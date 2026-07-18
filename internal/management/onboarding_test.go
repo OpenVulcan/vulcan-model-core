@@ -279,9 +279,9 @@ func TestKimiTokenServiceCoalescesConcurrentRefreshes(t *testing.T) {
 	}
 }
 
-// TestOnboardKimiCodingPlanUsesDeviceFlowAcrossBothChannels verifies one refreshed token closes both explicit protocols.
-// TestOnboardKimiCodingPlanUsesDeviceFlowAcrossBothChannels 验证一个刷新令牌闭合两条显式协议通道。
-func TestOnboardKimiCodingPlanUsesDeviceFlowAcrossBothChannels(t *testing.T) {
+// TestOnboardKimiCodingPlanUsesDeviceFlowWithPreferredProtocol verifies one refreshed token closes the sole preferred protocol.
+// TestOnboardKimiCodingPlanUsesDeviceFlowWithPreferredProtocol 验证一个刷新令牌闭合唯一的优势协议。
+func TestOnboardKimiCodingPlanUsesDeviceFlowWithPreferredProtocol(t *testing.T) {
 	service, _, _ := newKimiOnboardingService(t)
 	deviceToken, errMarshal := providerkimi.MarshalToken(providerkimi.Token{AccessToken: "access", RefreshToken: "refresh", TokenType: "Bearer", DeviceID: "device", Type: "kimi"})
 	if errMarshal != nil {
@@ -299,7 +299,7 @@ func TestOnboardKimiCodingPlanUsesDeviceFlowAcrossBothChannels(t *testing.T) {
 	if errOnboard != nil {
 		t.Fatalf("OnboardKimiDeviceProvider() error = %v", errOnboard)
 	}
-	if len(onboarding.Endpoints) != 2 || len(onboarding.Bindings) != 2 || onboarding.Credential.AuthMethodID != "device_flow" {
+	if len(onboarding.Endpoints) != 1 || len(onboarding.Bindings) != 1 || onboarding.Credential.AuthMethodID != "device_flow" {
 		t.Fatalf("Coding onboarding = %#v", onboarding)
 	}
 }

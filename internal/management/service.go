@@ -135,34 +135,23 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 		Instance:   providerconfig.ProviderInstance{ID: instanceID, DefinitionID: definition.ID, Handle: input.Handle, DisplayName: input.DisplayName, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now},
 		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: input.AuthMethodID, Label: input.CredentialLabel, PrincipalKey: input.PrincipalKey, SecretRef: secretReference, Fingerprint: hex.EncodeToString(fingerprintBytes[:]), Status: providerconfig.CredentialActive, Revision: 1},
 	}
-	// channelPresets rejects ambiguous multi-region definitions until management explicitly selects one preset.
-	// channelPresets 在管理端显式选择预设前拒绝存在歧义的多区域定义。
-	channelPresets := make(map[string]providerconfig.EndpointPreset, len(definition.EndpointPresets))
-	for _, preset := range definition.EndpointPresets {
-		if _, exists := channelPresets[preset.ChannelID]; exists {
-			return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition channel %q has multiple endpoint presets and requires explicit preset selection", preset.ChannelID)
-		}
-		channelPresets[preset.ChannelID] = preset
+	if len(definition.EndpointPresets) != 1 {
+		return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition requires exactly one onboarding endpoint preset")
 	}
-	for _, channel := range definition.Channels {
-		if !slices.Contains(channel.AuthMethodIDs, input.AuthMethodID) {
-			continue
-		}
-		preset, exists := channelPresets[channel.ID]
-		if !exists {
-			return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition channel %q has no onboarding endpoint preset", channel.ID)
-		}
-		endpointID, errEndpointID := generateID("ep_")
-		if errEndpointID != nil {
-			return providerconfig.SystemOnboarding{}, errEndpointID
-		}
-		bindingID, errBindingID := generateID("bind_")
-		if errBindingID != nil {
-			return providerconfig.SystemOnboarding{}, errBindingID
-		}
-		onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: channel.ID, BaseURL: preset.BaseURL, Region: preset.Region, Status: providerconfig.EndpointReady, Revision: 1})
-		onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: channel.ID, EndpointID: endpointID, CredentialID: credentialID, Priority: channel.Priority, Enabled: true, Revision: 1})
+	if !slices.Contains(definition.AuthMethodIDs, input.AuthMethodID) {
+		return providerconfig.SystemOnboarding{}, fmt.Errorf("provider protocol does not allow authentication method %q", input.AuthMethodID)
 	}
+	preset := definition.EndpointPresets[0]
+	endpointID, errEndpointID := generateID("ep_")
+	if errEndpointID != nil {
+		return providerconfig.SystemOnboarding{}, errEndpointID
+	}
+	bindingID, errBindingID := generateID("bind_")
+	if errBindingID != nil {
+		return providerconfig.SystemOnboarding{}, errBindingID
+	}
+	onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: preset.BaseURL, Region: preset.Region, Status: providerconfig.EndpointReady, Revision: 1})
+	onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, EndpointID: endpointID, CredentialID: credentialID, Priority: definition.Priority, Enabled: true, Revision: 1})
 	return onboarding, nil
 }
 
@@ -303,13 +292,10 @@ func customDefinition(definitionID string, revision uint64, input CreateCustomDe
 		Kind:                providerconfig.DefinitionKindCustom,
 		DisplayName:         input.DisplayName,
 		ConfigSchemaVersion: "1",
-		Channels: []providerconfig.ProviderChannel{{
-			ID:                "default",
-			ProtocolProfileID: input.ProtocolProfileID,
-			EndpointProfileID: "custom",
-			AuthMethodIDs:     []string{"default"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   input.ProtocolProfileID,
+		EndpointProfileID:   "custom",
+		AuthMethodIDs:       []string{"default"},
+		RuntimeReady:        true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
 			ID:                  "default",
 			Type:                input.AuthMethod,
@@ -437,9 +423,6 @@ type AddEndpointInput struct {
 	// ProviderInstanceID owns the endpoint.
 	// ProviderInstanceID 是端点所属供应商实例。
 	ProviderInstanceID string
-	// ChannelID selects one channel declared by the provider definition.
-	// ChannelID 选择供应商定义声明的一个通道。
-	ChannelID string
 	// BaseURL is the validated upstream base URL.
 	// BaseURL 是经过校验的上游基础 URL。
 	BaseURL string
@@ -451,6 +434,10 @@ type AddEndpointInput struct {
 // AddEndpoint creates one ready local endpoint record without probing the network.
 // AddEndpoint 创建一个本地 Ready 端点记录且不探测网络。
 func (s *Service) AddEndpoint(ctx context.Context, input AddEndpointInput) (providerconfig.Endpoint, error) {
+	protocolProfileID, errProtocol := s.providerProtocolProfileID(ctx, input.ProviderInstanceID)
+	if errProtocol != nil {
+		return providerconfig.Endpoint{}, errProtocol
+	}
 	endpointID := input.ID
 	if endpointID == "" {
 		generatedID, errID := generateID("ep_")
@@ -462,7 +449,7 @@ func (s *Service) AddEndpoint(ctx context.Context, input AddEndpointInput) (prov
 	endpoint := providerconfig.Endpoint{
 		ID:                 endpointID,
 		ProviderInstanceID: input.ProviderInstanceID,
-		ChannelID:          input.ChannelID,
+		ChannelID:          protocolProfileID,
 		BaseURL:            input.BaseURL,
 		Region:             input.Region,
 		Status:             providerconfig.EndpointReady,
@@ -483,9 +470,6 @@ type UpdateEndpointInput struct {
 	// EndpointID identifies the exact endpoint to replace.
 	// EndpointID 标识要替换的精确端点。
 	EndpointID string
-	// ChannelID selects the replacement provider channel.
-	// ChannelID 选择替换后的供应商通道。
-	ChannelID string
 	// BaseURL is the replacement validated upstream base URL.
 	// BaseURL 是替换后的已校验上游基础 URL。
 	BaseURL string
@@ -504,7 +488,6 @@ func (s *Service) UpdateEndpoint(ctx context.Context, input UpdateEndpointInput)
 	if errEndpoint != nil {
 		return providerconfig.Endpoint{}, errEndpoint
 	}
-	endpoint.ChannelID = input.ChannelID
 	endpoint.BaseURL = input.BaseURL
 	endpoint.Region = input.Region
 	endpoint.Status = input.Status
@@ -709,9 +692,6 @@ type AddBindingInput struct {
 	// ProviderInstanceID owns every referenced record.
 	// ProviderInstanceID 是全部被引用记录所属实例。
 	ProviderInstanceID string
-	// ChannelID is the exact provider channel.
-	// ChannelID 是精确供应商通道。
-	ChannelID string
 	// EndpointID references one endpoint in the same instance.
 	// EndpointID 引用同一实例中的一个端点。
 	EndpointID string
@@ -729,6 +709,10 @@ type AddBindingInput struct {
 // AddBinding persists one enabled same-instance access binding.
 // AddBinding 持久化一个启用的同实例访问绑定。
 func (s *Service) AddBinding(ctx context.Context, input AddBindingInput) (providerconfig.AccessBinding, error) {
+	protocolProfileID, errProtocol := s.providerProtocolProfileID(ctx, input.ProviderInstanceID)
+	if errProtocol != nil {
+		return providerconfig.AccessBinding{}, errProtocol
+	}
 	bindingID := input.ID
 	if bindingID == "" {
 		generatedID, errID := generateID("bind_")
@@ -740,7 +724,7 @@ func (s *Service) AddBinding(ctx context.Context, input AddBindingInput) (provid
 	binding := providerconfig.AccessBinding{
 		ID:                 bindingID,
 		ProviderInstanceID: input.ProviderInstanceID,
-		ChannelID:          input.ChannelID,
+		ChannelID:          protocolProfileID,
 		EndpointID:         input.EndpointID,
 		CredentialID:       input.CredentialID,
 		AllowedModelIDs:    append([]string(nil), input.AllowedModelIDs...),
@@ -763,9 +747,6 @@ type UpdateBindingInput struct {
 	// BindingID identifies the exact binding to replace.
 	// BindingID 标识要替换的精确绑定。
 	BindingID string
-	// ChannelID is the replacement exact provider channel.
-	// ChannelID 是替换后的精确供应商通道。
-	ChannelID string
 	// EndpointID references the replacement same-instance endpoint.
 	// EndpointID 引用替换后的同实例端点。
 	EndpointID string
@@ -790,7 +771,6 @@ func (s *Service) UpdateBinding(ctx context.Context, input UpdateBindingInput) (
 	if errBinding != nil {
 		return providerconfig.AccessBinding{}, errBinding
 	}
-	binding.ChannelID = input.ChannelID
 	binding.EndpointID = input.EndpointID
 	binding.CredentialID = input.CredentialID
 	binding.AllowedModelIDs = append([]string(nil), input.AllowedModelIDs...)
@@ -909,6 +889,20 @@ func (s *Service) SetCredentialStatus(ctx context.Context, input SetCredentialSt
 	return selected, nil
 }
 
+// providerProtocolProfileID resolves the immutable direct protocol reference owned by one provider instance.
+// providerProtocolProfileID 解析一个供应商实例拥有的不可变直接协议引用。
+func (s *Service) providerProtocolProfileID(ctx context.Context, instanceID string) (string, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return "", errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return "", errDefinition
+	}
+	return definition.ProtocolProfileID, nil
+}
+
 // endpoint returns one endpoint only when it belongs to the requested provider instance.
 // endpoint 仅在端点属于请求的供应商实例时返回该端点。
 func (s *Service) endpoint(ctx context.Context, instanceID string, endpointID string) (providerconfig.Endpoint, error) {
@@ -990,8 +984,8 @@ type SaveCustomCatalogInput struct {
 	// Models contains logical user-declared models.
 	// Models 包含逻辑用户声明模型。
 	Models []catalog.ProviderModel
-	// Offerings binds models to the configured custom provider channel.
-	// Offerings 将模型绑定到已配置自定义供应商通道。
+	// Offerings binds models to the provider's immutable direct protocol reference.
+	// Offerings 将模型绑定到供应商不可变的直接协议引用。
 	Offerings []catalog.ModelOffering
 	// Profiles contains client-selectable context and capability shapes.
 	// Profiles 包含客户端可选上下文与能力形态。
@@ -1007,6 +1001,10 @@ func (s *CustomCatalogService) SaveCustomCatalog(ctx context.Context, input Save
 	instance, errInstance := s.customInstance(ctx, input.ProviderInstanceID)
 	if errInstance != nil {
 		return catalog.Snapshot{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return catalog.Snapshot{}, errDefinition
 	}
 	for _, model := range input.Models {
 		if model.Source != catalog.ModelSourceUserDeclared || model.EntitlementMode != catalog.EntitlementAllBoundCredentials {
@@ -1030,6 +1028,7 @@ func (s *CustomCatalogService) SaveCustomCatalog(ctx context.Context, input Save
 	// offerings 在分配权威目录和能力修订前复制调用方数据。
 	offerings := append([]catalog.ModelOffering(nil), input.Offerings...)
 	for index := range offerings {
+		offerings[index].ChannelID = definition.ProtocolProfileID
 		offerings[index].CapabilityRevision = revision
 		offerings[index].Revision = revision
 	}

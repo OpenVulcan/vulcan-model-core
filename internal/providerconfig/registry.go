@@ -162,14 +162,12 @@ func (r *SystemRegistry) Register(definition ProviderDefinition) error {
 	if err := definition.Validate(); err != nil {
 		return err
 	}
-	for _, channel := range definition.Channels {
-		profile, exists := r.protocols.Lookup(channel.ProtocolProfileID)
-		if !exists {
-			return invalid("system provider channel %q references unknown protocol profile %q", channel.ID, channel.ProtocolProfileID)
-		}
-		if !profile.RuntimeReady {
-			return invalid("system provider channel %q references a protocol profile that is not runtime ready", channel.ID)
-		}
+	profile, exists := r.protocols.Lookup(definition.ProtocolProfileID)
+	if !exists {
+		return invalid("system provider references unknown protocol profile %q", definition.ProtocolProfileID)
+	}
+	if !profile.RuntimeReady {
+		return invalid("system provider references a protocol profile that is not runtime ready")
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -227,12 +225,11 @@ func ValidateCustomDefinition(definition ProviderDefinition, protocols *Protocol
 	if err := definition.Validate(); err != nil {
 		return err
 	}
-	channel := definition.Channels[0]
-	profile, exists := protocols.Lookup(channel.ProtocolProfileID)
+	profile, exists := protocols.Lookup(definition.ProtocolProfileID)
 	if !exists {
-		return invalid("custom provider references unknown protocol profile %q", channel.ProtocolProfileID)
+		return invalid("custom provider references unknown protocol profile %q", definition.ProtocolProfileID)
 	}
-	if !profile.UserConfigurable || !profile.RuntimeReady || !channel.RuntimeReady {
+	if !profile.UserConfigurable || !profile.RuntimeReady || !definition.RuntimeReady {
 		return invalid("custom provider protocol profile %q is not user configurable and runtime ready", profile.ID)
 	}
 	allowedAuthTypes := make(map[AuthMethodType]struct{}, len(profile.AllowedAuthMethods))
@@ -263,10 +260,7 @@ func cloneProtocolProfile(profile ProtocolProfile) ProtocolProfile {
 // cloneProviderDefinition returns a mutation-safe provider definition value.
 // cloneProviderDefinition 返回一个防止外部修改的供应商定义值。
 func cloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
-	definition.Channels = append([]ProviderChannel(nil), definition.Channels...)
-	for index := range definition.Channels {
-		definition.Channels[index].AuthMethodIDs = append([]string(nil), definition.Channels[index].AuthMethodIDs...)
-	}
+	definition.AuthMethodIDs = append([]string(nil), definition.AuthMethodIDs...)
 	definition.AuthMethods = append([]AuthMethodDefinition(nil), definition.AuthMethods...)
 	definition.EndpointPresets = append([]EndpointPreset(nil), definition.EndpointPresets...)
 	return definition

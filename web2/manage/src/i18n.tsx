@@ -1,11 +1,4 @@
-import {
-  createContext,
-  useContext,
-  useEffect,
-  useMemo,
-  useState,
-  type ReactNode,
-} from "react"
+import { createContext, useContext, useEffect, useMemo, useState, type ReactNode } from "react"
 
 // Locale identifies each supported user-interface language.
 // Locale 标识每种受支持的用户界面语言。
@@ -34,13 +27,29 @@ const englishMessages = {
   "brand.description": "Route local model access through one focused management surface.",
   "dashboard.overview": "Model Router overview",
   "providers.title": "Provider Management",
-  "providers.description": "Select a provider group, then choose the exact site or plan to configure.",
-  "providers.loading": "Loading provider catalog…",
-  "providers.loadFailed": "Unable to load the provider catalog.",
-  "providers.variants": "variants",
-  "providers.select": "Select variant",
+  "providers.authorizedDescription": "Manage configured providers and their authorized API or device credentials.",
+  "providers.description": "Choose a provider, then select the exact site or plan to authorize.",
+  "providers.add": "Add provider",
+  "providers.cancelAdd": "Close provider creation",
+  "providers.search": "Filter providers",
+  "providers.searchPlaceholder": "Filter by provider, site, or plan…",
+  "providers.chooseProvider": "Choose a provider",
+  "providers.chooseVariant": "Choose a site or plan",
+  "providers.configureProvider": "Configure provider",
+  "providers.directConfiguration": "Configure directly",
+  "providers.backToProviders": "Back to providers",
+  "providers.noMatches": "No providers match this filter.",
+  "providers.noAuthorized": "No authorized providers yet.",
+  "providers.authorizations": "Authorizations",
+  "providers.instanceHandle": "Instance handle",
+  "providers.loading": "Loading provider data…",
+  "providers.catalogLoadFailed": "Unable to load the provider catalog. Adding providers is temporarily unavailable.",
+  "providers.authorizedLoadFailed": "Unable to load the authorized provider list.",
+  "providers.variants": "options",
+  "providers.select": "Select",
   "providers.selected": "Selected",
-  "providers.kimi.description": "Moonshot AI services across regional Open Platform sites and the separate Coding Plan.",
+  "providers.kimi.description":
+    "Moonshot AI services across regional Open Platform sites and the separate Coding Plan.",
   "providers.kimi.cnDescription": "Kimi Open Platform service hosted at the CN API site.",
   "providers.kimi.globalDescription": "Kimi Open Platform service hosted at the Global API site.",
   "providers.kimi.codingDescription": "Membership-based coding service with dedicated models and credentials.",
@@ -54,6 +63,17 @@ const englishMessages = {
   "providers.checkAuthorization": "Check authorization",
   "providers.cancelAuthorization": "Cancel authorization",
   "providers.authorizationCode": "Authorization code",
+  "providers.status.draft": "Draft",
+  "providers.status.validating": "Validating",
+  "providers.status.ready": "Ready",
+  "providers.status.degraded": "Degraded",
+  "providers.status.disabled": "Disabled",
+  "providers.status.migrationRequired": "Migration required",
+  "providers.status.deleting": "Deleting",
+  "providers.status.active": "Active",
+  "providers.status.expired": "Expired",
+  "providers.status.invalid": "Invalid",
+  "providers.status.cooling": "Cooling down",
   "providers.authorizationPending": "Authorization is still pending.",
   "providers.unsupportedAuthentication": "This provider does not expose a supported authentication method.",
   "providers.onboardingFailed": "Unable to create the provider configuration.",
@@ -103,8 +123,7 @@ const chineseMessages: Messages = {
   "login.authToken": "认证令牌",
   "login.placeholder": "输入认证令牌",
   "login.rememberCredential": "保存凭证",
-  "login.rememberCredentialWarning":
-    "管理凭证将以明文保存在此浏览器的 localStorage 中，请仅在受信任设备上使用。",
+  "login.rememberCredentialWarning": "管理凭证将以明文保存在此浏览器的 localStorage 中，请仅在受信任设备上使用。",
   "login.submit": "登录",
   "login.verifying": "正在验证…",
   "login.error.empty": "请输入管理认证令牌。",
@@ -116,11 +135,26 @@ const chineseMessages: Messages = {
   "brand.description": "通过一个专用管理界面统一路由本地模型访问。",
   "dashboard.overview": "模型路由概览",
   "providers.title": "供应商管理",
-  "providers.description": "选择供应商分组，然后选择需要配置的精确站点或套餐。",
-  "providers.loading": "正在加载供应商目录…",
-  "providers.loadFailed": "无法加载供应商目录。",
-  "providers.variants": "个变体",
-  "providers.select": "选择变体",
+  "providers.authorizedDescription": "管理已配置供应商及其 API 或设备授权凭据。",
+  "providers.description": "选择供应商，然后选择需要授权的精确站点或套餐。",
+  "providers.add": "新增供应商",
+  "providers.cancelAdd": "关闭供应商新增",
+  "providers.search": "过滤供应商",
+  "providers.searchPlaceholder": "按供应商、站点或套餐过滤…",
+  "providers.chooseProvider": "选择供应商",
+  "providers.chooseVariant": "选择站点或套餐",
+  "providers.configureProvider": "配置供应商",
+  "providers.directConfiguration": "直接配置",
+  "providers.backToProviders": "返回供应商列表",
+  "providers.noMatches": "没有符合过滤条件的供应商。",
+  "providers.noAuthorized": "暂无已授权供应商。",
+  "providers.authorizations": "授权列表",
+  "providers.instanceHandle": "实例标识",
+  "providers.loading": "正在加载供应商数据…",
+  "providers.catalogLoadFailed": "无法加载供应商目录，暂时不能新增供应商。",
+  "providers.authorizedLoadFailed": "无法加载已授权供应商列表。",
+  "providers.variants": "个选项",
+  "providers.select": "选择",
   "providers.selected": "已选择",
   "providers.kimi.description": "Moonshot AI 在不同区域的开放平台站点以及独立的 Coding Plan 服务。",
   "providers.kimi.cnDescription": "托管于 CN API 站点的 Kimi 开放平台服务。",
@@ -136,6 +170,17 @@ const chineseMessages: Messages = {
   "providers.checkAuthorization": "检查授权状态",
   "providers.cancelAuthorization": "取消授权",
   "providers.authorizationCode": "授权码",
+  "providers.status.draft": "草稿",
+  "providers.status.validating": "验证中",
+  "providers.status.ready": "就绪",
+  "providers.status.degraded": "服务降级",
+  "providers.status.disabled": "已停用",
+  "providers.status.migrationRequired": "需要迁移",
+  "providers.status.deleting": "删除中",
+  "providers.status.active": "可用",
+  "providers.status.expired": "已过期",
+  "providers.status.invalid": "无效",
+  "providers.status.cooling": "冷却中",
   "providers.authorizationPending": "授权尚未完成。",
   "providers.unsupportedAuthentication": "该供应商没有提供受支持的认证方式。",
   "providers.onboardingFailed": "无法创建供应商配置。",
@@ -244,19 +289,13 @@ export function I18nProvider({ children }: I18nProviderProps) {
       locale,
       t: (key) => messageCatalogs[locale][key],
       toggleLocale: () => {
-        setLocale((currentLocale) =>
-          currentLocale === "zh" ? "en" : "zh",
-        )
+        setLocale((currentLocale) => (currentLocale === "zh" ? "en" : "zh"))
       },
     }),
     [locale],
   )
 
-  return (
-    <I18nContext.Provider value={contextValue}>
-      {children}
-    </I18nContext.Provider>
-  )
+  return <I18nContext.Provider value={contextValue}>{children}</I18nContext.Provider>
 }
 
 // useI18n returns the page language state, using the deterministic English fallback outside the provider.

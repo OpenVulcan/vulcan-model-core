@@ -60,9 +60,9 @@ type ProviderDefinitionView struct {
 	// SortOrder is the stable ordering inside the provider group.
 	// SortOrder 是供应商分组内的稳定排序值。
 	SortOrder int `json:"sort_order"`
-	// Channels contains executable protocol metadata without adapter internals.
-	// Channels 包含不暴露 Adapter 内部信息的可执行协议元数据。
-	Channels []ChannelView `json:"channels"`
+	// ProtocolProfileID identifies the provider's sole executable protocol.
+	// ProtocolProfileID 标识供应商唯一的可执行协议。
+	ProtocolProfileID string `json:"protocol_profile_id"`
 	// EndpointPresets contains safe code-owned onboarding destinations.
 	// EndpointPresets 包含安全的代码拥有录入目标。
 	EndpointPresets []EndpointPresetView `json:"endpoint_presets"`
@@ -109,9 +109,6 @@ type EndpointPresetView struct {
 	// ID is stable within one provider definition.
 	// ID 在一个供应商定义内保持稳定。
 	ID string `json:"id"`
-	// ChannelID identifies the exact channel served by the preset.
-	// ChannelID 标识该预设服务的精确通道。
-	ChannelID string `json:"channel_id"`
 	// BaseURL is the default absolute upstream address.
 	// BaseURL 是默认的上游绝对地址。
 	BaseURL string `json:"base_url"`
@@ -121,20 +118,6 @@ type EndpointPresetView struct {
 	// UserEditable reports whether management clients may replace the address.
 	// UserEditable 表示管理客户端是否可以替换该地址。
 	UserEditable bool `json:"user_editable"`
-}
-
-// ChannelView describes one provider channel without implementation details.
-// ChannelView 描述一个不包含实现细节的供应商通道。
-type ChannelView struct {
-	// ID is stable within the provider definition.
-	// ID 在供应商定义内保持稳定。
-	ID string `json:"id"`
-	// ProtocolProfileID identifies the internal upstream protocol contract.
-	// ProtocolProfileID 标识内部上游协议合同。
-	ProtocolProfileID string `json:"protocol_profile_id"`
-	// RuntimeReady reports local implementation readiness.
-	// RuntimeReady 报告本地实现就绪状态。
-	RuntimeReady bool `json:"runtime_ready"`
 }
 
 // AuthMethodView describes one supported authentication method.
@@ -215,9 +198,6 @@ type EndpointView struct {
 	// ProviderInstanceID identifies the exact endpoint owner.
 	// ProviderInstanceID 标识精确端点所有者。
 	ProviderInstanceID string `json:"provider_instance_id"`
-	// ChannelID identifies the provider channel served by this endpoint.
-	// ChannelID 标识此端点服务的供应商通道。
-	ChannelID string `json:"channel_id"`
 	// BaseURL is the validated upstream base URL.
 	// BaseURL 是已校验的上游基础 URL。
 	BaseURL string `json:"base_url"`
@@ -270,9 +250,6 @@ type BindingView struct {
 	// ProviderInstanceID identifies the exact binding owner.
 	// ProviderInstanceID 标识精确绑定所有者。
 	ProviderInstanceID string `json:"provider_instance_id"`
-	// ChannelID identifies the configured provider channel.
-	// ChannelID 标识配置的供应商通道。
-	ChannelID string `json:"channel_id"`
 	// EndpointID identifies the bound same-instance endpoint.
 	// EndpointID 标识绑定的同实例端点。
 	EndpointID string `json:"endpoint_id"`
@@ -345,9 +322,6 @@ type OfferingView struct {
 	// ID is the immutable offering identifier.
 	// ID 是不可变产品标识。
 	ID string `json:"id"`
-	// ChannelID identifies the selected provider access path.
-	// ChannelID 标识所选供应商访问路径。
-	ChannelID string `json:"channel_id"`
 	// UpstreamModelID is the exact model value used by the channel.
 	// UpstreamModelID 是通道使用的精确模型值。
 	UpstreamModelID string `json:"upstream_model_id"`
@@ -651,7 +625,6 @@ func (q *QueryService) ListEndpoints(ctx context.Context, instanceID string) ([]
 		views = append(views, EndpointView{
 			ID:                 endpoint.ID,
 			ProviderInstanceID: endpoint.ProviderInstanceID,
-			ChannelID:          endpoint.ChannelID,
 			BaseURL:            endpoint.BaseURL,
 			Region:             endpoint.Region,
 			Status:             endpoint.Status,
@@ -696,7 +669,6 @@ func (q *QueryService) ListBindings(ctx context.Context, instanceID string) ([]B
 		views = append(views, BindingView{
 			ID:                 binding.ID,
 			ProviderInstanceID: binding.ProviderInstanceID,
-			ChannelID:          binding.ChannelID,
 			EndpointID:         binding.EndpointID,
 			CredentialID:       binding.CredentialID,
 			AllowedModelIDs:    append([]string(nil), binding.AllowedModelIDs...),
@@ -724,12 +696,14 @@ func (q *QueryService) instanceView(ctx context.Context, instance providerconfig
 		return ProviderInstanceView{}, errBindings
 	}
 	return ProviderInstanceView{
-		ID:               instance.ID,
-		DefinitionID:     instance.DefinitionID,
-		Handle:           instance.Handle,
-		DisplayName:      instance.DisplayName,
-		Status:           instance.Status,
-		DisabledModelIDs: append([]string(nil), instance.DisabledModelIDs...),
+		ID:           instance.ID,
+		DefinitionID: instance.DefinitionID,
+		Handle:       instance.Handle,
+		DisplayName:  instance.DisplayName,
+		Status:       instance.Status,
+		// DisabledModelIDs starts from a non-nil slice so the public JSON contract emits [] instead of null.
+		// DisabledModelIDs 从非 nil 切片开始，以便公共 JSON 合同输出 [] 而不是 null。
+		DisabledModelIDs: append([]string{}, instance.DisabledModelIDs...),
 		EndpointCount:    len(endpoints),
 		CredentialCount:  len(credentials),
 		BindingCount:     len(bindings),
@@ -740,10 +714,6 @@ func (q *QueryService) instanceView(ctx context.Context, instance providerconfig
 // definitionView converts one internal provider definition to a safe DTO.
 // definitionView 将一个内部供应商定义转换为安全 DTO。
 func definitionView(definition providerconfig.ProviderDefinition) ProviderDefinitionView {
-	channels := make([]ChannelView, 0, len(definition.Channels))
-	for _, channel := range definition.Channels {
-		channels = append(channels, ChannelView{ID: channel.ID, ProtocolProfileID: channel.ProtocolProfileID, RuntimeReady: channel.RuntimeReady})
-	}
 	authMethods := make([]AuthMethodView, 0, len(definition.AuthMethods))
 	for _, authMethod := range definition.AuthMethods {
 		authMethods = append(authMethods, AuthMethodView{
@@ -757,7 +727,6 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 	for _, preset := range definition.EndpointPresets {
 		endpointPresets = append(endpointPresets, EndpointPresetView{
 			ID:           preset.ID,
-			ChannelID:    preset.ChannelID,
 			BaseURL:      preset.BaseURL,
 			Region:       preset.Region,
 			UserEditable: preset.UserEditable,
@@ -773,7 +742,7 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 		VariantDescriptionKey: definition.VariantDescriptionKey,
 		ModelCatalogID:        definition.ModelCatalogID,
 		SortOrder:             definition.SortOrder,
-		Channels:              channels,
+		ProtocolProfileID:     definition.ProtocolProfileID,
 		EndpointPresets:       endpointPresets,
 		AuthMethods:           authMethods,
 		Features: FeatureView{
@@ -832,7 +801,7 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 				}
 				return profileViews[left].ID < profileViews[right].ID
 			})
-			offeringViews = append(offeringViews, OfferingView{ID: offering.ID, ChannelID: offering.ChannelID, UpstreamModelID: offering.UpstreamModelID, Profiles: profileViews})
+			offeringViews = append(offeringViews, OfferingView{ID: offering.ID, UpstreamModelID: offering.UpstreamModelID, Profiles: profileViews})
 		}
 		sort.Slice(offeringViews, func(left int, right int) bool {
 			return offeringViews[left].ID < offeringViews[right].ID

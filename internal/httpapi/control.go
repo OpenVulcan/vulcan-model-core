@@ -366,9 +366,6 @@ type customCatalogOffering struct {
 	// ProviderModelID references a model in the same submitted document.
 	// ProviderModelID 引用同一提交文档内的一个模型。
 	ProviderModelID string `json:"provider_model_id"`
-	// ChannelID selects the exact configured provider channel.
-	// ChannelID 选择精确已配置供应商通道。
-	ChannelID string `json:"channel_id"`
 	// UpstreamModelID is the exact upstream model identifier for this channel.
 	// UpstreamModelID 是此通道的精确上游模型标识。
 	UpstreamModelID string `json:"upstream_model_id"`
@@ -532,9 +529,6 @@ type createEndpointRequest struct {
 	// ID optionally supplies a stable ep_ identifier.
 	// ID 可选提供稳定的 ep_ 标识。
 	ID string `json:"id"`
-	// ChannelID identifies the exact provider channel.
-	// ChannelID 标识精确供应商通道。
-	ChannelID string `json:"channel_id"`
 	// BaseURL is the validated upstream base URL.
 	// BaseURL 是已校验的上游基础 URL。
 	BaseURL string `json:"base_url"`
@@ -546,9 +540,6 @@ type createEndpointRequest struct {
 // updateEndpointRequest decodes every editable endpoint field.
 // updateEndpointRequest 解码全部可编辑端点字段。
 type updateEndpointRequest struct {
-	// ChannelID identifies the replacement provider channel.
-	// ChannelID 标识替换后的供应商通道。
-	ChannelID string `json:"channel_id"`
 	// BaseURL is the replacement validated upstream base URL.
 	// BaseURL 是替换后的已校验上游基础 URL。
 	BaseURL string `json:"base_url"`
@@ -631,9 +622,6 @@ type createBindingRequest struct {
 	// ID optionally supplies a stable bind_ identifier.
 	// ID 可选提供稳定的 bind_ 标识。
 	ID string `json:"id"`
-	// ChannelID identifies the exact provider channel.
-	// ChannelID 标识精确供应商通道。
-	ChannelID string `json:"channel_id"`
 	// EndpointID identifies the same-instance endpoint.
 	// EndpointID 标识同实例端点。
 	EndpointID string `json:"endpoint_id"`
@@ -651,9 +639,6 @@ type createBindingRequest struct {
 // updateBindingRequest decodes every editable access-binding field.
 // updateBindingRequest 解码全部可编辑访问绑定字段。
 type updateBindingRequest struct {
-	// ChannelID identifies the replacement exact provider channel.
-	// ChannelID 标识替换后的精确供应商通道。
-	ChannelID string `json:"channel_id"`
 	// EndpointID identifies the replacement same-instance endpoint.
 	// EndpointID 标识替换后的同实例端点。
 	EndpointID string `json:"endpoint_id"`
@@ -1116,7 +1101,6 @@ func customCatalogInput(providerInstanceID string, document customCatalogDocumen
 			ID:                 offering.ID,
 			ProviderInstanceID: providerInstanceID,
 			ProviderModelID:    offering.ProviderModelID,
-			ChannelID:          offering.ChannelID,
 			UpstreamModelID:    offering.UpstreamModelID,
 			Capabilities:       capabilityFromView(offering.Capabilities),
 		})
@@ -1161,7 +1145,7 @@ func customCatalogDocumentFromSnapshot(snapshot catalog.Snapshot) customCatalogD
 	}
 	for _, offering := range snapshot.Offerings {
 		document.Offerings = append(document.Offerings, customCatalogOffering{
-			ID: offering.ID, ProviderModelID: offering.ProviderModelID, ChannelID: offering.ChannelID, UpstreamModelID: offering.UpstreamModelID,
+			ID: offering.ID, ProviderModelID: offering.ProviderModelID, UpstreamModelID: offering.UpstreamModelID,
 			Capabilities: capabilityView(offering.Capabilities),
 		})
 	}
@@ -1260,7 +1244,7 @@ func (s *Server) handleCreateEndpoint(writer http.ResponseWriter, request *http.
 		return
 	}
 	endpoint, errCreate := s.control.Commands.AddEndpoint(request.Context(), management.AddEndpointInput{
-		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), ChannelID: payload.ChannelID, BaseURL: payload.BaseURL, Region: payload.Region,
+		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), BaseURL: payload.BaseURL, Region: payload.Region,
 	})
 	if errCreate != nil {
 		writeControlError(writer, errCreate)
@@ -1278,7 +1262,7 @@ func (s *Server) handleUpdateEndpoint(writer http.ResponseWriter, request *http.
 		return
 	}
 	endpoint, errUpdate := s.control.Commands.UpdateEndpoint(request.Context(), management.UpdateEndpointInput{
-		ProviderInstanceID: request.PathValue("provider_instance_id"), EndpointID: request.PathValue("endpoint_id"), ChannelID: payload.ChannelID,
+		ProviderInstanceID: request.PathValue("provider_instance_id"), EndpointID: request.PathValue("endpoint_id"),
 		BaseURL: payload.BaseURL, Region: payload.Region, Status: payload.Status,
 	})
 	if errUpdate != nil {
@@ -1393,7 +1377,7 @@ func (s *Server) handleCreateBinding(writer http.ResponseWriter, request *http.R
 		return
 	}
 	binding, errCreate := s.control.Commands.AddBinding(request.Context(), management.AddBindingInput{
-		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), ChannelID: payload.ChannelID, EndpointID: payload.EndpointID,
+		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), EndpointID: payload.EndpointID,
 		CredentialID: payload.CredentialID, AllowedModelIDs: payload.AllowedModelIDs, Priority: payload.Priority,
 	})
 	if errCreate != nil {
@@ -1412,7 +1396,7 @@ func (s *Server) handleUpdateBinding(writer http.ResponseWriter, request *http.R
 		return
 	}
 	binding, errUpdate := s.control.Commands.UpdateBinding(request.Context(), management.UpdateBindingInput{
-		ProviderInstanceID: request.PathValue("provider_instance_id"), BindingID: request.PathValue("binding_id"), ChannelID: payload.ChannelID,
+		ProviderInstanceID: request.PathValue("provider_instance_id"), BindingID: request.PathValue("binding_id"),
 		EndpointID: payload.EndpointID, CredentialID: payload.CredentialID, AllowedModelIDs: payload.AllowedModelIDs, Priority: payload.Priority, Enabled: payload.Enabled,
 	})
 	if errUpdate != nil {

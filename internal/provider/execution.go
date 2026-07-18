@@ -102,54 +102,50 @@ type ExecutionRequest struct {
 
 // ValidateForProfile verifies all invariant facts before a Profile or Driver can emit network traffic; supportedAuthTypes restricts the Driver's closed wire authentication capability when supplied.
 // ValidateForProfile 在 Profile 或 Driver 发起网络流量前校验全部不变量事实；提供 supportedAuthTypes 时，它会限制 Driver 的封闭 wire 认证能力。
-func (r ExecutionRequest) ValidateForProfile(profileID string, supportedAuthTypes ...providerconfig.AuthMethodType) (providerconfig.ProviderChannel, error) {
+func (r ExecutionRequest) ValidateForProfile(profileID string, supportedAuthTypes ...providerconfig.AuthMethodType) (string, error) {
 	if strings.TrimSpace(profileID) == "" {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: protocol profile identifier is required", ErrExecutionBinding)
+		return "", fmt.Errorf("%w: protocol profile identifier is required", ErrExecutionBinding)
 	}
 	if errBinding := r.Binding.Validate(); errBinding != nil {
-		return providerconfig.ProviderChannel{}, errBinding
+		return "", errBinding
 	}
 	if r.Definition.ID != r.Binding.Target.ProviderDefinitionID {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: definition does not match target", ErrExecutionBinding)
+		return "", fmt.Errorf("%w: definition does not match target", ErrExecutionBinding)
 	}
 	if strings.TrimSpace(r.LineageID) == "" || r.Now.IsZero() {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: lineage identifier and deterministic time are required", ErrExecutionBinding)
+		return "", fmt.Errorf("%w: lineage identifier and deterministic time are required", ErrExecutionBinding)
 	}
 	if errRequest := r.Request.Validate(); errRequest != nil {
-		return providerconfig.ProviderChannel{}, errRequest
+		return "", errRequest
 	}
-	channel, errChannel := exactChannel(r.Definition, r.Binding.Target.ChannelID)
-	if errChannel != nil {
-		return providerconfig.ProviderChannel{}, errChannel
+	if r.Definition.ProtocolProfileID != profileID || !r.Definition.RuntimeReady {
+		return "", fmt.Errorf("%w: provider protocol is not executable for %q", ErrExecutionBinding, profileID)
 	}
-	if channel.ProtocolProfileID != profileID || !channel.RuntimeReady {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: channel profile is not executable for %q", ErrExecutionBinding, profileID)
-	}
-	if !containsString(channel.AuthMethodIDs, r.Binding.Credential.AuthMethodID) {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: credential authentication method is not allowed by channel", ErrExecutionBinding)
+	if !containsString(r.Definition.AuthMethodIDs, r.Binding.Credential.AuthMethodID) {
+		return "", fmt.Errorf("%w: credential authentication method is not allowed by provider protocol", ErrExecutionBinding)
 	}
 	credentialAuthMethod, errAuthMethod := exactAuthMethod(r.Definition, r.Binding.Credential.AuthMethodID)
 	if errAuthMethod != nil {
-		return providerconfig.ProviderChannel{}, errAuthMethod
+		return "", errAuthMethod
 	}
 	if len(supportedAuthTypes) > 0 && !containsAuthMethodType(supportedAuthTypes, credentialAuthMethod.Type) {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: credential authentication type %q cannot be encoded by profile %q", ErrExecutionBinding, credentialAuthMethod.Type, profileID)
+		return "", fmt.Errorf("%w: credential authentication type %q cannot be encoded by profile %q", ErrExecutionBinding, credentialAuthMethod.Type, profileID)
 	}
 	continuationID, continuationRequired, errContinuationID := requiredContinuationID(r.Request)
 	if errContinuationID != nil {
-		return providerconfig.ProviderChannel{}, errContinuationID
+		return "", errContinuationID
 	}
 	if r.Continuation != nil {
 		if !continuationRequired || continuationID != r.Continuation.ContinuationID {
-			return providerconfig.ProviderChannel{}, fmt.Errorf("%w: continuation does not match VCP request", ErrExecutionBinding)
+			return "", fmt.Errorf("%w: continuation does not match VCP request", ErrExecutionBinding)
 		}
 		if errContinuation := r.Continuation.Validate(r.Binding.Target); errContinuation != nil {
-			return providerconfig.ProviderChannel{}, errContinuation
+			return "", errContinuation
 		}
 	} else if continuationRequired {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: Router-resolved continuation is required", ErrExecutionBinding)
+		return "", fmt.Errorf("%w: Router-resolved continuation is required", ErrExecutionBinding)
 	}
-	return channel, nil
+	return r.Definition.ProtocolProfileID, nil
 }
 
 // exactAuthMethod resolves one definition-owned authentication method by immutable identifier.
@@ -205,25 +201,6 @@ func requiredContinuationID(request vcp.VulcanRequest) (string, bool, error) {
 		return compactionID, true, nil
 	}
 	return "", false, nil
-}
-
-// exactChannel resolves exactly one definition-owned channel by immutable identifier.
-// exactChannel 按不可变标识解析唯一一个 Definition 拥有的 Channel。
-func exactChannel(definition providerconfig.ProviderDefinition, channelID string) (providerconfig.ProviderChannel, error) {
-	// matched stores the unique selected channel and count detects ambiguous definition data.
-	// matched 存储唯一选定 Channel，count 用于检测存在歧义的 Definition 数据。
-	matched := providerconfig.ProviderChannel{}
-	count := 0
-	for _, channel := range definition.Channels {
-		if channel.ID == channelID {
-			matched = channel
-			count++
-		}
-	}
-	if count != 1 {
-		return providerconfig.ProviderChannel{}, fmt.Errorf("%w: target channel must resolve exactly once", ErrExecutionBinding)
-	}
-	return matched, nil
 }
 
 // containsString reports whether a configured identifier is present without normalizing or guessing aliases.
@@ -332,19 +309,15 @@ func (r *ExecutionRegistry) Execute(ctx context.Context, request ExecutionReques
 	if r == nil {
 		return ExecutionResult{}, ErrExecutionDriverNotFound
 	}
-	channel, errChannel := exactChannel(request.Definition, request.Binding.Target.ChannelID)
-	if errChannel != nil {
-		return ExecutionResult{}, errChannel
-	}
-	if _, errValidate := request.ValidateForProfile(channel.ProtocolProfileID); errValidate != nil {
+	if _, errValidate := request.ValidateForProfile(request.Definition.ProtocolProfileID); errValidate != nil {
 		return ExecutionResult{}, errValidate
 	}
-	key := executionDriverKey(request.Binding.Target.ProviderDefinitionID, channel.ProtocolProfileID)
+	key := executionDriverKey(request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	r.mu.RLock()
 	driver, exists := r.drivers[key]
 	r.mu.RUnlock()
 	if !exists {
-		return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, channel.ProtocolProfileID)
+		return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	}
 	return driver.Execute(ctx, request)
 }

@@ -36,7 +36,7 @@ func TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership(t *testin
 	if errCN != nil || errGlobal != nil || errCoding != nil {
 		t.Fatalf("catalog errors CN=%v Global=%v Coding=%v", errCN, errGlobal, errCoding)
 	}
-	if len(cn.Models) != 11 || len(global.Models) != 11 || len(coding.Models) != 3 || len(coding.Offerings) != 6 {
+	if len(cn.Models) != 11 || len(global.Models) != 11 || len(coding.Models) != 3 || len(coding.Offerings) != 3 {
 		t.Fatalf("catalog sizes CN=%d Global=%d Coding models=%d offerings=%d", len(cn.Models), len(global.Models), len(coding.Models), len(coding.Offerings))
 	}
 	for index := range cn.Models {

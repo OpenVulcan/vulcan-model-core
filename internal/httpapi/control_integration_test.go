@@ -184,7 +184,7 @@ func serveControlRequest(server *Server, method string, path string, bearer stri
 
 // customCatalogPayload is one complete valid user-declared catalog document for HTTP integration coverage.
 // customCatalogPayload 是用于 HTTP 集成覆盖的一份完整有效用户声明目录文档。
-const customCatalogPayload = `{"models":[{"id":"model_control","upstream_model_id":"control-model","display_name":"Control Model"}],"offerings":[{"id":"offer_control","provider_model_id":"model_control","channel_id":"default","upstream_model_id":"control-model","capabilities":{"context_window":{"known":true,"value":128000},"max_input_tokens":{"known":false},"max_output_tokens":{"known":true,"value":4096},"max_reasoning_tokens":{"known":false},"tool_calling":"native","parallel_tool_calls":"native","streaming_tool_arguments":"unsupported","strict_json_schema":"unknown","reasoning":"unsupported","input_modalities":["text"],"output_modalities":["text"]}}],"profiles":[{"id":"profile_control_default","offering_id":"offer_control","display_name":"Default","default":true,"capabilities":{"context_window":{"known":true,"value":128000},"max_input_tokens":{"known":false},"max_output_tokens":{"known":true,"value":4096},"max_reasoning_tokens":{"known":false},"tool_calling":"native","parallel_tool_calls":"native","streaming_tool_arguments":"unsupported","strict_json_schema":"unknown","reasoning":"unsupported","input_modalities":["text"],"output_modalities":["text"]},"required_entitlement_classes":[],"switch_policy":"seamless","pool_policy":"strict_profile"}]}`
+const customCatalogPayload = `{"models":[{"id":"model_control","upstream_model_id":"control-model","display_name":"Control Model"}],"offerings":[{"id":"offer_control","provider_model_id":"model_control","upstream_model_id":"control-model","capabilities":{"context_window":{"known":true,"value":128000},"max_input_tokens":{"known":false},"max_output_tokens":{"known":true,"value":4096},"max_reasoning_tokens":{"known":false},"tool_calling":"native","parallel_tool_calls":"native","streaming_tool_arguments":"unsupported","strict_json_schema":"unknown","reasoning":"unsupported","input_modalities":["text"],"output_modalities":["text"]}}],"profiles":[{"id":"profile_control_default","offering_id":"offer_control","display_name":"Default","default":true,"capabilities":{"context_window":{"known":true,"value":128000},"max_input_tokens":{"known":false},"max_output_tokens":{"known":true,"value":4096},"max_reasoning_tokens":{"known":false},"tool_calling":"native","parallel_tool_calls":"native","streaming_tool_arguments":"unsupported","strict_json_schema":"unknown","reasoning":"unsupported","input_modalities":["text"],"output_modalities":["text"]},"required_entitlement_classes":[],"switch_policy":"seamless","pool_policy":"strict_profile"}]}`
 
 // TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate verifies real management mutations, redaction, and route-scoped authorization.
 // TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate 验证真实管理变更、脱敏和路由作用域授权。
@@ -214,7 +214,7 @@ func TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate(t *testin
 	if instance.Code != http.StatusCreated || !strings.Contains(instance.Body.String(), "pvi_control") {
 		t.Fatalf("create instance status=%d body=%s", instance.Code, instance.Body.String())
 	}
-	endpoint := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/pvi_control/endpoints", "admin-control-key", `{"id":"ep_control","channel_id":"default","base_url":"https://control.example/v1","region":"local"}`)
+	endpoint := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/pvi_control/endpoints", "admin-control-key", `{"id":"ep_control","base_url":"https://control.example/v1","region":"local"}`)
 	if endpoint.Code != http.StatusCreated || !strings.Contains(endpoint.Body.String(), "ep_control") {
 		t.Fatalf("create endpoint status=%d body=%s", endpoint.Code, endpoint.Body.String())
 	}
@@ -237,7 +237,7 @@ func TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate(t *testin
 	if unknownCustomCatalogField.Code != http.StatusBadRequest {
 		t.Fatalf("unknown custom catalog field status=%d body=%s", unknownCustomCatalogField.Code, unknownCustomCatalogField.Body.String())
 	}
-	binding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/pvi_control/bindings", "admin-control-key", `{"id":"bind_control","channel_id":"default","endpoint_id":"ep_control","credential_id":"cred_control","allowed_model_ids":["model_control"],"priority":1}`)
+	binding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/pvi_control/bindings", "admin-control-key", `{"id":"bind_control","endpoint_id":"ep_control","credential_id":"cred_control","allowed_model_ids":["model_control"],"priority":1}`)
 	if binding.Code != http.StatusCreated || !strings.Contains(binding.Body.String(), "bind_control") {
 		t.Fatalf("create binding status=%d body=%s", binding.Code, binding.Body.String())
 	}

@@ -10,7 +10,6 @@ import (
 	"testing"
 	"time"
 
-	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
@@ -52,16 +51,14 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 	if cn.ModelCatalogID != global.ModelCatalogID || cn.EndpointPresets[0].BaseURL != "https://api.moonshot.cn" || global.EndpointPresets[0].BaseURL != "https://api.moonshot.ai" {
 		t.Fatalf("Open Platform definitions = CN:%#v Global:%#v", cn, global)
 	}
-	if len(coding.Channels) != 2 || len(coding.EndpointPresets) != 2 || coding.VariantName != "Coding Plan" || coding.EndpointPresets[0].BaseURL != "https://api.kimi.com/coding" {
+	if coding.ProtocolProfileID != protocolchat.ProfileID || len(coding.EndpointPresets) != 1 || coding.VariantName != "Coding Plan" || coding.EndpointPresets[0].BaseURL != "https://api.kimi.com/coding" {
 		t.Fatalf("Coding definition = %#v", coding)
 	}
 	if len(coding.AuthMethods) != 2 || coding.AuthMethods[0].Type != providerconfig.AuthMethodAPIKey || coding.AuthMethods[1].Type != providerconfig.AuthMethodDeviceFlow || !coding.AuthMethods[1].Refreshable {
 		t.Fatalf("Coding authentication = %#v", coding.AuthMethods)
 	}
-	for _, channel := range coding.Channels {
-		if !channel.RuntimeReady {
-			t.Fatalf("Coding channel %q is not runtime ready after its driver implementation was added", channel.ID)
-		}
+	if !coding.RuntimeReady {
+		t.Fatal("Coding protocol is not runtime ready after its driver implementation was added")
 	}
 }
 
@@ -132,11 +129,10 @@ func TestKimiExecutionDriversUseExactDefinitionPathsAndBearerAuthentication(t *t
 		secretRef     string
 		authorization string
 	}{
-		{name: "CN Chat", definitionID: KimiCNDefinitionID, channelID: "chat", profileID: protocolchat.ProfileID, path: "/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
-		{name: "Global Chat", definitionID: KimiGlobalDefinitionID, channelID: "chat", profileID: protocolchat.ProfileID, path: "/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
-		{name: "Coding Chat API Key", definitionID: KimiCodingDefinitionID, channelID: "chat", profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
-		{name: "Coding Chat Device Flow", definitionID: KimiCodingDefinitionID, channelID: "chat", profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "device_flow", secretRef: deviceTokenReference, authorization: "Bearer kimi-device-access"},
-		{name: "Coding Anthropic", definitionID: KimiCodingDefinitionID, channelID: "anthropic", profileID: protocolmessages.ProfileID, path: "/coding/v1/messages", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
+		{name: "CN Chat", definitionID: KimiCNDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
+		{name: "Global Chat", definitionID: KimiGlobalDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
+		{name: "Coding Chat API Key", definitionID: KimiCodingDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key"},
+		{name: "Coding Chat Device Flow", definitionID: KimiCodingDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "device_flow", secretRef: deviceTokenReference, authorization: "Bearer kimi-device-access"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -174,10 +170,8 @@ func kimiDefinitionsByID() map[string]providerconfig.ProviderDefinition {
 // kimiEndpointPreset 从已校验的不可变定义返回一个精确通道预设。
 func kimiEndpointPreset(t *testing.T, definition providerconfig.ProviderDefinition, channelID string) providerconfig.EndpointPreset {
 	t.Helper()
-	for _, preset := range definition.EndpointPresets {
-		if preset.ChannelID == channelID {
-			return preset
-		}
+	if len(definition.EndpointPresets) == 1 && channelID == definition.ProtocolProfileID {
+		return definition.EndpointPresets[0]
 	}
 	t.Fatalf("definition %q has no endpoint preset for channel %q", definition.ID, channelID)
 	return providerconfig.EndpointPreset{}

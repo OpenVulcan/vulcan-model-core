@@ -105,9 +105,6 @@ func (d ProviderDefinition) Validate() error {
 		if d.GroupID != "" || d.VariantName != "" || d.VariantDescription != "" || d.VariantDescriptionKey != "" || d.ModelCatalogID != "" || d.SortOrder != 0 || len(d.EndpointPresets) != 0 {
 			return invalid("custom provider definition cannot register system grouping or endpoint preset metadata")
 		}
-		if len(d.Channels) != 1 {
-			return invalid("custom provider definition requires exactly one channel")
-		}
 	default:
 		return invalid("provider definition kind %q is invalid", d.Kind)
 	}
@@ -120,8 +117,20 @@ func (d ProviderDefinition) Validate() error {
 	if d.SortOrder < 0 {
 		return invalid("provider definition sort order cannot be negative")
 	}
-	if len(d.Channels) == 0 || len(d.AuthMethods) == 0 {
-		return invalid("provider definition requires at least one channel and auth method")
+	if err := validateIdentifier("provider protocol profile id", d.ProtocolProfileID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(d.EndpointProfileID) == "" {
+		return invalid("provider definition endpoint profile id is required")
+	}
+	if len(d.AuthMethodIDs) == 0 {
+		return invalid("provider definition protocol requires at least one auth method")
+	}
+	if !d.RuntimeReady {
+		return invalid("provider definition protocol must be runtime ready")
+	}
+	if len(d.AuthMethods) == 0 {
+		return invalid("provider definition requires at least one auth method")
 	}
 	authMethods := make(map[string]struct{}, len(d.AuthMethods))
 	for _, authMethod := range d.AuthMethods {
@@ -133,28 +142,18 @@ func (d ProviderDefinition) Validate() error {
 		}
 		authMethods[authMethod.ID] = struct{}{}
 	}
-	channels := make(map[string]struct{}, len(d.Channels))
-	for _, channel := range d.Channels {
-		if err := channel.Validate(); err != nil {
+	for _, authMethodID := range d.AuthMethodIDs {
+		if err := validateIdentifier("provider protocol auth method id", authMethodID); err != nil {
 			return err
 		}
-		if _, exists := channels[channel.ID]; exists {
-			return invalid("duplicate provider channel id %q", channel.ID)
-		}
-		channels[channel.ID] = struct{}{}
-		for _, authMethodID := range channel.AuthMethodIDs {
-			if _, exists := authMethods[authMethodID]; !exists {
-				return invalid("provider channel %q references unknown auth method %q", channel.ID, authMethodID)
-			}
+		if _, exists := authMethods[authMethodID]; !exists {
+			return invalid("provider protocol references unknown auth method %q", authMethodID)
 		}
 	}
 	presets := make(map[string]struct{}, len(d.EndpointPresets))
 	for _, preset := range d.EndpointPresets {
 		if err := preset.Validate(); err != nil {
 			return err
-		}
-		if _, exists := channels[preset.ChannelID]; !exists {
-			return invalid("endpoint preset %q references unknown provider channel %q", preset.ID, preset.ChannelID)
 		}
 		if _, exists := presets[preset.ID]; exists {
 			return invalid("duplicate endpoint preset id %q", preset.ID)
@@ -212,38 +211,12 @@ func (p EndpointPreset) Validate() error {
 	if err := validateIdentifier("endpoint preset id", p.ID); err != nil {
 		return err
 	}
-	if err := validateIdentifier("endpoint preset channel id", p.ChannelID); err != nil {
-		return err
-	}
 	parsedURL, errParse := url.ParseRequestURI(p.BaseURL)
 	if errParse != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
 		return invalid("endpoint preset base url must be an absolute http or https url")
 	}
 	if strings.TrimSpace(p.Region) == "" {
 		return invalid("endpoint preset region is required")
-	}
-	return nil
-}
-
-// Validate verifies one provider channel definition.
-// Validate 校验一个供应商通道定义。
-func (c ProviderChannel) Validate() error {
-	if err := validateIdentifier("provider channel id", c.ID); err != nil {
-		return err
-	}
-	if err := validateIdentifier("protocol profile id", c.ProtocolProfileID); err != nil {
-		return err
-	}
-	if strings.TrimSpace(c.EndpointProfileID) == "" {
-		return invalid("provider channel endpoint profile id is required")
-	}
-	if len(c.AuthMethodIDs) == 0 {
-		return invalid("provider channel requires at least one auth method")
-	}
-	for _, authMethodID := range c.AuthMethodIDs {
-		if err := validateIdentifier("provider channel auth method id", authMethodID); err != nil {
-			return err
-		}
 	}
 	return nil
 }
@@ -385,12 +358,7 @@ func (b AccessBinding) Validate() error {
 // HasChannel reports whether a provider definition owns one channel identifier.
 // HasChannel 返回供应商定义是否拥有指定通道标识。
 func (d ProviderDefinition) HasChannel(channelID string) bool {
-	for _, channel := range d.Channels {
-		if channel.ID == channelID {
-			return true
-		}
-	}
-	return false
+	return channelID == d.ProtocolProfileID
 }
 
 // HasAuthMethod reports whether a provider definition owns one authentication method.
@@ -414,14 +382,12 @@ func (d ProviderDefinition) AuthMethod(authMethodID string) (AuthMethodDefinitio
 // ChannelAllowsAuth reports whether a channel accepts one provider authentication method.
 // ChannelAllowsAuth 返回通道是否接受指定供应商认证方式。
 func (d ProviderDefinition) ChannelAllowsAuth(channelID string, authMethodID string) bool {
-	for _, channel := range d.Channels {
-		if channel.ID != channelID {
-			continue
-		}
-		for _, allowedAuthMethodID := range channel.AuthMethodIDs {
-			if allowedAuthMethodID == authMethodID {
-				return true
-			}
+	if channelID != d.ProtocolProfileID {
+		return false
+	}
+	for _, allowedAuthMethodID := range d.AuthMethodIDs {
+		if allowedAuthMethodID == authMethodID {
+			return true
 		}
 	}
 	return false
@@ -433,25 +399,18 @@ func (d ProviderDefinition) ValidateEndpointPreset(endpoint Endpoint) error {
 	if d.Kind != DefinitionKindSystem || len(d.EndpointPresets) == 0 {
 		return nil
 	}
-	// channelHasEditablePreset records the explicit exception that permits a management-provided address.
-	// channelHasEditablePreset 记录允许管理端提供地址的显式例外。
-	channelHasEditablePreset := false
-	// channelHasPreset distinguishes an unconstrained legacy channel from a fixed system-provider channel.
-	// channelHasPreset 区分不受约束的旧通道与固定系统供应商通道。
-	channelHasPreset := false
+	// hasEditablePreset records the explicit exception that permits a management-provided address.
+	// hasEditablePreset 记录允许管理端提供地址的显式例外。
+	hasEditablePreset := false
 	for _, preset := range d.EndpointPresets {
-		if preset.ChannelID != endpoint.ChannelID {
-			continue
-		}
-		channelHasPreset = true
 		if preset.BaseURL == endpoint.BaseURL && preset.Region == endpoint.Region {
 			return nil
 		}
 		if preset.UserEditable {
-			channelHasEditablePreset = true
+			hasEditablePreset = true
 		}
 	}
-	if channelHasPreset && !channelHasEditablePreset {
+	if !hasEditablePreset {
 		return invalid("endpoint must exactly match one fixed system provider preset")
 	}
 	return nil

@@ -57,7 +57,7 @@ func (d fakeKimiDriver) DiscoverModels(_ context.Context, request provider.Disco
 			ID:                 "offer_kimi_k3",
 			ProviderInstanceID: instanceID,
 			ProviderModelID:    "model_kimi_k3",
-			ChannelID:          "anthropic",
+			ChannelID:          "openai.chat",
 			UpstreamModelID:    "kimi-k3",
 			Capabilities:       fakeKimiCapabilities(1048576),
 			CapabilityRevision: 1,
@@ -209,7 +209,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	observedAt := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
-		ID: "anthropic.messages.v1", Version: "1", DisplayName: "Anthropic Messages", RuntimeReady: true,
+		ID: "openai.chat", Version: "1", DisplayName: "OpenAI Chat", RuntimeReady: true,
 		ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
@@ -221,9 +221,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	driver := fakeKimiDriver{definition: providerconfig.ProviderDefinition{
 		ID: "system_kimi_coding_plan", Kind: providerconfig.DefinitionKindSystem, DisplayName: "Kimi Coding Plan",
 		DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ConfigSchemaVersion: "1",
-		Channels: []providerconfig.ProviderChannel{{
-			ID: "anthropic", ProtocolProfileID: "anthropic.messages.v1", EndpointProfileID: "kimi", AuthMethodIDs: []string{"bearer"}, RuntimeReady: true,
-		}},
+		ProtocolProfileID: "openai.chat", EndpointProfileID: "kimi", AuthMethodIDs: []string{"bearer"}, RuntimeReady: true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
 			ID: "bearer", Type: providerconfig.AuthMethodBearer, MultipleCredentials: true,
 		}},
@@ -256,7 +254,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 		t.Fatalf("create Kimi instance: %v", errInstance)
 	}
 	endpoint, errEndpoint := configurationService.AddEndpoint(ctx, management.AddEndpointInput{
-		ID: "ep_kimi", ProviderInstanceID: instance.ID, ChannelID: "anthropic", BaseURL: "https://api.kimi.example/v1",
+		ID: "ep_kimi", ProviderInstanceID: instance.ID, BaseURL: "https://api.kimi.example/v1",
 	})
 	if errEndpoint != nil {
 		t.Fatalf("add Kimi endpoint: %v", errEndpoint)
@@ -272,7 +270,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 		}
 		if _, errBinding := configurationService.AddBinding(ctx, management.AddBindingInput{
 			ID: "bind_" + strings.TrimPrefix(credential.ID, "cred_"), ProviderInstanceID: instance.ID,
-			ChannelID: "anthropic", EndpointID: endpoint.ID, CredentialID: credential.ID, Priority: index,
+			EndpointID: endpoint.ID, CredentialID: credential.ID, Priority: index,
 		}); errBinding != nil {
 			t.Fatalf("bind Kimi credential %s: %v", credential.ID, errBinding)
 		}

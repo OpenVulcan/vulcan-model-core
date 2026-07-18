@@ -102,7 +102,7 @@ func setGoogleTranslatedProfile(execution *provider.ExecutionRequest, profileID 
 	execution.Binding.Target.ExecutionProfileID = profileID
 	execution.Request.ModelSelection.ExecutionProfileID = profileID
 	execution.Definition.AuthMethods[0].Type = authType
-	execution.Definition.Channels[0].ProtocolProfileID = profileID
+	execution.Definition.ProtocolProfileID = profileID
 }
 
 // translatedGoogleCapabilities returns verified capabilities used only by isolated driver tests.

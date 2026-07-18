@@ -53,9 +53,9 @@ func newResolverFixture(t *testing.T) resolverFixture {
 	now := time.Date(2026, 7, 17, 12, 0, 0, 0, time.UTC)
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
-		ID:                 "anthropic.messages.v1",
+		ID:                 "openai.chat",
 		Version:            "1",
-		DisplayName:        "Anthropic Messages",
+		DisplayName:        "OpenAI Chat",
 		RuntimeReady:       true,
 		ModelDiscovery:     providerconfig.SupportUnsupported,
 		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
@@ -73,13 +73,10 @@ func newResolverFixture(t *testing.T) resolverFixture {
 		DriverID:            "kimi-coding-plan",
 		DriverVersion:       "1.0.0",
 		ConfigSchemaVersion: "1",
-		Channels: []providerconfig.ProviderChannel{{
-			ID:                "anthropic",
-			ProtocolProfileID: "anthropic.messages.v1",
-			EndpointProfileID: "kimi-coding",
-			AuthMethodIDs:     []string{"oauth"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   "openai.chat",
+		EndpointProfileID:   "kimi-coding",
+		AuthMethodIDs:       []string{"oauth"},
+		RuntimeReady:        true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
 			ID:                  "oauth",
 			Type:                providerconfig.AuthMethodOAuth,
@@ -118,7 +115,7 @@ func newResolverFixture(t *testing.T) resolverFixture {
 	endpoint := providerconfig.Endpoint{
 		ID:                 "ep_kimi",
 		ProviderInstanceID: instance.ID,
-		ChannelID:          "anthropic",
+		ChannelID:          "openai.chat",
 		BaseURL:            "https://api.kimi.example/v1",
 		Status:             providerconfig.EndpointReady,
 		Revision:           1,
@@ -158,8 +155,8 @@ func newResolverFixture(t *testing.T) resolverFixture {
 		}
 	}
 	bindings := []providerconfig.AccessBinding{
-		{ID: "bind_kimi_256k", ProviderInstanceID: instance.ID, ChannelID: "anthropic", EndpointID: endpoint.ID, CredentialID: "cred_kimi_256k", Priority: 10, Enabled: true, Revision: 1},
-		{ID: "bind_kimi_1m", ProviderInstanceID: instance.ID, ChannelID: "anthropic", EndpointID: endpoint.ID, CredentialID: "cred_kimi_1m", Priority: 1, Enabled: true, Revision: 1},
+		{ID: "bind_kimi_256k", ProviderInstanceID: instance.ID, ChannelID: "openai.chat", EndpointID: endpoint.ID, CredentialID: "cred_kimi_256k", Priority: 10, Enabled: true, Revision: 1},
+		{ID: "bind_kimi_1m", ProviderInstanceID: instance.ID, ChannelID: "openai.chat", EndpointID: endpoint.ID, CredentialID: "cred_kimi_1m", Priority: 1, Enabled: true, Revision: 1},
 	}
 	for _, binding := range bindings {
 		if err := configurations.SaveBinding(ctx, binding); err != nil {
@@ -181,7 +178,7 @@ func newResolverFixture(t *testing.T) resolverFixture {
 			ID:                 "offer_kimi_k3",
 			ProviderInstanceID: instance.ID,
 			ProviderModelID:    "model_kimi_k3",
-			ChannelID:          "anthropic",
+			ChannelID:          "openai.chat",
 			UpstreamModelID:    "kimi-k3",
 			Capabilities:       resolverCapabilities(1048576),
 			CapabilityRevision: 1,

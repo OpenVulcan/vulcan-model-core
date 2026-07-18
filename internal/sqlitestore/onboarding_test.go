@@ -132,8 +132,8 @@ func sqliteKimiOnboarding(instanceID string, handle string, endpointID string, c
 	now := time.Date(2026, 7, 18, 12, 0, 0, 0, time.UTC)
 	return providerconfig.SystemOnboarding{
 		Instance:   providerconfig.ProviderInstance{ID: instanceID, DefinitionID: bootstrap.KimiCNDefinitionID, Handle: handle, DisplayName: handle, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: 1, CreatedAt: now, UpdatedAt: now},
-		Endpoints:  []providerconfig.Endpoint{{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: "chat", BaseURL: "https://api.moonshot.cn", Region: "CN", Status: providerconfig.EndpointReady, Revision: 1}},
+		Endpoints:  []providerconfig.Endpoint{{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: "openai.chat", BaseURL: "https://api.moonshot.cn", Region: "CN", Status: providerconfig.EndpointReady, Revision: 1}},
 		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: "api_key", Label: "Primary", SecretRef: "secret-reference", Fingerprint: credentialID, Status: providerconfig.CredentialActive, Revision: 1},
-		Bindings:   []providerconfig.AccessBinding{{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: "chat", EndpointID: endpointID, CredentialID: credentialID, Priority: 10, Enabled: true, Revision: 1}},
+		Bindings:   []providerconfig.AccessBinding{{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: "openai.chat", EndpointID: endpointID, CredentialID: credentialID, Priority: 10, Enabled: true, Revision: 1}},
 	}
 }

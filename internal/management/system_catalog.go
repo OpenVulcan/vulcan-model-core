@@ -36,12 +36,11 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 		modelSuffix := catalogIdentifier(template.upstreamID)
 		modelID := "model_" + modelSuffix
 		snapshot.Models = append(snapshot.Models, catalog.ProviderModel{ID: modelID, ProviderInstanceID: onboarding.Instance.ID, UpstreamModelID: template.upstreamID, DisplayName: template.displayName, Source: catalog.ModelSourceSystem, EntitlementMode: template.entitlementMode, Revision: 1})
-		for _, channel := range definition.Channels {
-			offeringID := "offer_" + modelSuffix + "_" + channel.ID
-			capabilities := systemModelCapabilities(template)
-			snapshot.Offerings = append(snapshot.Offerings, catalog.ModelOffering{ID: offeringID, ProviderInstanceID: onboarding.Instance.ID, ProviderModelID: modelID, ChannelID: channel.ID, UpstreamModelID: template.upstreamID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
-			snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + channel.ID, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, DisplayName: template.displayName, Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
-		}
+		protocolSuffix := catalogIdentifier(definition.ProtocolProfileID)
+		offeringID := "offer_" + modelSuffix + "_" + protocolSuffix
+		capabilities := systemModelCapabilities(template)
+		snapshot.Offerings = append(snapshot.Offerings, catalog.ModelOffering{ID: offeringID, ProviderInstanceID: onboarding.Instance.ID, ProviderModelID: modelID, ChannelID: definition.ProtocolProfileID, UpstreamModelID: template.upstreamID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
+		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, DisplayName: template.displayName, Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
 	}
 	if errValidate := snapshot.Validate(); errValidate != nil {
 		return catalog.Snapshot{}, fmt.Errorf("validate system provider catalog: %w", errValidate)

@@ -6,9 +6,6 @@ export interface ProviderEndpointPreset {
   // id is stable within one provider definition.
   // id 在一个供应商定义内保持稳定。
   id: string
-  // channel_id identifies the exact protocol channel served by this address.
-  // channel_id 标识此地址服务的精确协议通道。
-  channel_id: string
   // base_url is the trusted upstream base address.
   // base_url 是受信任的上游基础地址。
   base_url: string
@@ -18,20 +15,6 @@ export interface ProviderEndpointPreset {
   // user_editable reports whether the address may be changed during onboarding.
   // user_editable 表示录入期间是否可以修改地址。
   user_editable: boolean
-}
-
-// ProviderChannel describes one executable protocol option owned by a definition.
-// ProviderChannel 描述一个供应商定义拥有的可执行协议选项。
-export interface ProviderChannel {
-  // id is stable within the provider definition.
-  // id 在供应商定义内保持稳定。
-  id: string
-  // protocol_profile_id identifies the exact internal protocol contract.
-  // protocol_profile_id 标识精确的内部协议合同。
-  protocol_profile_id: string
-  // runtime_ready reports whether the local adapter is implemented.
-  // runtime_ready 表示本地适配器是否已实现。
-  runtime_ready: boolean
 }
 
 // ProviderDefinition describes one exact selectable site or commercial product.
@@ -58,9 +41,9 @@ export interface ProviderDefinition {
   // model_catalog_id identifies shared trusted model metadata.
   // model_catalog_id 标识共享的受信任模型元数据。
   model_catalog_id: string
-  // channels lists explicit protocol choices without fallback semantics.
-  // channels 列出不带降级语义的显式协议选项。
-  channels: ProviderChannel[]
+  // protocol_profile_id identifies the provider's one preferred protocol.
+  // protocol_profile_id 标识供应商唯一的优势协议。
+  protocol_profile_id: string
   // endpoint_presets lists trusted onboarding addresses.
   // endpoint_presets 列出受信任的录入地址。
   endpoint_presets: ProviderEndpointPreset[]
@@ -129,27 +112,119 @@ export interface KimiDeviceFlow {
   poll_interval_seconds: number
 }
 
+// ProviderInstance describes one configured provider without exposing secret material.
+// ProviderInstance 描述一个已配置供应商且不暴露秘密材料。
+export interface ProviderInstance {
+  // id is the immutable provider instance identifier.
+  // id 是不可变供应商实例标识。
+  id: string
+  // definition_id identifies the exact provider variant.
+  // definition_id 标识精确供应商变体。
+  definition_id: string
+  // handle is the stable routing alias.
+  // handle 是稳定路由别名。
+  handle: string
+  // display_name is the management-facing instance name.
+  // display_name 是管理界面实例名称。
+  display_name: string
+  // status is the current configuration lifecycle state.
+  // status 是当前配置生命周期状态。
+  status: string
+  // disabled_model_ids lists models disabled by local policy.
+  // disabled_model_ids 列出被本地策略禁用的模型。
+  disabled_model_ids: string[]
+  // endpoint_count is the number of configured endpoints.
+  // endpoint_count 是已配置端点数量。
+  endpoint_count: number
+  // credential_count is the number of configured credentials.
+  // credential_count 是已配置凭据数量。
+  credential_count: number
+  // binding_count is the number of configured access bindings.
+  // binding_count 是已配置访问绑定数量。
+  binding_count: number
+  // revision is the persisted instance revision.
+  // revision 是持久化实例修订号。
+  revision: number
+}
+
+// ProviderCredential describes one management-safe authorization entry.
+// ProviderCredential 描述一个管理安全的授权条目。
+export interface ProviderCredential {
+  // id is the immutable credential identifier.
+  // id 是不可变凭据标识。
+  id: string
+  // provider_instance_id identifies the exact owner.
+  // provider_instance_id 标识精确所有者。
+  provider_instance_id: string
+  // auth_method_id identifies the definition-owned authentication method.
+  // auth_method_id 标识定义拥有的认证方式。
+  auth_method_id: string
+  // label is the operator-authored API or account name.
+  // label 是操作员填写的 API 或账号名称。
+  label: string
+  // status is the local credential eligibility state.
+  // status 是本地凭据资格状态。
+  status: string
+  // expires_at is the provider-reported expiration when known.
+  // expires_at 是已知时供应商报告的到期时间。
+  expires_at: string | null
+  // cooling_until is the local recovery time when cooling applies.
+  // cooling_until 是适用冷却时的本地恢复时间。
+  cooling_until: string | null
+  // revision is the persisted credential revision.
+  // revision 是持久化凭据修订号。
+  revision: number
+}
+
+// AuthorizedProvider joins one configured instance with its non-secret authorization list.
+// AuthorizedProvider 将一个已配置实例与其非秘密授权列表连接起来。
+export interface AuthorizedProvider {
+  // instance contains the provider identity and lifecycle state.
+  // instance 包含供应商身份与生命周期状态。
+  instance: ProviderInstance
+  // credentials contains every configured API key or device authorization.
+  // credentials 包含每个已配置 API 密钥或设备授权。
+  credentials: ProviderCredential[]
+}
+
 // providerGroupListResponseSchema validates the complete untrusted management response before UI state owns it.
 // providerGroupListResponseSchema 在 UI 状态接管前校验完整的不受信任管理响应。
 const providerGroupListResponseSchema = z.object({
-  provider_groups: z.array(z.object({
-    id: z.string().min(1),
-    display_name: z.string().min(1),
-    description: z.string(),
-    description_key: z.string().optional(),
-    provider_definitions: z.array(z.object({
+  provider_groups: z.array(
+    z.object({
       id: z.string().min(1),
       display_name: z.string().min(1),
-      group_id: z.string().min(1),
-      variant_name: z.string().min(1),
-      variant_description: z.string(),
-      variant_description_key: z.string().optional(),
-      model_catalog_id: z.string().min(1),
-      channels: z.array(z.object({ id: z.string().min(1), protocol_profile_id: z.string().min(1), runtime_ready: z.boolean() })),
-      endpoint_presets: z.array(z.object({ id: z.string().min(1), channel_id: z.string().min(1), base_url: z.string().url(), region: z.string().min(1), user_editable: z.boolean() })),
-      auth_methods: z.array(z.object({ id: z.string().min(1), type: z.string().min(1), refreshable: z.boolean() })),
-    })),
-  })),
+      description: z.string(),
+      description_key: z.string().optional(),
+      provider_definitions: z.array(
+        z.object({
+          id: z.string().min(1),
+          display_name: z.string().min(1),
+          group_id: z.string().min(1),
+          variant_name: z.string().min(1),
+          variant_description: z.string(),
+          variant_description_key: z.string().optional(),
+          model_catalog_id: z.string().min(1),
+          protocol_profile_id: z.string().min(1),
+          endpoint_presets: z.array(
+            z.object({
+              id: z.string().min(1),
+              base_url: z.string().url(),
+              region: z.string().min(1),
+              user_editable: z.boolean(),
+            }),
+          ),
+          auth_methods: z.array(
+            z.object({
+              id: z.string().min(1),
+              type: z.string().min(1),
+              refreshable: z.boolean(),
+            }),
+          ),
+        }),
+      ),
+    }),
+  ),
 })
 
 // systemOnboardingResponseSchema validates identifiers returned after an atomic server commit.
@@ -172,12 +247,54 @@ const kimiDeviceFlowSchema = z.object({
   poll_interval_seconds: z.number().int().positive(),
 })
 
+// providerInstanceSchema validates one management-safe configured provider.
+// providerInstanceSchema 校验一个管理安全的已配置供应商。
+const providerInstanceSchema = z.object({
+  id: z.string().min(1),
+  definition_id: z.string().min(1),
+  handle: z.string().min(1),
+  display_name: z.string().min(1),
+  status: z.string().min(1),
+  // The running management API historically serialized an unset slice as null; normalize that exact shape at the boundary.
+  // 当前运行中的管理 API 历史上会将未设置切片序列化为 null；在边界处规范化这一精确结构。
+  disabled_model_ids: z
+    .array(z.string())
+    .nullable()
+    .transform((modelIDs) => modelIDs ?? []),
+  endpoint_count: z.number().int().nonnegative(),
+  credential_count: z.number().int().nonnegative(),
+  binding_count: z.number().int().nonnegative(),
+  revision: z.number().int().positive(),
+})
+
+// providerCredentialSchema validates one redacted authorization entry.
+// providerCredentialSchema 校验一个已脱敏授权条目。
+const providerCredentialSchema = z.object({
+  id: z.string().min(1),
+  provider_instance_id: z.string().min(1),
+  auth_method_id: z.string().min(1),
+  label: z.string().min(1),
+  status: z.string().min(1),
+  expires_at: z.string().datetime({ offset: true }).nullable(),
+  cooling_until: z.string().datetime({ offset: true }).nullable(),
+  revision: z.number().int().positive(),
+})
+
+// providerInstanceListResponseSchema validates the complete configured-provider envelope.
+// providerInstanceListResponseSchema 校验完整的已配置供应商响应信封。
+const providerInstanceListResponseSchema = z.object({
+  provider_instances: z.array(providerInstanceSchema),
+})
+
+// providerCredentialListResponseSchema validates one instance authorization envelope.
+// providerCredentialListResponseSchema 校验一个实例授权响应信封。
+const providerCredentialListResponseSchema = z.object({
+  credentials: z.array(providerCredentialSchema),
+})
+
 // fetchProviderGroups loads grouped system providers using the active in-memory management credential.
 // fetchProviderGroups 使用当前内存管理凭证加载已分组系统供应商。
-export async function fetchProviderGroups(
-  managementAuthToken: string,
-  signal?: AbortSignal
-): Promise<ProviderGroup[]> {
+export async function fetchProviderGroups(managementAuthToken: string, signal?: AbortSignal): Promise<ProviderGroup[]> {
   const response = await fetch("/vulcan/manage/provider-groups", {
     method: "GET",
     headers: { Authorization: `Bearer ${managementAuthToken}` },
@@ -190,12 +307,53 @@ export async function fetchProviderGroups(
   return payload.provider_groups
 }
 
+// fetchAuthorizedProviders loads configured instances and their redacted credentials, excluding incomplete instances without authorization.
+// fetchAuthorizedProviders 加载已配置实例及其脱敏凭据，并排除没有授权的不完整实例。
+export async function fetchAuthorizedProviders(
+  managementAuthToken: string,
+  signal?: AbortSignal,
+): Promise<AuthorizedProvider[]> {
+  const headers = { Authorization: `Bearer ${managementAuthToken}` }
+  const response = await fetch("/vulcan/manage/provider-instances", {
+    method: "GET",
+    headers,
+    signal,
+  })
+  if (!response.ok) {
+    throw new Error(`provider instances request failed with status ${response.status}`)
+  }
+  const payload = providerInstanceListResponseSchema.parse(await response.json())
+  const providers = await Promise.all(
+    payload.provider_instances.map(async (instance) => {
+      const credentialResponse = await fetch(
+        `/vulcan/manage/provider-instances/${encodeURIComponent(instance.id)}/credentials`,
+        { method: "GET", headers, signal },
+      )
+      if (!credentialResponse.ok) {
+        throw new Error(`provider credentials request failed with status ${credentialResponse.status}`)
+      }
+      const credentialPayload = providerCredentialListResponseSchema.parse(await credentialResponse.json())
+      if (credentialPayload.credentials.some((credential) => credential.provider_instance_id !== instance.id)) {
+        throw new Error("provider credential response contains a mismatched owner")
+      }
+      return { instance, credentials: credentialPayload.credentials }
+    }),
+  )
+  return providers.filter((provider) => provider.credentials.length > 0)
+}
+
 // onboardSystemProvider submits one API-key variant to the server-owned atomic onboarding command.
 // onboardSystemProvider 将一个 API Key 变体提交到服务端拥有的原子录入命令。
-export async function onboardSystemProvider(managementAuthToken: string, input: SystemOnboardingInput): Promise<SystemOnboardingResponse> {
+export async function onboardSystemProvider(
+  managementAuthToken: string,
+  input: SystemOnboardingInput,
+): Promise<SystemOnboardingResponse> {
   const response = await fetch("/vulcan/manage/provider-instances/onboard", {
     method: "POST",
-    headers: { Authorization: `Bearer ${managementAuthToken}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${managementAuthToken}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(input),
   })
   if (!response.ok) {
@@ -207,7 +365,10 @@ export async function onboardSystemProvider(managementAuthToken: string, input: 
 // startKimiDeviceFlow starts one token-confidential Coding Plan authorization session.
 // startKimiDeviceFlow 启动一个令牌保密的 Coding Plan 授权会话。
 export async function startKimiDeviceFlow(managementAuthToken: string): Promise<KimiDeviceFlow> {
-  const response = await fetch("/vulcan/manage/kimi/device-flows", { method: "POST", headers: { Authorization: `Bearer ${managementAuthToken}` } })
+  const response = await fetch("/vulcan/manage/kimi/device-flows", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${managementAuthToken}` },
+  })
   if (!response.ok) {
     throw new Error(`Kimi device flow failed with status ${response.status}`)
   }
@@ -216,10 +377,17 @@ export async function startKimiDeviceFlow(managementAuthToken: string): Promise<
 
 // onboardKimiDeviceFlow polls once and atomically stores a completed Coding Plan authorization.
 // onboardKimiDeviceFlow 轮询一次并原子存储已完成的 Coding Plan 授权。
-export async function onboardKimiDeviceFlow(managementAuthToken: string, flowID: string, input: Omit<SystemOnboardingInput, "auth_method_id" | "secret">): Promise<SystemOnboardingResponse | null> {
+export async function onboardKimiDeviceFlow(
+  managementAuthToken: string,
+  flowID: string,
+  input: Omit<SystemOnboardingInput, "auth_method_id" | "secret">,
+): Promise<SystemOnboardingResponse | null> {
   const response = await fetch(`/vulcan/manage/kimi/device-flows/${encodeURIComponent(flowID)}/onboard`, {
     method: "POST",
-    headers: { Authorization: `Bearer ${managementAuthToken}`, "Content-Type": "application/json" },
+    headers: {
+      Authorization: `Bearer ${managementAuthToken}`,
+      "Content-Type": "application/json",
+    },
     body: JSON.stringify(input),
   })
   if (response.status === 202) {

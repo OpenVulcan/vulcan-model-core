@@ -49,7 +49,7 @@ func TestCodexDriverPreservesAlwaysStreamingExecution(t *testing.T) {
 	}
 	execution.Binding.Target.ExecutionProfileID = protocolcodex.ProfileID
 	execution.Request.ModelSelection.ExecutionProfileID = protocolcodex.ProfileID
-	execution.Definition.Channels[0].ProtocolProfileID = protocolcodex.ProfileID
+	execution.Definition.ProtocolProfileID = protocolcodex.ProfileID
 	execution.Definition.AuthMethods[0].Type = providerconfig.AuthMethodAPIKey
 	result, errExecute := driver.Execute(context.Background(), execution)
 	if errExecute != nil {

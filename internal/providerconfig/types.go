@@ -267,9 +267,6 @@ type EndpointPreset struct {
 	// ID is stable within one provider definition.
 	// ID 在一个供应商定义内保持稳定。
 	ID string
-	// ChannelID identifies the exact provider channel served by this preset.
-	// ChannelID 标识该预设服务的精确供应商通道。
-	ChannelID string
 	// BaseURL is the default absolute upstream base URL.
 	// BaseURL 是默认的上游绝对基础 URL。
 	BaseURL string
@@ -279,29 +276,6 @@ type EndpointPreset struct {
 	// UserEditable reports whether management clients may replace this default address.
 	// UserEditable 表示管理客户端是否可以替换该默认地址。
 	UserEditable bool
-}
-
-// ProviderChannel defines one complete upstream access path owned by a provider.
-// ProviderChannel 定义供应商拥有的一条完整上游接入路径。
-type ProviderChannel struct {
-	// ID is stable within one provider definition.
-	// ID 在一个供应商定义内保持稳定。
-	ID string
-	// ProtocolProfileID references the shared upstream protocol profile.
-	// ProtocolProfileID 引用共享上游协议 Profile。
-	ProtocolProfileID string
-	// EndpointProfileID identifies provider-owned endpoint behavior.
-	// EndpointProfileID 标识供应商拥有的端点行为。
-	EndpointProfileID string
-	// AuthMethodIDs lists provider authentication methods allowed on this channel.
-	// AuthMethodIDs 列出该通道允许的供应商认证方式。
-	AuthMethodIDs []string
-	// Priority is the stable default ordering within one provider.
-	// Priority 是一个供应商内部的稳定默认顺序。
-	Priority int
-	// RuntimeReady reports whether the channel can participate in execution.
-	// RuntimeReady 表示该通道是否可以参与执行。
-	RuntimeReady bool
 }
 
 // ProviderDefinition describes either a code-owned system integration or a persisted custom definition.
@@ -343,9 +317,21 @@ type ProviderDefinition struct {
 	// ConfigSchemaVersion records the definition configuration schema version.
 	// ConfigSchemaVersion 记录定义配置 Schema 版本。
 	ConfigSchemaVersion string
-	// Channels lists complete provider access paths.
-	// Channels 列出完整的供应商接入路径。
-	Channels []ProviderChannel
+	// ProtocolProfileID references the one preferred upstream protocol profile.
+	// ProtocolProfileID 引用唯一的优势上游协议 Profile。
+	ProtocolProfileID string
+	// EndpointProfileID identifies provider-owned endpoint behavior for the selected protocol.
+	// EndpointProfileID 标识所选协议的供应商自有端点行为。
+	EndpointProfileID string
+	// AuthMethodIDs lists authentication methods allowed by the selected protocol.
+	// AuthMethodIDs 列出所选协议允许的认证方式。
+	AuthMethodIDs []string
+	// Priority is the stable default binding priority.
+	// Priority 是稳定的默认绑定优先级。
+	Priority int
+	// RuntimeReady reports whether the selected protocol can participate in execution.
+	// RuntimeReady 表示所选协议是否可以参与执行。
+	RuntimeReady bool
 	// EndpointPresets lists code-owned onboarding destinations without changing runtime endpoint ownership.
 	// EndpointPresets 列出代码拥有的录入目标，且不改变运行时端点归属。
 	EndpointPresets []EndpointPreset

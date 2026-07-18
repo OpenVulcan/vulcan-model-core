@@ -36,13 +36,10 @@ func testProviderDefinition() providerconfig.ProviderDefinition {
 		DriverID:            "test-provider",
 		DriverVersion:       "1.0.0",
 		ConfigSchemaVersion: "1",
-		Channels: []providerconfig.ProviderChannel{{
-			ID:                "anthropic",
-			ProtocolProfileID: "anthropic.messages.v1",
-			EndpointProfileID: "default",
-			AuthMethodIDs:     []string{"oauth"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   "anthropic.messages.v1",
+		EndpointProfileID:   "default",
+		AuthMethodIDs:       []string{"oauth"},
+		RuntimeReady:        true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
 			ID:                  "oauth",
 			Type:                providerconfig.AuthMethodOAuth,

@@ -76,13 +76,10 @@ func testSystemDefinition() ProviderDefinition {
 		DriverID:            "test_provider_driver",
 		DriverVersion:       "1",
 		ConfigSchemaVersion: "1",
-		Channels: []ProviderChannel{{
-			ID:                "responses",
-			ProtocolProfileID: "openai.responses.v1",
-			EndpointProfileID: "system_fixed",
-			AuthMethodIDs:     []string{"oauth", "api_key"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   "openai.responses.v1",
+		EndpointProfileID:   "system_fixed",
+		AuthMethodIDs:       []string{"oauth", "api_key"},
+		RuntimeReady:        true,
 		AuthMethods: []AuthMethodDefinition{
 			{ID: "oauth", Type: AuthMethodOAuth, Refreshable: true, MultipleCredentials: true},
 			{ID: "api_key", Type: AuthMethodAPIKey, MultipleCredentials: true},
@@ -100,13 +97,10 @@ func testCustomDefinition() ProviderDefinition {
 		Kind:                DefinitionKindCustom,
 		DisplayName:         "Custom Test Provider",
 		ConfigSchemaVersion: "1",
-		Channels: []ProviderChannel{{
-			ID:                "responses",
-			ProtocolProfileID: "openai.responses.v1",
-			EndpointProfileID: "custom_base_url",
-			AuthMethodIDs:     []string{"bearer"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   "openai.responses.v1",
+		EndpointProfileID:   "custom_base_url",
+		AuthMethodIDs:       []string{"bearer"},
+		RuntimeReady:        true,
 		AuthMethods: []AuthMethodDefinition{{
 			ID:                  "bearer",
 			Type:                AuthMethodBearer,
@@ -114,6 +108,16 @@ func testCustomDefinition() ProviderDefinition {
 		}},
 		Features: testFeatureSet(),
 		Revision: 1,
+	}
+}
+
+// TestProviderDefinitionRequiresProtocolProfileID verifies the data model requires one direct protocol reference.
+// TestProviderDefinitionRequiresProtocolProfileID 验证数据模型要求一个直接协议引用。
+func TestProviderDefinitionRequiresProtocolProfileID(t *testing.T) {
+	definition := testSystemDefinition()
+	definition.ProtocolProfileID = ""
+	if errValidate := definition.Validate(); errValidate == nil {
+		t.Fatal("ProviderDefinition.Validate() accepted an empty protocol profile identifier")
 	}
 }
 
@@ -201,7 +205,7 @@ func TestSystemProviderGroupsRemainManagementOnly(t *testing.T) {
 	groupedDefinition.GroupID = "test_group"
 	groupedDefinition.VariantName = "Global"
 	groupedDefinition.ModelCatalogID = "shared_catalog"
-	groupedDefinition.EndpointPresets = []EndpointPreset{{ID: "global", ChannelID: "responses", BaseURL: "https://global.example/v1", Region: "Global"}}
+	groupedDefinition.EndpointPresets = []EndpointPreset{{ID: "global", BaseURL: "https://global.example/v1", Region: "Global"}}
 	if errUnknownGroup := systems.Register(groupedDefinition); errUnknownGroup == nil {
 		t.Fatal("Register() accepted an unknown provider group")
 	}
@@ -245,7 +249,7 @@ func TestMemoryStoreKeepsAccessBindingsProviderScoped(t *testing.T) {
 	endpoint := Endpoint{
 		ID:                 "ep_first",
 		ProviderInstanceID: firstInstance.ID,
-		ChannelID:          "responses",
+		ChannelID:          "openai.responses.v1",
 		BaseURL:            "https://example.com/v1",
 		Status:             EndpointReady,
 		Revision:           1,
@@ -269,7 +273,7 @@ func TestMemoryStoreKeepsAccessBindingsProviderScoped(t *testing.T) {
 	binding := AccessBinding{
 		ID:                 "bind_cross",
 		ProviderInstanceID: firstInstance.ID,
-		ChannelID:          "responses",
+		ChannelID:          "openai.responses.v1",
 		EndpointID:         endpoint.ID,
 		CredentialID:       credential.ID,
 		Enabled:            true,
@@ -338,12 +342,12 @@ func TestStoreReturnsMutationSafeDefinitionSnapshots(t *testing.T) {
 	if !exists {
 		t.Fatal("expected system definition")
 	}
-	definition.Channels[0].AuthMethodIDs[0] = "mutated"
+	definition.AuthMethodIDs[0] = "mutated"
 	reloaded, errReloaded := store.GetDefinition(ctx, "system_test_provider")
 	if errReloaded != nil {
 		t.Fatalf("reload definition: %v", errReloaded)
 	}
-	if reloaded.Channels[0].AuthMethodIDs[0] != "oauth" {
+	if reloaded.AuthMethodIDs[0] != "oauth" {
 		t.Fatal("system definition was mutated through a returned snapshot")
 	}
 }

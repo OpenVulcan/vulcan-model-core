@@ -38,13 +38,10 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 		DriverID:            "management-test",
 		DriverVersion:       "1.0.0",
 		ConfigSchemaVersion: "1",
-		Channels: []providerconfig.ProviderChannel{{
-			ID:                "anthropic",
-			ProtocolProfileID: "anthropic.messages.v1",
-			EndpointProfileID: "default",
-			AuthMethodIDs:     []string{"bearer"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   "anthropic.messages.v1",
+		EndpointProfileID:   "default",
+		AuthMethodIDs:       []string{"bearer"},
+		RuntimeReady:        true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
 			ID:                  "bearer",
 			Type:                providerconfig.AuthMethodBearer,
@@ -82,7 +79,7 @@ func TestCreateCustomDefinitionConstrainsGenericProvider(t *testing.T) {
 	if errDefinition != nil {
 		t.Fatalf("create custom provider definition: %v", errDefinition)
 	}
-	if definition.Kind != providerconfig.DefinitionKindCustom || len(definition.Channels) != 1 || len(definition.AuthMethods) != 1 {
+	if definition.Kind != providerconfig.DefinitionKindCustom || definition.ProtocolProfileID != "anthropic.messages.v1" || len(definition.AuthMethods) != 1 {
 		t.Fatalf("unexpected custom definition shape: %+v", definition)
 	}
 	if definition.Features.AllowanceReader != providerconfig.SupportUnsupported {
@@ -216,7 +213,7 @@ func TestActivateInstanceRequiresClosedAccessPath(t *testing.T) {
 		t.Fatalf("expected incomplete configuration, got %v", errActivate)
 	}
 	endpoint, errEndpoint := service.AddEndpoint(ctx, AddEndpointInput{
-		ID: "ep_activation", ProviderInstanceID: instance.ID, ChannelID: "anthropic", BaseURL: "https://activation.example/v1",
+		ID: "ep_activation", ProviderInstanceID: instance.ID, BaseURL: "https://activation.example/v1",
 	})
 	if errEndpoint != nil {
 		t.Fatalf("add endpoint: %v", errEndpoint)
@@ -232,7 +229,7 @@ func TestActivateInstanceRequiresClosedAccessPath(t *testing.T) {
 		t.Fatalf("expected missing binding rejection, got %v", errActivate)
 	}
 	if _, errBinding := service.AddBinding(ctx, AddBindingInput{
-		ID: "bind_activation", ProviderInstanceID: instance.ID, ChannelID: "anthropic", EndpointID: endpoint.ID, CredentialID: credential.ID,
+		ID: "bind_activation", ProviderInstanceID: instance.ID, EndpointID: endpoint.ID, CredentialID: credential.ID,
 	}); errBinding != nil {
 		t.Fatalf("add access binding: %v", errBinding)
 	}
@@ -272,7 +269,7 @@ func TestCustomCatalogServicePersistsUserDeclaredModels(t *testing.T) {
 		t.Fatalf("create custom provider instance: %v", errInstance)
 	}
 	endpoint, errEndpoint := service.AddEndpoint(ctx, AddEndpointInput{
-		ID: "ep_custom_catalog", ProviderInstanceID: instance.ID, ChannelID: "default", BaseURL: "https://custom.example/v1",
+		ID: "ep_custom_catalog", ProviderInstanceID: instance.ID, BaseURL: "https://custom.example/v1",
 	})
 	if errEndpoint != nil {
 		t.Fatalf("add custom endpoint: %v", errEndpoint)
@@ -285,7 +282,7 @@ func TestCustomCatalogServicePersistsUserDeclaredModels(t *testing.T) {
 		t.Fatalf("add custom credential: %v", errCredential)
 	}
 	if _, errBinding := service.AddBinding(ctx, AddBindingInput{
-		ID: "bind_custom_catalog", ProviderInstanceID: instance.ID, ChannelID: "default", EndpointID: endpoint.ID, CredentialID: credential.ID,
+		ID: "bind_custom_catalog", ProviderInstanceID: instance.ID, EndpointID: endpoint.ID, CredentialID: credential.ID,
 	}); errBinding != nil {
 		t.Fatalf("add custom binding: %v", errBinding)
 	}
@@ -315,7 +312,7 @@ func TestCustomCatalogServicePersistsUserDeclaredModels(t *testing.T) {
 			Source: catalog.ModelSourceUserDeclared, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1,
 		}},
 		Offerings: []catalog.ModelOffering{{
-			ID: "offer_custom_example", ProviderInstanceID: instance.ID, ProviderModelID: "model_custom_example", ChannelID: "default",
+			ID: "offer_custom_example", ProviderInstanceID: instance.ID, ProviderModelID: "model_custom_example",
 			UpstreamModelID: "custom-model", Capabilities: capabilities, CapabilityRevision: 1, Revision: 1,
 		}},
 		Profiles: []catalog.ExecutionProfile{{
@@ -327,7 +324,7 @@ func TestCustomCatalogServicePersistsUserDeclaredModels(t *testing.T) {
 	if errSave != nil {
 		t.Fatalf("save custom catalog: %v", errSave)
 	}
-	if len(snapshot.Models) != 1 || len(snapshot.Pools) != 1 || snapshot.Pools[0].ReadyCredentials != 1 {
+	if len(snapshot.Models) != 1 || len(snapshot.Pools) != 1 || snapshot.Pools[0].ReadyCredentials != 1 || snapshot.Offerings[0].ChannelID != definition.ProtocolProfileID {
 		t.Fatalf("unexpected custom catalog snapshot: %+v", snapshot)
 	}
 	secondSnapshot, errSecondSave := catalogService.SaveCustomCatalog(ctx, SaveCustomCatalogInput{

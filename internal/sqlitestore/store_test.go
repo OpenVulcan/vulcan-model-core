@@ -41,13 +41,10 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 		DriverID:            "sqlite-test",
 		DriverVersion:       "1.0.0",
 		ConfigSchemaVersion: "1",
-		Channels: []providerconfig.ProviderChannel{{
-			ID:                "anthropic",
-			ProtocolProfileID: "anthropic.messages.v1",
-			EndpointProfileID: "default",
-			AuthMethodIDs:     []string{"bearer"},
-			RuntimeReady:      true,
-		}},
+		ProtocolProfileID:   "anthropic.messages.v1",
+		EndpointProfileID:   "default",
+		AuthMethodIDs:       []string{"bearer"},
+		RuntimeReady:        true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
 			ID:                  "bearer",
 			Type:                providerconfig.AuthMethodBearer,
@@ -99,7 +96,7 @@ func sqliteTestSnapshot(observedAt time.Time) catalog.Snapshot {
 			ID:                 "offer_sqlite",
 			ProviderInstanceID: "pvi_sqlite",
 			ProviderModelID:    "model_sqlite",
-			ChannelID:          "anthropic",
+			ChannelID:          "anthropic.messages.v1",
 			UpstreamModelID:    "sqlite-model",
 			Capabilities:       sqliteTestCapabilities(),
 			CapabilityRevision: 1,
@@ -183,7 +180,7 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 		t.Fatalf("create provider instance: %v", errInstance)
 	}
 	endpoint, errEndpoint := service.AddEndpoint(ctx, management.AddEndpointInput{
-		ID: "ep_sqlite", ProviderInstanceID: instance.ID, ChannelID: "anthropic", BaseURL: "https://sqlite.example/v1",
+		ID: "ep_sqlite", ProviderInstanceID: instance.ID, BaseURL: "https://sqlite.example/v1",
 	})
 	if errEndpoint != nil {
 		t.Fatalf("add endpoint: %v", errEndpoint)
@@ -197,7 +194,7 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 		t.Fatalf("add credential: %v", errCredential)
 	}
 	if _, errBinding := service.AddBinding(ctx, management.AddBindingInput{
-		ID: "bind_sqlite", ProviderInstanceID: instance.ID, ChannelID: "anthropic", EndpointID: endpoint.ID, CredentialID: credential.ID,
+		ID: "bind_sqlite", ProviderInstanceID: instance.ID, EndpointID: endpoint.ID, CredentialID: credential.ID,
 	}); errBinding != nil {
 		t.Fatalf("add binding: %v", errBinding)
 	}

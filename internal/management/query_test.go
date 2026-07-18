@@ -27,7 +27,7 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 		t.Fatalf("create provider instance: %v", errInstance)
 	}
 	endpoint, errEndpoint := commands.AddEndpoint(ctx, AddEndpointInput{
-		ID: "ep_query_redaction", ProviderInstanceID: instance.ID, ChannelID: "anthropic", BaseURL: "https://query-redaction.example/v1",
+		ID: "ep_query_redaction", ProviderInstanceID: instance.ID, BaseURL: "https://query-redaction.example/v1",
 	})
 	if errEndpoint != nil {
 		t.Fatalf("create endpoint: %v", errEndpoint)
@@ -40,7 +40,7 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 		t.Fatalf("create credential: %v", errCredential)
 	}
 	if _, errBinding := commands.AddBinding(ctx, AddBindingInput{
-		ID: "bind_query_redaction", ProviderInstanceID: instance.ID, ChannelID: "anthropic", EndpointID: endpoint.ID, CredentialID: credential.ID,
+		ID: "bind_query_redaction", ProviderInstanceID: instance.ID, EndpointID: endpoint.ID, CredentialID: credential.ID,
 	}); errBinding != nil {
 		t.Fatalf("create binding: %v", errBinding)
 	}
@@ -49,6 +49,19 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 	queries, errQueries := NewQueryService(configurations, catalog.NewMemoryStore())
 	if errQueries != nil {
 		t.Fatalf("create query service: %v", errQueries)
+	}
+	instanceViews, errInstances := queries.ListInstances(ctx)
+	if errInstances != nil || len(instanceViews) != 1 {
+		t.Fatalf("instance views = %+v, error = %v", instanceViews, errInstances)
+	}
+	// encodedInstances verifies an unset internal slice remains a stable public JSON array.
+	// encodedInstances 验证未设置的内部切片仍保持为稳定的公共 JSON 数组。
+	encodedInstances, errEncodeInstances := json.Marshal(instanceViews)
+	if errEncodeInstances != nil {
+		t.Fatalf("encode instance views: %v", errEncodeInstances)
+	}
+	if strings.Contains(string(encodedInstances), `"disabled_model_ids":null`) || !strings.Contains(string(encodedInstances), `"disabled_model_ids":[]`) {
+		t.Fatalf("disabled model IDs did not encode as an array: %s", encodedInstances)
 	}
 	credentialViews, errCredentials := queries.ListCredentials(ctx, instance.ID)
 	if errCredentials != nil {

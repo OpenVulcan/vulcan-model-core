@@ -169,8 +169,8 @@ func validExecutionRequest() ExecutionRequest {
 		},
 		Definition: providerconfig.ProviderDefinition{
 			ID: "definition-1", Kind: providerconfig.DefinitionKindSystem,
+			ProtocolProfileID: "openai.responses", AuthMethodIDs: []string{"api-key"}, RuntimeReady: true,
 			AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "api-key", Type: providerconfig.AuthMethodAPIKey}},
-			Channels:    []providerconfig.ProviderChannel{{ID: "channel-1", ProtocolProfileID: "openai.responses", AuthMethodIDs: []string{"api-key"}, RuntimeReady: true}},
 		},
 		Request: vcp.VulcanRequest{
 			ProtocolVersion: vcp.ProtocolVersion, RequestID: "request-1",

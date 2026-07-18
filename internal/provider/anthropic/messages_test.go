@@ -102,7 +102,7 @@ func anthropicTestExecution(baseURL string, secretReference string) provider.Exe
 			Endpoint:   providerconfig.Endpoint{ID: "endpoint-1", ProviderInstanceID: "instance-1", ChannelID: "channel-1", BaseURL: baseURL, Status: providerconfig.EndpointReady},
 			Credential: providerconfig.Credential{ID: "credential-1", ProviderInstanceID: "instance-1", AuthMethodID: "api-key", SecretRef: secretReference, Status: providerconfig.CredentialActive},
 		},
-		Definition: providerconfig.ProviderDefinition{ID: "definition-1", Kind: providerconfig.DefinitionKindSystem, AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "api-key", Type: providerconfig.AuthMethodAPIKey}}, Channels: []providerconfig.ProviderChannel{{ID: "channel-1", ProtocolProfileID: protocolmessages.ProfileID, AuthMethodIDs: []string{"api-key"}, RuntimeReady: true}}},
+		Definition: providerconfig.ProviderDefinition{ID: "definition-1", Kind: providerconfig.DefinitionKindSystem, ProtocolProfileID: protocolmessages.ProfileID, AuthMethodIDs: []string{"api-key"}, RuntimeReady: true, AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "api-key", Type: providerconfig.AuthMethodAPIKey}}},
 		Request: vcp.VulcanRequest{
 			ProtocolVersion: vcp.ProtocolVersion, RequestID: "request-1",
 			ModelSelection: vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: "instance-1", ProviderModelID: "model-1", ExecutionProfileID: protocolmessages.ProfileID},

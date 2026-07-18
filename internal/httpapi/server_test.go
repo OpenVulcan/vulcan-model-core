@@ -80,7 +80,7 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 		ProviderInstanceID: "pvi_test",
 		Models: []management.ModelView{{
 			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit, Enabled: true,
-			Offerings: []management.OfferingView{{ID: "offer_test", ChannelID: "anthropic", UpstreamModelID: "test", Profiles: []management.ExecutionProfileView{
+			Offerings: []management.OfferingView{{ID: "offer_test", UpstreamModelID: "test", Profiles: []management.ExecutionProfileView{
 				{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 262144}}},
 				{ID: "profile_test_1m", DisplayName: "1M", Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 1048576}}},
 			}}},
