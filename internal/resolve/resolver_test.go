@@ -16,6 +16,9 @@ type resolverFixture struct {
 	// resolver selects targets from the configured provider and catalog stores.
 	// resolver 从已配置的供应商和目录存储中选择目标。
 	resolver *Resolver
+	// configurations exposes the provider configuration store for local policy mutation tests.
+	// configurations 为本地策略变更测试暴露供应商配置存储。
+	configurations *providerconfig.MemoryStore
 	// catalogs exposes the atomic snapshot store for allowance replacement tests.
 	// catalogs 为资源替换测试暴露原子快照存储。
 	catalogs *catalog.MemoryStore
@@ -252,7 +255,33 @@ func newResolverFixture(t *testing.T) resolverFixture {
 	if errResolver != nil {
 		t.Fatalf("create resolver: %v", errResolver)
 	}
-	return resolverFixture{resolver: resolver, catalogs: catalogs, snapshot: snapshot, now: now}
+	return resolverFixture{resolver: resolver, configurations: configurations, catalogs: catalogs, snapshot: snapshot, now: now}
+}
+
+// TestResolverRejectsLocallyDisabledModel verifies call routing cannot bypass management-disabled model policy.
+// TestResolverRejectsLocallyDisabledModel 验证调用路由无法绕过管理面禁用的模型策略。
+func TestResolverRejectsLocallyDisabledModel(t *testing.T) {
+	// fixture contains a ready provider instance with a normally resolvable model.
+	// fixture 包含具有通常可解析模型的就绪供应商实例。
+	fixture := newResolverFixture(t)
+	// ctx fixes the configuration read and write scope.
+	// ctx 固定配置读写范围。
+	ctx := context.Background()
+	instance, errInstance := fixture.configurations.GetInstance(ctx, "pvi_kimi")
+	if errInstance != nil {
+		t.Fatalf("get provider instance: %v", errInstance)
+	}
+	instance.DisabledModelIDs = []string{"model_kimi_k3"}
+	instance.Revision++
+	if errSave := fixture.configurations.SaveInstance(ctx, instance); errSave != nil {
+		t.Fatalf("save disabled-model policy: %v", errSave)
+	}
+	_, _, errResolve := fixture.resolver.Resolve(ctx, Request{
+		ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Now: fixture.now,
+	})
+	if !errors.Is(errResolve, ErrModelDisabled) {
+		t.Fatalf("disabled model resolution error = %v, want ErrModelDisabled", errResolve)
+	}
 }
 
 // TestResolverPreservesHighTierCredential verifies smallest-sufficient account selection.

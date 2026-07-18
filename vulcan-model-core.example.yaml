@@ -1,0 +1,14 @@
+# make config copies this file to output/configs/vulcan-model-core.yaml before the first local start.
+# make config 会在首次本地启动前将此文件复制为 output/configs/vulcan-model-core.yaml。
+management:
+  # Replace before first startup; it is replaced by a bcrypt hash after the first successful load.
+  # 首次启动前替换；首次成功加载后将被替换为 bcrypt 散列。
+  secret-key: replace-this-management-key-before-first-start
+api:
+  keys:
+    # Call-plane keys intentionally remain plaintext so local management can edit them.
+    # 调用面密钥按设计保持明文，以便本地管理端可以编辑。
+    - id: api_vulcan_code
+      name: Vulcan Code
+      key: replace-this-call-api-key-before-first-start
+      enabled: true

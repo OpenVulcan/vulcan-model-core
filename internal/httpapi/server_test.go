@@ -3,6 +3,7 @@ package httpapi
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,6 +12,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 )
 
 // staticCatalog provides immutable provider identifiers for HTTP tests.
@@ -24,6 +26,24 @@ type staticCatalog struct {
 // staticManagementQuery provides deterministic safe discovery views for HTTP tests.
 // staticManagementQuery 为 HTTP 测试提供确定性安全发现视图。
 type staticManagementQuery struct{}
+
+// staticProtocolProfiles provides immutable protocol metadata for authenticated route tests.
+// staticProtocolProfiles 为认证路由测试提供不可变协议元数据。
+type staticProtocolProfiles struct{}
+
+// List returns one custom-provider-selectable protocol profile.
+// List 返回一个可供自定义供应商选择的协议 Profile。
+func (staticProtocolProfiles) List() []providerconfig.ProtocolProfile {
+	return []providerconfig.ProtocolProfile{{
+		ID:                 "openai.responses",
+		Version:            "1",
+		DisplayName:        "OpenAI Responses",
+		UserConfigurable:   true,
+		RuntimeReady:       true,
+		ModelDiscovery:     providerconfig.SupportUnsupported,
+		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey},
+	}}
+}
 
 // ListDefinitions returns one system provider definition view.
 // ListDefinitions 返回一个系统供应商定义视图。
@@ -49,7 +69,7 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 	return management.CatalogView{
 		ProviderInstanceID: "pvi_test",
 		Models: []management.ModelView{{
-			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit,
+			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit, Enabled: true,
 			Offerings: []management.OfferingView{{ID: "offer_test", ChannelID: "anthropic", UpstreamModelID: "test", Profiles: []management.ExecutionProfileView{
 				{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 262144}}},
 				{ID: "profile_test_1m", DisplayName: "1M", Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 1048576}}},
@@ -57,6 +77,175 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 		}},
 		Revision: 1,
 	}, nil
+}
+
+// ListEndpoints returns no endpoint details for the focused route fixture.
+// ListEndpoints 为聚焦路由夹具返回空端点详情。
+func (staticManagementQuery) ListEndpoints(context.Context, string) ([]management.EndpointView, error) {
+	return []management.EndpointView{}, nil
+}
+
+// ListCredentials returns no credential details for the focused route fixture.
+// ListCredentials 为聚焦路由夹具返回空凭据详情。
+func (staticManagementQuery) ListCredentials(context.Context, string) ([]management.CredentialView, error) {
+	return []management.CredentialView{}, nil
+}
+
+// ListBindings returns no binding details for the focused route fixture.
+// ListBindings 为聚焦路由夹具返回空绑定详情。
+func (staticManagementQuery) ListBindings(context.Context, string) ([]management.BindingView, error) {
+	return []management.BindingView{}, nil
+}
+
+// staticManagementCommands satisfies mutation dependencies while route tests focus on authentication and redaction.
+// staticManagementCommands 满足变更依赖，而路由测试聚焦认证和脱敏。
+type staticManagementCommands struct{}
+
+// CreateCustomDefinition reports that the static fixture does not execute mutation flows.
+// CreateCustomDefinition 报告静态夹具不执行变更流程。
+func (staticManagementCommands) CreateCustomDefinition(context.Context, management.CreateCustomDefinitionInput) (providerconfig.ProviderDefinition, error) {
+	return providerconfig.ProviderDefinition{}, errors.New("static command fixture")
+}
+
+// UpdateCustomDefinition reports that the static fixture does not execute mutation flows.
+// UpdateCustomDefinition 报告静态夹具不执行变更流程。
+func (staticManagementCommands) UpdateCustomDefinition(context.Context, management.UpdateCustomDefinitionInput) (providerconfig.ProviderDefinition, error) {
+	return providerconfig.ProviderDefinition{}, errors.New("static command fixture")
+}
+
+// CreateInstance reports that the static fixture does not execute mutation flows.
+// CreateInstance 报告静态夹具不执行变更流程。
+func (staticManagementCommands) CreateInstance(context.Context, management.CreateInstanceInput) (providerconfig.ProviderInstance, error) {
+	return providerconfig.ProviderInstance{}, errors.New("static command fixture")
+}
+
+// UpdateInstance reports that the static fixture does not execute mutation flows.
+// UpdateInstance 报告静态夹具不执行变更流程。
+func (staticManagementCommands) UpdateInstance(context.Context, management.UpdateInstanceInput) (providerconfig.ProviderInstance, error) {
+	return providerconfig.ProviderInstance{}, errors.New("static command fixture")
+}
+
+// SetInstanceEnabled reports that the static fixture does not execute mutation flows.
+// SetInstanceEnabled 报告静态夹具不执行变更流程。
+func (staticManagementCommands) SetInstanceEnabled(context.Context, string, bool) (providerconfig.ProviderInstance, error) {
+	return providerconfig.ProviderInstance{}, errors.New("static command fixture")
+}
+
+// AddEndpoint reports that the static fixture does not execute mutation flows.
+// AddEndpoint 报告静态夹具不执行变更流程。
+func (staticManagementCommands) AddEndpoint(context.Context, management.AddEndpointInput) (providerconfig.Endpoint, error) {
+	return providerconfig.Endpoint{}, errors.New("static command fixture")
+}
+
+// UpdateEndpoint reports that the static fixture does not execute mutation flows.
+// UpdateEndpoint 报告静态夹具不执行变更流程。
+func (staticManagementCommands) UpdateEndpoint(context.Context, management.UpdateEndpointInput) (providerconfig.Endpoint, error) {
+	return providerconfig.Endpoint{}, errors.New("static command fixture")
+}
+
+// AddCredential reports that the static fixture does not execute mutation flows.
+// AddCredential 报告静态夹具不执行变更流程。
+func (staticManagementCommands) AddCredential(context.Context, management.AddCredentialInput) (providerconfig.Credential, error) {
+	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// UpdateCredential reports that the static fixture does not execute mutation flows.
+// UpdateCredential 报告静态夹具不执行变更流程。
+func (staticManagementCommands) UpdateCredential(context.Context, management.UpdateCredentialInput) (providerconfig.Credential, error) {
+	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// RotateCredentialSecret reports that the static fixture does not execute mutation flows.
+// RotateCredentialSecret 报告静态夹具不执行变更流程。
+func (staticManagementCommands) RotateCredentialSecret(context.Context, management.RotateCredentialSecretInput) (providerconfig.Credential, error) {
+	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// SetCredentialStatus reports that the static fixture does not execute mutation flows.
+// SetCredentialStatus 报告静态夹具不执行变更流程。
+func (staticManagementCommands) SetCredentialStatus(context.Context, management.SetCredentialStatusInput) (providerconfig.Credential, error) {
+	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// AddBinding reports that the static fixture does not execute mutation flows.
+// AddBinding 报告静态夹具不执行变更流程。
+func (staticManagementCommands) AddBinding(context.Context, management.AddBindingInput) (providerconfig.AccessBinding, error) {
+	return providerconfig.AccessBinding{}, errors.New("static command fixture")
+}
+
+// UpdateBinding reports that the static fixture does not execute mutation flows.
+// UpdateBinding 报告静态夹具不执行变更流程。
+func (staticManagementCommands) UpdateBinding(context.Context, management.UpdateBindingInput) (providerconfig.AccessBinding, error) {
+	return providerconfig.AccessBinding{}, errors.New("static command fixture")
+}
+
+// staticModelAccessCommands satisfies model policy dependencies for static HTTP route tests.
+// staticModelAccessCommands 为静态 HTTP 路由测试满足模型策略依赖。
+type staticModelAccessCommands struct{}
+
+// SetModelEnabled reports that the static fixture does not execute mutation flows.
+// SetModelEnabled 报告静态夹具不执行变更流程。
+func (staticModelAccessCommands) SetModelEnabled(context.Context, management.SetModelEnabledInput) (providerconfig.ProviderInstance, error) {
+	return providerconfig.ProviderInstance{}, errors.New("static model access fixture")
+}
+
+// staticCustomCatalogOperations satisfies custom catalog dependencies for static HTTP route tests.
+// staticCustomCatalogOperations 为静态 HTTP 路由测试满足自定义目录依赖。
+type staticCustomCatalogOperations struct{}
+
+// GetCustomCatalog returns an empty deterministic editable catalog fixture.
+// GetCustomCatalog 返回一个空的确定性可编辑目录夹具。
+func (staticCustomCatalogOperations) GetCustomCatalog(context.Context, string) (catalog.Snapshot, error) {
+	return catalog.Snapshot{ProviderInstanceID: "pvi_test", Revision: 1}, nil
+}
+
+// SaveCustomCatalog reports that the static fixture does not execute mutation flows.
+// SaveCustomCatalog 报告静态夹具不执行变更流程。
+func (staticCustomCatalogOperations) SaveCustomCatalog(context.Context, management.SaveCustomCatalogInput) (catalog.Snapshot, error) {
+	return catalog.Snapshot{}, errors.New("static custom catalog fixture")
+}
+
+// staticControlAccess provides deterministic distinct management and call-plane credentials.
+// staticControlAccess 提供确定性的独立管理和调用面凭据。
+type staticControlAccess struct{}
+
+// AuthenticateManagementKey accepts only the management fixture key.
+// AuthenticateManagementKey 仅接受管理夹具密钥。
+func (staticControlAccess) AuthenticateManagementKey(value string) bool {
+	return value == "manage-key"
+}
+
+// AuthenticateAPIKey accepts only the call-plane fixture key.
+// AuthenticateAPIKey 仅接受调用面夹具密钥。
+func (staticControlAccess) AuthenticateAPIKey(value string) bool {
+	return value == "call-key"
+}
+
+// ListAPIKeys returns one management-visible fixture API key.
+// ListAPIKeys 返回一个管理面可见夹具 API 密钥。
+func (staticControlAccess) ListAPIKeys() []runtimeconfig.APIKey {
+	return []runtimeconfig.APIKey{{ID: "api_test", Name: "Test", Key: "call-key", Enabled: true}}
+}
+
+// CreateAPIKey returns one deterministic fixture API key.
+// CreateAPIKey 返回一个确定性夹具 API 密钥。
+func (staticControlAccess) CreateAPIKey(input runtimeconfig.APIKeyInput) (runtimeconfig.APIKey, error) {
+	return runtimeconfig.APIKey{ID: "api_created", Name: input.Name, Key: input.Key, Enabled: input.Enabled}, nil
+}
+
+// UpdateAPIKey returns one deterministic replacement fixture API key.
+// UpdateAPIKey 返回一个确定性替换夹具 API 密钥。
+func (staticControlAccess) UpdateAPIKey(identifier string, input runtimeconfig.APIKeyInput) (runtimeconfig.APIKey, error) {
+	return runtimeconfig.APIKey{ID: identifier, Name: input.Name, Key: input.Key, Enabled: input.Enabled}, nil
+}
+
+// DeleteAPIKey accepts the deterministic fixture key identifier only.
+// DeleteAPIKey 仅接受确定性夹具密钥标识。
+func (staticControlAccess) DeleteAPIKey(identifier string) error {
+	if identifier != "api_test" {
+		return runtimeconfig.ErrAPIKeyNotFound
+	}
+	return nil
 }
 
 // ProviderIDs returns an isolated provider identifier snapshot.
@@ -154,21 +343,38 @@ func TestServerDoesNotExposeLegacyProtocolRoutes(t *testing.T) {
 	}
 }
 
-// TestManagementRoutesExposeOnlySafeVulcanViews verifies read-only discovery routing and JSON shape.
-// TestManagementRoutesExposeOnlySafeVulcanViews 校验只读发现路由与 JSON 形态。
-func TestManagementRoutesExposeOnlySafeVulcanViews(t *testing.T) {
-	server, errServer := NewWithManagement(staticCatalog{}, staticManagementQuery{})
+// TestControlPlaneSeparatesManagementAndCallCredentials verifies route-scoped authentication and safe query views.
+// TestControlPlaneSeparatesManagementAndCallCredentials 校验路由作用域认证和安全查询视图。
+func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
+	// access owns the same deterministic fixture for management and call-plane interfaces.
+	// access 为管理和调用面接口拥有同一确定性夹具。
+	access := staticControlAccess{}
+	server, errServer := NewWithControlPlane(staticCatalog{}, ControlPlane{
+		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+	})
 	if errServer != nil {
-		t.Fatalf("create management server: %v", errServer)
+		t.Fatalf("create control-plane server: %v", errServer)
 	}
-	paths := []string{
-		"/vulcan/management/provider-definitions",
-		"/vulcan/management/provider-instances",
-		"/vulcan/management/provider-instances/pvi_test",
-		"/vulcan/catalog/provider-instances/pvi_test",
+	managementPaths := []string{
+		"/vulcan/manage/protocol-profiles",
+		"/vulcan/manage/provider-definitions",
+		"/vulcan/manage/provider-instances",
+		"/vulcan/manage/provider-instances/pvi_test",
+		"/vulcan/manage/provider-instances/pvi_test/catalog",
+		"/vulcan/manage/provider-instances/pvi_test/custom-catalog",
+		"/vulcan/manage/api-keys",
 	}
-	for _, path := range paths {
+	for _, path := range managementPaths {
+		// missingRequest proves management routes never inherit call-plane or loopback trust.
+		// missingRequest 证明管理路由绝不继承调用面或环回信任。
+		missingRequest := httptest.NewRequest(http.MethodGet, path, nil)
+		missingRecorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(missingRecorder, missingRequest)
+		if missingRecorder.Code != http.StatusUnauthorized {
+			t.Fatalf("unauthenticated path %s status=%d, want %d", path, missingRecorder.Code, http.StatusUnauthorized)
+		}
 		request := httptest.NewRequest(http.MethodGet, path, nil)
+		request.Header.Set("Authorization", "Bearer manage-key")
 		recorder := httptest.NewRecorder()
 		server.Handler().ServeHTTP(recorder, request)
 		if recorder.Code != http.StatusOK {
@@ -183,5 +389,28 @@ func TestManagementRoutesExposeOnlySafeVulcanViews(t *testing.T) {
 				t.Fatalf("path %s leaked forbidden field %s", path, forbidden)
 			}
 		}
+	}
+	// callRequest proves a management credential cannot authorize the call plane.
+	// callRequest 证明管理凭据不能授权调用面。
+	callRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/models", nil)
+	callRequest.Header.Set("Authorization", "Bearer manage-key")
+	callRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(callRecorder, callRequest)
+	if callRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("management credential call-plane status=%d, want %d", callRecorder.Code, http.StatusUnauthorized)
+	}
+	callRequest.Header.Set("Authorization", "Bearer call-key")
+	callRecorder = httptest.NewRecorder()
+	server.Handler().ServeHTTP(callRecorder, callRequest)
+	if callRecorder.Code != http.StatusOK {
+		t.Fatalf("call-plane status=%d body=%s", callRecorder.Code, callRecorder.Body.String())
+	}
+	// legacyRequest verifies the old read-only management namespace is not exposed beside the authenticated surface.
+	// legacyRequest 验证旧只读管理命名空间不会与认证接口面并存。
+	legacyRequest := httptest.NewRequest(http.MethodGet, "/vulcan/management/provider-definitions", nil)
+	legacyRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(legacyRecorder, legacyRequest)
+	if legacyRecorder.Code != http.StatusNotFound {
+		t.Fatalf("legacy management route status=%d, want %d", legacyRecorder.Code, http.StatusNotFound)
 	}
 }

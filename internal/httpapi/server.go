@@ -8,9 +8,7 @@ import (
 	"errors"
 	"net/http"
 
-	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
-	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
 var (
@@ -27,8 +25,8 @@ type ProviderCatalog interface {
 	ProviderIDs() []string
 }
 
-// ManagementQuery exposes client-safe VulcanCode configuration and model discovery views.
-// ManagementQuery 暴露客户端安全的 VulcanCode 配置与模型发现视图。
+// ManagementQuery exposes client-safe configuration, catalog, and management-detail views.
+// ManagementQuery 暴露客户端安全的配置、目录和管理详情视图。
 type ManagementQuery interface {
 	// ListDefinitions returns visible system and custom provider definitions.
 	// ListDefinitions 返回可见系统与自定义供应商定义。
@@ -42,6 +40,15 @@ type ManagementQuery interface {
 	// GetCatalog returns one safe atomic provider model catalog.
 	// GetCatalog 返回一个安全原子供应商模型目录。
 	GetCatalog(context.Context, string) (management.CatalogView, error)
+	// ListEndpoints returns management-safe endpoint records.
+	// ListEndpoints 返回管理安全端点记录。
+	ListEndpoints(context.Context, string) ([]management.EndpointView, error)
+	// ListCredentials returns management-safe non-secret credential records.
+	// ListCredentials 返回管理安全的非秘密凭据记录。
+	ListCredentials(context.Context, string) ([]management.CredentialView, error)
+	// ListBindings returns management-safe access binding records.
+	// ListBindings 返回管理安全访问绑定记录。
+	ListBindings(context.Context, string) ([]management.BindingView, error)
 }
 
 // Server owns the minimal Vulcan Model Core HTTP surface.
@@ -50,12 +57,20 @@ type Server struct {
 	// catalog supplies provider readiness and metadata.
 	// catalog 提供供应商就绪状态和元数据。
 	catalog ProviderCatalog
-	// management optionally supplies VulcanCode management and discovery views.
-	// management 可选地提供 VulcanCode 管理与发现视图。
-	management ManagementQuery
+	// control supplies the complete authenticated management and call-plane dependency graph.
+	// control 提供完整认证的管理和调用面依赖图。
+	control *ControlPlane
 	// handler contains the immutable route table.
 	// handler 包含不可变的路由表。
 	handler http.Handler
+}
+
+// errorResponse carries one non-sensitive machine-readable HTTP error code.
+// errorResponse 携带一个不敏感且机器可读的 HTTP 错误码。
+type errorResponse struct {
+	// Error is the stable public error category without internal persistence details.
+	// Error 是不包含内部持久化详情的稳定公开错误类别。
+	Error string `json:"error"`
 }
 
 // New creates the minimal HTTP API without legacy protocol routes.
@@ -64,84 +79,69 @@ func New(catalog ProviderCatalog) (*Server, error) {
 	return newServer(catalog, nil)
 }
 
-// NewWithManagement creates the HTTP API with client-safe VulcanCode discovery routes.
-// NewWithManagement 创建带客户端安全 VulcanCode 发现路由的 HTTP API。
-func NewWithManagement(catalog ProviderCatalog, managementQuery ManagementQuery) (*Server, error) {
-	if managementQuery == nil {
-		return nil, errors.New("management query service is required")
+// NewWithControlPlane creates the authenticated local management and call-plane HTTP surface.
+// NewWithControlPlane 创建认证的本地管理和调用面 HTTP 接口面。
+func NewWithControlPlane(catalog ProviderCatalog, control ControlPlane) (*Server, error) {
+	if errControl := control.validate(); errControl != nil {
+		return nil, errControl
 	}
-	return newServer(catalog, managementQuery)
+	return newServer(catalog, &control)
 }
 
-// newServer creates one immutable route table with optional management discovery.
-// newServer 创建一个带可选管理发现能力的不可变路由表。
-func newServer(catalog ProviderCatalog, managementQuery ManagementQuery) (*Server, error) {
+// newServer creates one immutable route table with an optional fully authenticated control plane.
+// newServer 创建一个带可选完整认证控制面的不可变路由表。
+func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) {
 	if catalog == nil {
 		return nil, ErrProviderCatalogRequired
 	}
 	// server owns the catalog before routes capture it.
 	// server 在路由捕获目录前持有该目录。
-	server := &Server{catalog: catalog, management: managementQuery}
-	// mux registers only framework and Vulcan metadata endpoints.
-	// mux 仅注册框架端点和 Vulcan 元数据端点。
+	server := &Server{catalog: catalog, control: control}
+	// mux registers framework routes plus optional route-scoped authenticated Vulcan surfaces.
+	// mux 注册框架路由以及可选的按路由作用域认证 Vulcan 接口面。
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", server.handleHealth)
 	mux.HandleFunc("HEAD /healthz", server.handleHealth)
 	mux.HandleFunc("GET /readyz", server.handleReady)
 	mux.HandleFunc("HEAD /readyz", server.handleReady)
 	mux.HandleFunc("GET /vulcan/meta/providers", server.handleProviders)
-	if managementQuery != nil {
-		mux.HandleFunc("GET /vulcan/management/provider-definitions", server.handleProviderDefinitions)
-		mux.HandleFunc("GET /vulcan/management/provider-instances", server.handleProviderInstances)
-		mux.HandleFunc("GET /vulcan/management/provider-instances/{provider_instance_id}", server.handleProviderInstance)
-		mux.HandleFunc("GET /vulcan/catalog/provider-instances/{provider_instance_id}", server.handleProviderCatalog)
+	if control != nil {
+		// management routes are protected exclusively by the management credential namespace.
+		// management 路由仅受管理凭据命名空间保护。
+		mux.Handle("GET /vulcan/manage/protocol-profiles", server.requireManagement(http.HandlerFunc(server.handleProtocolProfiles)))
+		mux.Handle("GET /vulcan/manage/provider-definitions", server.requireManagement(http.HandlerFunc(server.handleProviderDefinitions)))
+		mux.Handle("POST /vulcan/manage/provider-definitions", server.requireManagement(http.HandlerFunc(server.handleCreateCustomDefinition)))
+		mux.Handle("PUT /vulcan/manage/provider-definitions/{provider_definition_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateCustomDefinition)))
+		mux.Handle("GET /vulcan/manage/provider-instances", server.requireManagement(http.HandlerFunc(server.handleProviderInstances)))
+		mux.Handle("POST /vulcan/manage/provider-instances", server.requireManagement(http.HandlerFunc(server.handleCreateInstance)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleProviderInstance)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateInstance)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/enabled", server.requireManagement(http.HandlerFunc(server.handleSetInstanceEnabled)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/catalog", server.requireManagement(http.HandlerFunc(server.handleProviderCatalog)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog", server.requireManagement(http.HandlerFunc(server.handleCustomCatalog)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog", server.requireManagement(http.HandlerFunc(server.handleSaveCustomCatalog)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/models/{provider_model_id}/enabled", server.requireManagement(http.HandlerFunc(server.handleSetModelEnabled)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/endpoints", server.requireManagement(http.HandlerFunc(server.handleEndpoints)))
+		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/endpoints", server.requireManagement(http.HandlerFunc(server.handleCreateEndpoint)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/endpoints/{endpoint_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateEndpoint)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/credentials", server.requireManagement(http.HandlerFunc(server.handleCredentials)))
+		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials", server.requireManagement(http.HandlerFunc(server.handleCreateCredential)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateCredential)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/secret", server.requireManagement(http.HandlerFunc(server.handleRotateCredentialSecret)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/status", server.requireManagement(http.HandlerFunc(server.handleSetCredentialStatus)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleBindings)))
+		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleCreateBinding)))
+		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/bindings/{binding_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateBinding)))
+		mux.Handle("GET /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleAPIKeys)))
+		mux.Handle("POST /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleCreateAPIKey)))
+		mux.Handle("PUT /vulcan/manage/api-keys/{api_key_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateAPIKey)))
+		mux.Handle("DELETE /vulcan/manage/api-keys/{api_key_id}", server.requireManagement(http.HandlerFunc(server.handleDeleteAPIKey)))
+		// call routes are protected exclusively by enabled call-plane API keys.
+		// call 路由仅受启用的调用面 API 密钥保护。
+		mux.Handle("GET /vulcan/v1/models", server.requireAPIKey(http.HandlerFunc(server.handleCallModels)))
 	}
 	server.handler = mux
 	return server, nil
-}
-
-// handleProviderDefinitions returns safe system and custom provider metadata.
-// handleProviderDefinitions 返回安全的系统与自定义供应商元数据。
-func (s *Server) handleProviderDefinitions(w http.ResponseWriter, request *http.Request) {
-	definitions, errDefinitions := s.management.ListDefinitions(request.Context())
-	if errDefinitions != nil {
-		writeManagementError(w, errDefinitions)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"provider_definitions": definitions})
-}
-
-// handleProviderInstances returns safe aggregate provider configuration views.
-// handleProviderInstances 返回安全的供应商配置聚合视图。
-func (s *Server) handleProviderInstances(w http.ResponseWriter, request *http.Request) {
-	instances, errInstances := s.management.ListInstances(request.Context())
-	if errInstances != nil {
-		writeManagementError(w, errInstances)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"provider_instances": instances})
-}
-
-// handleProviderInstance returns one safe aggregate provider configuration view.
-// handleProviderInstance 返回一个安全供应商配置聚合视图。
-func (s *Server) handleProviderInstance(w http.ResponseWriter, request *http.Request) {
-	instance, errInstance := s.management.GetInstance(request.Context(), request.PathValue("provider_instance_id"))
-	if errInstance != nil {
-		writeManagementError(w, errInstance)
-		return
-	}
-	writeJSON(w, http.StatusOK, instance)
-}
-
-// handleProviderCatalog returns one safe atomic model and resource catalog.
-// handleProviderCatalog 返回一个安全原子模型与资源目录。
-func (s *Server) handleProviderCatalog(w http.ResponseWriter, request *http.Request) {
-	providerCatalog, errCatalog := s.management.GetCatalog(request.Context(), request.PathValue("provider_instance_id"))
-	if errCatalog != nil {
-		writeManagementError(w, errCatalog)
-		return
-	}
-	writeJSON(w, http.StatusOK, providerCatalog)
 }
 
 // Handler returns the immutable HTTP handler.
@@ -195,16 +195,4 @@ func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)
-}
-
-// writeManagementError maps domain absence to 404 without leaking persistence details.
-// writeManagementError 将领域缺失映射为 404 且不泄露持久化细节。
-func writeManagementError(w http.ResponseWriter, err error) {
-	statusCode := http.StatusInternalServerError
-	errorCode := "internal_error"
-	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) {
-		statusCode = http.StatusNotFound
-		errorCode = "not_found"
-	}
-	writeJSON(w, statusCode, map[string]any{"error": errorCode})
 }

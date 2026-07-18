@@ -16,6 +16,12 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
+const (
+	// ProfileID is the stable upstream protocol profile identifier for OpenAI Chat Completions.
+	// ProfileID 是 OpenAI Chat Completions 的稳定上游协议 Profile 标识。
+	ProfileID = "openai.chat"
+)
+
 var (
 	// ErrInvalidTarget reports an incomplete resolved execution target.
 	// ErrInvalidTarget 表示解析后的执行目标不完整。

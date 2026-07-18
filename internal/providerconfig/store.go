@@ -175,7 +175,7 @@ func (s *MemoryStore) SaveInstance(ctx context.Context, instance ProviderInstanc
 	if current, exists := s.instances[instance.ID]; exists && instance.Revision <= current.Revision {
 		return invalid("provider instance revision must increase")
 	}
-	s.instances[instance.ID] = instance
+	s.instances[instance.ID] = cloneProviderInstance(instance)
 	return nil
 }
 
@@ -191,7 +191,7 @@ func (s *MemoryStore) GetInstance(ctx context.Context, instanceID string) (Provi
 	if !exists {
 		return ProviderInstance{}, fmt.Errorf("%w: provider instance %s", ErrNotFound, instanceID)
 	}
-	return instance, nil
+	return cloneProviderInstance(instance), nil
 }
 
 // ListInstances returns stable sorted provider instance snapshots.
@@ -205,7 +205,7 @@ func (s *MemoryStore) ListInstances(ctx context.Context, definitionID string) ([
 	instances := make([]ProviderInstance, 0, len(s.instances))
 	for _, instance := range s.instances {
 		if definitionID == "" || instance.DefinitionID == definitionID {
-			instances = append(instances, instance)
+			instances = append(instances, cloneProviderInstance(instance))
 		}
 	}
 	sort.Slice(instances, func(left int, right int) bool {
@@ -393,6 +393,13 @@ func (s *MemoryStore) ListBindings(ctx context.Context, instanceID string) ([]Ac
 func cloneCredential(credential Credential) Credential {
 	credential.ScopeRefs = append([]ScopeReference(nil), credential.ScopeRefs...)
 	return credential
+}
+
+// cloneProviderInstance returns a mutation-safe provider instance value.
+// cloneProviderInstance 返回一个防止外部修改的供应商实例值。
+func cloneProviderInstance(instance ProviderInstance) ProviderInstance {
+	instance.DisabledModelIDs = append([]string(nil), instance.DisabledModelIDs...)
+	return instance
 }
 
 // cloneAccessBinding returns a mutation-safe access binding value.

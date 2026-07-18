@@ -27,6 +27,18 @@ go.work.sum
 # env file
 .env
 
+# Local control-plane credentials and protected upstream secret material
+vulcan-model-core.yaml
+vulcan-model-core.secrets/
+
+# Local React + Vite dependency and generated asset directories
+node_modules/
+dist/
+.playwright-cli/
+
+# Generated local executable, startup configuration, Vite logs, and process state
+output/
+
 # Local implementation plans and completion records
 docs/plan/
 docs/completed/

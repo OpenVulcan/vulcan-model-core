@@ -122,6 +122,9 @@ type ProviderInstanceView struct {
 	// Status is the current configuration lifecycle state.
 	// Status 是当前配置生命周期状态。
 	Status providerconfig.LifecycleStatus `json:"status"`
+	// DisabledModelIDs lists models disabled by local management policy.
+	// DisabledModelIDs 列出被本地管理策略禁用的模型。
+	DisabledModelIDs []string `json:"disabled_model_ids"`
 	// EndpointCount is the configured endpoint count.
 	// EndpointCount 是已配置端点数量。
 	EndpointCount int `json:"endpoint_count"`
@@ -133,6 +136,93 @@ type ProviderInstanceView struct {
 	BindingCount int `json:"binding_count"`
 	// Revision is the persisted configuration revision.
 	// Revision 是持久化配置修订号。
+	Revision uint64 `json:"revision"`
+}
+
+// EndpointView contains one management-safe upstream endpoint record.
+// EndpointView 包含一个管理安全的上游端点记录。
+type EndpointView struct {
+	// ID is the immutable endpoint identifier.
+	// ID 是不可变端点标识。
+	ID string `json:"id"`
+	// ProviderInstanceID identifies the exact endpoint owner.
+	// ProviderInstanceID 标识精确端点所有者。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// ChannelID identifies the provider channel served by this endpoint.
+	// ChannelID 标识此端点服务的供应商通道。
+	ChannelID string `json:"channel_id"`
+	// BaseURL is the validated upstream base URL.
+	// BaseURL 是已校验的上游基础 URL。
+	BaseURL string `json:"base_url"`
+	// Region is the optional provider-defined region label.
+	// Region 是可选供应商定义区域标签。
+	Region string `json:"region"`
+	// Status is the current local endpoint availability state.
+	// Status 是当前本地端点可用性状态。
+	Status providerconfig.EndpointStatus `json:"status"`
+	// Revision identifies the persisted endpoint revision.
+	// Revision 标识持久化端点修订号。
+	Revision uint64 `json:"revision"`
+}
+
+// CredentialView contains management-safe non-secret credential metadata.
+// CredentialView 包含管理安全的非秘密凭据元数据。
+type CredentialView struct {
+	// ID is the immutable credential identifier.
+	// ID 是不可变凭据标识。
+	ID string `json:"id"`
+	// ProviderInstanceID identifies the exact credential owner.
+	// ProviderInstanceID 标识精确凭据所有者。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// AuthMethodID identifies the configured provider authentication method.
+	// AuthMethodID 标识配置的供应商认证方式。
+	AuthMethodID string `json:"auth_method_id"`
+	// Label is the management-facing credential label.
+	// Label 是管理界面凭据标签。
+	Label string `json:"label"`
+	// Status is the current local credential eligibility state.
+	// Status 是当前本地凭据资格状态。
+	Status providerconfig.CredentialStatus `json:"status"`
+	// ExpiresAt is the provider-reported expiration when it is known.
+	// ExpiresAt 是已知时供应商报告的到期时间。
+	ExpiresAt *time.Time `json:"expires_at"`
+	// CoolingUntil is the local recovery time for a cooling credential when applicable.
+	// CoolingUntil 是适用时处于冷却状态凭据的本地恢复时间。
+	CoolingUntil *time.Time `json:"cooling_until"`
+	// Revision identifies the persisted credential revision.
+	// Revision 标识持久化凭据修订号。
+	Revision uint64 `json:"revision"`
+}
+
+// BindingView contains one management-safe access binding without any secret material.
+// BindingView 包含一个不带任何 Secret 材料的管理安全访问绑定。
+type BindingView struct {
+	// ID is the immutable access binding identifier.
+	// ID 是不可变访问绑定标识。
+	ID string `json:"id"`
+	// ProviderInstanceID identifies the exact binding owner.
+	// ProviderInstanceID 标识精确绑定所有者。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// ChannelID identifies the configured provider channel.
+	// ChannelID 标识配置的供应商通道。
+	ChannelID string `json:"channel_id"`
+	// EndpointID identifies the bound same-instance endpoint.
+	// EndpointID 标识绑定的同实例端点。
+	EndpointID string `json:"endpoint_id"`
+	// CredentialID identifies the bound same-instance credential.
+	// CredentialID 标识绑定的同实例凭据。
+	CredentialID string `json:"credential_id"`
+	// AllowedModelIDs lists explicit model restrictions when present.
+	// AllowedModelIDs 列出存在时的显式模型限制。
+	AllowedModelIDs []string `json:"allowed_model_ids"`
+	// Priority is the deterministic same-pool selection order.
+	// Priority 是确定性的同账号池选择顺序。
+	Priority int `json:"priority"`
+	// Enabled reports whether the binding participates in resolution.
+	// Enabled 报告该绑定是否参与解析。
+	Enabled bool `json:"enabled"`
+	// Revision identifies the persisted binding revision.
+	// Revision 标识持久化绑定修订号。
 	Revision uint64 `json:"revision"`
 }
 
@@ -174,6 +264,9 @@ type ModelView struct {
 	// EntitlementMode reports whether account-specific authorization is required.
 	// EntitlementMode 报告是否要求账号特定授权。
 	EntitlementMode catalog.EntitlementMode `json:"entitlement_mode"`
+	// Enabled reports whether local management policy allows call-plane use of this model.
+	// Enabled 报告本地管理策略是否允许调用面使用该模型。
+	Enabled bool `json:"enabled"`
 	// Offerings contains channel-specific products and selectable profiles.
 	// Offerings 包含通道特定产品与可选规格。
 	Offerings []OfferingView `json:"offerings"`
@@ -426,14 +519,84 @@ func (q *QueryService) GetInstance(ctx context.Context, instanceID string) (Prov
 // GetCatalog returns one client-safe provider model, profile, pool, and allowance view.
 // GetCatalog 返回一个客户端安全的供应商模型、规格、账号池与额度视图。
 func (q *QueryService) GetCatalog(ctx context.Context, instanceID string) (CatalogView, error) {
-	if _, errInstance := q.configurations.GetInstance(ctx, instanceID); errInstance != nil {
+	instance, errInstance := q.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
 		return CatalogView{}, errInstance
 	}
 	snapshot, errSnapshot := q.catalogs.Get(ctx, instanceID)
 	if errSnapshot != nil {
 		return CatalogView{}, errSnapshot
 	}
-	return catalogView(snapshot), nil
+	return catalogView(snapshot, instance.DisabledModelIDs), nil
+}
+
+// ListEndpoints returns management-safe endpoint records for one exact provider instance.
+// ListEndpoints 返回一个精确供应商实例的管理安全端点记录。
+func (q *QueryService) ListEndpoints(ctx context.Context, instanceID string) ([]EndpointView, error) {
+	endpoints, errEndpoints := q.configurations.ListEndpoints(ctx, instanceID)
+	if errEndpoints != nil {
+		return nil, errEndpoints
+	}
+	views := make([]EndpointView, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		views = append(views, EndpointView{
+			ID:                 endpoint.ID,
+			ProviderInstanceID: endpoint.ProviderInstanceID,
+			ChannelID:          endpoint.ChannelID,
+			BaseURL:            endpoint.BaseURL,
+			Region:             endpoint.Region,
+			Status:             endpoint.Status,
+			Revision:           endpoint.Revision,
+		})
+	}
+	return views, nil
+}
+
+// ListCredentials returns management-safe credential metadata without SecretRef, fingerprint, or account identity.
+// ListCredentials 返回管理安全凭据元数据且不包含 SecretRef、指纹或账号身份。
+func (q *QueryService) ListCredentials(ctx context.Context, instanceID string) ([]CredentialView, error) {
+	credentials, errCredentials := q.configurations.ListCredentials(ctx, instanceID)
+	if errCredentials != nil {
+		return nil, errCredentials
+	}
+	views := make([]CredentialView, 0, len(credentials))
+	for _, credential := range credentials {
+		views = append(views, CredentialView{
+			ID:                 credential.ID,
+			ProviderInstanceID: credential.ProviderInstanceID,
+			AuthMethodID:       credential.AuthMethodID,
+			Label:              credential.Label,
+			Status:             credential.Status,
+			ExpiresAt:          cloneTime(credential.ExpiresAt),
+			CoolingUntil:       cloneTime(credential.CoolingUntil),
+			Revision:           credential.Revision,
+		})
+	}
+	return views, nil
+}
+
+// ListBindings returns management-safe access bindings for one exact provider instance.
+// ListBindings 返回一个精确供应商实例的管理安全访问绑定。
+func (q *QueryService) ListBindings(ctx context.Context, instanceID string) ([]BindingView, error) {
+	bindings, errBindings := q.configurations.ListBindings(ctx, instanceID)
+	if errBindings != nil {
+		return nil, errBindings
+	}
+	views := make([]BindingView, 0, len(bindings))
+	for _, binding := range bindings {
+		views = append(views, BindingView{
+			ID:                 binding.ID,
+			ProviderInstanceID: binding.ProviderInstanceID,
+			ChannelID:          binding.ChannelID,
+			EndpointID:         binding.EndpointID,
+			CredentialID:       binding.CredentialID,
+			AllowedModelIDs:    append([]string(nil), binding.AllowedModelIDs...),
+			Priority:           binding.Priority,
+			Enabled:            binding.Enabled,
+			Revision:           binding.Revision,
+		})
+	}
+	return views, nil
 }
 
 // instanceView builds aggregate counts without exposing credential identities.
@@ -452,15 +615,16 @@ func (q *QueryService) instanceView(ctx context.Context, instance providerconfig
 		return ProviderInstanceView{}, errBindings
 	}
 	return ProviderInstanceView{
-		ID:              instance.ID,
-		DefinitionID:    instance.DefinitionID,
-		Handle:          instance.Handle,
-		DisplayName:     instance.DisplayName,
-		Status:          instance.Status,
-		EndpointCount:   len(endpoints),
-		CredentialCount: len(credentials),
-		BindingCount:    len(bindings),
-		Revision:        instance.Revision,
+		ID:               instance.ID,
+		DefinitionID:     instance.DefinitionID,
+		Handle:           instance.Handle,
+		DisplayName:      instance.DisplayName,
+		Status:           instance.Status,
+		DisabledModelIDs: append([]string(nil), instance.DisabledModelIDs...),
+		EndpointCount:    len(endpoints),
+		CredentialCount:  len(credentials),
+		BindingCount:     len(bindings),
+		Revision:         instance.Revision,
 	}, nil
 }
 
@@ -498,7 +662,7 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 
 // catalogView converts one atomic internal snapshot to a redacted client view.
 // catalogView 将一个原子内部快照转换为脱敏客户端视图。
-func catalogView(snapshot catalog.Snapshot) CatalogView {
+func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogView {
 	offeringsByModel := make(map[string][]catalog.ModelOffering)
 	for _, offering := range snapshot.Offerings {
 		offeringsByModel[offering.ProviderModelID] = append(offeringsByModel[offering.ProviderModelID], offering)
@@ -547,7 +711,7 @@ func catalogView(snapshot catalog.Snapshot) CatalogView {
 		sort.Slice(offeringViews, func(left int, right int) bool {
 			return offeringViews[left].ID < offeringViews[right].ID
 		})
-		models = append(models, ModelView{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName, EntitlementMode: model.EntitlementMode, Offerings: offeringViews})
+		models = append(models, ModelView{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName, EntitlementMode: model.EntitlementMode, Enabled: !modelDisabled(disabledModelIDs, model.ID), Offerings: offeringViews})
 	}
 	sort.Slice(models, func(left int, right int) bool {
 		return models[left].ID < models[right].ID
@@ -594,6 +758,17 @@ func catalogView(snapshot catalog.Snapshot) CatalogView {
 		return plans[left].Status < plans[right].Status
 	})
 	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, Models: models, Allowances: allowances, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+}
+
+// modelDisabled reports whether local management policy explicitly disables one model identifier.
+// modelDisabled 返回本地管理策略是否显式禁用一个模型标识。
+func modelDisabled(disabledModelIDs []string, modelID string) bool {
+	for _, disabledModelID := range disabledModelIDs {
+		if disabledModelID == modelID {
+			return true
+		}
+	}
+	return false
 }
 
 // capabilityView converts internal capability metadata to an explicit client DTO.

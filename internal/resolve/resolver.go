@@ -158,6 +158,9 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 	if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
 		return Target{}, Diagnostics{}, fmt.Errorf("%w: %s", ErrInstanceNotExecutable, instance.Status)
 	}
+	if modelDisabled(instance.DisabledModelIDs, request.ProviderModelID) {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: %s", ErrModelDisabled, request.ProviderModelID)
+	}
 	snapshot, errCatalog := r.catalogs.Get(ctx, request.ProviderInstanceID)
 	if errCatalog != nil {
 		return Target{}, Diagnostics{}, errCatalog
@@ -464,6 +467,12 @@ func credentialReady(credential providerconfig.Credential, now time.Time) bool {
 // allowsModel 返回访问绑定是否允许一个供应商模型。
 func allowsModel(allowedModelIDs []string, modelID string) bool {
 	return len(allowedModelIDs) == 0 || contains(allowedModelIDs, modelID)
+}
+
+// modelDisabled reports whether local management policy explicitly disables one provider model.
+// modelDisabled 返回本地管理策略是否显式禁用一个供应商模型。
+func modelDisabled(disabledModelIDs []string, modelID string) bool {
+	return contains(disabledModelIDs, modelID)
 }
 
 // contains reports whether a string slice contains one exact value.

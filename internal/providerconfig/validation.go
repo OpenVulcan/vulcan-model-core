@@ -201,6 +201,18 @@ func (i ProviderInstance) Validate() error {
 	if i.CreatedAt.IsZero() || i.UpdatedAt.IsZero() || i.UpdatedAt.Before(i.CreatedAt) {
 		return invalid("provider instance timestamps are invalid")
 	}
+	// disabledModels prevents one model policy from containing duplicate or non-portable identifiers.
+	// disabledModels 防止一个模型策略包含重复或不可移植标识。
+	disabledModels := make(map[string]struct{}, len(i.DisabledModelIDs))
+	for _, modelID := range i.DisabledModelIDs {
+		if errModelID := validateIdentifier("provider instance disabled model id", modelID); errModelID != nil {
+			return errModelID
+		}
+		if _, exists := disabledModels[modelID]; exists {
+			return invalid("duplicate provider instance disabled model id %q", modelID)
+		}
+		disabledModels[modelID] = struct{}{}
+	}
 	return nil
 }
 

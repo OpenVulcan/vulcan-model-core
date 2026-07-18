@@ -16,6 +16,9 @@ var (
 	// ErrModelNotFound reports a provider model outside the selected instance catalog.
 	// ErrModelNotFound 表示所选实例目录中不存在供应商模型。
 	ErrModelNotFound = errors.New("provider model not found")
+	// ErrModelDisabled reports a provider model explicitly disabled by local management policy.
+	// ErrModelDisabled 表示供应商模型被本地管理策略显式禁用。
+	ErrModelDisabled = errors.New("provider model is disabled")
 	// ErrProfileNotFound reports an absent or ambiguous execution profile.
 	// ErrProfileNotFound 表示执行规格不存在或存在歧义。
 	ErrProfileNotFound = errors.New("execution profile not found")

@@ -27,11 +27,12 @@ It establishes:
 - atomic provider catalogs and a same-instance target resolver that enforces profile, entitlement, context, allowance, binding, and health boundaries;
 - replaceable repository interfaces with thread-safe in-memory and durable SQLite implementations;
 - transactional schema migrations with WAL, foreign keys, and busy timeout configuration;
-- an isolated `SecretStore` contract with metadata-write compensation;
+- a Windows DPAPI-protected local `SecretStore` with metadata-write compensation;
 - configuration application services for custom definitions, instances, endpoints, credentials, bindings, activation, credential state, and user-declared custom model catalogs;
 - trusted provider metadata refresh coordination and derived account-pool summaries;
 - client-safe VulcanCode discovery DTOs that omit secret references and upstream account identifiers;
-- liveness, readiness, provider metadata, management, and model catalog endpoints;
+- separate authenticated local management and call-plane HTTP namespaces with independent bearer keys;
+- a React + Vite local management page that keeps its management key in browser memory only;
 - graceful process shutdown;
 - tests that keep legacy protocol endpoints absent.
 
@@ -44,40 +45,78 @@ The service is expected to report `503` from `/readyz` until a production provid
 | `GET`, `HEAD` | `/healthz` | Process liveness |
 | `GET`, `HEAD` | `/readyz` | Provider execution readiness |
 | `GET` | `/vulcan/meta/providers` | Registered provider identifiers |
-| `GET` | `/vulcan/management/provider-definitions` | System and custom provider definitions |
-| `GET` | `/vulcan/management/provider-instances` | Provider instance configuration summaries |
-| `GET` | `/vulcan/management/provider-instances/{provider_instance_id}` | One provider instance summary |
-| `GET` | `/vulcan/catalog/provider-instances/{provider_instance_id}` | Models, profiles, plan aggregates, allowances, and pool summaries |
+| `GET`, `POST`, `PUT` | `/vulcan/manage/provider-definitions` and `/vulcan/manage/provider-definitions/{provider_definition_id}` | Management-only custom provider definitions; system definitions remain immutable |
+| `GET` | `/vulcan/manage/protocol-profiles` | Management-only custom-provider protocol choices |
+| `GET`, `POST`, `PUT` | `/vulcan/manage/provider-instances/...` | Management-only instances, endpoints, credentials, bindings, activation, and local model enablement |
+| `GET`, `PUT` | `/vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog` | Management-only complete user-declared model catalog for a custom provider instance; system provider catalogs remain read-only |
+| `GET`, `POST`, `PUT`, `DELETE` | `/vulcan/manage/api-keys/...` | Management-only plaintext call-plane API key lifecycle |
+| `GET` | `/vulcan/v1/models` | Call-plane provider-scoped enabled models and capabilities |
 
 Claude Messages, OpenAI Chat Completions, OpenAI Responses compatibility aliases, Gemini GenerateContent, and Codex client routes are intentionally absent.
+
+Every `/vulcan/manage` request requires `Authorization: Bearer <management-key>`. Every `/vulcan/v1` request requires an enabled call-plane key in the same header. The two key namespaces cannot authorize each other.
+
+## Local control-plane bootstrap
+
+Create the ignored startup configuration before the first start, then replace both placeholders:
+
+```powershell
+make config
+# Edit .\output\configs\vulcan-model-core.yaml
+```
+
+`make config` never overwrites an existing file. The startup YAML is always `output/configs/vulcan-model-core.yaml`; the compiled executable runs from `output/bin/` and resolves that configuration as `../configs/vulcan-model-core.yaml`. The whole `output/` directory is ignored by Git.
+
+`management.secret-key` starts as a plaintext bootstrap value. On the first successful process load it is replaced atomically by a bcrypt hash and is subsequently verified only with bcrypt. `api.keys` deliberately remains plaintext because the management API edits those call-plane keys.
+
+| 位置 | 用途 |
+| --- | --- |
+| `output/bin/vulcan-model-core.exe` | 每次 `make run` 重新编译的核心程序 |
+| `output/configs/vulcan-model-core.yaml` | 启动 YAML 配置 |
+| `~/.vulcan/router/database/data.db` | 持久化 SQLite 数据库 |
+| `~/.vulcan/router/secrets/` | DPAPI 保护的上游供应商凭据 |
+
+The process defaults to the loopback-only listener `127.0.0.1:13514`. On Windows, upstream provider secrets are persisted using DPAPI; an unsupported operating system returns an explicit startup error rather than falling back to plaintext.
+
+Start the core through Make after configuring it:
+
+```powershell
+make run
+```
+
+## Local management page
+
+The management page is an independent React + Vite development service in `web2/manage`. It replaces the legacy management homepage, provides the Dashboard at `/`, and keeps the administrator credential page at `/login` in the same application. It proxies only `/vulcan/manage` to the core and is fixed to `127.0.0.1:13520`.
+
+```powershell
+make vite start
+# ... use http://127.0.0.1:13520 ...
+make vite stop
+```
+
+`make vite start` installs locked frontend dependencies with `npm ci` only when the package-local Vite entry is missing. It starts Vite as a hidden process and records its PID plus start time in ignored `output/vite-state.json`; `make vite stop` stops only that exact recorded process. The browser does not write the management key to local storage, session storage, cookies, or the URL. It retains the key only while the page is open.
 
 ## Development
 
 ```bash
 gofmt -w .
 go test ./...
-go build -o test-output ./cmd/vulcan-model-core
+cd web2/manage && npm test
 ```
 
-Run with a random loopback port:
+Run with the default local control-plane listener and prescribed local paths:
 
 ```bash
-go run ./cmd/vulcan-model-core
+make run
 ```
 
-Run with an explicit address:
+For an ad-hoc direct process invocation, supply its configuration and persistence paths explicitly:
 
 ```bash
-go run ./cmd/vulcan-model-core --listen-address 127.0.0.1:8080
+go run ./cmd/vulcan-model-core --listen-address 127.0.0.1:8080 --config ./output/configs/vulcan-model-core.yaml --database-path ~/.vulcan/router/database/data.db --secret-directory ~/.vulcan/router/secrets
 ```
 
-Use an explicit SQLite path:
-
-```bash
-go run ./cmd/vulcan-model-core --database-path ./data/vulcan-model-core.db
-```
-
-The business database stores only opaque secret references. The current in-memory `SecretStore` exists for tests and explicit ephemeral use; a production encrypted file or operating-system key store is intentionally deferred to a dedicated security design.
+The business database stores only opaque secret references. The in-memory `SecretStore` exists only for tests and explicit ephemeral use; the production local process uses the platform-protected SecretStore described above.
 
 ## Migration strategy
 

@@ -317,6 +317,9 @@ type ProviderInstance struct {
 	// ProxyRef references an optional separately managed proxy configuration.
 	// ProxyRef 引用可选的独立代理配置。
 	ProxyRef string
+	// DisabledModelIDs lists provider-scoped models intentionally hidden from call-plane resolution.
+	// DisabledModelIDs 列出被有意从调用面解析中隐藏的供应商作用域模型。
+	DisabledModelIDs []string
 	// Revision is the latest persisted instance revision.
 	// Revision 是最新持久化实例修订号。
 	Revision uint64

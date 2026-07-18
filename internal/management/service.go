@@ -20,6 +20,12 @@ var (
 	// ErrConfigurationIncomplete reports an instance that cannot enter ready state.
 	// ErrConfigurationIncomplete 表示供应商实例无法进入 Ready 状态。
 	ErrConfigurationIncomplete = errors.New("provider configuration is incomplete")
+	// ErrSystemDefinitionImmutable reports a management mutation attempted against a code-owned system definition.
+	// ErrSystemDefinitionImmutable 表示管理变更尝试作用于代码拥有的系统定义。
+	ErrSystemDefinitionImmutable = errors.New("system provider definition is immutable")
+	// ErrCustomCatalogRequiresCustomProvider reports a user-declared catalog operation attempted against a system provider.
+	// ErrCustomCatalogRequiresCustomProvider 表示用户声明目录操作尝试作用于系统供应商。
+	ErrCustomCatalogRequiresCustomProvider = errors.New("user-declared catalogs are allowed only for custom providers")
 )
 
 // Service coordinates configuration persistence, secret compensation, and lifecycle rules.
@@ -73,7 +79,73 @@ func (s *Service) CreateCustomDefinition(ctx context.Context, input CreateCustom
 		}
 		definitionID = generatedID
 	}
-	definition := providerconfig.ProviderDefinition{
+	definition := customDefinition(definitionID, 1, input)
+	if errSave := s.configurations.SaveCustomDefinition(ctx, definition); errSave != nil {
+		return providerconfig.ProviderDefinition{}, errSave
+	}
+	return definition, nil
+}
+
+// UpdateCustomDefinitionInput contains every editable field of one existing custom provider definition.
+// UpdateCustomDefinitionInput 包含一个既有自定义供应商定义的全部可编辑字段。
+type UpdateCustomDefinitionInput struct {
+	// DefinitionID identifies the exact custom definition to replace.
+	// DefinitionID 标识要替换的精确自定义定义。
+	DefinitionID string
+	// DisplayName is the replacement management-facing provider name.
+	// DisplayName 是替换后的管理界面供应商名称。
+	DisplayName string
+	// ProtocolProfileID selects the replacement executable protocol profile.
+	// ProtocolProfileID 选择替换后的可执行协议规格。
+	ProtocolProfileID string
+	// AuthMethod selects the replacement custom-provider authentication mechanism.
+	// AuthMethod 选择替换后的自定义供应商认证机制。
+	AuthMethod providerconfig.AuthMethodType
+}
+
+// UpdateCustomDefinition replaces one custom definition and marks its existing instances as migration-required.
+// UpdateCustomDefinition 替换一个自定义定义并将其既有实例标记为需要迁移。
+func (s *Service) UpdateCustomDefinition(ctx context.Context, input UpdateCustomDefinitionInput) (providerconfig.ProviderDefinition, error) {
+	current, errCurrent := s.configurations.GetDefinition(ctx, input.DefinitionID)
+	if errCurrent != nil {
+		return providerconfig.ProviderDefinition{}, errCurrent
+	}
+	if current.Kind != providerconfig.DefinitionKindCustom {
+		return providerconfig.ProviderDefinition{}, fmt.Errorf("%w: %s", ErrSystemDefinitionImmutable, current.ID)
+	}
+	// updated rebuilds the constrained one-channel custom shape rather than preserving incompatible stale fields.
+	// updated 重建受约束的单通道自定义形态，而不是保留可能不兼容的旧字段。
+	updated := customDefinition(current.ID, current.Revision+1, CreateCustomDefinitionInput{
+		DisplayName:       input.DisplayName,
+		ProtocolProfileID: input.ProtocolProfileID,
+		AuthMethod:        input.AuthMethod,
+	})
+	if errSave := s.configurations.SaveCustomDefinition(ctx, updated); errSave != nil {
+		return providerconfig.ProviderDefinition{}, errSave
+	}
+	instances, errInstances := s.configurations.ListInstances(ctx, current.ID)
+	if errInstances != nil {
+		return providerconfig.ProviderDefinition{}, errInstances
+	}
+	// migrationTime is shared so all transitioned instances form one management operation snapshot.
+	// migrationTime 被共享，使全部转换实例形成一次管理操作快照。
+	migrationTime := s.now().UTC()
+	for _, instance := range instances {
+		instance.DefinitionRevision = updated.Revision
+		instance.Status = providerconfig.LifecycleMigrationRequired
+		instance.Revision++
+		instance.UpdatedAt = migrationTime
+		if errSaveInstance := s.configurations.SaveInstance(ctx, instance); errSaveInstance != nil {
+			return providerconfig.ProviderDefinition{}, fmt.Errorf("mark provider instance %s migration required: %w", instance.ID, errSaveInstance)
+		}
+	}
+	return updated, nil
+}
+
+// customDefinition builds the sole supported generic custom provider shape from explicit management input.
+// customDefinition 根据显式管理输入构建唯一受支持的通用自定义供应商形态。
+func customDefinition(definitionID string, revision uint64, input CreateCustomDefinitionInput) providerconfig.ProviderDefinition {
+	return providerconfig.ProviderDefinition{
 		ID:                  definitionID,
 		Kind:                providerconfig.DefinitionKindCustom,
 		DisplayName:         input.DisplayName,
@@ -96,12 +168,8 @@ func (s *Service) CreateCustomDefinition(ctx context.Context, input CreateCustom
 			EntitlementReader: providerconfig.SupportUnsupported,
 			AllowanceReader:   providerconfig.SupportUnsupported,
 		},
-		Revision: 1,
+		Revision: revision,
 	}
-	if errSave := s.configurations.SaveCustomDefinition(ctx, definition); errSave != nil {
-		return providerconfig.ProviderDefinition{}, errSave
-	}
-	return definition, nil
 }
 
 // CreateInstanceInput contains initial provider instance configuration.
@@ -154,6 +222,59 @@ func (s *Service) CreateInstance(ctx context.Context, input CreateInstanceInput)
 	return instance, nil
 }
 
+// UpdateInstanceInput contains editable identity fields of one existing provider instance.
+// UpdateInstanceInput 包含一个既有供应商实例的可编辑身份字段。
+type UpdateInstanceInput struct {
+	// ProviderInstanceID identifies the exact instance to update.
+	// ProviderInstanceID 标识要更新的精确实例。
+	ProviderInstanceID string
+	// Handle is the replacement stable workspace routing alias.
+	// Handle 是替换后的稳定工作区路由别名。
+	Handle string
+	// DisplayName is the replacement management-facing instance name.
+	// DisplayName 是替换后的管理界面实例名称。
+	DisplayName string
+}
+
+// UpdateInstance replaces editable instance identity fields without altering provider ownership or lifecycle.
+// UpdateInstance 替换可编辑实例身份字段且不改变供应商归属或生命周期。
+func (s *Service) UpdateInstance(ctx context.Context, input UpdateInstanceInput) (providerconfig.ProviderInstance, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, input.ProviderInstanceID)
+	if errInstance != nil {
+		return providerconfig.ProviderInstance{}, errInstance
+	}
+	instance.Handle = input.Handle
+	instance.DisplayName = input.DisplayName
+	instance.Revision++
+	instance.UpdatedAt = s.now().UTC()
+	if errSave := s.configurations.SaveInstance(ctx, instance); errSave != nil {
+		return providerconfig.ProviderInstance{}, errSave
+	}
+	return instance, nil
+}
+
+// SetInstanceEnabled transitions one instance to disabled or validates it back into ready state.
+// SetInstanceEnabled 将一个实例转换为禁用状态或校验后恢复为就绪状态。
+func (s *Service) SetInstanceEnabled(ctx context.Context, instanceID string, enabled bool) (providerconfig.ProviderInstance, error) {
+	if enabled {
+		return s.ActivateInstance(ctx, instanceID)
+	}
+	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return providerconfig.ProviderInstance{}, errInstance
+	}
+	if instance.Status == providerconfig.LifecycleDisabled {
+		return instance, nil
+	}
+	instance.Status = providerconfig.LifecycleDisabled
+	instance.Revision++
+	instance.UpdatedAt = s.now().UTC()
+	if errSave := s.configurations.SaveInstance(ctx, instance); errSave != nil {
+		return providerconfig.ProviderInstance{}, errSave
+	}
+	return instance, nil
+}
+
 // AddEndpointInput contains one concrete upstream endpoint configuration.
 // AddEndpointInput 包含一个具体上游端点配置。
 type AddEndpointInput struct {
@@ -194,6 +315,47 @@ func (s *Service) AddEndpoint(ctx context.Context, input AddEndpointInput) (prov
 		Status:             providerconfig.EndpointReady,
 		Revision:           1,
 	}
+	if errSave := s.configurations.SaveEndpoint(ctx, endpoint); errSave != nil {
+		return providerconfig.Endpoint{}, errSave
+	}
+	return endpoint, nil
+}
+
+// UpdateEndpointInput contains every editable field of one existing endpoint.
+// UpdateEndpointInput 包含一个既有端点的全部可编辑字段。
+type UpdateEndpointInput struct {
+	// ProviderInstanceID owns the endpoint and prevents cross-instance updates.
+	// ProviderInstanceID 拥有该端点并阻止跨实例更新。
+	ProviderInstanceID string
+	// EndpointID identifies the exact endpoint to replace.
+	// EndpointID 标识要替换的精确端点。
+	EndpointID string
+	// ChannelID selects the replacement provider channel.
+	// ChannelID 选择替换后的供应商通道。
+	ChannelID string
+	// BaseURL is the replacement validated upstream base URL.
+	// BaseURL 是替换后的已校验上游基础 URL。
+	BaseURL string
+	// Region is the replacement optional provider-defined region.
+	// Region 是替换后的可选供应商定义区域。
+	Region string
+	// Status is the replacement endpoint availability state.
+	// Status 是替换后的端点可用性状态。
+	Status providerconfig.EndpointStatus
+}
+
+// UpdateEndpoint replaces one same-instance endpoint while preserving its immutable identifier.
+// UpdateEndpoint 替换一个同实例端点，同时保留其不可变标识。
+func (s *Service) UpdateEndpoint(ctx context.Context, input UpdateEndpointInput) (providerconfig.Endpoint, error) {
+	endpoint, errEndpoint := s.endpoint(ctx, input.ProviderInstanceID, input.EndpointID)
+	if errEndpoint != nil {
+		return providerconfig.Endpoint{}, errEndpoint
+	}
+	endpoint.ChannelID = input.ChannelID
+	endpoint.BaseURL = input.BaseURL
+	endpoint.Region = input.Region
+	endpoint.Status = input.Status
+	endpoint.Revision++
 	if errSave := s.configurations.SaveEndpoint(ctx, endpoint); errSave != nil {
 		return providerconfig.Endpoint{}, errSave
 	}
@@ -265,6 +427,93 @@ func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (
 	return credential, nil
 }
 
+// UpdateCredentialInput contains editable non-secret fields of one existing credential.
+// UpdateCredentialInput 包含一个既有凭据的可编辑非秘密字段。
+type UpdateCredentialInput struct {
+	// ProviderInstanceID owns the credential and prevents cross-instance updates.
+	// ProviderInstanceID 拥有该凭据并阻止跨实例更新。
+	ProviderInstanceID string
+	// CredentialID identifies the exact credential to update.
+	// CredentialID 标识要更新的精确凭据。
+	CredentialID string
+	// Label is the replacement management-facing credential label.
+	// Label 是替换后的管理界面凭据标签。
+	Label string
+	// PrincipalKey is the replacement optional upstream account identity.
+	// PrincipalKey 是替换后的可选上游账号身份。
+	PrincipalKey string
+	// Fingerprint is the replacement irreversible duplicate-detection value.
+	// Fingerprint 是替换后的不可逆排重值。
+	Fingerprint string
+	// ScopeRefs is the replacement set of commercial and organizational scopes.
+	// ScopeRefs 是替换后的商业和组织作用域集合。
+	ScopeRefs []providerconfig.ScopeReference
+}
+
+// UpdateCredential replaces non-secret credential metadata without reading or returning secret bytes.
+// UpdateCredential 替换非秘密凭据元数据且不读取或返回 Secret 字节。
+func (s *Service) UpdateCredential(ctx context.Context, input UpdateCredentialInput) (providerconfig.Credential, error) {
+	credential, errCredential := s.credential(ctx, input.ProviderInstanceID, input.CredentialID)
+	if errCredential != nil {
+		return providerconfig.Credential{}, errCredential
+	}
+	credential.Label = input.Label
+	credential.PrincipalKey = input.PrincipalKey
+	credential.Fingerprint = input.Fingerprint
+	credential.ScopeRefs = append([]providerconfig.ScopeReference(nil), input.ScopeRefs...)
+	credential.Revision++
+	if errSave := s.configurations.SaveCredential(ctx, credential); errSave != nil {
+		return providerconfig.Credential{}, errSave
+	}
+	return credential, nil
+}
+
+// RotateCredentialSecretInput contains the only fields needed to replace credential secret bytes safely.
+// RotateCredentialSecretInput 包含安全替换凭据 Secret 字节所需的唯一字段。
+type RotateCredentialSecretInput struct {
+	// ProviderInstanceID owns the credential and prevents cross-instance rotation.
+	// ProviderInstanceID 拥有该凭据并阻止跨实例轮换。
+	ProviderInstanceID string
+	// CredentialID identifies the exact credential whose secret changes.
+	// CredentialID 标识其 Secret 发生变化的精确凭据。
+	CredentialID string
+	// Secret contains the transient replacement credential bytes.
+	// Secret 包含临时替换凭据字节。
+	Secret []byte
+	// Fingerprint is the replacement irreversible duplicate-detection value for the new secret.
+	// Fingerprint 是新 Secret 的替换不可逆排重值。
+	Fingerprint string
+}
+
+// RotateCredentialSecret writes a replacement secret before changing metadata and cleans up the old secret afterwards.
+// RotateCredentialSecret 在变更元数据前写入替换 Secret，并在之后清理旧 Secret。
+func (s *Service) RotateCredentialSecret(ctx context.Context, input RotateCredentialSecretInput) (providerconfig.Credential, error) {
+	credential, errCredential := s.credential(ctx, input.ProviderInstanceID, input.CredentialID)
+	if errCredential != nil {
+		return providerconfig.Credential{}, errCredential
+	}
+	// replacementReference is written first so the existing credential remains usable if protection fails.
+	// replacementReference 先写入，因此保护失败时既有凭据仍可用。
+	replacementReference, errPut := s.secrets.Put(ctx, input.Secret)
+	if errPut != nil {
+		return providerconfig.Credential{}, errPut
+	}
+	previousReference := credential.SecretRef
+	credential.SecretRef = replacementReference
+	credential.Fingerprint = input.Fingerprint
+	credential.Revision++
+	if errSave := s.configurations.SaveCredential(ctx, credential); errSave != nil {
+		if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), replacementReference); errDelete != nil {
+			return providerconfig.Credential{}, fmt.Errorf("save rotated credential metadata: %v; compensate replacement secret: %w", errSave, errDelete)
+		}
+		return providerconfig.Credential{}, errSave
+	}
+	if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), previousReference); errDelete != nil {
+		return providerconfig.Credential{}, fmt.Errorf("persisted rotated credential but could not delete previous secret: %w", errDelete)
+	}
+	return credential, nil
+}
+
 // AddBindingInput contains one endpoint-to-credential access relationship.
 // AddBindingInput 包含一个端点到凭据的访问关系。
 type AddBindingInput struct {
@@ -313,6 +562,55 @@ func (s *Service) AddBinding(ctx context.Context, input AddBindingInput) (provid
 		Enabled:            true,
 		Revision:           1,
 	}
+	if errSave := s.configurations.SaveBinding(ctx, binding); errSave != nil {
+		return providerconfig.AccessBinding{}, errSave
+	}
+	return binding, nil
+}
+
+// UpdateBindingInput contains every editable field of one existing access binding.
+// UpdateBindingInput 包含一个既有访问绑定的全部可编辑字段。
+type UpdateBindingInput struct {
+	// ProviderInstanceID owns all referenced records and prevents cross-instance updates.
+	// ProviderInstanceID 拥有全部引用记录并阻止跨实例更新。
+	ProviderInstanceID string
+	// BindingID identifies the exact binding to replace.
+	// BindingID 标识要替换的精确绑定。
+	BindingID string
+	// ChannelID is the replacement exact provider channel.
+	// ChannelID 是替换后的精确供应商通道。
+	ChannelID string
+	// EndpointID references the replacement same-instance endpoint.
+	// EndpointID 引用替换后的同实例端点。
+	EndpointID string
+	// CredentialID references the replacement same-instance credential.
+	// CredentialID 引用替换后的同实例凭据。
+	CredentialID string
+	// AllowedModelIDs restricts the replacement binding to explicit models when non-empty.
+	// AllowedModelIDs 非空时将替换绑定限制到明确模型。
+	AllowedModelIDs []string
+	// Priority is the replacement deterministic same-pool order.
+	// Priority 是替换后的确定性同账号池顺序。
+	Priority int
+	// Enabled controls whether the binding participates in resolution.
+	// Enabled 控制绑定是否参与解析。
+	Enabled bool
+}
+
+// UpdateBinding replaces one same-instance access binding while preserving its immutable identifier.
+// UpdateBinding 替换一个同实例访问绑定，同时保留其不可变标识。
+func (s *Service) UpdateBinding(ctx context.Context, input UpdateBindingInput) (providerconfig.AccessBinding, error) {
+	binding, errBinding := s.binding(ctx, input.ProviderInstanceID, input.BindingID)
+	if errBinding != nil {
+		return providerconfig.AccessBinding{}, errBinding
+	}
+	binding.ChannelID = input.ChannelID
+	binding.EndpointID = input.EndpointID
+	binding.CredentialID = input.CredentialID
+	binding.AllowedModelIDs = append([]string(nil), input.AllowedModelIDs...)
+	binding.Priority = input.Priority
+	binding.Enabled = input.Enabled
+	binding.Revision++
 	if errSave := s.configurations.SaveBinding(ctx, binding); errSave != nil {
 		return providerconfig.AccessBinding{}, errSave
 	}
@@ -425,6 +723,51 @@ func (s *Service) SetCredentialStatus(ctx context.Context, input SetCredentialSt
 	return selected, nil
 }
 
+// endpoint returns one endpoint only when it belongs to the requested provider instance.
+// endpoint 仅在端点属于请求的供应商实例时返回该端点。
+func (s *Service) endpoint(ctx context.Context, instanceID string, endpointID string) (providerconfig.Endpoint, error) {
+	endpoints, errEndpoints := s.configurations.ListEndpoints(ctx, instanceID)
+	if errEndpoints != nil {
+		return providerconfig.Endpoint{}, errEndpoints
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.ID == endpointID {
+			return endpoint, nil
+		}
+	}
+	return providerconfig.Endpoint{}, fmt.Errorf("%w: provider endpoint %s", providerconfig.ErrNotFound, endpointID)
+}
+
+// credential returns one credential only when it belongs to the requested provider instance.
+// credential 仅在凭据属于请求的供应商实例时返回该凭据。
+func (s *Service) credential(ctx context.Context, instanceID string, credentialID string) (providerconfig.Credential, error) {
+	credentials, errCredentials := s.configurations.ListCredentials(ctx, instanceID)
+	if errCredentials != nil {
+		return providerconfig.Credential{}, errCredentials
+	}
+	for _, credential := range credentials {
+		if credential.ID == credentialID {
+			return credential, nil
+		}
+	}
+	return providerconfig.Credential{}, fmt.Errorf("%w: provider credential %s", providerconfig.ErrNotFound, credentialID)
+}
+
+// binding returns one access binding only when it belongs to the requested provider instance.
+// binding 仅在访问绑定属于请求的供应商实例时返回该绑定。
+func (s *Service) binding(ctx context.Context, instanceID string, bindingID string) (providerconfig.AccessBinding, error) {
+	bindings, errBindings := s.configurations.ListBindings(ctx, instanceID)
+	if errBindings != nil {
+		return providerconfig.AccessBinding{}, errBindings
+	}
+	for _, binding := range bindings {
+		if binding.ID == bindingID {
+			return binding, nil
+		}
+	}
+	return providerconfig.AccessBinding{}, fmt.Errorf("%w: access binding %s", providerconfig.ErrNotFound, bindingID)
+}
+
 // CustomCatalogService persists user-declared models without system-provider commercial metadata.
 // CustomCatalogService 持久化用户声明模型且不包含系统供应商商业元数据。
 type CustomCatalogService struct {
@@ -475,16 +818,9 @@ type SaveCustomCatalogInput struct {
 // SaveCustomCatalog validates custom ownership, derives pools, and atomically saves the catalog.
 // SaveCustomCatalog 校验自定义所有权、派生账号池并原子保存目录。
 func (s *CustomCatalogService) SaveCustomCatalog(ctx context.Context, input SaveCustomCatalogInput) (catalog.Snapshot, error) {
-	instance, errInstance := s.configurations.GetInstance(ctx, input.ProviderInstanceID)
+	instance, errInstance := s.customInstance(ctx, input.ProviderInstanceID)
 	if errInstance != nil {
 		return catalog.Snapshot{}, errInstance
-	}
-	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
-	if errDefinition != nil {
-		return catalog.Snapshot{}, errDefinition
-	}
-	if definition.Kind != providerconfig.DefinitionKindCustom {
-		return catalog.Snapshot{}, errors.New("user-declared catalogs are allowed only for custom providers")
 	}
 	for _, model := range input.Models {
 		if model.Source != catalog.ModelSourceUserDeclared || model.EntitlementMode != catalog.EntitlementAllBoundCredentials {
@@ -498,11 +834,31 @@ func (s *CustomCatalogService) SaveCustomCatalog(ctx context.Context, input Save
 	} else if !errors.Is(errCurrent, catalog.ErrSnapshotNotFound) {
 		return catalog.Snapshot{}, errCurrent
 	}
+	// models copies caller data before the service owns the catalog revision metadata.
+	// models 在服务接管目录修订元数据前复制调用方数据。
+	models := append([]catalog.ProviderModel(nil), input.Models...)
+	for index := range models {
+		models[index].Revision = revision
+	}
+	// offerings copies caller data before assigning the authoritative catalog and capability revisions.
+	// offerings 在分配权威目录和能力修订前复制调用方数据。
+	offerings := append([]catalog.ModelOffering(nil), input.Offerings...)
+	for index := range offerings {
+		offerings[index].CapabilityRevision = revision
+		offerings[index].Revision = revision
+	}
+	// profiles copies caller data before assigning the authoritative catalog and capability revisions.
+	// profiles 在分配权威目录和能力修订前复制调用方数据。
+	profiles := append([]catalog.ExecutionProfile(nil), input.Profiles...)
+	for index := range profiles {
+		profiles[index].CapabilityRevision = revision
+		profiles[index].Revision = revision
+	}
 	snapshot := catalog.Snapshot{
 		ProviderInstanceID: instance.ID,
-		Models:             append([]catalog.ProviderModel(nil), input.Models...),
-		Offerings:          append([]catalog.ModelOffering(nil), input.Offerings...),
-		Profiles:           append([]catalog.ExecutionProfile(nil), input.Profiles...),
+		Models:             models,
+		Offerings:          offerings,
+		Profiles:           profiles,
 		Revision:           revision,
 		ObservedAt:         input.ObservedAt,
 	}
@@ -518,6 +874,33 @@ func (s *CustomCatalogService) SaveCustomCatalog(ctx context.Context, input Save
 		return catalog.Snapshot{}, errSave
 	}
 	return snapshot, nil
+}
+
+// GetCustomCatalog returns the current user-declared catalog only for a custom provider instance.
+// GetCustomCatalog 仅为自定义供应商实例返回当前用户声明的目录。
+func (s *CustomCatalogService) GetCustomCatalog(ctx context.Context, providerInstanceID string) (catalog.Snapshot, error) {
+	instance, errInstance := s.customInstance(ctx, providerInstanceID)
+	if errInstance != nil {
+		return catalog.Snapshot{}, errInstance
+	}
+	return s.catalogs.Get(ctx, instance.ID)
+}
+
+// customInstance verifies that one instance is owned by a user-editable custom provider definition.
+// customInstance 校验一个实例由可编辑的自定义供应商定义拥有。
+func (s *CustomCatalogService) customInstance(ctx context.Context, providerInstanceID string) (providerconfig.ProviderInstance, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, providerInstanceID)
+	if errInstance != nil {
+		return providerconfig.ProviderInstance{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return providerconfig.ProviderInstance{}, errDefinition
+	}
+	if definition.Kind != providerconfig.DefinitionKindCustom {
+		return providerconfig.ProviderInstance{}, fmt.Errorf("%w: %s", ErrCustomCatalogRequiresCustomProvider, instance.ID)
+	}
+	return instance, nil
 }
 
 // cloneTimePointer copies one optional lifecycle timestamp.
