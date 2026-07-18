@@ -4,8 +4,12 @@ import (
 	"errors"
 	"testing"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/antigravity"
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/interactions"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/codex"
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	xairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/xai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -23,12 +27,12 @@ func TestRegisterProtocolProfilesRegistersOnlySupportedCustomProfiles(t *testing
 	// profiles records the stable sorted registration snapshot.
 	// profiles 记录稳定排序后的注册快照。
 	profiles := registry.List()
-	if len(profiles) != 4 {
-		t.Fatalf("registered profile count = %d, want 4", len(profiles))
+	if len(profiles) != 8 {
+		t.Fatalf("registered profile count = %d, want 8", len(profiles))
 	}
 	// expectedIDs preserves the public management identifiers without exposing upstream compatibility endpoints.
 	// expectedIDs 保留公开管理标识而不暴露上游兼容端点。
-	expectedIDs := []string{aistudio.ProfileID, chat.ProfileID, openairesponses.ProfileID, xairesponses.ProfileID}
+	expectedIDs := []string{messages.ProfileID, aistudio.ProfileID, antigravity.ProfileID, interactions.ProfileID, chat.ProfileID, codex.ProfileID, openairesponses.ProfileID, xairesponses.ProfileID}
 	for index, expectedID := range expectedIDs {
 		if profiles[index].ID != expectedID {
 			t.Fatalf("profile[%d].ID = %q, want %q", index, profiles[index].ID, expectedID)

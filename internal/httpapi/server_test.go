@@ -27,6 +27,16 @@ type staticCatalog struct {
 // staticManagementQuery 为 HTTP 测试提供确定性安全发现视图。
 type staticManagementQuery struct{}
 
+// ListProviderGroups returns one Kimi group for authenticated management discovery tests.
+// ListProviderGroups 为已认证管理发现测试返回一个 Kimi 分组。
+func (staticManagementQuery) ListProviderGroups(context.Context) ([]management.ProviderGroupView, error) {
+	return []management.ProviderGroupView{{
+		ID: "kimi", DisplayName: "Kimi", ProviderDefinitions: []management.ProviderDefinitionView{
+			{ID: "system_kimi_cn", Kind: providerconfig.DefinitionKindSystem, DisplayName: "Kimi CN", GroupID: "kimi", VariantName: "CN", Revision: 1},
+		}, Revision: 1,
+	}}, nil
+}
+
 // staticProtocolProfiles provides immutable protocol metadata for authenticated route tests.
 // staticProtocolProfiles 为认证路由测试提供不可变协议元数据。
 type staticProtocolProfiles struct{}
@@ -100,6 +110,18 @@ func (staticManagementQuery) ListBindings(context.Context, string) ([]management
 // staticManagementCommands satisfies mutation dependencies while route tests focus on authentication and redaction.
 // staticManagementCommands 满足变更依赖，而路由测试聚焦认证和脱敏。
 type staticManagementCommands struct{}
+
+// OnboardSystemProvider returns an empty onboarding result for route-table tests.
+// OnboardSystemProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardSystemProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardKimiDeviceProvider returns an empty onboarding result for route-table tests.
+// OnboardKimiDeviceProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardKimiDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
 
 // CreateCustomDefinition reports that the static fixture does not execute mutation flows.
 // CreateCustomDefinition 报告静态夹具不执行变更流程。
@@ -357,6 +379,7 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	}
 	managementPaths := []string{
 		"/vulcan/manage/protocol-profiles",
+		"/vulcan/manage/provider-groups",
 		"/vulcan/manage/provider-definitions",
 		"/vulcan/manage/provider-instances",
 		"/vulcan/manage/provider-instances/pvi_test",

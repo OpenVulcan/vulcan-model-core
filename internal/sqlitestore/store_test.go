@@ -45,13 +45,12 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 			ID:                "anthropic",
 			ProtocolProfileID: "anthropic.messages.v1",
 			EndpointProfileID: "default",
-			AuthMethodIDs:     []string{"oauth"},
+			AuthMethodIDs:     []string{"bearer"},
 			RuntimeReady:      true,
 		}},
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
-			ID:                  "oauth",
-			Type:                providerconfig.AuthMethodOAuth,
-			Refreshable:         true,
+			ID:                  "bearer",
+			Type:                providerconfig.AuthMethodBearer,
 			MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
@@ -167,7 +166,7 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 		t.Fatalf("create catalog store: %v", errCatalogs)
 	}
 	secrets := secret.NewMemoryStore()
-	service, errService := management.NewService(configurations, secrets)
+	service, errService := management.NewService(configurations, secrets, catalogs)
 	if errService != nil {
 		t.Fatalf("create management service: %v", errService)
 	}
@@ -191,7 +190,7 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	}
 	secretValue := []byte("super-secret-token-must-not-enter-sqlite")
 	credential, errCredential := service.AddCredential(ctx, management.AddCredentialInput{
-		ID: "cred_sqlite", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "Account",
+		ID: "cred_sqlite", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Account",
 		PrincipalKey: "account-sqlite", Fingerprint: "fingerprint-sqlite", Secret: secretValue,
 	})
 	if errCredential != nil {

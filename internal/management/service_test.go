@@ -42,13 +42,12 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 			ID:                "anthropic",
 			ProtocolProfileID: "anthropic.messages.v1",
 			EndpointProfileID: "default",
-			AuthMethodIDs:     []string{"oauth"},
+			AuthMethodIDs:     []string{"bearer"},
 			RuntimeReady:      true,
 		}},
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
-			ID:                  "oauth",
-			Type:                providerconfig.AuthMethodOAuth,
-			Refreshable:         true,
+			ID:                  "bearer",
+			Type:                providerconfig.AuthMethodBearer,
 			MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
@@ -66,7 +65,7 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 		t.Fatalf("create configuration store: %v", errConfigurations)
 	}
 	secrets := secret.NewMemoryStore()
-	service, errService := NewService(configurations, secrets)
+	service, errService := NewService(configurations, secrets, catalog.NewMemoryStore())
 	if errService != nil {
 		t.Fatalf("create management service: %v", errService)
 	}
@@ -152,7 +151,7 @@ func TestRotateCredentialSecretReplacesProtectedMaterial(t *testing.T) {
 		t.Fatalf("create provider instance: %v", errInstance)
 	}
 	credential, errCredential := service.AddCredential(ctx, AddCredentialInput{
-		ID: "cred_rotation", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "Before Rotation",
+		ID: "cred_rotation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Before Rotation",
 		PrincipalKey: "rotation-account", Fingerprint: "rotation-before", Secret: []byte("before-secret"),
 	})
 	if errCredential != nil {
@@ -191,7 +190,7 @@ func TestAddCredentialCompensatesSecret(t *testing.T) {
 		t.Fatalf("create provider instance: %v", errInstance)
 	}
 	_, errCredential := service.AddCredential(context.Background(), AddCredentialInput{
-		ID: "cred_compensation", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "Invalid",
+		ID: "cred_compensation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Invalid",
 		PrincipalKey: "account-invalid", Secret: []byte("temporary-secret"),
 	})
 	if errCredential == nil {
@@ -223,7 +222,7 @@ func TestActivateInstanceRequiresClosedAccessPath(t *testing.T) {
 		t.Fatalf("add endpoint: %v", errEndpoint)
 	}
 	credential, errCredential := service.AddCredential(ctx, AddCredentialInput{
-		ID: "cred_activation", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "Account",
+		ID: "cred_activation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Account",
 		PrincipalKey: "account-activation", Fingerprint: "fingerprint-activation", Secret: []byte("activation-secret"),
 	})
 	if errCredential != nil {

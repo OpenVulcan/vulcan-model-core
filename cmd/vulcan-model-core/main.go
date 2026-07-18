@@ -16,9 +16,11 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
-	"github.com/OpenVulcan/vulcan-model-core/internal/core"
 	"github.com/OpenVulcan/vulcan-model-core/internal/httpapi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -120,6 +122,9 @@ func run(ctx context.Context, args []string) error {
 	if errSystemDefinitions != nil {
 		return fmt.Errorf("create system provider registry: %w", errSystemDefinitions)
 	}
+	if errRegisterProviders := bootstrap.RegisterSystemProviders(systemDefinitions); errRegisterProviders != nil {
+		return fmt.Errorf("register built-in system providers: %w", errRegisterProviders)
+	}
 	// database owns durable non-secret configuration and atomic catalog snapshots.
 	// database 管理持久化非秘密配置与原子目录快照。
 	database, errDatabase := sqlitestore.Open(ctx, options.databasePath)
@@ -151,9 +156,27 @@ func run(ctx context.Context, args []string) error {
 	}
 	// managementCommands owns durable provider configuration mutations and secret reference lifecycle.
 	// managementCommands 管理持久化供应商配置变更和秘密引用生命周期。
-	managementCommands, errManagementCommands := management.NewService(configurations, secrets)
+	managementCommands, errManagementCommands := management.NewService(configurations, secrets, catalogs)
 	if errManagementCommands != nil {
 		return fmt.Errorf("create management command service: %w", errManagementCommands)
+	}
+	// kimiDeviceClient performs bounded Coding Plan device authorization exchanges.
+	// kimiDeviceClient 执行有界 Coding Plan 设备授权交换。
+	kimiDeviceClient, errKimiDeviceClient := providerkimi.NewDeviceFlowClient(&http.Client{Timeout: 30 * time.Second})
+	if errKimiDeviceClient != nil {
+		return fmt.Errorf("create Kimi device-flow client: %w", errKimiDeviceClient)
+	}
+	// kimiDeviceFlows retains only incomplete authorization state in process memory.
+	// kimiDeviceFlows 仅在进程内存中保留未完成授权状态。
+	kimiDeviceFlows, errKimiDeviceFlows := providerkimi.NewFlowManager(kimiDeviceClient)
+	if errKimiDeviceFlows != nil {
+		return fmt.Errorf("create Kimi device-flow manager: %w", errKimiDeviceFlows)
+	}
+	// kimiTokens refreshes completed Coding Plan credentials without exposing provider tokens.
+	// kimiTokens 刷新已完成 Coding Plan 凭据且不暴露供应商令牌。
+	kimiTokens, errKimiTokens := management.NewKimiTokenService(configurations, secrets, kimiDeviceClient)
+	if errKimiTokens != nil {
+		return fmt.Errorf("create Kimi token service: %w", errKimiTokens)
 	}
 	// modelAccessCommands owns per-instance local model enablement policy.
 	// modelAccessCommands 管理每个实例的本地模型启停策略。
@@ -167,19 +190,42 @@ func run(ctx context.Context, args []string) error {
 	if errCustomCatalogCommands != nil {
 		return fmt.Errorf("create custom catalog service: %w", errCustomCatalogCommands)
 	}
-	// registry begins empty until explicit provider adapters are added.
-	// registry 在显式添加供应商适配器前保持为空。
-	registry := core.NewRegistry()
+	// openPlatformTransport resolves raw API keys only for regional Open Platform definitions.
+	// openPlatformTransport 仅为区域开放平台定义解析原始 API Key。
+	openPlatformTransport, errOpenPlatformTransport := transport.NewClient(&http.Client{Timeout: 5 * time.Minute}, secrets, transport.RetryPolicy{})
+	if errOpenPlatformTransport != nil {
+		return fmt.Errorf("create Kimi Open Platform transport: %w", errOpenPlatformTransport)
+	}
+	// kimiAccessTokens projects protected refreshable documents to access tokens only at request time.
+	// kimiAccessTokens 仅在请求时将受保护可刷新文档投影为 Access Token。
+	kimiAccessTokens, errKimiAccessTokens := providerkimi.NewAccessTokenStore(secrets)
+	if errKimiAccessTokens != nil {
+		return fmt.Errorf("create Kimi access-token store: %w", errKimiAccessTokens)
+	}
+	// codingTransport applies only the projected Coding Plan access token to outbound requests.
+	// codingTransport 仅将投影后的 Coding Plan Access Token 应用于出站请求。
+	codingTransport, errCodingTransport := transport.NewClient(&http.Client{Timeout: 5 * time.Minute}, kimiAccessTokens, transport.RetryPolicy{})
+	if errCodingTransport != nil {
+		return fmt.Errorf("create Kimi Coding transport: %w", errCodingTransport)
+	}
+	// executionDrivers dispatch by exact provider definition and protocol profile without fallback.
+	// executionDrivers 按精确供应商定义和协议 Profile 分派且不进行降级。
+	executionDrivers := provider.NewExecutionRegistry()
+	if errDrivers := bootstrap.RegisterKimiExecutionDrivers(executionDrivers, openPlatformTransport, codingTransport); errDrivers != nil {
+		return fmt.Errorf("register Kimi execution drivers: %w", errDrivers)
+	}
 	// api exposes separated authenticated Vulcan management and call-plane routes.
 	// api 暴露相互隔离且经认证的 Vulcan 管理面和调用面路由。
-	api, errAPI := httpapi.NewWithControlPlane(registry, httpapi.ControlPlane{
-		Query:          managementQueries,
-		Commands:       managementCommands,
-		ModelAccess:    modelAccessCommands,
-		CustomCatalogs: customCatalogCommands,
-		Protocols:      protocols,
-		APIKeys:        controlConfiguration,
-		Auth:           controlConfiguration,
+	api, errAPI := httpapi.NewWithControlPlane(executionDrivers, httpapi.ControlPlane{
+		Query:           managementQueries,
+		Commands:        managementCommands,
+		ModelAccess:     modelAccessCommands,
+		CustomCatalogs:  customCatalogCommands,
+		Protocols:       protocols,
+		APIKeys:         controlConfiguration,
+		Auth:            controlConfiguration,
+		KimiDeviceFlows: kimiDeviceFlows,
+		KimiTokens:      kimiTokens,
 	})
 	if errAPI != nil {
 		return fmt.Errorf("create HTTP API: %w", errAPI)

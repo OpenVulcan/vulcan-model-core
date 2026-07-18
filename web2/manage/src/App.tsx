@@ -1,4 +1,5 @@
-import { useEffect, useState } from "react"
+import { useState } from "react"
+import { Navigate, Route, Routes, useLocation, useNavigate } from "react-router-dom"
 
 import { TooltipProvider } from "@/components/ui/tooltip"
 import { clearStoredManagementCredential } from "@/lib/management-credential-storage"
@@ -11,23 +12,18 @@ export function App() {
   // managementAuthToken is the active in-memory session credential accepted by the management API.
   // managementAuthToken 是管理 API 已接受的当前内存会话凭证。
   const [managementAuthToken, setManagementAuthToken] = useState("")
-
-  // synchronizeUnauthenticatedRoute ensures a fresh page opens the dedicated login route before authentication.
-  // synchronizeUnauthenticatedRoute 确保新页面会在认证前打开专用登录路由。
-  useEffect(() => {
-    if (
-      managementAuthToken === "" &&
-      window.location.pathname !== "/login"
-    ) {
-      window.history.replaceState(null, "", "/login")
-    }
-  }, [managementAuthToken])
+  // location is the browser-router-owned source of truth for refresh and history navigation.
+  // location 是浏览器路由拥有的刷新与历史导航事实来源。
+  const location = useLocation()
+  // navigate changes authenticated routes without manually duplicating browser history state.
+  // navigate 在不手工复制浏览器历史状态的情况下切换已认证路由。
+  const navigate = useNavigate()
 
   // handleAuthenticated records the verified token in memory and moves the application to the dashboard route.
   // handleAuthenticated 在内存中记录已验证令牌，并将应用切换到仪表盘路由。
   function handleAuthenticated(authToken: string) {
     setManagementAuthToken(authToken)
-    window.history.replaceState(null, "", "/")
+    navigate("/", { replace: true })
   }
 
   // handleLogout removes both active and explicitly remembered credentials before returning to login.
@@ -35,21 +31,35 @@ export function App() {
   function handleLogout() {
     clearStoredManagementCredential()
     setManagementAuthToken("")
-    window.history.replaceState(null, "", "/login")
+    navigate("/login", { replace: true })
   }
 
-  // currentPath is read during render because route changes are initiated by the authenticated callbacks above.
-  // currentPath 会在渲染时读取，因为路由变更由上方认证回调发起。
-  const currentPath = window.location.pathname
+  // handleNavigate changes authenticated page state without broadening credential persistence.
+  // handleNavigate 在不扩大凭证持久化范围的情况下切换已认证页面状态。
+  function handleNavigate(path: string) {
+    navigate(path)
+  }
   const isAuthenticated = managementAuthToken !== ""
 
   return (
     <TooltipProvider>
-      {isAuthenticated && currentPath !== "/login" ? (
-        <DashboardPage onLogout={handleLogout} />
-      ) : (
-        <LoginPage onAuthenticated={handleAuthenticated} />
-      )}
+      <Routes>
+        <Route
+          path="/login"
+          element={isAuthenticated ? <Navigate to="/" replace /> : <LoginPage onAuthenticated={handleAuthenticated} />}
+        />
+        <Route
+          path="/*"
+          element={isAuthenticated ? (
+            <DashboardPage
+              currentPath={location.pathname}
+              managementAuthToken={managementAuthToken}
+              onNavigate={handleNavigate}
+              onLogout={handleLogout}
+            />
+          ) : <Navigate to="/login" replace />}
+        />
+      </Routes>
     </TooltipProvider>
   )
 }

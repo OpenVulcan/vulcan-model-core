@@ -5,16 +5,166 @@ package management
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
+
+// OnboardSystemProviderInput contains the only operator-authored fields for one atomic system-provider onboarding.
+// OnboardSystemProviderInput 包含一次原子系统供应商录入仅由操作员填写的字段。
+type OnboardSystemProviderInput struct {
+	// DefinitionID selects one exact code-owned provider variant.
+	// DefinitionID 选择一个精确的代码拥有供应商变体。
+	DefinitionID string
+	// Handle is the stable workspace-visible routing alias.
+	// Handle 是工作区可见的稳定路由别名。
+	Handle string
+	// DisplayName is the editable management-facing instance name.
+	// DisplayName 是可编辑的管理端实例名称。
+	DisplayName string
+	// AuthMethodID selects one authentication method declared by the definition.
+	// AuthMethodID 选择定义声明的一种认证方式。
+	AuthMethodID string
+	// CredentialLabel is the safe operator-visible account label.
+	// CredentialLabel 是安全且操作员可见的账号标签。
+	CredentialLabel string
+	// PrincipalKey is the provider-reported stable account identity when available.
+	// PrincipalKey 是可用时供应商报告的稳定账号身份。
+	PrincipalKey string
+	// Secret contains transient credential material and is never written to SQLite.
+	// Secret 包含临时凭据材料且绝不写入 SQLite。
+	Secret []byte
+}
+
+// OnboardSystemProvider atomically creates one complete system-provider access path with secret compensation.
+// OnboardSystemProvider 通过秘密补偿原子创建一条完整系统供应商访问路径。
+func (s *Service) OnboardSystemProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return s.onboardSystemProvider(ctx, input, false)
+}
+
+// OnboardKimiDeviceProvider atomically stores one server-acquired and format-validated Kimi device credential.
+// OnboardKimiDeviceProvider 原子存储一个由服务端获取且格式已校验的 Kimi 设备凭据。
+func (s *Service) OnboardKimiDeviceProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return s.onboardSystemProvider(ctx, input, true)
+}
+
+// onboardSystemProvider enforces the acquisition boundary before committing one complete provider graph.
+// onboardSystemProvider 在提交完整供应商图之前强制执行凭据获取边界。
+func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystemProviderInput, serverAcquiredDeviceCredential bool) (providerconfig.SystemOnboarding, error) {
+	definition, errDefinition := s.configurations.GetDefinition(ctx, input.DefinitionID)
+	if errDefinition != nil {
+		return providerconfig.SystemOnboarding{}, errDefinition
+	}
+	authMethod, authMethodExists := definition.AuthMethod(input.AuthMethodID)
+	if definition.Kind != providerconfig.DefinitionKindSystem || !authMethodExists {
+		return providerconfig.SystemOnboarding{}, fmt.Errorf("system provider onboarding requires an exact system definition and authentication method")
+	}
+	if serverAcquiredDeviceCredential {
+		if definition.DriverID != "kimi" || authMethod.Type != providerconfig.AuthMethodDeviceFlow {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("server-acquired Kimi onboarding requires a Kimi device-flow definition")
+		}
+		if _, errToken := providerkimi.UnmarshalToken(input.Secret); errToken != nil {
+			return providerconfig.SystemOnboarding{}, errToken
+		}
+	} else if authMethod.Type == providerconfig.AuthMethodDeviceFlow || authMethod.Type == providerconfig.AuthMethodOAuth {
+		return providerconfig.SystemOnboarding{}, fmt.Errorf("interactive provider credentials require their server-owned authorization workflow")
+	}
+	if len(input.Secret) == 0 {
+		return providerconfig.SystemOnboarding{}, fmt.Errorf("system provider onboarding secret is required")
+	}
+	secretReference, errSecret := s.secrets.Put(ctx, input.Secret)
+	if errSecret != nil {
+		return providerconfig.SystemOnboarding{}, errSecret
+	}
+	onboarding, errBuild := s.buildSystemOnboarding(definition, input, secretReference)
+	if errBuild != nil {
+		_ = s.secrets.Delete(context.WithoutCancel(ctx), secretReference)
+		return providerconfig.SystemOnboarding{}, errBuild
+	}
+	if errSave := s.configurations.SaveSystemOnboarding(ctx, onboarding); errSave != nil {
+		if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), secretReference); errDelete != nil {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("save system provider onboarding: %w; compensate secret: %v", errSave, errDelete)
+		}
+		return providerconfig.SystemOnboarding{}, errSave
+	}
+	snapshot, errCatalog := buildSystemCatalog(onboarding, definition, s.now().UTC())
+	if errCatalog == nil {
+		errCatalog = s.catalogs.Save(ctx, snapshot)
+	}
+	if errCatalog != nil {
+		compensationContext := context.WithoutCancel(ctx)
+		errCatalogCleanup := s.catalogs.Delete(compensationContext, onboarding.Instance.ID)
+		if errors.Is(errCatalogCleanup, catalog.ErrSnapshotNotFound) {
+			errCatalogCleanup = nil
+		}
+		errConfigurationCleanup := s.configurations.DeleteSystemOnboarding(compensationContext, onboarding)
+		errSecretCleanup := s.secrets.Delete(compensationContext, secretReference)
+		if errCatalogCleanup != nil || errConfigurationCleanup != nil || errSecretCleanup != nil {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("save system provider catalog: %w; compensate catalog: %v; compensate configuration: %v; compensate secret: %v", errCatalog, errCatalogCleanup, errConfigurationCleanup, errSecretCleanup)
+		}
+		return providerconfig.SystemOnboarding{}, errCatalog
+	}
+	return onboarding, nil
+}
+
+// buildSystemOnboarding constructs server-owned identifiers, fixed endpoints, and bindings for one definition.
+// buildSystemOnboarding 为一个定义构建服务端拥有的标识、固定端点和绑定。
+func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefinition, input OnboardSystemProviderInput, secretReference string) (providerconfig.SystemOnboarding, error) {
+	instanceID, errInstanceID := generateID("pvi_")
+	if errInstanceID != nil {
+		return providerconfig.SystemOnboarding{}, errInstanceID
+	}
+	credentialID, errCredentialID := generateID("cred_")
+	if errCredentialID != nil {
+		return providerconfig.SystemOnboarding{}, errCredentialID
+	}
+	now := s.now().UTC()
+	// fingerprint is derived by the trusted service so clients cannot choose duplicate-detection metadata.
+	// fingerprint 由受信任服务派生，客户端不能选择排重元数据。
+	fingerprintBytes := sha256.Sum256(input.Secret)
+	onboarding := providerconfig.SystemOnboarding{
+		Instance:   providerconfig.ProviderInstance{ID: instanceID, DefinitionID: definition.ID, Handle: input.Handle, DisplayName: input.DisplayName, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now},
+		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: input.AuthMethodID, Label: input.CredentialLabel, PrincipalKey: input.PrincipalKey, SecretRef: secretReference, Fingerprint: hex.EncodeToString(fingerprintBytes[:]), Status: providerconfig.CredentialActive, Revision: 1},
+	}
+	// channelPresets rejects ambiguous multi-region definitions until management explicitly selects one preset.
+	// channelPresets 在管理端显式选择预设前拒绝存在歧义的多区域定义。
+	channelPresets := make(map[string]providerconfig.EndpointPreset, len(definition.EndpointPresets))
+	for _, preset := range definition.EndpointPresets {
+		if _, exists := channelPresets[preset.ChannelID]; exists {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition channel %q has multiple endpoint presets and requires explicit preset selection", preset.ChannelID)
+		}
+		channelPresets[preset.ChannelID] = preset
+	}
+	for _, channel := range definition.Channels {
+		if !slices.Contains(channel.AuthMethodIDs, input.AuthMethodID) {
+			continue
+		}
+		preset, exists := channelPresets[channel.ID]
+		if !exists {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition channel %q has no onboarding endpoint preset", channel.ID)
+		}
+		endpointID, errEndpointID := generateID("ep_")
+		if errEndpointID != nil {
+			return providerconfig.SystemOnboarding{}, errEndpointID
+		}
+		bindingID, errBindingID := generateID("bind_")
+		if errBindingID != nil {
+			return providerconfig.SystemOnboarding{}, errBindingID
+		}
+		onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: channel.ID, BaseURL: preset.BaseURL, Region: preset.Region, Status: providerconfig.EndpointReady, Revision: 1})
+		onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: channel.ID, EndpointID: endpointID, CredentialID: credentialID, Priority: channel.Priority, Enabled: true, Revision: 1})
+	}
+	return onboarding, nil
+}
 
 var (
 	// ErrConfigurationIncomplete reports an instance that cannot enter ready state.
@@ -37,6 +187,9 @@ type Service struct {
 	// secrets persists opaque credential bytes outside business storage.
 	// secrets 在业务存储之外持久化不透明凭据字节。
 	secrets secret.Store
+	// catalogs persists instance-isolated system model metadata created during onboarding.
+	// catalogs 持久化录入期间创建的实例隔离系统模型元数据。
+	catalogs catalog.Store
 	// now returns the authoritative lifecycle timestamp.
 	// now 返回权威生命周期时间戳。
 	now func() time.Time
@@ -44,11 +197,11 @@ type Service struct {
 
 // NewService creates one provider configuration application service.
 // NewService 创建一个供应商配置应用服务。
-func NewService(configurations providerconfig.Store, secrets secret.Store) (*Service, error) {
-	if configurations == nil || secrets == nil {
-		return nil, errors.New("provider configuration and secret stores are required")
+func NewService(configurations providerconfig.Store, secrets secret.Store, catalogs catalog.Store) (*Service, error) {
+	if configurations == nil || secrets == nil || catalogs == nil {
+		return nil, errors.New("provider configuration, secret, and catalog stores are required")
 	}
-	return &Service{configurations: configurations, secrets: secrets, now: time.Now}, nil
+	return &Service{configurations: configurations, secrets: secrets, catalogs: catalogs, now: time.Now}, nil
 }
 
 // CreateCustomDefinitionInput contains the editable portion of one generic custom provider.
@@ -394,6 +547,12 @@ type AddCredentialInput struct {
 // AddCredential stores a secret first and compensates it if metadata persistence fails.
 // AddCredential 先保存 Secret，并在元数据持久化失败时进行补偿删除。
 func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (providerconfig.Credential, error) {
+	if errAuth := s.validateDirectSecretAuthMethod(ctx, input.ProviderInstanceID, input.AuthMethodID); errAuth != nil {
+		return providerconfig.Credential{}, errAuth
+	}
+	if len(input.Secret) == 0 {
+		return providerconfig.Credential{}, fmt.Errorf("provider credential secret is required")
+	}
 	credentialID := input.ID
 	if credentialID == "" {
 		generatedID, errID := generateID("cred_")
@@ -492,6 +651,12 @@ func (s *Service) RotateCredentialSecret(ctx context.Context, input RotateCreden
 	if errCredential != nil {
 		return providerconfig.Credential{}, errCredential
 	}
+	if errAuth := s.validateDirectSecretAuthMethod(ctx, input.ProviderInstanceID, credential.AuthMethodID); errAuth != nil {
+		return providerconfig.Credential{}, errAuth
+	}
+	if len(input.Secret) == 0 {
+		return providerconfig.Credential{}, fmt.Errorf("replacement provider credential secret is required")
+	}
 	// replacementReference is written first so the existing credential remains usable if protection fails.
 	// replacementReference 先写入，因此保护失败时既有凭据仍可用。
 	replacementReference, errPut := s.secrets.Put(ctx, input.Secret)
@@ -512,6 +677,27 @@ func (s *Service) RotateCredentialSecret(ctx context.Context, input RotateCreden
 		return providerconfig.Credential{}, fmt.Errorf("persisted rotated credential but could not delete previous secret: %w", errDelete)
 	}
 	return credential, nil
+}
+
+// validateDirectSecretAuthMethod permits operator-supplied bytes only for non-interactive authentication methods declared by the exact instance definition.
+// validateDirectSecretAuthMethod 仅允许精确实例定义声明的非交互认证方式接收操作员提供的字节。
+func (s *Service) validateDirectSecretAuthMethod(ctx context.Context, instanceID string, authMethodID string) error {
+	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	authMethod, exists := definition.AuthMethod(authMethodID)
+	if !exists {
+		return fmt.Errorf("provider credential requires an exact definition-owned authentication method")
+	}
+	if authMethod.Type == providerconfig.AuthMethodDeviceFlow || authMethod.Type == providerconfig.AuthMethodOAuth {
+		return fmt.Errorf("interactive provider credentials require their server-owned authorization workflow")
+	}
+	return nil
 }
 
 // AddBindingInput contains one endpoint-to-credential access relationship.

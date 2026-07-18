@@ -47,6 +47,18 @@ func TestDecodeResponseMapsContentToolsUsageAndSynthesis(t *testing.T) {
 	assertMonotonicEvents(t, events)
 }
 
+// TestDecodeResponsePreservesCompatibleReasoningContent verifies terminal reasoning is a distinct canonical item before tool replay.
+// TestDecodeResponsePreservesCompatibleReasoningContent 验证终态推理在工具回放前成为独立规范项目。
+func TestDecodeResponsePreservesCompatibleReasoningContent(t *testing.T) {
+	response, _, _, errDecode := DecodeResponse("resp_reasoning_content", Response{Choices: []Choice{{Index: 0, Message: &AssistantMessage{ReasoningContent: "exact reasoning", ToolCalls: []ToolCall{{ID: "upstream-call", Type: "function", Function: FunctionCall{Name: "lookup", Arguments: `{}`}}}}, FinishReason: "tool_calls"}}}, time.Unix(41, 0))
+	if errDecode != nil {
+		t.Fatalf("DecodeResponse() error = %v", errDecode)
+	}
+	if len(response.Items) != 2 || response.Items[0].Kind != vcp.ContextReasoning || response.Items[0].Content[0].Text != "exact reasoning" || response.Items[1].Kind != vcp.ContextToolCall {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 // TestDecodeResponseMapsRefusalAndErrors verifies refusal and structured failure paths.
 // TestDecodeResponseMapsRefusalAndErrors 校验拒绝和结构化失败路径。
 func TestDecodeResponseMapsRefusalAndErrors(t *testing.T) {

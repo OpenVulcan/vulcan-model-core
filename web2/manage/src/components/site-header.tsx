@@ -1,11 +1,19 @@
 import { LanguageToggle } from "@/components/language-toggle"
 import { Separator } from "@/components/ui/separator"
 import { SidebarTrigger } from "@/components/ui/sidebar"
-import { useI18n } from "@/i18n"
+import { type TranslationKey, useI18n } from "@/i18n"
+
+// SiteHeaderProps identifies the localized title owned by the active authenticated page.
+// SiteHeaderProps 标识当前已认证页面拥有的本地化标题。
+interface SiteHeaderProps {
+  // titleKey selects one exact authored page title.
+  // titleKey 选择一个精确的已编写页面标题。
+  titleKey?: TranslationKey
+}
 
 // SiteHeader renders the dashboard-01 header for the router overview workspace.
 // SiteHeader 为 Router 概览工作区渲染 dashboard-01 页头。
-export function SiteHeader() {
+export function SiteHeader({ titleKey = "dashboard.overview" }: SiteHeaderProps) {
   const { t } = useI18n()
   return (
     <header className="flex h-(--header-height) shrink-0 items-center gap-2 border-b transition-[width,height] ease-linear group-has-data-[collapsible=icon]/sidebar-wrapper:h-(--header-height)">
@@ -15,7 +23,7 @@ export function SiteHeader() {
           orientation="vertical"
           className="mx-2 h-4 data-vertical:self-auto"
         />
-        <h1 className="text-base font-medium">{t("dashboard.overview")}</h1>
+        <h1 className="text-base font-medium">{t(titleKey)}</h1>
         <LanguageToggle className="ml-auto" />
       </div>
     </header>

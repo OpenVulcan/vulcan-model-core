@@ -6,8 +6,12 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/antigravity"
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/interactions"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/codex"
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	xairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/xai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -53,6 +57,42 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			ID:                 aistudio.ProfileID,
 			Version:            "1",
 			DisplayName:        "Google AI Studio GenerateContent",
+			UserConfigurable:   true,
+			RuntimeReady:       true,
+			ModelDiscovery:     providerconfig.SupportUnsupported,
+			AllowedAuthMethods: genericCustomAuthMethods(),
+		},
+		{
+			ID:                 messages.ProfileID,
+			Version:            "1",
+			DisplayName:        "Anthropic Messages",
+			UserConfigurable:   true,
+			RuntimeReady:       true,
+			ModelDiscovery:     providerconfig.SupportUnsupported,
+			AllowedAuthMethods: genericCustomAuthMethods(),
+		},
+		{
+			ID:                 codex.ProfileID,
+			Version:            "1",
+			DisplayName:        "OpenAI Codex",
+			UserConfigurable:   true,
+			RuntimeReady:       true,
+			ModelDiscovery:     providerconfig.SupportUnsupported,
+			AllowedAuthMethods: genericCustomAuthMethods(),
+		},
+		{
+			ID:                 interactions.ProfileID,
+			Version:            "1",
+			DisplayName:        "Google Interactions",
+			UserConfigurable:   true,
+			RuntimeReady:       true,
+			ModelDiscovery:     providerconfig.SupportUnsupported,
+			AllowedAuthMethods: genericCustomAuthMethods(),
+		},
+		{
+			ID:                 antigravity.ProfileID,
+			Version:            "1",
+			DisplayName:        "Google Antigravity",
 			UserConfigurable:   true,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,

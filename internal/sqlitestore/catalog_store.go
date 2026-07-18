@@ -61,6 +61,26 @@ func (s *CatalogStore) Save(ctx context.Context, snapshot catalog.Snapshot) erro
 	return nil
 }
 
+// Delete removes one provider catalog snapshot.
+// Delete 删除一个供应商目录快照。
+func (s *CatalogStore) Delete(ctx context.Context, providerInstanceID string) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	result, errExec := s.database.sql.ExecContext(ctx, `DELETE FROM catalog_snapshots WHERE provider_instance_id = ?`, providerInstanceID)
+	if errExec != nil {
+		return fmt.Errorf("delete provider catalog snapshot: %w", errExec)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("read provider catalog delete result: %w", errRows)
+	}
+	if rowsAffected == 0 {
+		return fmt.Errorf("%w: %s", catalog.ErrSnapshotNotFound, providerInstanceID)
+	}
+	return nil
+}
+
 // Get returns one validated mutation-safe provider catalog snapshot.
 // Get 返回一个经过校验且防止外部修改的供应商目录快照。
 func (s *CatalogStore) Get(ctx context.Context, providerInstanceID string) (catalog.Snapshot, error) {

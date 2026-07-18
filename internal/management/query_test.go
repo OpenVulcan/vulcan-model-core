@@ -6,7 +6,9 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
 // TestQueryServiceRedactsCredentialSecretMetadata verifies every management query view excludes secret references and identity correlation fields.
@@ -31,7 +33,7 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 		t.Fatalf("create endpoint: %v", errEndpoint)
 	}
 	credential, errCredential := commands.AddCredential(ctx, AddCredentialInput{
-		ID: "cred_query_redaction", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "Safe Label",
+		ID: "cred_query_redaction", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Safe Label",
 		PrincipalKey: "sensitive-principal", Fingerprint: "sensitive-fingerprint", Secret: []byte("sensitive-secret"),
 	})
 	if errCredential != nil {
@@ -74,5 +76,43 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 	bindingViews, errBindings := queries.ListBindings(ctx, instance.ID)
 	if errBindings != nil || len(bindingViews) != 1 || bindingViews[0].CredentialID != credential.ID {
 		t.Fatalf("binding views = %+v, error = %v", bindingViews, errBindings)
+	}
+}
+
+// TestListProviderGroupsReturnsExactKimiVariants verifies grouped discovery preserves definition boundaries and stable ordering.
+// TestListProviderGroupsReturnsExactKimiVariants 验证分组发现保留定义边界和稳定排序。
+func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProfiles := bootstrap.RegisterProtocolProfiles(protocols); errProfiles != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProfiles)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	configurations, errConfigurations := providerconfig.NewMemoryStore(protocols, systems)
+	if errConfigurations != nil {
+		t.Fatalf("NewMemoryStore() error = %v", errConfigurations)
+	}
+	queries, errQueries := NewQueryService(configurations, catalog.NewMemoryStore())
+	if errQueries != nil {
+		t.Fatalf("NewQueryService() error = %v", errQueries)
+	}
+	groups, errGroups := queries.ListProviderGroups(context.Background())
+	if errGroups != nil {
+		t.Fatalf("ListProviderGroups() error = %v", errGroups)
+	}
+	if len(groups) != 1 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 {
+		t.Fatalf("groups = %#v", groups)
+	}
+	variants := groups[0].ProviderDefinitions
+	if variants[0].VariantName != "CN" || variants[1].VariantName != "Global" || variants[2].VariantName != "Coding Plan" {
+		t.Fatalf("variants = %#v", variants)
+	}
+	if variants[0].ModelCatalogID != variants[1].ModelCatalogID || variants[2].ModelCatalogID == variants[0].ModelCatalogID {
+		t.Fatalf("catalog ownership = %#v", variants)
 	}
 }

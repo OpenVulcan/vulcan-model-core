@@ -51,6 +51,23 @@ func DecodeResponse(responseID string, upstream Response, now time.Time) (vcp.Re
 			report.ConversionSummary = append(report.ConversionSummary, "openai_chat.choice.message_missing")
 			continue
 		}
+		if choice.Message.ReasoningContent != "" {
+			itemID := vcp.DeriveID("itm", responseID, "reasoning", fmt.Sprint(choice.Index))
+			item := vcp.OutputItem{ItemID: itemID, Kind: vcp.ContextReasoning, Status: vcp.OutputItemInProgress}
+			started := emitter.itemEvent(vcp.EventItemStarted, itemID)
+			started.Item = &item
+			if errStarted := appendEvent(started); errStarted != nil {
+				return vcp.Response{}, nil, report, errStarted
+			}
+			delta := emitter.itemEvent(vcp.EventContentDelta, itemID)
+			delta.Delta = choice.Message.ReasoningContent
+			if errDelta := appendEvent(delta); errDelta != nil {
+				return vcp.Response{}, nil, report, errDelta
+			}
+			if errDone := appendEvent(emitter.itemEvent(vcp.EventItemCompleted, itemID)); errDone != nil {
+				return vcp.Response{}, nil, report, errDone
+			}
+		}
 		if choice.Message.Content != "" {
 			itemID := vcp.DeriveID("itm", responseID, "message", fmt.Sprint(choice.Index))
 			item := vcp.OutputItem{ItemID: itemID, Kind: vcp.ContextMessage, Status: vcp.OutputItemInProgress}

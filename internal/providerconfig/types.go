@@ -204,6 +204,29 @@ type ProtocolProfile struct {
 	AllowedAuthMethods []AuthMethodType
 }
 
+// ProviderGroup describes one code-owned management catalog group that contains related system provider variants.
+// ProviderGroup 描述一个由代码拥有的管理目录分组，其中包含相关的系统供应商变体。
+type ProviderGroup struct {
+	// ID is the immutable group identifier used only by management discovery.
+	// ID 是仅供管理发现使用的不可变分组标识。
+	ID string
+	// DisplayName is the locale-neutral brand name shown by management clients.
+	// DisplayName 是管理客户端显示的与区域设置无关的品牌名称。
+	DisplayName string
+	// Description explains the shared provider brand without selecting an execution target.
+	// Description 说明共享供应商品牌，但不选择执行目标。
+	Description string
+	// DescriptionKey identifies authored client localization without making locale part of provider identity.
+	// DescriptionKey 标识客户端编写的本地化文本且不让区域设置成为供应商身份的一部分。
+	DescriptionKey string
+	// SortOrder is the stable management catalog ordering value.
+	// SortOrder 是稳定的管理目录排序值。
+	SortOrder int
+	// Revision is the immutable group metadata revision.
+	// Revision 是不可变的分组元数据修订号。
+	Revision uint64
+}
+
 // ProviderFeatureSet describes optional system-provider management capabilities.
 // ProviderFeatureSet 描述系统供应商可选的管理能力。
 type ProviderFeatureSet struct {
@@ -236,6 +259,26 @@ type AuthMethodDefinition struct {
 	// MultipleCredentials reports whether one instance may store multiple credentials of this method.
 	// MultipleCredentials 表示一个实例是否可以存储该认证方式的多个凭据。
 	MultipleCredentials bool
+}
+
+// EndpointPreset describes one code-owned default network destination offered during system-provider onboarding.
+// EndpointPreset 描述系统供应商录入期间提供的一个由代码拥有的默认网络目标。
+type EndpointPreset struct {
+	// ID is stable within one provider definition.
+	// ID 在一个供应商定义内保持稳定。
+	ID string
+	// ChannelID identifies the exact provider channel served by this preset.
+	// ChannelID 标识该预设服务的精确供应商通道。
+	ChannelID string
+	// BaseURL is the default absolute upstream base URL.
+	// BaseURL 是默认的上游绝对基础 URL。
+	BaseURL string
+	// Region is the locale-neutral site or region label shown during onboarding.
+	// Region 是录入期间显示的与区域设置无关的站点或区域标签。
+	Region string
+	// UserEditable reports whether management clients may replace this default address.
+	// UserEditable 表示管理客户端是否可以替换该默认地址。
+	UserEditable bool
 }
 
 // ProviderChannel defines one complete upstream access path owned by a provider.
@@ -273,6 +316,24 @@ type ProviderDefinition struct {
 	// DisplayName is the management-facing provider name.
 	// DisplayName 是管理界面显示的供应商名称。
 	DisplayName string
+	// GroupID references optional code-owned management grouping metadata.
+	// GroupID 引用可选的代码拥有管理分组元数据。
+	GroupID string
+	// VariantName is the concise locale-neutral label shown inside the owning group.
+	// VariantName 是在所属分组内显示的简洁且与区域设置无关的标签。
+	VariantName string
+	// VariantDescription explains the site, product, or commercial boundary of this definition.
+	// VariantDescription 说明此定义的站点、产品或商业边界。
+	VariantDescription string
+	// VariantDescriptionKey identifies authored client localization for this exact variant.
+	// VariantDescriptionKey 标识此精确变体的客户端编写本地化文本。
+	VariantDescriptionKey string
+	// ModelCatalogID identifies reusable code-owned model metadata shared by compatible definitions.
+	// ModelCatalogID 标识可由兼容定义共享的代码拥有模型元数据。
+	ModelCatalogID string
+	// SortOrder is the stable ordering of this variant inside its management group.
+	// SortOrder 是此变体在管理分组内的稳定排序值。
+	SortOrder int
 	// DriverID identifies the trusted driver used by system definitions.
 	// DriverID 标识系统定义使用的受信任 Driver。
 	DriverID string
@@ -285,6 +346,9 @@ type ProviderDefinition struct {
 	// Channels lists complete provider access paths.
 	// Channels 列出完整的供应商接入路径。
 	Channels []ProviderChannel
+	// EndpointPresets lists code-owned onboarding destinations without changing runtime endpoint ownership.
+	// EndpointPresets 列出代码拥有的录入目标，且不改变运行时端点归属。
+	EndpointPresets []EndpointPreset
 	// AuthMethods lists authentication methods declared by the provider.
 	// AuthMethods 列出供应商声明的认证方式。
 	AuthMethods []AuthMethodDefinition
@@ -442,4 +506,21 @@ type AccessBinding struct {
 	// Revision is the latest persisted binding revision.
 	// Revision 是最新持久化绑定修订号。
 	Revision uint64
+}
+
+// SystemOnboarding contains one complete new system-provider configuration committed as one unit.
+// SystemOnboarding 包含作为一个单元提交的完整新系统供应商配置。
+type SystemOnboarding struct {
+	// Instance is the exact new provider instance owned by one system definition.
+	// Instance 是由一个系统定义拥有的精确新供应商实例。
+	Instance ProviderInstance
+	// Endpoints contains every code-owned endpoint required by the selected definition.
+	// Endpoints 包含所选定义要求的全部代码拥有端点。
+	Endpoints []Endpoint
+	// Credential contains the protected-secret reference and safe account metadata.
+	// Credential 包含受保护秘密引用和安全账号元数据。
+	Credential Credential
+	// Bindings closes every selected channel path between the credential and its endpoint.
+	// Bindings 在凭据与其端点之间闭合每条所选通道路由。
+	Bindings []AccessBinding
 }

@@ -42,9 +42,30 @@ type ProviderDefinitionView struct {
 	// DisplayName is the management-facing provider name.
 	// DisplayName 是管理界面显示的供应商名称。
 	DisplayName string `json:"display_name"`
+	// GroupID identifies optional management-only brand grouping.
+	// GroupID 标识可选且仅供管理使用的品牌分组。
+	GroupID string `json:"group_id,omitempty"`
+	// VariantName is the concise locale-neutral label within the group.
+	// VariantName 是分组内简洁且与区域设置无关的标签。
+	VariantName string `json:"variant_name,omitempty"`
+	// VariantDescription explains the exact site or product boundary.
+	// VariantDescription 说明精确的站点或产品边界。
+	VariantDescription string `json:"variant_description,omitempty"`
+	// VariantDescriptionKey identifies authored client localization for this variant.
+	// VariantDescriptionKey 标识此变体的客户端编写本地化文本。
+	VariantDescriptionKey string `json:"variant_description_key,omitempty"`
+	// ModelCatalogID identifies shared code-owned model metadata.
+	// ModelCatalogID 标识共享的代码拥有模型元数据。
+	ModelCatalogID string `json:"model_catalog_id,omitempty"`
+	// SortOrder is the stable ordering inside the provider group.
+	// SortOrder 是供应商分组内的稳定排序值。
+	SortOrder int `json:"sort_order"`
 	// Channels contains executable protocol metadata without adapter internals.
 	// Channels 包含不暴露 Adapter 内部信息的可执行协议元数据。
 	Channels []ChannelView `json:"channels"`
+	// EndpointPresets contains safe code-owned onboarding destinations.
+	// EndpointPresets 包含安全的代码拥有录入目标。
+	EndpointPresets []EndpointPresetView `json:"endpoint_presets"`
 	// AuthMethods contains supported credential acquisition shapes.
 	// AuthMethods 包含支持的凭据获取形态。
 	AuthMethods []AuthMethodView `json:"auth_methods"`
@@ -54,6 +75,52 @@ type ProviderDefinitionView struct {
 	// Revision is the immutable definition revision.
 	// Revision 是不可变定义修订号。
 	Revision uint64 `json:"revision"`
+}
+
+// ProviderGroupView contains one management group and its selectable system provider definitions.
+// ProviderGroupView 包含一个管理分组及其可选择的系统供应商定义。
+type ProviderGroupView struct {
+	// ID is the immutable management-only group identifier.
+	// ID 是不可变且仅供管理使用的分组标识。
+	ID string `json:"id"`
+	// DisplayName is the locale-neutral provider brand name.
+	// DisplayName 是与区域设置无关的供应商品牌名称。
+	DisplayName string `json:"display_name"`
+	// Description explains the shared brand represented by this group.
+	// Description 说明此分组代表的共享品牌。
+	Description string `json:"description"`
+	// DescriptionKey identifies authored client localization for this group.
+	// DescriptionKey 标识此分组的客户端编写本地化文本。
+	DescriptionKey string `json:"description_key,omitempty"`
+	// SortOrder is the stable management catalog ordering value.
+	// SortOrder 是稳定的管理目录排序值。
+	SortOrder int `json:"sort_order"`
+	// ProviderDefinitions contains exact selectable execution definitions in this group.
+	// ProviderDefinitions 包含此分组内可精确选择的执行定义。
+	ProviderDefinitions []ProviderDefinitionView `json:"provider_definitions"`
+	// Revision is the immutable group metadata revision.
+	// Revision 是不可变的分组元数据修订号。
+	Revision uint64 `json:"revision"`
+}
+
+// EndpointPresetView exposes one safe default destination during provider onboarding.
+// EndpointPresetView 在供应商录入期间暴露一个安全的默认目标。
+type EndpointPresetView struct {
+	// ID is stable within one provider definition.
+	// ID 在一个供应商定义内保持稳定。
+	ID string `json:"id"`
+	// ChannelID identifies the exact channel served by the preset.
+	// ChannelID 标识该预设服务的精确通道。
+	ChannelID string `json:"channel_id"`
+	// BaseURL is the default absolute upstream address.
+	// BaseURL 是默认的上游绝对地址。
+	BaseURL string `json:"base_url"`
+	// Region is the locale-neutral site label.
+	// Region 是与区域设置无关的站点标签。
+	Region string `json:"region"`
+	// UserEditable reports whether management clients may replace the address.
+	// UserEditable 表示管理客户端是否可以替换该地址。
+	UserEditable bool `json:"user_editable"`
 }
 
 // ChannelView describes one provider channel without implementation details.
@@ -488,6 +555,48 @@ func (q *QueryService) ListDefinitions(ctx context.Context) ([]ProviderDefinitio
 	return views, nil
 }
 
+// ListProviderGroups returns code-owned provider groups with their exact selectable definitions.
+// ListProviderGroups 返回代码拥有的供应商分组及其精确可选择定义。
+func (q *QueryService) ListProviderGroups(ctx context.Context) ([]ProviderGroupView, error) {
+	groups, errGroups := q.configurations.ListProviderGroups(ctx)
+	if errGroups != nil {
+		return nil, errGroups
+	}
+	definitions, errDefinitions := q.configurations.ListDefinitions(ctx)
+	if errDefinitions != nil {
+		return nil, errDefinitions
+	}
+	// definitionsByGroup owns only system definitions that explicitly reference a registered group.
+	// definitionsByGroup 仅管理显式引用已注册分组的系统定义。
+	definitionsByGroup := make(map[string][]ProviderDefinitionView, len(groups))
+	for _, definition := range definitions {
+		if definition.Kind != providerconfig.DefinitionKindSystem || definition.GroupID == "" {
+			continue
+		}
+		definitionsByGroup[definition.GroupID] = append(definitionsByGroup[definition.GroupID], definitionView(definition))
+	}
+	views := make([]ProviderGroupView, 0, len(groups))
+	for _, group := range groups {
+		groupDefinitions := definitionsByGroup[group.ID]
+		sort.Slice(groupDefinitions, func(left int, right int) bool {
+			if groupDefinitions[left].SortOrder != groupDefinitions[right].SortOrder {
+				return groupDefinitions[left].SortOrder < groupDefinitions[right].SortOrder
+			}
+			return groupDefinitions[left].ID < groupDefinitions[right].ID
+		})
+		views = append(views, ProviderGroupView{
+			ID:                  group.ID,
+			DisplayName:         group.DisplayName,
+			Description:         group.Description,
+			DescriptionKey:      group.DescriptionKey,
+			SortOrder:           group.SortOrder,
+			ProviderDefinitions: groupDefinitions,
+			Revision:            group.Revision,
+		})
+	}
+	return views, nil
+}
+
 // ListInstances returns client-safe aggregate views for all provider instances.
 // ListInstances 返回全部供应商实例的客户端安全聚合视图。
 func (q *QueryService) ListInstances(ctx context.Context) ([]ProviderInstanceView, error) {
@@ -644,12 +753,29 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 			MultipleCredentials: authMethod.MultipleCredentials,
 		})
 	}
+	endpointPresets := make([]EndpointPresetView, 0, len(definition.EndpointPresets))
+	for _, preset := range definition.EndpointPresets {
+		endpointPresets = append(endpointPresets, EndpointPresetView{
+			ID:           preset.ID,
+			ChannelID:    preset.ChannelID,
+			BaseURL:      preset.BaseURL,
+			Region:       preset.Region,
+			UserEditable: preset.UserEditable,
+		})
+	}
 	return ProviderDefinitionView{
-		ID:          definition.ID,
-		Kind:        definition.Kind,
-		DisplayName: definition.DisplayName,
-		Channels:    channels,
-		AuthMethods: authMethods,
+		ID:                    definition.ID,
+		Kind:                  definition.Kind,
+		DisplayName:           definition.DisplayName,
+		GroupID:               definition.GroupID,
+		VariantName:           definition.VariantName,
+		VariantDescription:    definition.VariantDescription,
+		VariantDescriptionKey: definition.VariantDescriptionKey,
+		ModelCatalogID:        definition.ModelCatalogID,
+		SortOrder:             definition.SortOrder,
+		Channels:              channels,
+		EndpointPresets:       endpointPresets,
+		AuthMethods:           authMethods,
 		Features: FeatureView{
 			ModelDiscovery:    definition.Features.ModelDiscovery,
 			PlanReader:        definition.Features.PlanReader,

@@ -273,6 +273,48 @@ func TestProjectRequestOmitsHistoricalReasoning(t *testing.T) {
 	}
 }
 
+// TestProjectRequestReplaysVerifiedReasoningContentForToolCalls verifies compatible profiles preserve exact reasoning across tool turns.
+// TestProjectRequestReplaysVerifiedReasoningContentForToolCalls 验证兼容 Profile 在工具续轮中保留精确推理内容。
+func TestProjectRequestReplaysVerifiedReasoningContentForToolCalls(t *testing.T) {
+	request := chatTestRequest()
+	request.Context = append(request.Context,
+		vcp.ContextItem{
+			ItemID: "reasoning", Sequence: 2, Kind: vcp.ContextReasoning, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			Content: []vcp.ContentBlock{{Type: vcp.ContentText, Text: "exact provider reasoning"}}, Reasoning: &vcp.ReasoningItem{},
+		},
+		vcp.ContextItem{
+			ItemID: "tool-call", Sequence: 3, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			ToolCall: &vcp.ToolCallItem{ToolCallID: "call", UpstreamID: "upstream-call", Name: "lookup", Arguments: `{}`, Status: vcp.ToolCallCompleted},
+		},
+	)
+	projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{Reasoning: true, ReasoningContent: true}, "lin_reasoning_content", time.Unix(39, 0))
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if len(projected.Upstream.Messages) != 3 || projected.Upstream.Messages[1].ReasoningContent != "exact provider reasoning" || projected.Upstream.Messages[2].ReasoningContent != "exact provider reasoning" {
+		t.Fatalf("messages = %#v", projected.Upstream.Messages)
+	}
+	if mode, exists := projected.CapabilityPlan.Decision(vcp.FeatureReasoning); !exists || mode != vcp.CapabilityNative {
+		t.Fatalf("reasoning capability mode = %q, exists = %t", mode, exists)
+	}
+}
+
+// TestProjectRequestRejectsReasoningContentToolReplayWithoutReasoning verifies compatible profiles never fabricate missing provider reasoning.
+// TestProjectRequestRejectsReasoningContentToolReplayWithoutReasoning 验证兼容 Profile 绝不伪造缺失的供应商推理。
+func TestProjectRequestRejectsReasoningContentToolReplayWithoutReasoning(t *testing.T) {
+	request := chatTestRequest()
+	request.Context = append(request.Context, vcp.ContextItem{
+		ItemID: "tool-call", Sequence: 2, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+		Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+		ToolCall: &vcp.ToolCallItem{ToolCallID: "call", UpstreamID: "upstream-call", Name: "lookup", Arguments: `{}`, Status: vcp.ToolCallCompleted},
+	})
+	if _, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{ReasoningContent: true}, "lin_missing_reasoning_content", time.Unix(40, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+	}
+}
+
 // TestProjectRequestOmitsNonModelVisibility verifies client and audit-only context never reaches the Chat wire request.
 // TestProjectRequestOmitsNonModelVisibility 验证客户端和仅审计上下文永远不会进入 Chat wire 请求。
 func TestProjectRequestOmitsNonModelVisibility(t *testing.T) {

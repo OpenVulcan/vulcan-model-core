@@ -28,6 +28,9 @@ type ProviderCatalog interface {
 // ManagementQuery exposes client-safe configuration, catalog, and management-detail views.
 // ManagementQuery 暴露客户端安全的配置、目录和管理详情视图。
 type ManagementQuery interface {
+	// ListProviderGroups returns management-only system provider groups and exact selectable definitions.
+	// ListProviderGroups 返回仅供管理使用的系统供应商分组及精确可选定义。
+	ListProviderGroups(context.Context) ([]management.ProviderGroupView, error)
 	// ListDefinitions returns visible system and custom provider definitions.
 	// ListDefinitions 返回可见系统与自定义供应商定义。
 	ListDefinitions(context.Context) ([]management.ProviderDefinitionView, error)
@@ -109,10 +112,12 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		// management routes are protected exclusively by the management credential namespace.
 		// management 路由仅受管理凭据命名空间保护。
 		mux.Handle("GET /vulcan/manage/protocol-profiles", server.requireManagement(http.HandlerFunc(server.handleProtocolProfiles)))
+		mux.Handle("GET /vulcan/manage/provider-groups", server.requireManagement(http.HandlerFunc(server.handleProviderGroups)))
 		mux.Handle("GET /vulcan/manage/provider-definitions", server.requireManagement(http.HandlerFunc(server.handleProviderDefinitions)))
 		mux.Handle("POST /vulcan/manage/provider-definitions", server.requireManagement(http.HandlerFunc(server.handleCreateCustomDefinition)))
 		mux.Handle("PUT /vulcan/manage/provider-definitions/{provider_definition_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateCustomDefinition)))
 		mux.Handle("GET /vulcan/manage/provider-instances", server.requireManagement(http.HandlerFunc(server.handleProviderInstances)))
+		mux.Handle("POST /vulcan/manage/provider-instances/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardSystemProvider)))
 		mux.Handle("POST /vulcan/manage/provider-instances", server.requireManagement(http.HandlerFunc(server.handleCreateInstance)))
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleProviderInstance)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateInstance)))
@@ -132,6 +137,14 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleBindings)))
 		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleCreateBinding)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/bindings/{binding_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateBinding)))
+		if control.KimiDeviceFlows != nil {
+			mux.Handle("POST /vulcan/manage/kimi/device-flows", server.requireManagement(http.HandlerFunc(server.handleStartKimiDeviceFlow)))
+			mux.Handle("POST /vulcan/manage/kimi/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardKimiDeviceFlow)))
+			mux.Handle("DELETE /vulcan/manage/kimi/device-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelKimiDeviceFlow)))
+		}
+		if control.KimiTokens != nil {
+			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshKimiCredential)))
+		}
 		mux.Handle("GET /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleAPIKeys)))
 		mux.Handle("POST /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleCreateAPIKey)))
 		mux.Handle("PUT /vulcan/manage/api-keys/{api_key_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateAPIKey)))

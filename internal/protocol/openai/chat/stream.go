@@ -142,6 +142,11 @@ func (d *StreamDecoder) Push(chunk Chunk) ([]vcp.Event, error) {
 	for choiceIndex := range chunk.Choices {
 		choice := chunk.Choices[choiceIndex]
 		if choice.Delta != nil {
+			if choice.Delta.ReasoningContent != "" {
+				if errReasoning := d.emitText(choice.Index, vcp.ContextReasoning, choice.Delta.ReasoningContent, &newEvents); errReasoning != nil {
+					return nil, errReasoning
+				}
+			}
 			if choice.Delta.Content != "" {
 				if errText := d.emitText(choice.Index, vcp.ContextMessage, choice.Delta.Content, &newEvents); errText != nil {
 					return nil, errText
@@ -493,6 +498,13 @@ func (d *StreamDecoder) finishChoice(choice Choice, output *[]vcp.Event) error {
 func (d *StreamDecoder) hydrateTerminalOnlyFields(choice Choice, output *[]vcp.Event) error {
 	if choice.Message == nil {
 		return nil
+	}
+	if choice.Message.ReasoningContent != "" {
+		if _, reasoningExists := d.texts[textKey(choice.Index, vcp.ContextReasoning)]; !reasoningExists {
+			if errReasoning := d.emitText(choice.Index, vcp.ContextReasoning, choice.Message.ReasoningContent, output); errReasoning != nil {
+				return errReasoning
+			}
+		}
 	}
 	if choice.Message.Content != "" {
 		if _, textExists := d.texts[textKey(choice.Index, vcp.ContextMessage)]; !textExists {

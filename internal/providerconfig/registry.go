@@ -90,6 +90,9 @@ type SystemRegistry struct {
 	// protocols resolves protocol profiles referenced by system definitions.
 	// protocols 解析系统定义引用的协议 Profile。
 	protocols *ProtocolRegistry
+	// groups stores management-only system provider groups by stable identifier.
+	// groups 按稳定标识存储仅供管理使用的系统供应商分组。
+	groups map[string]ProviderGroup
 	// definitions stores system definitions by stable identifier.
 	// definitions 按稳定标识存储系统定义。
 	definitions map[string]ProviderDefinition
@@ -103,8 +106,48 @@ func NewSystemRegistry(protocols *ProtocolRegistry) (*SystemRegistry, error) {
 	}
 	return &SystemRegistry{
 		protocols:   protocols,
+		groups:      make(map[string]ProviderGroup),
 		definitions: make(map[string]ProviderDefinition),
 	}, nil
+}
+
+// RegisterGroup adds one immutable management-only system provider group.
+// RegisterGroup 添加一个不可变且仅供管理使用的系统供应商分组。
+func (r *SystemRegistry) RegisterGroup(group ProviderGroup) error {
+	if r == nil {
+		return errors.New("system provider registry is nil")
+	}
+	if err := group.Validate(); err != nil {
+		return err
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if _, exists := r.groups[group.ID]; exists {
+		return fmt.Errorf("%w: system provider group %s", ErrAlreadyRegistered, group.ID)
+	}
+	r.groups[group.ID] = group
+	return nil
+}
+
+// ListGroups returns a stable management ordering of code-owned provider groups.
+// ListGroups 返回代码拥有供应商分组的稳定管理排序。
+func (r *SystemRegistry) ListGroups() []ProviderGroup {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	groups := make([]ProviderGroup, 0, len(r.groups))
+	for _, group := range r.groups {
+		groups = append(groups, group)
+	}
+	sort.Slice(groups, func(left int, right int) bool {
+		if groups[left].SortOrder != groups[right].SortOrder {
+			return groups[left].SortOrder < groups[right].SortOrder
+		}
+		return groups[left].ID < groups[right].ID
+	})
+	return groups
 }
 
 // Register adds one code-owned system provider definition.
@@ -124,12 +167,17 @@ func (r *SystemRegistry) Register(definition ProviderDefinition) error {
 		if !exists {
 			return invalid("system provider channel %q references unknown protocol profile %q", channel.ID, channel.ProtocolProfileID)
 		}
-		if !profile.RuntimeReady || !channel.RuntimeReady {
-			return invalid("system provider channel %q is not runtime ready", channel.ID)
+		if !profile.RuntimeReady {
+			return invalid("system provider channel %q references a protocol profile that is not runtime ready", channel.ID)
 		}
 	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
+	if definition.GroupID != "" {
+		if _, exists := r.groups[definition.GroupID]; !exists {
+			return invalid("system provider definition %q references unknown provider group %q", definition.ID, definition.GroupID)
+		}
+	}
 	if _, exists := r.definitions[definition.ID]; exists {
 		return fmt.Errorf("%w: system provider definition %s", ErrAlreadyRegistered, definition.ID)
 	}
@@ -220,5 +268,6 @@ func cloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
 		definition.Channels[index].AuthMethodIDs = append([]string(nil), definition.Channels[index].AuthMethodIDs...)
 	}
 	definition.AuthMethods = append([]AuthMethodDefinition(nil), definition.AuthMethods...)
+	definition.EndpointPresets = append([]EndpointPreset(nil), definition.EndpointPresets...)
 	return definition
 }

@@ -222,10 +222,10 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 		ID: "system_kimi_coding_plan", Kind: providerconfig.DefinitionKindSystem, DisplayName: "Kimi Coding Plan",
 		DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ConfigSchemaVersion: "1",
 		Channels: []providerconfig.ProviderChannel{{
-			ID: "anthropic", ProtocolProfileID: "anthropic.messages.v1", EndpointProfileID: "kimi", AuthMethodIDs: []string{"oauth"}, RuntimeReady: true,
+			ID: "anthropic", ProtocolProfileID: "anthropic.messages.v1", EndpointProfileID: "kimi", AuthMethodIDs: []string{"bearer"}, RuntimeReady: true,
 		}},
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
-			ID: "oauth", Type: providerconfig.AuthMethodOAuth, Refreshable: true, MultipleCredentials: true,
+			ID: "bearer", Type: providerconfig.AuthMethodBearer, MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
 			ModelDiscovery: providerconfig.SupportSupported, PlanReader: providerconfig.SupportSupported,
@@ -244,7 +244,8 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	if errConfigurations != nil {
 		t.Fatalf("create configuration store: %v", errConfigurations)
 	}
-	configurationService, errConfigurationService := management.NewService(configurations, secret.NewMemoryStore())
+	catalogs := catalog.NewMemoryStore()
+	configurationService, errConfigurationService := management.NewService(configurations, secret.NewMemoryStore(), catalogs)
 	if errConfigurationService != nil {
 		t.Fatalf("create configuration service: %v", errConfigurationService)
 	}
@@ -261,8 +262,8 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 		t.Fatalf("add Kimi endpoint: %v", errEndpoint)
 	}
 	credentialInputs := []management.AddCredentialInput{
-		{ID: "cred_kimi_256k", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "256K", PrincipalKey: "account-256k", Fingerprint: "fingerprint-256k", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-256k"}}, Secret: []byte("secret-256k")},
-		{ID: "cred_kimi_1m", ProviderInstanceID: instance.ID, AuthMethodID: "oauth", Label: "1M", PrincipalKey: "account-1m", Fingerprint: "fingerprint-1m", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-1m"}}, Secret: []byte("secret-1m")},
+		{ID: "cred_kimi_256k", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "256K", PrincipalKey: "account-256k", Fingerprint: "fingerprint-256k", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-256k"}}, Secret: []byte("secret-256k")},
+		{ID: "cred_kimi_1m", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "1M", PrincipalKey: "account-1m", Fingerprint: "fingerprint-1m", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-1m"}}, Secret: []byte("secret-1m")},
 	}
 	for index, input := range credentialInputs {
 		credential, errCredential := configurationService.AddCredential(ctx, input)
@@ -279,7 +280,6 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	if _, errActivate := configurationService.ActivateInstance(ctx, instance.ID); errActivate != nil {
 		t.Fatalf("activate Kimi instance: %v", errActivate)
 	}
-	catalogs := catalog.NewMemoryStore()
 	refreshService, errRefreshService := NewService(configurations, catalogs, drivers)
 	if errRefreshService != nil {
 		t.Fatalf("create refresh service: %v", errRefreshService)

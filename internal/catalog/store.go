@@ -19,6 +19,9 @@ type Store interface {
 	// Save creates or replaces one provider snapshot with a newer revision.
 	// Save 使用更高修订号创建或替换一个供应商快照。
 	Save(context.Context, Snapshot) error
+	// Delete removes one provider snapshot and reports ErrSnapshotNotFound when it does not exist.
+	// Delete 删除一个供应商快照，目标不存在时返回 ErrSnapshotNotFound。
+	Delete(context.Context, string) error
 	// Get returns one mutation-safe provider snapshot.
 	// Get 返回一个防止外部修改的供应商快照。
 	Get(context.Context, string) (Snapshot, error)
@@ -59,6 +62,24 @@ func (s *MemoryStore) Save(ctx context.Context, snapshot Snapshot) error {
 		return fmt.Errorf("%w: catalog revision must increase", ErrInvalidCatalog)
 	}
 	s.snapshots[snapshot.ProviderInstanceID] = cloneSnapshot(snapshot)
+	return nil
+}
+
+// Delete removes one provider snapshot atomically.
+// Delete 原子删除一个供应商快照。
+func (s *MemoryStore) Delete(ctx context.Context, providerInstanceID string) error {
+	if ctx == nil {
+		return errors.New("context is required")
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.snapshots[providerInstanceID]; !exists {
+		return fmt.Errorf("%w: %s", ErrSnapshotNotFound, providerInstanceID)
+	}
+	delete(s.snapshots, providerInstanceID)
 	return nil
 }
 

@@ -44,15 +44,34 @@ type ChatDriver struct {
 	// capabilities records the verified protocol behavior selected for this driver instance.
 	// capabilities 记录为此 Driver 实例选定的已验证协议行为。
 	capabilities chatprofile.ProfileCapabilities
+	// allowedAuthMethods is the closed set of credential acquisition types that this Bearer wire adapter may encode.
+	// allowedAuthMethods 是此 Bearer 线路适配器可以编码的封闭凭据获取类型集合。
+	allowedAuthMethods []providerconfig.AuthMethodType
 }
 
 // NewChatDriver creates a driver permanently bound to one provider definition, registered Chat profile, and transport client.
 // NewChatDriver 创建一个永久绑定到一个 Provider Definition、已注册 Chat Profile 与传输客户端的 Driver。
 func NewChatDriver(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities) (*ChatDriver, error) {
+	return NewBearerChatDriver(definitionID, profileID, client, capabilities, []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey})
+}
+
+// NewBearerChatDriver creates a Chat driver with an explicit closed set of Bearer-compatible credential types.
+// NewBearerChatDriver 使用显式封闭的 Bearer 兼容凭据类型集合创建 Chat Driver。
+func NewBearerChatDriver(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType) (*ChatDriver, error) {
 	if strings.TrimSpace(definitionID) == "" || strings.TrimSpace(profileID) == "" || client == nil {
 		return nil, ErrInvalidChatDriver
 	}
-	return &ChatDriver{definitionID: definitionID, profileID: profileID, client: client, capabilities: capabilities}, nil
+	if len(allowedAuthMethods) == 0 {
+		return nil, ErrInvalidChatDriver
+	}
+	for _, authMethod := range allowedAuthMethods {
+		switch authMethod {
+		case providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodBearer, providerconfig.AuthMethodOAuth, providerconfig.AuthMethodDeviceFlow:
+		default:
+			return nil, fmt.Errorf("%w: authentication type %q cannot use a Bearer header", ErrInvalidChatDriver, authMethod)
+		}
+	}
+	return &ChatDriver{definitionID: definitionID, profileID: profileID, client: client, capabilities: capabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...)}, nil
 }
 
 // ProviderDefinitionID returns the exact definition that owns this Chat driver.
@@ -82,7 +101,7 @@ func (d *ChatDriver) Execute(ctx context.Context, execution provider.ExecutionRe
 	if execution.Binding.Target.ProviderDefinitionID != d.definitionID {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: target definition does not belong to this driver", provider.ErrExecutionBinding)
 	}
-	if _, errValidate := execution.ValidateForProfile(d.profileID, providerconfig.AuthMethodAPIKey); errValidate != nil {
+	if _, errValidate := execution.ValidateForProfile(d.profileID, d.allowedAuthMethods...); errValidate != nil {
 		return provider.ExecutionResult{}, errValidate
 	}
 	projected, errProject := chatprofile.ProjectRequest(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, execution.Now)

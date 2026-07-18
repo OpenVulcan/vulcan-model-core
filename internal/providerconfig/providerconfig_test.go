@@ -186,6 +186,49 @@ func TestRegistriesEnforceDefinitionOwnership(t *testing.T) {
 	}
 }
 
+// TestSystemProviderGroupsRemainManagementOnly verifies group ownership, definition references, ordering, and snapshot isolation.
+// TestSystemProviderGroupsRemainManagementOnly 验证分组归属、定义引用、排序和快照隔离。
+func TestSystemProviderGroupsRemainManagementOnly(t *testing.T) {
+	protocols := NewProtocolRegistry()
+	if errProfile := protocols.Register(testProtocolProfile()); errProfile != nil {
+		t.Fatalf("register protocol profile: %v", errProfile)
+	}
+	systems, errSystems := NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("create system registry: %v", errSystems)
+	}
+	groupedDefinition := testSystemDefinition()
+	groupedDefinition.GroupID = "test_group"
+	groupedDefinition.VariantName = "Global"
+	groupedDefinition.ModelCatalogID = "shared_catalog"
+	groupedDefinition.EndpointPresets = []EndpointPreset{{ID: "global", ChannelID: "responses", BaseURL: "https://global.example/v1", Region: "Global"}}
+	if errUnknownGroup := systems.Register(groupedDefinition); errUnknownGroup == nil {
+		t.Fatal("Register() accepted an unknown provider group")
+	}
+	if errGroup := systems.RegisterGroup(ProviderGroup{ID: "test_group", DisplayName: "Test", SortOrder: 20, Revision: 1}); errGroup != nil {
+		t.Fatalf("RegisterGroup() error = %v", errGroup)
+	}
+	if errEarlierGroup := systems.RegisterGroup(ProviderGroup{ID: "earlier_group", DisplayName: "Earlier", SortOrder: 10, Revision: 1}); errEarlierGroup != nil {
+		t.Fatalf("RegisterGroup() earlier error = %v", errEarlierGroup)
+	}
+	if errDefinition := systems.Register(groupedDefinition); errDefinition != nil {
+		t.Fatalf("Register() grouped definition error = %v", errDefinition)
+	}
+	groups := systems.ListGroups()
+	if len(groups) != 2 || groups[0].ID != "earlier_group" || groups[1].ID != "test_group" {
+		t.Fatalf("groups = %#v", groups)
+	}
+	stored, exists := systems.Lookup(groupedDefinition.ID)
+	if !exists || stored.GroupID != "test_group" || len(stored.EndpointPresets) != 1 {
+		t.Fatalf("stored definition = %#v", stored)
+	}
+	stored.EndpointPresets[0].BaseURL = "https://mutated.invalid"
+	again, existsAgain := systems.Lookup(groupedDefinition.ID)
+	if !existsAgain || again.EndpointPresets[0].BaseURL != "https://global.example/v1" {
+		t.Fatalf("isolated definition = %#v", again)
+	}
+}
+
 // TestMemoryStoreKeepsAccessBindingsProviderScoped verifies that bindings cannot cross instances.
 // TestMemoryStoreKeepsAccessBindingsProviderScoped 校验访问绑定不能跨实例。
 func TestMemoryStoreKeepsAccessBindingsProviderScoped(t *testing.T) {

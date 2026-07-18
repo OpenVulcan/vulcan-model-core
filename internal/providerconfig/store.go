@@ -11,6 +11,9 @@ import (
 // Store defines persistence behavior for custom definitions and provider instance configuration.
 // Store 定义自定义定义和供应商实例配置的持久化行为。
 type Store interface {
+	// ListProviderGroups returns code-owned management-only provider groups.
+	// ListProviderGroups 返回代码拥有且仅供管理使用的供应商分组。
+	ListProviderGroups(context.Context) ([]ProviderGroup, error)
 	// SaveCustomDefinition creates or updates one custom provider definition.
 	// SaveCustomDefinition 创建或更新一个自定义供应商定义。
 	SaveCustomDefinition(context.Context, ProviderDefinition) error
@@ -20,6 +23,12 @@ type Store interface {
 	// ListDefinitions returns all visible system and custom provider definitions.
 	// ListDefinitions 返回全部可见的系统和自定义供应商定义。
 	ListDefinitions(context.Context) ([]ProviderDefinition, error)
+	// SaveSystemOnboarding atomically creates one complete system-provider configuration.
+	// SaveSystemOnboarding 原子创建一份完整的系统供应商配置。
+	SaveSystemOnboarding(context.Context, SystemOnboarding) error
+	// DeleteSystemOnboarding removes one newly created configuration during cross-store compensation.
+	// DeleteSystemOnboarding 在跨存储补偿期间删除一份新创建配置。
+	DeleteSystemOnboarding(context.Context, SystemOnboarding) error
 	// SaveInstance creates or updates one provider instance.
 	// SaveInstance 创建或更新一个供应商实例。
 	SaveInstance(context.Context, ProviderInstance) error
@@ -47,6 +56,104 @@ type Store interface {
 	// ListBindings returns bindings owned by one provider instance.
 	// ListBindings 返回一个供应商实例拥有的访问绑定。
 	ListBindings(context.Context, string) ([]AccessBinding, error)
+}
+
+// SaveSystemOnboarding atomically commits one new system-provider configuration in memory.
+// SaveSystemOnboarding 在内存中原子提交一份新的系统供应商配置。
+func (s *MemoryStore) SaveSystemOnboarding(ctx context.Context, onboarding SystemOnboarding) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	definition, errDefinition := s.GetDefinition(ctx, onboarding.Instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	if errValidate := ValidateSystemOnboarding(onboarding, definition); errValidate != nil {
+		return errValidate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.instances[onboarding.Instance.ID]; exists {
+		return fmt.Errorf("%w: provider instance %s", ErrAlreadyRegistered, onboarding.Instance.ID)
+	}
+	for _, current := range s.instances {
+		if current.Handle == onboarding.Instance.Handle {
+			return fmt.Errorf("%w: provider handle %s", ErrAlreadyRegistered, onboarding.Instance.Handle)
+		}
+	}
+	if _, exists := s.credentials[onboarding.Credential.ID]; exists {
+		return fmt.Errorf("%w: credential %s", ErrAlreadyRegistered, onboarding.Credential.ID)
+	}
+	for _, endpoint := range onboarding.Endpoints {
+		if _, exists := s.endpoints[endpoint.ID]; exists {
+			return fmt.Errorf("%w: provider endpoint %s", ErrAlreadyRegistered, endpoint.ID)
+		}
+	}
+	for _, binding := range onboarding.Bindings {
+		if _, exists := s.bindings[binding.ID]; exists {
+			return fmt.Errorf("%w: access binding %s", ErrAlreadyRegistered, binding.ID)
+		}
+	}
+	s.instances[onboarding.Instance.ID] = cloneProviderInstance(onboarding.Instance)
+	for _, endpoint := range onboarding.Endpoints {
+		s.endpoints[endpoint.ID] = endpoint
+	}
+	s.credentials[onboarding.Credential.ID] = cloneCredential(onboarding.Credential)
+	for _, binding := range onboarding.Bindings {
+		s.bindings[binding.ID] = cloneAccessBinding(binding)
+	}
+	return nil
+}
+
+// DeleteSystemOnboarding removes one complete instance-owned configuration graph atomically in memory.
+// DeleteSystemOnboarding 在内存中原子删除一个完整实例拥有的配置图。
+func (s *MemoryStore) DeleteSystemOnboarding(ctx context.Context, onboarding SystemOnboarding) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	instance, exists := s.instances[onboarding.Instance.ID]
+	if !exists {
+		return fmt.Errorf("%w: provider instance %s", ErrNotFound, onboarding.Instance.ID)
+	}
+	if instance.DefinitionID != onboarding.Instance.DefinitionID || instance.Revision != onboarding.Instance.Revision {
+		return fmt.Errorf("system onboarding compensation target changed")
+	}
+	for _, binding := range onboarding.Bindings {
+		current, bindingExists := s.bindings[binding.ID]
+		if !bindingExists || current.ProviderInstanceID != onboarding.Instance.ID || current.Revision != binding.Revision {
+			return fmt.Errorf("system onboarding compensation binding %s changed", binding.ID)
+		}
+	}
+	for _, endpoint := range onboarding.Endpoints {
+		current, endpointExists := s.endpoints[endpoint.ID]
+		if !endpointExists || current.ProviderInstanceID != onboarding.Instance.ID || current.Revision != endpoint.Revision {
+			return fmt.Errorf("system onboarding compensation endpoint %s changed", endpoint.ID)
+		}
+	}
+	credential, credentialExists := s.credentials[onboarding.Credential.ID]
+	if !credentialExists || credential.ProviderInstanceID != onboarding.Instance.ID || credential.Revision != onboarding.Credential.Revision {
+		return fmt.Errorf("system onboarding compensation credential %s changed", onboarding.Credential.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		delete(s.bindings, binding.ID)
+	}
+	for _, endpoint := range onboarding.Endpoints {
+		delete(s.endpoints, endpoint.ID)
+	}
+	delete(s.credentials, onboarding.Credential.ID)
+	delete(s.instances, onboarding.Instance.ID)
+	return nil
+}
+
+// ListProviderGroups returns code-owned groups without reading persisted execution configuration.
+// ListProviderGroups 返回代码拥有的分组，且不读取持久化执行配置。
+func (s *MemoryStore) ListProviderGroups(ctx context.Context) ([]ProviderGroup, error) {
+	if err := contextError(ctx); err != nil {
+		return nil, err
+	}
+	return s.systems.ListGroups(), nil
 }
 
 // MemoryStore is a thread-safe configuration store for tests and framework bootstrap.
@@ -233,6 +340,9 @@ func (s *MemoryStore) SaveEndpoint(ctx context.Context, endpoint Endpoint) error
 	}
 	if !definition.HasChannel(endpoint.ChannelID) {
 		return invalid("endpoint references channel outside its provider definition")
+	}
+	if errPreset := definition.ValidateEndpointPreset(endpoint); errPreset != nil {
+		return errPreset
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()

@@ -164,7 +164,7 @@ const data: SidebarData = {
   documents: [
     {
       nameKey: "sidebar.providerManagement",
-      url: "#",
+      url: "/providers",
       icon: (
         <ServerCogIcon
         />
@@ -217,6 +217,9 @@ function localizeNavigationEntries(
 // AppSidebarProps extends the sidebar primitives with the application logout operation.
 // AppSidebarProps 在侧栏基础属性上扩展应用退出登录操作。
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
+	// onNavigate changes authenticated routes without reloading the Vite application.
+	// onNavigate 在不重新加载 Vite 应用的情况下切换已认证路由。
+	onNavigate: (path: string) => void
   // onLogout is forwarded to the footer confirmation action.
   // onLogout 会传递到侧栏底部的确认操作。
   onLogout: () => void
@@ -224,7 +227,7 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
 
 // AppSidebar renders the dashboard-01 sidebar with the VulcanModelRouter brand mark.
 // AppSidebar 使用 VulcanModelRouter 品牌标识渲染 dashboard-01 侧栏。
-export function AppSidebar({ onLogout, ...props }: AppSidebarProps) {
+export function AppSidebar({ onNavigate, onLogout, ...props }: AppSidebarProps) {
   // t resolves all authored sidebar chrome into the current interface language.
   // t 将所有已编写侧栏界面元素解析为当前界面语言。
   const { t } = useI18n()
@@ -264,7 +267,7 @@ export function AppSidebar({ onLogout, ...props }: AppSidebarProps) {
       </SidebarHeader>
       <SidebarContent>
         <NavMain items={localizedMainItems} />
-        <NavDocuments items={localizedDocumentItems} />
+        <NavDocuments items={localizedDocumentItems} onNavigate={onNavigate} />
         <NavSecondary items={localizedSecondaryItems} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>

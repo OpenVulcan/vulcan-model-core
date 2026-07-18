@@ -13,6 +13,7 @@ import (
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 )
@@ -54,6 +55,12 @@ type APIKeyManager interface {
 // ManagementCommands exposes typed provider configuration mutations to the management HTTP boundary.
 // ManagementCommands 向管理 HTTP 边界暴露类型化供应商配置变更。
 type ManagementCommands interface {
+	// OnboardSystemProvider atomically creates one complete system-provider access path.
+	// OnboardSystemProvider 原子创建一条完整系统供应商访问路径。
+	OnboardSystemProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardKimiDeviceProvider accepts only a server-acquired and validated Kimi device credential.
+	// OnboardKimiDeviceProvider 仅接受由服务端获取并校验的 Kimi 设备凭据。
+	OnboardKimiDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
 	// CreateCustomDefinition creates one user-owned provider definition.
 	// CreateCustomDefinition 创建一个用户拥有的供应商定义。
 	CreateCustomDefinition(context.Context, management.CreateCustomDefinitionInput) (providerconfig.ProviderDefinition, error)
@@ -93,6 +100,28 @@ type ManagementCommands interface {
 	// UpdateBinding replaces one credential-to-endpoint access binding.
 	// UpdateBinding 替换一个凭据到端点的访问绑定。
 	UpdateBinding(context.Context, management.UpdateBindingInput) (providerconfig.AccessBinding, error)
+}
+
+// KimiDeviceFlows owns transient Coding Plan authorization sessions without exposing provider tokens.
+// KimiDeviceFlows 管理临时 Coding Plan 授权会话且不暴露供应商令牌。
+type KimiDeviceFlows interface {
+	// Start creates one management-safe provider verification session.
+	// Start 创建一个管理安全的供应商验证会话。
+	Start(context.Context) (providerkimi.Flow, error)
+	// Poll performs one bounded provider token exchange.
+	// Poll 执行一次有界供应商令牌交换。
+	Poll(context.Context, string) (providerkimi.Token, error)
+	// Cancel deletes one incomplete local authorization session.
+	// Cancel 删除一个未完成的本地授权会话。
+	Cancel(string)
+}
+
+// KimiTokenCommands refreshes completed Coding Plan credentials behind the protected secret boundary.
+// KimiTokenCommands 在受保护秘密边界后刷新已完成的 Coding Plan 凭据。
+type KimiTokenCommands interface {
+	// RefreshCredential replaces one exact refreshable credential.
+	// RefreshCredential 替换一个精确可刷新凭据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
 }
 
 // ModelAccessCommands exposes typed instance model enablement operations.
@@ -146,6 +175,12 @@ type ControlPlane struct {
 	// Auth verifies route-scoped bearer values.
 	// Auth 校验路由作用域 Bearer 值。
 	Auth KeyAuthenticator
+	// KimiDeviceFlows optionally enables server-owned Coding Plan device authorization routes.
+	// KimiDeviceFlows 可选启用服务端拥有的 Coding Plan 设备授权路由。
+	KimiDeviceFlows KimiDeviceFlows
+	// KimiTokens optionally enables explicit protected Coding Plan token refresh.
+	// KimiTokens 可选启用显式受保护 Coding Plan 令牌刷新。
+	KimiTokens KimiTokenCommands
 }
 
 // validate verifies the complete authenticated control-plane dependency graph.
@@ -219,6 +254,14 @@ type providerDefinitionListResponse struct {
 	// ProviderDefinitions contains only management-safe provider definition metadata.
 	// ProviderDefinitions 仅包含管理安全的供应商定义元数据。
 	ProviderDefinitions []management.ProviderDefinitionView `json:"provider_definitions"`
+}
+
+// providerGroupListResponse returns management-only system provider groups and their selectable variants.
+// providerGroupListResponse 返回仅供管理使用的系统供应商分组及其可选择变体。
+type providerGroupListResponse struct {
+	// ProviderGroups contains grouped definitions without execution fallback semantics.
+	// ProviderGroups 包含不带执行降级语义的分组定义。
+	ProviderGroups []management.ProviderGroupView `json:"provider_groups"`
 }
 
 // providerInstanceListResponse returns management-safe provider instance views.
@@ -409,6 +452,59 @@ type createInstanceRequest struct {
 	// DisplayName is the management-facing instance name.
 	// DisplayName 是管理界面实例名称。
 	DisplayName string `json:"display_name"`
+}
+
+// onboardSystemProviderRequest decodes one complete API-key or completed-device-flow onboarding request.
+// onboardSystemProviderRequest 解码一次完整 API Key 或已完成设备授权的录入请求。
+type onboardSystemProviderRequest struct {
+	// DefinitionID selects one exact system provider variant.
+	// DefinitionID 选择一个精确系统供应商变体。
+	DefinitionID string `json:"provider_definition_id"`
+	// Handle is the stable workspace-visible routing alias.
+	// Handle 是工作区可见的稳定路由别名。
+	Handle string `json:"handle"`
+	// DisplayName is the editable instance label.
+	// DisplayName 是可编辑的实例标签。
+	DisplayName string `json:"display_name"`
+	// AuthMethodID selects one definition-owned authentication method.
+	// AuthMethodID 选择一种由定义拥有的认证方式。
+	AuthMethodID string `json:"auth_method_id"`
+	// CredentialLabel is the safe operator-visible account label.
+	// CredentialLabel 是安全且操作员可见的账号标签。
+	CredentialLabel string `json:"credential_label"`
+	// PrincipalKey is the optional provider-reported account identity.
+	// PrincipalKey 是可选的供应商报告账号身份。
+	PrincipalKey string `json:"principal_key"`
+	// Secret contains transient credential material and is never returned.
+	// Secret 包含临时凭据材料且绝不返回。
+	Secret string `json:"secret"`
+}
+
+// kimiDeviceFlowOnboardRequest contains non-secret instance metadata applied after provider authorization succeeds.
+// kimiDeviceFlowOnboardRequest 包含供应商授权成功后应用的非秘密实例元数据。
+type kimiDeviceFlowOnboardRequest struct {
+	DefinitionID    string `json:"provider_definition_id"`
+	Handle          string `json:"handle"`
+	DisplayName     string `json:"display_name"`
+	CredentialLabel string `json:"credential_label"`
+	PrincipalKey    string `json:"principal_key"`
+}
+
+// onboardSystemProviderResponse returns only non-secret identifiers created by one atomic onboarding.
+// onboardSystemProviderResponse 仅返回一次原子录入创建的非秘密标识。
+type onboardSystemProviderResponse struct {
+	// ProviderInstanceID identifies the created exact provider instance.
+	// ProviderInstanceID 标识创建的精确供应商实例。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// CredentialID identifies the created protected credential metadata.
+	// CredentialID 标识创建的受保护凭据元数据。
+	CredentialID string `json:"credential_id"`
+	// EndpointIDs identify the created fixed endpoints.
+	// EndpointIDs 标识创建的固定端点。
+	EndpointIDs []string `json:"endpoint_ids"`
+	// BindingIDs identify the created closed access paths.
+	// BindingIDs 标识创建的闭合访问路径。
+	BindingIDs []string `json:"binding_ids"`
 }
 
 // updateInstanceRequest decodes editable provider-instance identity fields.
@@ -667,6 +763,21 @@ func writeControlError(writer http.ResponseWriter, err error) {
 	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) || errors.Is(err, management.ErrProviderModelNotFound) || errors.Is(err, runtimeconfig.ErrAPIKeyNotFound) {
 		statusCode = http.StatusNotFound
 		errorCode = "not_found"
+	} else if errors.Is(err, providerkimi.ErrFlowNotFound) {
+		statusCode = http.StatusNotFound
+		errorCode = "device_flow_not_found"
+	} else if errors.Is(err, providerkimi.ErrAuthorizationExpired) {
+		statusCode = http.StatusGone
+		errorCode = "device_flow_expired"
+	} else if errors.Is(err, providerkimi.ErrAuthorizationDenied) {
+		statusCode = http.StatusForbidden
+		errorCode = "device_flow_denied"
+	} else if errors.Is(err, providerkimi.ErrAuthorizationPending) {
+		statusCode = http.StatusConflict
+		errorCode = "device_flow_pending"
+	} else if errors.Is(err, providerkimi.ErrFlowLimitReached) {
+		statusCode = http.StatusTooManyRequests
+		errorCode = "device_flow_limit_reached"
 	} else if errors.Is(err, management.ErrSystemDefinitionImmutable) {
 		statusCode = http.StatusConflict
 		errorCode = "immutable_resource"
@@ -722,6 +833,17 @@ func (s *Server) handleProviderDefinitions(writer http.ResponseWriter, request *
 		return
 	}
 	writeJSON(writer, http.StatusOK, providerDefinitionListResponse{ProviderDefinitions: definitions})
+}
+
+// handleProviderGroups returns system provider brand groups without exposing secrets or routing internals.
+// handleProviderGroups 返回系统供应商品牌分组，且不暴露 Secret 或路由内部实现。
+func (s *Server) handleProviderGroups(writer http.ResponseWriter, request *http.Request) {
+	groups, errGroups := s.control.Query.ListProviderGroups(request.Context())
+	if errGroups != nil {
+		writeControlError(writer, errGroups)
+		return
+	}
+	writeJSON(writer, http.StatusOK, providerGroupListResponse{ProviderGroups: groups})
 }
 
 // handleCreateCustomDefinition creates one constrained user-owned custom provider definition.
@@ -787,6 +909,101 @@ func (s *Server) handleCreateInstance(writer http.ResponseWriter, request *http.
 		return
 	}
 	writeJSON(writer, http.StatusCreated, identifierResponse{ID: instance.ID})
+}
+
+// handleOnboardSystemProvider creates one complete system-provider configuration without exposing its secret.
+// handleOnboardSystemProvider 创建一份完整系统供应商配置且不暴露其秘密。
+func (s *Server) handleOnboardSystemProvider(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[onboardSystemProviderRequest](writer, request)
+	if errDecode != nil {
+		return
+	}
+	onboarding, errOnboard := s.control.Commands.OnboardSystemProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, Handle: body.Handle, DisplayName: body.DisplayName, AuthMethodID: body.AuthMethodID,
+		CredentialLabel: body.CredentialLabel, PrincipalKey: body.PrincipalKey, Secret: []byte(body.Secret),
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleStartKimiDeviceFlow starts one server-owned Coding Plan verification session.
+// handleStartKimiDeviceFlow 启动一个服务端拥有的 Coding Plan 验证会话。
+func (s *Server) handleStartKimiDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	flow, errStart := s.control.KimiDeviceFlows.Start(request.Context())
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardKimiDeviceFlow polls authorization once and atomically onboards a completed token.
+// handleOnboardKimiDeviceFlow 轮询一次授权并原子录入已完成令牌。
+func (s *Server) handleOnboardKimiDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[kimiDeviceFlowOnboardRequest](writer, request)
+	if errDecode != nil {
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errPoll := s.control.KimiDeviceFlows.Poll(request.Context(), flowID)
+	if errors.Is(errPoll, providerkimi.ErrAuthorizationPending) {
+		writeJSON(writer, http.StatusAccepted, map[string]string{"status": "authorization_pending"})
+		return
+	}
+	if errPoll != nil {
+		writeControlError(writer, errPoll)
+		return
+	}
+	secretValue, errMarshal := providerkimi.MarshalToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	onboarding, errOnboard := s.control.Commands.OnboardKimiDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, Handle: body.Handle, DisplayName: body.DisplayName, AuthMethodID: "device_flow",
+		CredentialLabel: body.CredentialLabel, PrincipalKey: body.PrincipalKey, Secret: secretValue,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.KimiDeviceFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelKimiDeviceFlow removes one incomplete local verification session.
+// handleCancelKimiDeviceFlow 删除一个未完成的本地验证会话。
+func (s *Server) handleCancelKimiDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.KimiDeviceFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// handleRefreshKimiCredential refreshes one protected Coding Plan token and returns only its metadata identifier.
+// handleRefreshKimiCredential 刷新一个受保护 Coding Plan 令牌并仅返回其元数据标识。
+func (s *Server) handleRefreshKimiCredential(writer http.ResponseWriter, request *http.Request) {
+	credential, errRefresh := s.control.KimiTokens.RefreshCredential(request.Context(), request.PathValue("provider_instance_id"), request.PathValue("credential_id"))
+	if errRefresh != nil {
+		writeControlError(writer, errRefresh)
+		return
+	}
+	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
 }
 
 // handleProviderInstance returns one management-safe provider instance view.

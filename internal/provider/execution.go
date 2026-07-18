@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -303,6 +304,26 @@ func (r *ExecutionRegistry) Register(driver ExecutionDriver) error {
 	}
 	r.drivers[key] = driver
 	return nil
+}
+
+// ProviderIDs returns stable unique definition identifiers that own at least one registered execution driver.
+// ProviderIDs 返回至少拥有一个已注册执行 Driver 的稳定唯一 Definition 标识。
+func (r *ExecutionRegistry) ProviderIDs() []string {
+	if r == nil {
+		return nil
+	}
+	r.mu.RLock()
+	identifiers := make(map[string]struct{}, len(r.drivers))
+	for _, driver := range r.drivers {
+		identifiers[driver.ProviderDefinitionID()] = struct{}{}
+	}
+	r.mu.RUnlock()
+	providerIDs := make([]string, 0, len(identifiers))
+	for identifier := range identifiers {
+		providerIDs = append(providerIDs, identifier)
+	}
+	sort.Strings(providerIDs)
+	return providerIDs
 }
 
 // Execute validates the exact binding and dispatches without candidate lists or cross-provider fallback.

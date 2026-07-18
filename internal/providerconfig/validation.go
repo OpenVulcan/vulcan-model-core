@@ -80,12 +80,30 @@ func (d ProviderDefinition) Validate() error {
 		if strings.TrimSpace(d.DriverID) == "" || strings.TrimSpace(d.DriverVersion) == "" {
 			return invalid("system provider definition requires driver id and version")
 		}
+		if d.GroupID != "" {
+			if err := validateIdentifier("provider group id", d.GroupID); err != nil {
+				return err
+			}
+			if strings.TrimSpace(d.VariantName) == "" {
+				return invalid("grouped system provider definition requires a variant name")
+			}
+		} else if d.VariantName != "" || d.VariantDescription != "" || d.VariantDescriptionKey != "" || d.SortOrder != 0 {
+			return invalid("ungrouped system provider definition cannot register grouped variant metadata")
+		}
+		if d.ModelCatalogID != "" {
+			if err := validateIdentifier("provider model catalog id", d.ModelCatalogID); err != nil {
+				return err
+			}
+		}
 	case DefinitionKindCustom:
 		if !strings.HasPrefix(d.ID, "custom_") {
 			return invalid("custom provider definition id must start with custom_")
 		}
 		if d.DriverID != "" || d.DriverVersion != "" {
 			return invalid("custom provider definition cannot register a trusted driver")
+		}
+		if d.GroupID != "" || d.VariantName != "" || d.VariantDescription != "" || d.VariantDescriptionKey != "" || d.ModelCatalogID != "" || d.SortOrder != 0 || len(d.EndpointPresets) != 0 {
+			return invalid("custom provider definition cannot register system grouping or endpoint preset metadata")
 		}
 		if len(d.Channels) != 1 {
 			return invalid("custom provider definition requires exactly one channel")
@@ -98,6 +116,9 @@ func (d ProviderDefinition) Validate() error {
 	}
 	if d.Revision == 0 {
 		return invalid("provider definition revision must be positive")
+	}
+	if d.SortOrder < 0 {
+		return invalid("provider definition sort order cannot be negative")
 	}
 	if len(d.Channels) == 0 || len(d.AuthMethods) == 0 {
 		return invalid("provider definition requires at least one channel and auth method")
@@ -127,8 +148,36 @@ func (d ProviderDefinition) Validate() error {
 			}
 		}
 	}
+	presets := make(map[string]struct{}, len(d.EndpointPresets))
+	for _, preset := range d.EndpointPresets {
+		if err := preset.Validate(); err != nil {
+			return err
+		}
+		if _, exists := channels[preset.ChannelID]; !exists {
+			return invalid("endpoint preset %q references unknown provider channel %q", preset.ID, preset.ChannelID)
+		}
+		if _, exists := presets[preset.ID]; exists {
+			return invalid("duplicate endpoint preset id %q", preset.ID)
+		}
+		presets[preset.ID] = struct{}{}
+	}
 	if err := d.Features.Validate(); err != nil {
 		return err
+	}
+	return nil
+}
+
+// Validate verifies one code-owned provider management group without granting it routing semantics.
+// Validate 校验一个代码拥有的供应商管理分组，且不赋予其路由语义。
+func (g ProviderGroup) Validate() error {
+	if err := validateIdentifier("provider group id", g.ID); err != nil {
+		return err
+	}
+	if strings.TrimSpace(g.DisplayName) == "" || g.Revision == 0 {
+		return invalid("provider group display name and positive revision are required")
+	}
+	if g.SortOrder < 0 {
+		return invalid("provider group sort order cannot be negative")
 	}
 	return nil
 }
@@ -153,6 +202,25 @@ func (a AuthMethodDefinition) Validate() error {
 	}
 	if !validAuthMethodType(a.Type) {
 		return invalid("auth method type %q is invalid", a.Type)
+	}
+	return nil
+}
+
+// Validate verifies one system-provider endpoint preset independently from persisted instance endpoints.
+// Validate 独立于持久化实例端点校验一个系统供应商端点预设。
+func (p EndpointPreset) Validate() error {
+	if err := validateIdentifier("endpoint preset id", p.ID); err != nil {
+		return err
+	}
+	if err := validateIdentifier("endpoint preset channel id", p.ChannelID); err != nil {
+		return err
+	}
+	parsedURL, errParse := url.ParseRequestURI(p.BaseURL)
+	if errParse != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return invalid("endpoint preset base url must be an absolute http or https url")
+	}
+	if strings.TrimSpace(p.Region) == "" {
+		return invalid("endpoint preset region is required")
 	}
 	return nil
 }
@@ -328,12 +396,19 @@ func (d ProviderDefinition) HasChannel(channelID string) bool {
 // HasAuthMethod reports whether a provider definition owns one authentication method.
 // HasAuthMethod 返回供应商定义是否拥有指定认证方式。
 func (d ProviderDefinition) HasAuthMethod(authMethodID string) bool {
+	_, exists := d.AuthMethod(authMethodID)
+	return exists
+}
+
+// AuthMethod returns one definition-owned authentication method by exact identifier.
+// AuthMethod 按精确标识返回一个由定义拥有的认证方式。
+func (d ProviderDefinition) AuthMethod(authMethodID string) (AuthMethodDefinition, bool) {
 	for _, authMethod := range d.AuthMethods {
 		if authMethod.ID == authMethodID {
-			return true
+			return authMethod, true
 		}
 	}
-	return false
+	return AuthMethodDefinition{}, false
 }
 
 // ChannelAllowsAuth reports whether a channel accepts one provider authentication method.
@@ -350,6 +425,97 @@ func (d ProviderDefinition) ChannelAllowsAuth(channelID string, authMethodID str
 		}
 	}
 	return false
+}
+
+// ValidateEndpointPreset enforces code-owned fixed endpoint boundaries for one concrete endpoint.
+// ValidateEndpointPreset 为一个具体端点强制执行代码拥有的固定端点边界。
+func (d ProviderDefinition) ValidateEndpointPreset(endpoint Endpoint) error {
+	if d.Kind != DefinitionKindSystem || len(d.EndpointPresets) == 0 {
+		return nil
+	}
+	// channelHasEditablePreset records the explicit exception that permits a management-provided address.
+	// channelHasEditablePreset 记录允许管理端提供地址的显式例外。
+	channelHasEditablePreset := false
+	// channelHasPreset distinguishes an unconstrained legacy channel from a fixed system-provider channel.
+	// channelHasPreset 区分不受约束的旧通道与固定系统供应商通道。
+	channelHasPreset := false
+	for _, preset := range d.EndpointPresets {
+		if preset.ChannelID != endpoint.ChannelID {
+			continue
+		}
+		channelHasPreset = true
+		if preset.BaseURL == endpoint.BaseURL && preset.Region == endpoint.Region {
+			return nil
+		}
+		if preset.UserEditable {
+			channelHasEditablePreset = true
+		}
+	}
+	if channelHasPreset && !channelHasEditablePreset {
+		return invalid("endpoint must exactly match one fixed system provider preset")
+	}
+	return nil
+}
+
+// ValidateSystemOnboarding verifies one complete new system-provider configuration before persistence.
+// ValidateSystemOnboarding 在持久化前校验一份完整的新系统供应商配置。
+func ValidateSystemOnboarding(onboarding SystemOnboarding, definition ProviderDefinition) error {
+	if definition.Kind != DefinitionKindSystem || onboarding.Instance.DefinitionID != definition.ID {
+		return invalid("system onboarding requires its exact system provider definition")
+	}
+	if errInstance := onboarding.Instance.Validate(); errInstance != nil {
+		return errInstance
+	}
+	if onboarding.Instance.DefinitionRevision != definition.Revision {
+		return invalid("system onboarding definition revision does not match current definition")
+	}
+	if onboarding.Instance.Status != LifecycleReady {
+		return invalid("complete system onboarding instance must be ready")
+	}
+	if errCredential := onboarding.Credential.Validate(); errCredential != nil {
+		return errCredential
+	}
+	if onboarding.Credential.ProviderInstanceID != onboarding.Instance.ID || !definition.HasAuthMethod(onboarding.Credential.AuthMethodID) {
+		return invalid("system onboarding credential is outside its provider definition")
+	}
+	// endpoints indexes exact onboarding endpoints for binding ownership validation.
+	// endpoints 为绑定所有权校验索引精确的录入端点。
+	endpoints := make(map[string]Endpoint, len(onboarding.Endpoints))
+	for _, endpoint := range onboarding.Endpoints {
+		if errEndpoint := endpoint.Validate(); errEndpoint != nil {
+			return errEndpoint
+		}
+		if endpoint.ProviderInstanceID != onboarding.Instance.ID || !definition.HasChannel(endpoint.ChannelID) {
+			return invalid("system onboarding endpoint is outside its provider definition")
+		}
+		if errPreset := definition.ValidateEndpointPreset(endpoint); errPreset != nil {
+			return errPreset
+		}
+		if _, exists := endpoints[endpoint.ID]; exists {
+			return invalid("duplicate system onboarding endpoint id %q", endpoint.ID)
+		}
+		endpoints[endpoint.ID] = endpoint
+	}
+	// boundChannels ensures every runtime-ready selected channel has exactly one closed access path.
+	// boundChannels 确保每个运行时就绪的已选通道都恰有一条闭合访问路径。
+	boundChannels := make(map[string]struct{}, len(onboarding.Bindings))
+	for _, binding := range onboarding.Bindings {
+		if errBinding := binding.Validate(); errBinding != nil {
+			return errBinding
+		}
+		endpoint, endpointExists := endpoints[binding.EndpointID]
+		if !endpointExists || binding.ProviderInstanceID != onboarding.Instance.ID || binding.CredentialID != onboarding.Credential.ID || endpoint.ChannelID != binding.ChannelID || !definition.ChannelAllowsAuth(binding.ChannelID, onboarding.Credential.AuthMethodID) {
+			return invalid("system onboarding binding does not close one exact provider channel")
+		}
+		if _, exists := boundChannels[binding.ChannelID]; exists {
+			return invalid("duplicate system onboarding channel binding %q", binding.ChannelID)
+		}
+		boundChannels[binding.ChannelID] = struct{}{}
+	}
+	if len(onboarding.Endpoints) == 0 || len(onboarding.Bindings) == 0 {
+		return invalid("system onboarding requires endpoints and bindings")
+	}
+	return nil
 }
 
 // validSupportStatus reports whether a support state is explicitly defined.

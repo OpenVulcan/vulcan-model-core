@@ -87,11 +87,27 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 	// callProjections preserves the exact provider call identifier needed by later tool results.
 	// callProjections 保留后续工具结果所需的精确 Provider 调用标识。
 	callProjections := make(map[string]string)
+	// latestReasoningContent retains only canonical reasoning already observed in ordered history.
+	// latestReasoningContent 仅保留有序历史中已观察到的规范推理内容。
+	latestReasoningContent := ""
 	for _, item := range request.Context {
 		position := len(upstream.Messages)
 		message, mode, equivalence, ruleID, frameID, digest, include, errMessage := projectItem(item, request, capabilities, callProjections, lineageID, position)
 		if errMessage != nil {
 			return ProjectedRequest{}, errMessage
+		}
+		if item.Kind == vcp.ContextReasoning && capabilities.ReasoningContent {
+			reasoningText, errReasoning := vcp.TextContent(item.Content)
+			if errReasoning != nil {
+				return ProjectedRequest{}, fmt.Errorf("%w: reasoning item %q: %v", ErrUnsupportedContext, item.ItemID, errReasoning)
+			}
+			latestReasoningContent = reasoningText
+		}
+		if include && item.Kind == vcp.ContextToolCall && capabilities.ReasoningContent {
+			if strings.TrimSpace(latestReasoningContent) == "" {
+				return ProjectedRequest{}, fmt.Errorf("%w: historical tool call %q requires preceding reasoning_content", ErrUnsupportedContext, item.ToolCall.ToolCallID)
+			}
+			message.ReasoningContent = latestReasoningContent
 		}
 		if include {
 			upstream.Messages = append(upstream.Messages, message)
@@ -192,13 +208,13 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 // supportsRequestedReasoning reports whether this Chat profile can faithfully carry the requested reasoning control.
 // supportsRequestedReasoning 报告此 Chat Profile 是否能忠实承载所请求的推理控制。
 func supportsRequestedReasoning(request vcp.VulcanRequest, capabilities ProfileCapabilities) bool {
-	// OpenAI Chat has reasoning_effort but no typed carrier for visible reasoning summaries or historical reasoning items.
-	// OpenAI Chat 具有 reasoning_effort，但没有可见推理摘要或历史推理项目的类型化载体。
+	// Historical reasoning is native only when this exact profile declares the compatible reasoning_content carrier.
+	// 历史推理仅在此精确 Profile 声明兼容 reasoning_content 载体时才是原生能力。
 	if !capabilities.Reasoning || request.ReasoningPolicy.Summary {
 		return false
 	}
 	for _, item := range request.Context {
-		if item.Kind == vcp.ContextReasoning {
+		if item.Kind == vcp.ContextReasoning && !capabilities.ReasoningContent {
 			return false
 		}
 	}
@@ -261,6 +277,9 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 		}
 		return Message{Role: "tool", ToolCallID: upstreamCallID, Content: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.tool_result.native.v1", "", "", true, nil
 	case vcp.ContextReasoning:
+		if capabilities.ReasoningContent {
+			return Message{Role: "assistant", ReasoningContent: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.reasoning_content.native.v1", "", "", true, nil
+		}
 		// A plain assistant message would erase the VCP reasoning kind, so it is not a native Chat replay carrier.
 		// 普通 assistant 消息会抹去 VCP 推理类型，因此不能作为原生 Chat 回放载体。
 		return Message{}, vcp.CapabilityOmitted, vcp.EquivalenceNone, "openai_chat.reasoning.omitted.v1", "", "", false, nil

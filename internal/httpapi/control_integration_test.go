@@ -1,24 +1,68 @@
 package httpapi
 
 import (
+	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
 
+// TestWriteControlErrorMapsKimiDeviceFlowStates verifies stable non-secret HTTP semantics for every local authorization state.
+// TestWriteControlErrorMapsKimiDeviceFlowStates 验证每个本地授权状态具有稳定且不泄密的 HTTP 语义。
+func TestWriteControlErrorMapsKimiDeviceFlowStates(t *testing.T) {
+	testCases := []struct {
+		name       string
+		err        error
+		statusCode int
+		errorCode  string
+	}{
+		{name: "not found", err: providerkimi.ErrFlowNotFound, statusCode: http.StatusNotFound, errorCode: "device_flow_not_found"},
+		{name: "expired", err: providerkimi.ErrAuthorizationExpired, statusCode: http.StatusGone, errorCode: "device_flow_expired"},
+		{name: "denied", err: providerkimi.ErrAuthorizationDenied, statusCode: http.StatusForbidden, errorCode: "device_flow_denied"},
+		{name: "pending", err: providerkimi.ErrAuthorizationPending, statusCode: http.StatusConflict, errorCode: "device_flow_pending"},
+		{name: "bounded", err: providerkimi.ErrFlowLimitReached, statusCode: http.StatusTooManyRequests, errorCode: "device_flow_limit_reached"},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			writeControlError(recorder, testCase.err)
+			if recorder.Code != testCase.statusCode {
+				t.Fatalf("status = %d, want %d", recorder.Code, testCase.statusCode)
+			}
+			var response errorResponse
+			if errDecode := json.NewDecoder(recorder.Body).Decode(&response); errDecode != nil {
+				t.Fatalf("decode error response: %v", errDecode)
+			}
+			if response.Error != testCase.errorCode {
+				t.Fatalf("error = %q, want %q", response.Error, testCase.errorCode)
+			}
+		})
+	}
+}
+
 // newControlPlaneIntegrationServer creates an authenticated server backed by real control-plane services and isolated test storage.
 // newControlPlaneIntegrationServer 创建一个由真实控制面服务和隔离测试存储支撑的认证服务器。
 func newControlPlaneIntegrationServer(t *testing.T) *Server {
+	return newControlPlaneIntegrationServerWithFlows(t, nil)
+}
+
+// newControlPlaneIntegrationServerWithFlows creates the real control plane with an optional deterministic device-flow boundary.
+// newControlPlaneIntegrationServerWithFlows 创建具有可选确定性设备授权边界的真实控制面。
+func newControlPlaneIntegrationServerWithFlows(t *testing.T, deviceFlows KimiDeviceFlows) *Server {
 	t.Helper()
 	// protocols owns the exact custom-provider protocol vocabulary used by management commands.
 	// protocols 管理控制命令使用的精确自定义供应商协议词汇。
@@ -26,11 +70,14 @@ func newControlPlaneIntegrationServer(t *testing.T) *Server {
 	if errRegister := bootstrap.RegisterProtocolProfiles(protocols); errRegister != nil {
 		t.Fatalf("register protocol profiles: %v", errRegister)
 	}
-	// systems remains empty because this focused integration test creates one custom provider.
-	// systems 保持为空，因为此聚焦集成测试创建一个自定义供应商。
+	// systems owns the same built-in provider definitions used by the production process.
+	// systems 管理与生产进程相同的内置供应商定义。
 	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
 	if errSystems != nil {
 		t.Fatalf("create system registry: %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("register system providers: %v", errProviders)
 	}
 	configurations, errConfigurations := providerconfig.NewMemoryStore(protocols, systems)
 	if errConfigurations != nil {
@@ -41,7 +88,7 @@ func newControlPlaneIntegrationServer(t *testing.T) *Server {
 	if errQueries != nil {
 		t.Fatalf("create management query service: %v", errQueries)
 	}
-	commands, errCommands := management.NewService(configurations, secret.NewMemoryStore())
+	commands, errCommands := management.NewService(configurations, secret.NewMemoryStore(), catalogs)
 	if errCommands != nil {
 		t.Fatalf("create management command service: %v", errCommands)
 	}
@@ -68,18 +115,54 @@ func newControlPlaneIntegrationServer(t *testing.T) *Server {
 	// server exposes the same dependencies the process entry point owns, without opening a network listener.
 	// server 暴露与进程入口相同的依赖，但不打开网络监听器。
 	server, errServer := NewWithControlPlane(staticCatalog{}, ControlPlane{
-		Query:          queries,
-		Commands:       commands,
-		ModelAccess:    modelAccess,
-		CustomCatalogs: customCatalogs,
-		Protocols:      protocols,
-		APIKeys:        configuration,
-		Auth:           configuration,
+		Query:           queries,
+		Commands:        commands,
+		ModelAccess:     modelAccess,
+		CustomCatalogs:  customCatalogs,
+		Protocols:       protocols,
+		APIKeys:         configuration,
+		Auth:            configuration,
+		KimiDeviceFlows: deviceFlows,
 	})
 	if errServer != nil {
 		t.Fatalf("create control-plane server: %v", errServer)
 	}
 	return server
+}
+
+// TestSystemProviderOnboardingHTTPCommitsFixedKimiCatalog verifies the authenticated atomic API-key route end to end.
+// TestSystemProviderOnboardingHTTPCommitsFixedKimiCatalog 端到端验证经过认证的原子 API Key 路由。
+func TestSystemProviderOnboardingHTTPCommitsFixedKimiCatalog(t *testing.T) {
+	server := newControlPlaneIntegrationServer(t)
+	onboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_cn","handle":"kimi-cn-http","display_name":"Kimi CN","auth_method_id":"api_key","credential_label":"Primary","principal_key":"","secret":"private-kimi-key"}`)
+	if onboarding.Code != http.StatusCreated || strings.Contains(onboarding.Body.String(), "private-kimi-key") {
+		t.Fatalf("onboarding status=%d body=%s", onboarding.Code, onboarding.Body.String())
+	}
+	var created onboardSystemProviderResponse
+	if errDecode := json.Unmarshal(onboarding.Body.Bytes(), &created); errDecode != nil {
+		t.Fatalf("decode onboarding response: %v", errDecode)
+	}
+	if created.ProviderInstanceID == "" || len(created.EndpointIDs) != 1 || len(created.BindingIDs) != 1 {
+		t.Fatalf("onboarding response = %#v", created)
+	}
+	catalogResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/catalog", "admin-control-key", "")
+	if catalogResponse.Code != http.StatusOK || !strings.Contains(catalogResponse.Body.String(), "kimi-k2.6") || !strings.Contains(catalogResponse.Body.String(), "moonshot-v1-128k") {
+		t.Fatalf("catalog status=%d body=%s", catalogResponse.Code, catalogResponse.Body.String())
+	}
+	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
+	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://api.moonshot.cn") || strings.Contains(endpoints.Body.String(), "private-kimi-key") {
+		t.Fatalf("endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
+	}
+}
+
+// TestSystemProviderOnboardingHTTPRejectsDeviceCredentialInjection verifies device credentials are accepted only through the server-owned flow route.
+// TestSystemProviderOnboardingHTTPRejectsDeviceCredentialInjection 验证设备凭据仅能通过服务端拥有的授权流程路由录入。
+func TestSystemProviderOnboardingHTTPRejectsDeviceCredentialInjection(t *testing.T) {
+	server := newControlPlaneIntegrationServer(t)
+	response := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_coding_plan","handle":"forged-device-flow","display_name":"Forged Device Flow","auth_method_id":"device_flow","credential_label":"Untrusted","principal_key":"","secret":"vulcan-kimi-token-v1:{\"access_token\":\"forged\"}"}`)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("device credential injection status=%d body=%s", response.Code, response.Body.String())
+	}
 }
 
 // serveControlRequest sends one JSON management or call-plane request with the selected bearer namespace value.
@@ -191,4 +274,61 @@ func TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate(t *testin
 	if callModels.Code != http.StatusOK || strings.Contains(callModels.Body.String(), "model_control") {
 		t.Fatalf("disabled call model list status=%d body=%s", callModels.Code, callModels.Body.String())
 	}
+}
+
+// TestKimiDeviceFlowHTTPKeepsTokensServerSideAndOnboardsCoding verifies the token-confidential route sequence.
+// TestKimiDeviceFlowHTTPKeepsTokensServerSideAndOnboardsCoding 验证令牌保密的路由序列。
+func TestKimiDeviceFlowHTTPKeepsTokensServerSideAndOnboardsCoding(t *testing.T) {
+	flows := &staticKimiDeviceFlows{token: providerkimi.Token{AccessToken: "device-access-secret", RefreshToken: "device-refresh-secret", TokenType: "Bearer", DeviceID: "device-id", Type: "kimi"}}
+	server := newControlPlaneIntegrationServerWithFlows(t, flows)
+	started := serveControlRequest(server, http.MethodPost, "/vulcan/manage/kimi/device-flows", "admin-control-key", "")
+	if started.Code != http.StatusCreated || !strings.Contains(started.Body.String(), "ABCD-EFGH") || strings.Contains(started.Body.String(), "device-access-secret") {
+		t.Fatalf("start flow status=%d body=%s", started.Code, started.Body.String())
+	}
+	onboarded := serveControlRequest(server, http.MethodPost, "/vulcan/manage/kimi/device-flows/flow-test/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_coding_plan","handle":"kimi-coding-http","display_name":"Kimi Coding Plan","credential_label":"Kimi User","principal_key":"account"}`)
+	if onboarded.Code != http.StatusCreated || strings.Contains(onboarded.Body.String(), "device-access-secret") || strings.Contains(onboarded.Body.String(), "device-refresh-secret") {
+		t.Fatalf("device onboarding status=%d body=%s", onboarded.Code, onboarded.Body.String())
+	}
+	if !flows.wasCancelled("flow-test") {
+		t.Fatal("completed device flow was not consumed")
+	}
+}
+
+// staticKimiDeviceFlows returns deterministic safe verification data and one completed token.
+// staticKimiDeviceFlows 返回确定性的安全验证数据和一个已完成令牌。
+type staticKimiDeviceFlows struct {
+	mu        sync.Mutex
+	token     providerkimi.Token
+	cancelled map[string]bool
+}
+
+// Start returns management-safe verification data.
+// Start 返回管理安全验证数据。
+func (f *staticKimiDeviceFlows) Start(context.Context) (providerkimi.Flow, error) {
+	return providerkimi.Flow{ID: "flow-test", UserCode: "ABCD-EFGH", VerificationURI: "https://auth.example/verify", VerificationURIComplete: "https://auth.example/verify?code=ABCD-EFGH", ExpiresAt: time.Now().Add(time.Minute), PollIntervalSeconds: 5}, nil
+}
+
+// Poll returns the configured completed token.
+// Poll 返回配置的已完成令牌。
+func (f *staticKimiDeviceFlows) Poll(context.Context, string) (providerkimi.Token, error) {
+	return f.token, nil
+}
+
+// Cancel records one consumed flow identifier.
+// Cancel 记录一个已消费授权流程标识。
+func (f *staticKimiDeviceFlows) Cancel(flowID string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.cancelled == nil {
+		f.cancelled = make(map[string]bool)
+	}
+	f.cancelled[flowID] = true
+}
+
+// wasCancelled reports whether one flow was consumed.
+// wasCancelled 报告一个授权流程是否已消费。
+func (f *staticKimiDeviceFlows) wasCancelled(flowID string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.cancelled[flowID]
 }

@@ -80,6 +80,31 @@ func TestStreamDecoderInterleavedToolsLateFieldsUsageAndHydration(t *testing.T) 
 	}
 }
 
+// TestStreamDecoderPreservesReasoningContentDeltas verifies compatible streaming reasoning becomes one canonical reasoning item.
+// TestStreamDecoderPreservesReasoningContentDeltas 验证兼容流式推理增量形成一个规范推理项目。
+func TestStreamDecoderPreservesReasoningContentDeltas(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("resp_stream_reasoning", time.Unix(51, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	chunks := []Chunk{
+		{Choices: []Choice{{Index: 0, Delta: &Delta{ReasoningContent: "exact "}}}},
+		{Choices: []Choice{{Index: 0, Delta: &Delta{ReasoningContent: "reasoning"}, FinishReason: "stop"}}},
+	}
+	for index, chunk := range chunks {
+		if _, errPush := decoder.Push(chunk); errPush != nil {
+			t.Fatalf("Push(%d) error = %v", index, errPush)
+		}
+	}
+	if _, errClose := decoder.Close(nil); errClose != nil {
+		t.Fatalf("Close() error = %v", errClose)
+	}
+	response := decoder.Response()
+	if len(response.Items) != 1 || response.Items[0].Kind != vcp.ContextReasoning || response.Items[0].Content[0].Text != "exact reasoning" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 // TestStreamDecoderEOFAndFailureTerminals verifies incomplete and failed reducer paths.
 // TestStreamDecoderEOFAndFailureTerminals 校验 incomplete 和 failed reducer 路径。
 func TestStreamDecoderEOFAndFailureTerminals(t *testing.T) {

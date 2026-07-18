@@ -26,6 +26,15 @@ type ConfigurationStore struct {
 	systems *providerconfig.SystemRegistry
 }
 
+// ListProviderGroups returns immutable code-owned management groups without querying SQLite.
+// ListProviderGroups 返回不可变的代码拥有管理分组，且不查询 SQLite。
+func (s *ConfigurationStore) ListProviderGroups(ctx context.Context) ([]providerconfig.ProviderGroup, error) {
+	if err := validateContext(ctx); err != nil {
+		return nil, err
+	}
+	return s.systems.ListGroups(), nil
+}
+
 // NewConfigurationStore creates a SQLite-backed provider configuration repository.
 // NewConfigurationStore 创建一个 SQLite 支持的供应商配置 Repository。
 func NewConfigurationStore(database *Database, protocols *providerconfig.ProtocolRegistry, systems *providerconfig.SystemRegistry) (*ConfigurationStore, error) {
@@ -116,6 +125,150 @@ func (s *ConfigurationStore) ListDefinitions(ctx context.Context) ([]providercon
 	return definitions, nil
 }
 
+// SaveSystemOnboarding atomically inserts one complete system-provider configuration in SQLite.
+// SaveSystemOnboarding 在 SQLite 中原子插入一份完整的系统供应商配置。
+func (s *ConfigurationStore) SaveSystemOnboarding(ctx context.Context, onboarding providerconfig.SystemOnboarding) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	definition, errDefinition := s.GetDefinition(ctx, onboarding.Instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	if errValidate := providerconfig.ValidateSystemOnboarding(onboarding, definition); errValidate != nil {
+		return errValidate
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin system provider onboarding transaction: %w", errTransaction)
+	}
+	defer func() {
+		_ = transaction.Rollback()
+	}()
+	if errInsert := insertOnboardingInstance(ctx, transaction, onboarding.Instance); errInsert != nil {
+		return errInsert
+	}
+	for _, endpoint := range onboarding.Endpoints {
+		if errInsert := insertOnboardingEndpoint(ctx, transaction, endpoint); errInsert != nil {
+			return errInsert
+		}
+	}
+	if errInsert := insertOnboardingCredential(ctx, transaction, onboarding.Credential); errInsert != nil {
+		return errInsert
+	}
+	for _, binding := range onboarding.Bindings {
+		if errInsert := insertOnboardingBinding(ctx, transaction, binding); errInsert != nil {
+			return errInsert
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit system provider onboarding transaction: %w", errCommit)
+	}
+	return nil
+}
+
+// DeleteSystemOnboarding removes one complete new instance graph in a single compensation transaction.
+// DeleteSystemOnboarding 在一个补偿事务中删除完整的新实例图。
+func (s *ConfigurationStore) DeleteSystemOnboarding(ctx context.Context, onboarding providerconfig.SystemOnboarding) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin system onboarding compensation: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	for _, binding := range onboarding.Bindings {
+		if errDelete := deleteCompensationRow(ctx, transaction, "access binding", `DELETE FROM access_bindings WHERE id = ? AND provider_instance_id = ? AND revision = ?`, binding.ID, onboarding.Instance.ID, binding.Revision); errDelete != nil {
+			return errDelete
+		}
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "credential", `DELETE FROM provider_credentials WHERE id = ? AND provider_instance_id = ? AND revision = ?`, onboarding.Credential.ID, onboarding.Instance.ID, onboarding.Credential.Revision); errDelete != nil {
+		return errDelete
+	}
+	for _, endpoint := range onboarding.Endpoints {
+		if errDelete := deleteCompensationRow(ctx, transaction, "endpoint", `DELETE FROM provider_endpoints WHERE id = ? AND provider_instance_id = ? AND revision = ?`, endpoint.ID, onboarding.Instance.ID, endpoint.Revision); errDelete != nil {
+			return errDelete
+		}
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "provider instance", `DELETE FROM provider_instances WHERE id = ? AND definition_id = ? AND revision = ?`, onboarding.Instance.ID, onboarding.Instance.DefinitionID, onboarding.Instance.Revision); errDelete != nil {
+		return errDelete
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit system onboarding compensation: %w", errCommit)
+	}
+	return nil
+}
+
+// deleteCompensationRow deletes exactly one unchanged onboarding row inside the caller-owned transaction.
+// deleteCompensationRow 在调用方事务内精确删除一条未变化的录入记录。
+func deleteCompensationRow(ctx context.Context, transaction *sql.Tx, entityName string, statement string, arguments ...any) error {
+	result, errExec := transaction.ExecContext(ctx, statement, arguments...)
+	if errExec != nil {
+		return fmt.Errorf("compensate system onboarding %s: %w", entityName, errExec)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("read system onboarding %s compensation result: %w", entityName, errRows)
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("system onboarding compensation %s changed", entityName)
+	}
+	return nil
+}
+
+// insertOnboardingInstance inserts the new instance inside the caller-owned transaction.
+// insertOnboardingInstance 在调用方拥有的事务内插入新实例。
+func insertOnboardingInstance(ctx context.Context, transaction *sql.Tx, instance providerconfig.ProviderInstance) error {
+	payload, errPayload := marshalPayload(instance)
+	if errPayload != nil {
+		return errPayload
+	}
+	if _, errExec := transaction.ExecContext(ctx, `INSERT INTO provider_instances(id, definition_id, handle, status, revision, payload) VALUES (?, ?, ?, ?, ?, ?)`, instance.ID, instance.DefinitionID, instance.Handle, instance.Status, instance.Revision, payload); errExec != nil {
+		return fmt.Errorf("insert onboarding provider instance: %w", errExec)
+	}
+	return nil
+}
+
+// insertOnboardingEndpoint inserts one fixed endpoint inside the caller-owned transaction.
+// insertOnboardingEndpoint 在调用方拥有的事务内插入一个固定端点。
+func insertOnboardingEndpoint(ctx context.Context, transaction *sql.Tx, endpoint providerconfig.Endpoint) error {
+	payload, errPayload := marshalPayload(endpoint)
+	if errPayload != nil {
+		return errPayload
+	}
+	if _, errExec := transaction.ExecContext(ctx, `INSERT INTO provider_endpoints(id, provider_instance_id, channel_id, status, revision, payload) VALUES (?, ?, ?, ?, ?, ?)`, endpoint.ID, endpoint.ProviderInstanceID, endpoint.ChannelID, endpoint.Status, endpoint.Revision, payload); errExec != nil {
+		return fmt.Errorf("insert onboarding provider endpoint: %w", errExec)
+	}
+	return nil
+}
+
+// insertOnboardingCredential inserts one non-secret credential record inside the caller-owned transaction.
+// insertOnboardingCredential 在调用方拥有的事务内插入一个非秘密凭据记录。
+func insertOnboardingCredential(ctx context.Context, transaction *sql.Tx, credential providerconfig.Credential) error {
+	payload, errPayload := marshalPayload(credential)
+	if errPayload != nil {
+		return errPayload
+	}
+	if _, errExec := transaction.ExecContext(ctx, `INSERT INTO provider_credentials(id, provider_instance_id, auth_method_id, principal_key, fingerprint, status, revision, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, credential.ID, credential.ProviderInstanceID, credential.AuthMethodID, credential.PrincipalKey, credential.Fingerprint, credential.Status, credential.Revision, payload); errExec != nil {
+		return fmt.Errorf("insert onboarding provider credential: %w", errExec)
+	}
+	return nil
+}
+
+// insertOnboardingBinding inserts one closed access path inside the caller-owned transaction.
+// insertOnboardingBinding 在调用方拥有的事务内插入一条闭合访问路径。
+func insertOnboardingBinding(ctx context.Context, transaction *sql.Tx, binding providerconfig.AccessBinding) error {
+	payload, errPayload := marshalPayload(binding)
+	if errPayload != nil {
+		return errPayload
+	}
+	if _, errExec := transaction.ExecContext(ctx, `INSERT INTO access_bindings(id, provider_instance_id, channel_id, endpoint_id, credential_id, priority, enabled, revision, payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, binding.ID, binding.ProviderInstanceID, binding.ChannelID, binding.EndpointID, binding.CredentialID, binding.Priority, binding.Enabled, binding.Revision, payload); errExec != nil {
+		return fmt.Errorf("insert onboarding access binding: %w", errExec)
+	}
+	return nil
+}
+
 // SaveInstance creates or updates one provider instance with revision and handle checks.
 // SaveInstance 使用修订号和 Handle 校验创建或更新供应商实例。
 func (s *ConfigurationStore) SaveInstance(ctx context.Context, instance providerconfig.ProviderInstance) error {
@@ -197,6 +350,9 @@ func (s *ConfigurationStore) SaveEndpoint(ctx context.Context, endpoint provider
 	}
 	if instance.ID == "" || !definition.HasChannel(endpoint.ChannelID) {
 		return invalidConfiguration("endpoint references channel outside its provider definition")
+	}
+	if errPreset := definition.ValidateEndpointPreset(endpoint); errPreset != nil {
+		return errPreset
 	}
 	payload, errPayload := marshalPayload(endpoint)
 	if errPayload != nil {

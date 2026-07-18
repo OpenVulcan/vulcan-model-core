@@ -61,6 +61,9 @@ type ProfileCapabilities struct {
 	// Reasoning reports verified Chat reasoning parameter support.
 	// Reasoning 表示经过验证的 Chat 推理参数支持。
 	Reasoning bool
+	// ReasoningContent reports verified reasoning_content response and replay support.
+	// ReasoningContent 表示经过验证的 reasoning_content 响应与回放支持。
+	ReasoningContent bool
 	// StreamUsage reports verified stream_options.include_usage support.
 	// StreamUsage 表示经过验证的 stream_options.include_usage 支持。
 	StreamUsage bool
@@ -127,6 +130,9 @@ type Message struct {
 	// Content contains text when applicable.
 	// Content 在适用时包含文本。
 	Content string `json:"content,omitempty"`
+	// ReasoningContent preserves provider-visible reasoning only for profiles with an explicit carrier contract.
+	// ReasoningContent 仅为具有显式载体契约的 Profile 保留供应商可见推理。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// ToolCalls contains historical assistant tool calls.
 	// ToolCalls 包含历史助手工具调用。
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
@@ -303,6 +309,9 @@ type AssistantMessage struct {
 	// Content contains assistant text.
 	// Content 包含助手文本。
 	Content string `json:"content,omitempty"`
+	// ReasoningContent contains provider-returned reasoning text when the compatible upstream exposes it.
+	// ReasoningContent 包含兼容上游明确返回的推理文本。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// Refusal contains structured refusal text.
 	// Refusal 包含结构化拒绝文本。
 	Refusal string `json:"refusal,omitempty"`
@@ -329,6 +338,9 @@ type Delta struct {
 	// Content contains an actual upstream text fragment.
 	// Content 包含真实上游文本片段。
 	Content string `json:"content,omitempty"`
+	// ReasoningContent contains one actual provider reasoning fragment.
+	// ReasoningContent 包含一个真实的供应商推理片段。
+	ReasoningContent string `json:"reasoning_content,omitempty"`
 	// Refusal contains an actual upstream refusal fragment.
 	// Refusal 包含真实上游拒绝片段。
 	Refusal string `json:"refusal,omitempty"`
