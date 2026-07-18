@@ -32,12 +32,38 @@ func (p ProtocolProfile) Validate() error {
 	if !validSupportStatus(p.ModelDiscovery) {
 		return invalid("protocol profile model discovery status is invalid")
 	}
+	// capabilities ensures each declarable behavior has one explicit verified status rather than runtime probing.
+	// capabilities 确保每个可声明行为拥有一个显式验证状态，而不是在运行时探测。
+	capabilities := make(map[ProtocolCapability]struct{}, len(p.Capabilities))
+	for _, fact := range p.Capabilities {
+		if !validProtocolCapability(fact.Capability) {
+			return invalid("protocol profile capability %q is invalid", fact.Capability)
+		}
+		if !validSupportStatus(fact.Status) {
+			return invalid("protocol profile capability %q status is invalid", fact.Capability)
+		}
+		if _, exists := capabilities[fact.Capability]; exists {
+			return invalid("protocol profile capability %q is duplicated", fact.Capability)
+		}
+		capabilities[fact.Capability] = struct{}{}
+	}
 	for _, authMethod := range p.AllowedAuthMethods {
 		if !validAuthMethodType(authMethod) {
 			return invalid("protocol profile auth method %q is invalid", authMethod)
 		}
 	}
 	return nil
+}
+
+// validProtocolCapability reports whether one declarable protocol behavior belongs to the closed configuration vocabulary.
+// validProtocolCapability 报告一个可声明协议行为是否属于封闭配置词汇表。
+func validProtocolCapability(capability ProtocolCapability) bool {
+	switch capability {
+	case ProtocolCapabilitySystemInstruction, ProtocolCapabilityStructuredTools, ProtocolCapabilityParallelTools, ProtocolCapabilityStreamingToolArguments, ProtocolCapabilityStrictJSONSchema, ProtocolCapabilityReasoning, ProtocolCapabilityReasoningContinuation, ProtocolCapabilityRemoteCompaction, ProtocolCapabilityNativeWebSearch, ProtocolCapabilityTokenCounting:
+		return true
+	default:
+		return false
+	}
 }
 
 // Validate verifies one provider definition and its internally owned identifiers.

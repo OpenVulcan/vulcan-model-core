@@ -1,5 +1,12 @@
 // Package chat implements the VCP 1.0 to OpenAI Chat Completions protocol profile.
 // Package chat 实现 VCP 1.0 到 OpenAI Chat Completions 的协议 Profile。
+//
+// Portions of these typed wire carriers are adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 这些类型化 wire 载体的部分逻辑改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The adapted scope is closed Chat protocol fields; VCP owns all canonical state.
+// 改编范围是封闭 Chat 协议字段；所有规范状态由 VCP 所有。
 package chat
 
 import (
@@ -86,12 +93,15 @@ type Request struct {
 	// ToolChoice contains a typed automatic, disabled, required, or named choice.
 	// ToolChoice 包含类型化自动、禁用、必需或指定选择。
 	ToolChoice *ToolChoice `json:"tool_choice,omitempty"`
-	// ParallelToolCalls is absent when tools are empty.
-	// ParallelToolCalls 在 tools 为空时缺失。
+	// ParallelToolCalls is absent when tools are empty or parallel controls are not verified for the target.
+	// ParallelToolCalls 在 tools 为空或 Target 未验证并行控制时缺失。
 	ParallelToolCalls *bool `json:"parallel_tool_calls,omitempty"`
 	// ResponseFormat contains a verified strict JSON Schema request.
 	// ResponseFormat 包含经过验证的严格 JSON Schema 请求。
 	ResponseFormat *ResponseFormat `json:"response_format,omitempty"`
+	// ReasoningEffort constrains verified OpenAI Chat reasoning-model effort.
+	// ReasoningEffort 约束经过验证的 OpenAI Chat 推理模型强度。
+	ReasoningEffort string `json:"reasoning_effort,omitempty"`
 }
 
 // StreamOptions contains OpenAI Chat stream usage options.
@@ -182,9 +192,23 @@ type ResponseFormat struct {
 	// Type is fixed to json_schema.
 	// Type 固定为 json_schema。
 	Type string `json:"type"`
-	// JSONSchema contains the caller-provided verified schema.
-	// JSONSchema 包含调用方提供且经过验证的 Schema。
-	JSONSchema json.RawMessage `json:"json_schema"`
+	// JSONSchema contains the complete named strict-schema configuration.
+	// JSONSchema 包含完整的具名严格 Schema 配置。
+	JSONSchema JSONSchemaConfiguration `json:"json_schema"`
+}
+
+// JSONSchemaConfiguration is the closed OpenAI Chat json_schema configuration carrier.
+// JSONSchemaConfiguration 是封闭的 OpenAI Chat json_schema 配置载体。
+type JSONSchemaConfiguration struct {
+	// Name is the stable profile-owned schema name required by OpenAI Chat.
+	// Name 是 OpenAI Chat 要求的稳定 Profile 所有 Schema 名称。
+	Name string `json:"name"`
+	// Schema contains the caller-provided validated JSON Schema.
+	// Schema 包含调用方提供且已校验的 JSON Schema。
+	Schema json.RawMessage `json:"schema"`
+	// Strict requests strict upstream validation for the named schema.
+	// Strict 请求上游对具名 Schema 进行严格校验。
+	Strict bool `json:"strict"`
 }
 
 // ToolCall is one complete OpenAI Chat function call.
@@ -218,6 +242,12 @@ type Response struct {
 	// ID is the upstream response identifier.
 	// ID 是上游响应标识。
 	ID string `json:"id,omitempty"`
+	// Object is the documented Chat completion response discriminator.
+	// Object 是文档化的 Chat completion 响应判别字段。
+	Object string `json:"object,omitempty"`
+	// Created is the provider creation timestamp that VCP does not currently carry.
+	// Created 是 VCP 当前不承载的 Provider 创建时间戳。
+	Created *int64 `json:"created,omitempty"`
 	// Model is the upstream model identifier.
 	// Model 是上游模型标识。
 	Model string `json:"model,omitempty"`
@@ -227,6 +257,12 @@ type Response struct {
 	// Usage contains terminal usage when reported.
 	// Usage 包含上游报告的终态用量。
 	Usage *Usage `json:"usage,omitempty"`
+	// ServiceTier is the provider-selected processing tier without a VCP response carrier.
+	// ServiceTier 是没有 VCP 响应承载字段的 Provider 所选处理层级。
+	ServiceTier string `json:"service_tier,omitempty"`
+	// SystemFingerprint is the provider backend fingerprint without a VCP response carrier.
+	// SystemFingerprint 是没有 VCP 响应承载字段的 Provider 后端指纹。
+	SystemFingerprint string `json:"system_fingerprint,omitempty"`
 	// Error contains a structured upstream failure envelope.
 	// Error 包含结构化上游失败信封。
 	Error *Error `json:"error,omitempty"`
@@ -247,6 +283,9 @@ type Choice struct {
 	// FinishReason records the upstream terminal reason.
 	// FinishReason 记录上游终止原因。
 	FinishReason string `json:"finish_reason,omitempty"`
+	// Logprobs detects token likelihood metadata that this first-phase VCP profile cannot represent.
+	// Logprobs 检测到本第一阶段 VCP Profile 无法表示的 Token 概率元数据。
+	Logprobs *UnsupportedResponsePayload `json:"logprobs,omitempty"`
 }
 
 // AssistantMessage contains OpenAI assistant output.
@@ -264,6 +303,15 @@ type AssistantMessage struct {
 	// ToolCalls contains complete function calls.
 	// ToolCalls 包含完整函数调用。
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+	// FunctionCall is the deprecated single-function carrier that remains safely projectable as one VCP tool call.
+	// FunctionCall 是已废弃的单函数载体，仍可安全投影为一个 VCP 工具调用。
+	FunctionCall *FunctionCall `json:"function_call,omitempty"`
+	// Annotations detects citation metadata that this first-phase VCP profile cannot represent.
+	// Annotations 检测到本第一阶段 VCP Profile 无法表示的引文元数据。
+	Annotations []UnsupportedResponsePayload `json:"annotations,omitempty"`
+	// Audio detects an audio response payload outside this text-only first-phase profile.
+	// Audio 检测到超出此文本优先第一阶段 Profile 范围的音频响应载荷。
+	Audio *UnsupportedResponsePayload `json:"audio,omitempty"`
 }
 
 // Delta contains one streaming Chat assistant delta.
@@ -281,6 +329,12 @@ type Delta struct {
 	// ToolCalls contains actual upstream tool deltas.
 	// ToolCalls 包含真实上游工具增量。
 	ToolCalls []ToolCallDelta `json:"tool_calls,omitempty"`
+	// FunctionCall is the deprecated single-function delta carrier that remains safely projectable as one VCP tool call.
+	// FunctionCall 是已废弃的单函数增量载体，仍可安全投影为一个 VCP 工具调用。
+	FunctionCall *FunctionCall `json:"function_call,omitempty"`
+	// Audio detects an audio response delta outside this text-only first-phase profile.
+	// Audio 检测到超出此文本优先第一阶段 Profile 范围的音频响应增量。
+	Audio *UnsupportedResponsePayload `json:"audio,omitempty"`
 }
 
 // ToolCallDelta contains one indexed streaming function call delta.
@@ -306,6 +360,12 @@ type Chunk struct {
 	// ID is the upstream response identifier when reported.
 	// ID 是上游报告的响应标识。
 	ID string `json:"id,omitempty"`
+	// Object is the documented Chat completion chunk discriminator.
+	// Object 是文档化的 Chat completion 分片判别字段。
+	Object string `json:"object,omitempty"`
+	// Created is the provider chunk creation timestamp that VCP does not currently carry.
+	// Created 是 VCP 当前不承载的 Provider 分片创建时间戳。
+	Created *int64 `json:"created,omitempty"`
 	// Model is the upstream model identifier when reported.
 	// Model 是上游报告的模型标识。
 	Model string `json:"model,omitempty"`
@@ -315,6 +375,12 @@ type Chunk struct {
 	// Usage supports a standard usage-only chunk.
 	// Usage 支持标准的仅用量分片。
 	Usage *Usage `json:"usage,omitempty"`
+	// ServiceTier is the provider-selected processing tier without a VCP response carrier.
+	// ServiceTier 是没有 VCP 响应承载字段的 Provider 所选处理层级。
+	ServiceTier string `json:"service_tier,omitempty"`
+	// SystemFingerprint is the provider backend fingerprint without a VCP response carrier.
+	// SystemFingerprint 是没有 VCP 响应承载字段的 Provider 后端指纹。
+	SystemFingerprint string `json:"system_fingerprint,omitempty"`
 	// Error contains an in-stream structured failure.
 	// Error 包含流内结构化失败。
 	Error *Error `json:"error,omitempty"`
@@ -338,6 +404,12 @@ type Usage struct {
 	// CompletionDetails contains reasoning observations when reported.
 	// CompletionDetails 在报告时包含推理观测。
 	CompletionDetails *CompletionTokenDetails `json:"completion_tokens_details,omitempty"`
+	// CostInUSDTicks is xAI-compatible cost accounting without a VCP billing carrier.
+	// CostInUSDTicks 是没有 VCP 计费承载字段的 xAI 兼容成本计量。
+	CostInUSDTicks *int64 `json:"cost_in_usd_ticks,omitempty"`
+	// NumSourcesUsed is xAI-compatible server-side source accounting without a VCP usage carrier.
+	// NumSourcesUsed 是没有 VCP 用量承载字段的 xAI 兼容服务端来源计量。
+	NumSourcesUsed *int64 `json:"num_sources_used,omitempty"`
 }
 
 // PromptTokenDetails contains OpenAI prompt token details.
@@ -349,6 +421,15 @@ type PromptTokenDetails struct {
 	// CacheCreationTokens is nil when not reported by compatible upstreams.
 	// CacheCreationTokens 在兼容上游未报告时为 nil。
 	CacheCreationTokens *int64 `json:"cache_creation_input_tokens,omitempty"`
+	// AudioTokens is the provider-reported audio input accounting without a VCP accounting carrier.
+	// AudioTokens 是没有 VCP 计量承载字段的 Provider 音频输入计量。
+	AudioTokens *int64 `json:"audio_tokens,omitempty"`
+	// TextTokens is xAI-compatible text input accounting without a VCP accounting carrier.
+	// TextTokens 是没有 VCP 计量承载字段的 xAI 兼容文本输入计量。
+	TextTokens *int64 `json:"text_tokens,omitempty"`
+	// ImageTokens is xAI-compatible image input accounting without a VCP accounting carrier.
+	// ImageTokens 是没有 VCP 计量承载字段的 xAI 兼容图像输入计量。
+	ImageTokens *int64 `json:"image_tokens,omitempty"`
 }
 
 // CompletionTokenDetails contains OpenAI completion token details.
@@ -357,6 +438,25 @@ type CompletionTokenDetails struct {
 	// ReasoningTokens is nil when not reported.
 	// ReasoningTokens 在未报告时为 nil。
 	ReasoningTokens *int64 `json:"reasoning_tokens,omitempty"`
+	// AudioTokens is the provider-reported generated audio accounting without a VCP accounting carrier.
+	// AudioTokens 是没有 VCP 计量承载字段的 Provider 生成音频计量。
+	AudioTokens *int64 `json:"audio_tokens,omitempty"`
+	// AcceptedPredictionTokens is predicted-output accounting without a VCP accounting carrier.
+	// AcceptedPredictionTokens 是没有 VCP 计量承载字段的预测输出接受计量。
+	AcceptedPredictionTokens *int64 `json:"accepted_prediction_tokens,omitempty"`
+	// RejectedPredictionTokens is predicted-output accounting without a VCP accounting carrier.
+	// RejectedPredictionTokens 是没有 VCP 计量承载字段的预测输出拒绝计量。
+	RejectedPredictionTokens *int64 `json:"rejected_prediction_tokens,omitempty"`
+}
+
+// UnsupportedResponsePayload detects a documented response field without retaining its provider payload.
+// UnsupportedResponsePayload 在不保留其 Provider 载荷的前提下检测一个文档化响应字段。
+type UnsupportedResponsePayload struct{}
+
+// UnmarshalJSON accepts any documented JSON payload shape while intentionally discarding its contents.
+// UnmarshalJSON 接受任何文档化 JSON 载荷形态，同时有意丢弃其内容。
+func (*UnsupportedResponsePayload) UnmarshalJSON([]byte) error {
+	return nil
 }
 
 // Error contains safe upstream error fields.

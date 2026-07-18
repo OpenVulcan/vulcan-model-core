@@ -417,6 +417,9 @@ const (
 	// ToolFunction is a caller-executed structured function.
 	// ToolFunction 是由调用方执行的结构化函数。
 	ToolFunction ToolKind = "function"
+	// ToolCustom is a caller-executed freeform tool whose input is not constrained to JSON Schema.
+	// ToolCustom 是一个输入不受 JSON Schema 约束且由调用方执行的自由格式工具。
+	ToolCustom ToolKind = "custom"
 	// ToolNativeWebSearch is provider-hosted web search.
 	// ToolNativeWebSearch 是供应商托管网页搜索。
 	ToolNativeWebSearch ToolKind = "native_web_search"

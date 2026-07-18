@@ -338,11 +338,14 @@ func validateContent(block ContentBlock) error {
 // validateTool verifies one tool declaration without accepting arbitrary execution fields.
 // validateTool 校验工具声明且不接受任意执行字段。
 func validateTool(tool ToolDefinition) error {
-	if tool.Kind != ToolFunction && tool.Kind != ToolNativeWebSearch {
+	if tool.Kind != ToolFunction && tool.Kind != ToolCustom && tool.Kind != ToolNativeWebSearch {
 		return fmt.Errorf("unknown tool kind %q", tool.Kind)
 	}
 	if strings.TrimSpace(tool.Name) == "" {
 		return errors.New("name is required")
+	}
+	if tool.Strict && tool.Kind != ToolFunction {
+		return errors.New("strict schema is only supported for function tools")
 	}
 	if tool.Kind == ToolFunction && !validJSONObject(tool.Parameters) {
 		return errors.New("function parameters must be a JSON object")

@@ -73,3 +73,15 @@ func TestProjectRequestAcceptsMatchingExactModelSelection(t *testing.T) {
 		t.Fatalf("upstream model = %q, want %q", projected.Upstream.Model, "gpt-test")
 	}
 }
+
+// TestProjectRequestRejectsInvalidVCPRequest verifies the pure Chat profile enforces the same canonical request validation as executable profiles.
+// TestProjectRequestRejectsInvalidVCPRequest 校验纯 Chat Profile 与可执行 Profile 一样强制执行规范请求校验。
+func TestProjectRequestRejectsInvalidVCPRequest(t *testing.T) {
+	request := chatTestRequest()
+	request.ProtocolVersion = "vcp.invalid"
+
+	_, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{}, "lin_invalid_vcp", time.Unix(42, 0))
+	if !errors.Is(errProject, vcp.ErrInvalidRequest) {
+		t.Fatalf("ProjectRequest() error = %v, want ErrInvalidRequest", errProject)
+	}
+}

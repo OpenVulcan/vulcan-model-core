@@ -1,7 +1,14 @@
+// Request fixtures cover behavior adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 请求夹具覆盖改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66 的行为。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The fixtures verify typed Chat request projection without importing CLIProxyAPI runtime code.
+// 夹具验证类型化 Chat 请求投影，不导入 CLIProxyAPI 运行时代码。
 package chat
 
 import (
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
@@ -97,6 +104,208 @@ func TestProjectRequestMapsToolsAndBlocksUnsupportedRequiredCapabilities(t *test
 	}
 	if len(projected.Upstream.Tools) != 1 || projected.Upstream.ParallelToolCalls == nil || !*projected.Upstream.ParallelToolCalls {
 		t.Fatalf("tool mapping = %#v", projected.Upstream)
+	}
+}
+
+// TestProjectRequestOmitsUnverifiedParallelToolControl verifies an unsupported optional false control is not serialized merely because tools exist.
+// TestProjectRequestOmitsUnverifiedParallelToolControl 验证不能仅因存在工具就序列化未经验证的可选 false 并行控制。
+func TestProjectRequestOmitsUnverifiedParallelToolControl(t *testing.T) {
+	request := chatTestRequest()
+	request.Tools = []vcp.ToolDefinition{{Kind: vcp.ToolFunction, Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	request.ToolPolicy = vcp.ToolPolicy{Choice: vcp.ToolChoiceAuto, Parallel: false}
+	projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{StructuredTools: true}, "lin_tools_without_parallel", time.Unix(35, 0))
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if projected.Upstream.ParallelToolCalls != nil {
+		t.Fatalf("parallel_tool_calls = %#v, want absent", projected.Upstream.ParallelToolCalls)
+	}
+	encoded, errMarshal := json.Marshal(projected.Upstream)
+	if errMarshal != nil {
+		t.Fatalf("Marshal() error = %v", errMarshal)
+	}
+	if strings.Contains(string(encoded), "parallel_tool_calls") {
+		t.Fatalf("unverified parallel control serialized: %s", encoded)
+	}
+}
+
+// TestProjectRequestUsesUpstreamToolCallID verifies that Chat tool calls and results retain their provider-owned relation.
+// TestProjectRequestUsesUpstreamToolCallID 验证 Chat 工具调用和结果保留 Provider 所有的关联关系。
+func TestProjectRequestUsesUpstreamToolCallID(t *testing.T) {
+	request := chatTestRequest()
+	request.Context = append(request.Context,
+		vcp.ContextItem{
+			ItemID: "item-call", Sequence: 2, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			ToolCall: &vcp.ToolCallItem{ToolCallID: "vcp-call", UpstreamID: "upstream-call", Name: "lookup", Arguments: `{"city":"Shanghai"}`, Status: vcp.ToolCallCompleted},
+		},
+		vcp.ContextItem{
+			ItemID: "item-result", Sequence: 3, Kind: vcp.ContextToolResult, Authority: vcp.AuthorityTool, Actor: vcp.ActorTool,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			Content: []vcp.ContentBlock{{Type: vcp.ContentText, Text: "Sunny"}}, ToolResult: &vcp.ToolResultItem{ToolCallID: "vcp-call"},
+		},
+	)
+	projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{}, "lin_tool_relation", time.Unix(37, 0))
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if len(projected.Upstream.Messages) != 3 {
+		t.Fatalf("message count = %d, want 3", len(projected.Upstream.Messages))
+	}
+	call := projected.Upstream.Messages[1]
+	if len(call.ToolCalls) != 1 || call.ToolCalls[0].ID != "upstream-call" {
+		t.Fatalf("tool call = %#v", call)
+	}
+	result := projected.Upstream.Messages[2]
+	if result.Role != "tool" || result.ToolCallID != "upstream-call" || result.Content != "Sunny" {
+		t.Fatalf("tool result = %#v", result)
+	}
+}
+
+// TestProjectRequestRejectsToolCallWithoutUpstreamID verifies Router-owned tool identities are never serialized as provider call identifiers.
+// TestProjectRequestRejectsToolCallWithoutUpstreamID 验证 Router 所有的工具身份绝不会序列化为 Provider 调用标识。
+func TestProjectRequestRejectsToolCallWithoutUpstreamID(t *testing.T) {
+	request := chatTestRequest()
+	request.Context = append(request.Context, vcp.ContextItem{
+		ItemID: "item-call-without-upstream", Sequence: 2, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+		Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+		ToolCall: &vcp.ToolCallItem{ToolCallID: "vcp-only-call", Name: "lookup", Arguments: `{}`, Status: vcp.ToolCallCompleted},
+	})
+	if _, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{}, "lin_tool_without_upstream", time.Unix(38, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+	}
+}
+
+// TestProjectRequestRejectsNamespacedToolIdentity verifies Chat never erases a VCP tool namespace from declarations or historical calls.
+// TestProjectRequestRejectsNamespacedToolIdentity 验证 Chat 永远不会从声明或历史调用中抹去 VCP 工具命名空间。
+func TestProjectRequestRejectsNamespacedToolIdentity(t *testing.T) {
+	declarationRequest := chatTestRequest()
+	declarationRequest.Tools = []vcp.ToolDefinition{{Kind: vcp.ToolFunction, Namespace: "weather", Name: "lookup", Parameters: json.RawMessage(`{"type":"object"}`)}}
+	if _, errProject := ProjectRequest(declarationRequest, chatTarget(), ProfileCapabilities{StructuredTools: true}, "lin_namespaced_declaration", time.Unix(39, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("namespaced declaration error = %v, want ErrUnsupportedContext", errProject)
+	}
+
+	historyRequest := chatTestRequest()
+	historyRequest.Context = append(historyRequest.Context, vcp.ContextItem{
+		ItemID: "namespaced-call", Sequence: 2, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+		Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+		ToolCall: &vcp.ToolCallItem{ToolCallID: "call-namespaced", Namespace: "weather", Name: "lookup", Arguments: `{}`, Status: vcp.ToolCallCompleted},
+	})
+	if _, errProject := ProjectRequest(historyRequest, chatTarget(), ProfileCapabilities{}, "lin_namespaced_history", time.Unix(40, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("namespaced historical call error = %v, want ErrUnsupportedContext", errProject)
+	}
+}
+
+// TestProjectRequestMapsReasoningEffortAndStrictSchema verifies exact native OpenAI Chat control carriers.
+// TestProjectRequestMapsReasoningEffortAndStrictSchema 验证精确的原生 OpenAI Chat 控制载体。
+func TestProjectRequestMapsReasoningEffortAndStrictSchema(t *testing.T) {
+	request := chatTestRequest()
+	request.ReasoningPolicy.Effort = "high"
+	request.GenerationPolicy.StrictJSONSchema = json.RawMessage(`{"type":"object","properties":{"answer":{"type":"string"}},"required":["answer"],"additionalProperties":false}`)
+	projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{Reasoning: true, StrictJSONSchema: true}, "lin_reasoning", time.Unix(35, 0))
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if projected.Upstream.ReasoningEffort != "high" {
+		t.Fatalf("reasoning_effort = %q, want high", projected.Upstream.ReasoningEffort)
+	}
+	format := projected.Upstream.ResponseFormat
+	if format == nil || format.Type != "json_schema" || format.JSONSchema.Name != "vulcan_response" || !format.JSONSchema.Strict {
+		t.Fatalf("response format = %#v", format)
+	}
+	if !reflect.DeepEqual(format.JSONSchema.Schema, request.GenerationPolicy.StrictJSONSchema) {
+		t.Fatalf("schema = %s, want %s", format.JSONSchema.Schema, request.GenerationPolicy.StrictJSONSchema)
+	}
+	encoded, errJSON := json.Marshal(projected.Upstream)
+	if errJSON != nil {
+		t.Fatalf("Marshal() error = %v", errJSON)
+	}
+	if !strings.Contains(string(encoded), `"reasoning_effort":"high"`) || !strings.Contains(string(encoded), `"json_schema":{"name":"vulcan_response","schema":`) || !strings.Contains(string(encoded), `"strict":true`) {
+		t.Fatalf("wire request omits native reasoning or strict schema envelope: %s", encoded)
+	}
+	mode, exists := projected.CapabilityPlan.Decision(vcp.FeatureReasoning)
+	if !exists || mode != vcp.CapabilityNative {
+		t.Fatalf("reasoning capability mode = %q, exists = %t", mode, exists)
+	}
+}
+
+// TestProjectRequestDoesNotClaimUnsupportedVisibleReasoningSummary verifies that Chat records an unavailable summary explicitly.
+// TestProjectRequestDoesNotClaimUnsupportedVisibleReasoningSummary 验证 Chat 会显式记录不可用的可见推理摘要。
+func TestProjectRequestDoesNotClaimUnsupportedVisibleReasoningSummary(t *testing.T) {
+	request := chatTestRequest()
+	request.ReasoningPolicy = vcp.ReasoningPolicy{Effort: "high", Summary: true}
+	projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{Reasoning: true}, "lin_summary", time.Unix(36, 0))
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	mode, exists := projected.CapabilityPlan.Decision(vcp.FeatureReasoning)
+	if !exists || mode != vcp.CapabilityOmitted {
+		t.Fatalf("reasoning capability mode = %q, exists = %t", mode, exists)
+	}
+	if projected.Upstream.ReasoningEffort != "" {
+		t.Fatalf("unsupported summary request emitted reasoning_effort = %q", projected.Upstream.ReasoningEffort)
+	}
+}
+
+// TestProjectRequestOmitsHistoricalReasoning verifies a typed historical reasoning item is never relabeled as a native Chat assistant message.
+// TestProjectRequestOmitsHistoricalReasoning 验证类型化历史推理项目绝不会被重新标记为原生 Chat assistant 消息。
+func TestProjectRequestOmitsHistoricalReasoning(t *testing.T) {
+	request := chatTestRequest()
+	request.Context = append(request.Context, vcp.ContextItem{
+		ItemID: "reasoning", Sequence: 2, Kind: vcp.ContextReasoning, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+		Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+		Content: []vcp.ContentBlock{{Type: vcp.ContentText, Text: "Visible summary"}}, Reasoning: &vcp.ReasoningItem{Summary: true},
+	})
+
+	projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{Reasoning: true}, "lin_historical_reasoning", time.Unix(38, 0))
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if len(projected.Upstream.Messages) != 1 || projected.Upstream.Messages[0].Role != "user" {
+		t.Fatalf("messages = %#v", projected.Upstream.Messages)
+	}
+	if len(projected.Ledger.Entries) != 2 || projected.Ledger.Entries[1].ProjectionMode != vcp.CapabilityOmitted || projected.Ledger.Entries[1].RuleID != "openai_chat.reasoning.omitted.v1" {
+		t.Fatalf("ledger = %#v", projected.Ledger.Entries)
+	}
+	mode, exists := projected.CapabilityPlan.Decision(vcp.FeatureReasoning)
+	if !exists || mode != vcp.CapabilityOmitted {
+		t.Fatalf("reasoning capability mode = %q, exists = %t", mode, exists)
+	}
+}
+
+// TestProjectRequestOmitsNonModelVisibility verifies client and audit-only context never reaches the Chat wire request.
+// TestProjectRequestOmitsNonModelVisibility 验证客户端和仅审计上下文永远不会进入 Chat wire 请求。
+func TestProjectRequestOmitsNonModelVisibility(t *testing.T) {
+	for _, visibility := range []vcp.Visibility{vcp.VisibilityClient, vcp.VisibilityAuditOnly} {
+		t.Run(string(visibility), func(t *testing.T) {
+			request := chatTestRequest()
+			hidden := chatMessage("hidden", 2, vcp.AuthorityAssistant, "must not reach upstream")
+			hidden.Visibility = visibility
+			request.Context = append(request.Context, hidden)
+
+			projected, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{}, "lin_visibility", time.Unix(39, 0))
+			if errProject != nil {
+				t.Fatalf("ProjectRequest() error = %v", errProject)
+			}
+			if len(projected.Upstream.Messages) != 1 || projected.Upstream.Messages[0].Content != "Hello" {
+				t.Fatalf("messages = %#v", projected.Upstream.Messages)
+			}
+			entry := projected.Ledger.Entries[1]
+			if entry.UpstreamPosition != -1 || entry.ProjectionMode != vcp.CapabilityOmitted || entry.RuleID != "openai_chat.visibility.omitted.v1" {
+				t.Fatalf("ledger entry = %#v", entry)
+			}
+		})
+	}
+}
+
+// TestProjectRequestRejectsUnresolvedProviderState verifies opaque state is never serialized as a Chat message field.
+// TestProjectRequestRejectsUnresolvedProviderState 验证不透明状态永远不会序列化为 Chat 消息字段。
+func TestProjectRequestRejectsUnresolvedProviderState(t *testing.T) {
+	request := chatTestRequest()
+	request.Context[0].ProviderStateRef = "sealed-state"
+
+	if _, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{}, "lin_provider_state", time.Unix(40, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
 	}
 }
 

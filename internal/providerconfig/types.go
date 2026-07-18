@@ -61,6 +61,54 @@ const (
 	SupportTemporarilyUnavailable SupportStatus = "temporarily_unavailable"
 )
 
+// ProtocolCapability identifies one declarable upstream protocol behavior independent of a concrete provider instance.
+// ProtocolCapability 标识独立于具体 Provider Instance 的一个可声明上游协议行为。
+type ProtocolCapability string
+
+const (
+	// ProtocolCapabilitySystemInstruction identifies a native system-instruction carrier.
+	// ProtocolCapabilitySystemInstruction 标识原生系统指令载体。
+	ProtocolCapabilitySystemInstruction ProtocolCapability = "system_instruction"
+	// ProtocolCapabilityStructuredTools identifies typed function declaration and invocation support.
+	// ProtocolCapabilityStructuredTools 标识类型化函数声明和调用支持。
+	ProtocolCapabilityStructuredTools ProtocolCapability = "structured_tools"
+	// ProtocolCapabilityParallelTools identifies reliable parallel function invocation support.
+	// ProtocolCapabilityParallelTools 标识可靠并行函数调用支持。
+	ProtocolCapabilityParallelTools ProtocolCapability = "parallel_tools"
+	// ProtocolCapabilityStreamingToolArguments identifies real upstream tool-argument deltas.
+	// ProtocolCapabilityStreamingToolArguments 标识真实上游工具参数增量。
+	ProtocolCapabilityStreamingToolArguments ProtocolCapability = "streaming_tool_arguments"
+	// ProtocolCapabilityStrictJSONSchema identifies response-schema enforcement.
+	// ProtocolCapabilityStrictJSONSchema 标识响应 Schema 约束支持。
+	ProtocolCapabilityStrictJSONSchema ProtocolCapability = "strict_json_schema"
+	// ProtocolCapabilityReasoning identifies provider reasoning output or request controls.
+	// ProtocolCapabilityReasoning 标识 Provider 推理输出或请求控制。
+	ProtocolCapabilityReasoning ProtocolCapability = "reasoning"
+	// ProtocolCapabilityReasoningContinuation identifies sealed provider reasoning continuation support.
+	// ProtocolCapabilityReasoningContinuation 标识密封 Provider 推理续接支持。
+	ProtocolCapabilityReasoningContinuation ProtocolCapability = "reasoning_continuation"
+	// ProtocolCapabilityRemoteCompaction identifies a provider-native remote compaction action.
+	// ProtocolCapabilityRemoteCompaction 标识 Provider 原生远程压缩动作。
+	ProtocolCapabilityRemoteCompaction ProtocolCapability = "remote_compaction"
+	// ProtocolCapabilityNativeWebSearch identifies a provider-hosted web-search tool.
+	// ProtocolCapabilityNativeWebSearch 标识 Provider 托管网页搜索工具。
+	ProtocolCapabilityNativeWebSearch ProtocolCapability = "native_web_search"
+	// ProtocolCapabilityTokenCounting identifies a typed upstream token-count action.
+	// ProtocolCapabilityTokenCounting 标识类型化上游 Token 统计动作。
+	ProtocolCapabilityTokenCounting ProtocolCapability = "token_counting"
+)
+
+// ProtocolCapabilityFact declares the verified availability of one closed protocol behavior.
+// ProtocolCapabilityFact 声明一个封闭协议行为的经过验证可用性。
+type ProtocolCapabilityFact struct {
+	// Capability identifies the protocol behavior.
+	// Capability 标识协议行为。
+	Capability ProtocolCapability
+	// Status records whether the behavior is supported without runtime probing.
+	// Status 记录该行为是否无需运行时探测即可确认支持。
+	Status SupportStatus
+}
+
 // AuthMethodType identifies one credential acquisition and application mechanism.
 // AuthMethodType 标识一种凭据获取和应用机制。
 type AuthMethodType string
@@ -148,6 +196,9 @@ type ProtocolProfile struct {
 	// ModelDiscovery describes whether the profile can list upstream models.
 	// ModelDiscovery 描述该 Profile 是否可以拉取上游模型。
 	ModelDiscovery SupportStatus
+	// Capabilities declares protocol behavior facts available for target-specific capability planning.
+	// Capabilities 声明可供 Target 特定能力规划使用的协议行为事实。
+	Capabilities []ProtocolCapabilityFact
 	// AllowedAuthMethods lists generic authentication methods accepted by custom providers.
 	// AllowedAuthMethods 列出自定义供应商可使用的通用认证方式。
 	AllowedAuthMethods []AuthMethodType

@@ -20,6 +20,24 @@ func TestPlanCapabilitiesIgnoresUnusedAdvancedCapabilities(t *testing.T) {
 	}
 }
 
+// TestPlanCapabilitiesIgnoresNonModelContext verifies client and audit-only data cannot trigger upstream capability requirements.
+// TestPlanCapabilitiesIgnoresNonModelContext 验证客户端和仅审计数据不会触发上游能力需求。
+func TestPlanCapabilitiesIgnoresNonModelContext(t *testing.T) {
+	request := testTextRequest()
+	request.Context = append(request.Context,
+		ContextItem{ItemID: "itm_client_image", Sequence: 2, Kind: ContextMessage, Authority: AuthorityUser, Actor: ActorEndUser, Placement: PlacementTranscript, Activation: Activation{Mode: ActivationRequestStart}, Visibility: VisibilityClient, Content: []ContentBlock{{Type: ContentImage, ResourceRef: "res_client"}}, Message: &MessageItem{}},
+		ContextItem{ItemID: "itm_audit_instruction", Sequence: 3, Kind: ContextInstruction, Authority: AuthorityDeveloper, Actor: ActorApplication, Placement: PlacementTranscript, Activation: Activation{Mode: ActivationRequestStart}, Visibility: VisibilityAuditOnly, Content: []ContentBlock{{Type: ContentText, Text: "audit only"}}, Instruction: &InstructionItem{}},
+	)
+
+	plan, errPlan := PlanCapabilities(request, nil, 7, time.Unix(1, 0))
+	if errPlan != nil {
+		t.Fatalf("PlanCapabilities() error = %v", errPlan)
+	}
+	if len(plan.Demands) != 0 || plan.HasBlocked() {
+		t.Fatalf("non-model demands = %#v, want none", plan.Demands)
+	}
+}
+
 // TestPlanCapabilitiesRequiredPreferredAndUnused verifies all demand outcomes.
 // TestPlanCapabilitiesRequiredPreferredAndUnused 校验全部需求结果。
 func TestPlanCapabilitiesRequiredPreferredAndUnused(t *testing.T) {
@@ -60,6 +78,23 @@ func TestPlanCapabilitiesOmitsPreferredUnsupported(t *testing.T) {
 	}
 	if mode, _ := plan.Decision(FeatureRemoteCompaction); mode != CapabilityOmitted {
 		t.Fatalf("remote compaction mode = %q, want omitted", mode)
+	}
+}
+
+// TestPlanCapabilitiesRequiresStrictSchemaForStrictFunctionTool verifies strict function schemas cannot bypass target capability planning.
+// TestPlanCapabilitiesRequiresStrictSchemaForStrictFunctionTool 验证严格函数 Schema 不会绕过 Target 能力规划。
+func TestPlanCapabilitiesRequiresStrictSchemaForStrictFunctionTool(t *testing.T) {
+	request := testTextRequest()
+	request.Tools = []ToolDefinition{{Kind: ToolFunction, Name: "lookup", Parameters: []byte(`{"type":"object"}`), Strict: true}}
+	plan, errPlan := PlanCapabilities(request, []CapabilityAvailability{
+		{Feature: FeatureStructuredToolCalling, Native: true},
+		{Feature: FeatureStrictSchema, Native: false},
+	}, 10, time.Unix(4, 0))
+	if errPlan != nil {
+		t.Fatalf("PlanCapabilities() error = %v", errPlan)
+	}
+	if mode, _ := plan.Decision(FeatureStrictSchema); mode != CapabilityBlocked {
+		t.Fatalf("strict function schema mode = %q, want blocked", mode)
 	}
 }
 

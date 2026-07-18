@@ -207,6 +207,7 @@ func ValidateCustomDefinition(definition ProviderDefinition, protocols *Protocol
 // cloneProtocolProfile returns a mutation-safe protocol profile value.
 // cloneProtocolProfile 返回一个防止外部修改的协议 Profile 值。
 func cloneProtocolProfile(profile ProtocolProfile) ProtocolProfile {
+	profile.Capabilities = append([]ProtocolCapabilityFact(nil), profile.Capabilities...)
 	profile.AllowedAuthMethods = append([]AuthMethodType(nil), profile.AllowedAuthMethods...)
 	return profile
 }

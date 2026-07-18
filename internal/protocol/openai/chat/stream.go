@@ -1,3 +1,9 @@
+// Portions of this stream decoder are adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 本流式解码器的部分逻辑改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The adapted scope is Chat SSE tool-delta, usage-only, and terminal compatibility behavior.
+// 改编范围是 Chat SSE 工具增量、仅用量和终态兼容行为。
 package chat
 
 import (
@@ -22,15 +28,27 @@ type StreamDecoder struct {
 	// toolOrder preserves first-observed causal order independently of map iteration.
 	// toolOrder 独立于 map 迭代保留首次观察到的因果顺序。
 	toolOrder []string
-	// texts stores text item state by choice index.
-	// texts 按候选索引存储文本项目状态。
-	texts map[int]*streamText
+	// texts stores text, refusal, and reasoning item state by choice and semantic kind.
+	// texts 按候选和语义类型存储文本、拒绝与推理项目状态。
+	texts map[string]*streamText
 	// allEvents stores the deterministic replay log.
 	// allEvents 存储确定性回放日志。
 	allEvents []vcp.Event
+	// report stores client-safe warnings, usage, and terminal advice accumulated during stream decoding.
+	// report 存储流解码期间累积的客户端安全告警、用量和终态建议。
+	report vcp.ExecutionReport
 	// pendingFinish records a confirmed finish_reason until usage-only chunks are consumed.
 	// pendingFinish 在消费 usage-only 分片前记录已确认的 finish_reason。
 	pendingFinish string
+	// pendingTerminal records the exact VCP terminal type selected from a confirmed finish reason.
+	// pendingTerminal 记录由已确认 finish reason 选定的精确 VCP 终态类型。
+	pendingTerminal vcp.EventType
+	// pendingErrorCode records the safe failure code selected from a confirmed finish reason.
+	// pendingErrorCode 记录由已确认 finish reason 选定的安全失败代码。
+	pendingErrorCode string
+	// upstreamResponseID records the one provider response identifier observed across stream chunks.
+	// upstreamResponseID 记录跨流分片观察到的唯一 Provider 响应标识。
+	upstreamResponseID string
 }
 
 // streamTool stores one stable tool call across delayed upstream fields.
@@ -62,11 +80,14 @@ type streamTool struct {
 // streamText stores one text or refusal item lifecycle.
 // streamText 存储一个文本或拒绝项目生命周期。
 type streamText struct {
+	// choiceIndex identifies the owning upstream choice.
+	// choiceIndex 标识所属上游候选。
+	choiceIndex int
 	// itemID is stable for the choice output.
 	// itemID 对候选输出保持稳定。
 	itemID string
-	// kind identifies message or refusal output.
-	// kind 标识消息或拒绝输出。
+	// kind identifies message, refusal, or reasoning output.
+	// kind 标识消息、拒绝或推理输出。
 	kind vcp.ContextKind
 	// started reports whether item.started has been emitted.
 	// started 表示是否已发出 item.started。
@@ -79,7 +100,7 @@ func NewStreamDecoder(responseID string, now time.Time) (*StreamDecoder, error) 
 	if responseID == "" {
 		return nil, fmt.Errorf("%w: response_id is required", ErrInvalidUpstreamResponse)
 	}
-	decoder := &StreamDecoder{emitter: newEmitter(responseID, now), reducer: vcp.NewReducer(responseID), tools: make(map[string]*streamTool), texts: make(map[int]*streamText)}
+	decoder := &StreamDecoder{emitter: newEmitter(responseID, now), reducer: vcp.NewReducer(responseID), tools: make(map[string]*streamTool), texts: make(map[string]*streamText), report: vcp.ExecutionReport{ResponseID: responseID, ExecutionID: vcp.DeriveID("exec", responseID)}}
 	if errEmit := decoder.emit(decoder.emitter.event(vcp.EventResponseStarted), nil); errEmit != nil {
 		return nil, errEmit
 	}
@@ -92,8 +113,17 @@ func (d *StreamDecoder) Push(chunk Chunk) ([]vcp.Event, error) {
 	if d.reducer.Terminal() {
 		return nil, nil
 	}
+	if chunk.ID != "" {
+		if d.upstreamResponseID != "" && d.upstreamResponseID != chunk.ID {
+			return nil, fmt.Errorf("%w: stream response identifier changed", ErrInvalidUpstreamResponse)
+		}
+		d.upstreamResponseID = chunk.ID
+	}
+	if errMetadata := d.observeChunkMetadata(chunk); errMetadata != nil {
+		return nil, errMetadata
+	}
 	newEvents := make([]vcp.Event, 0)
-	if chunk.Error != nil && d.pendingFinish == "" {
+	if chunk.Error != nil && d.pendingTerminal == "" {
 		failed := d.emitter.event(vcp.EventResponseFailed)
 		failed.ErrorCode = safeErrorCode(chunk.Error)
 		if errEmit := d.emit(failed, &newEvents); errEmit != nil {
@@ -127,6 +157,12 @@ func (d *StreamDecoder) Push(chunk Chunk) ([]vcp.Event, error) {
 					return nil, errTool
 				}
 			}
+			if choice.Delta.FunctionCall != nil {
+				legacyDelta := ToolCallDelta{Index: 0, Type: "function", Function: *choice.Delta.FunctionCall}
+				if errTool := d.emitTool(choice.Index, legacyDelta, &newEvents); errTool != nil {
+					return nil, errTool
+				}
+			}
 		}
 		if choice.FinishReason != "" {
 			if errFinish := d.finishChoice(choice, &newEvents); errFinish != nil {
@@ -145,14 +181,18 @@ func (d *StreamDecoder) Close(transportErr error) ([]vcp.Event, error) {
 	}
 	newEvents := make([]vcp.Event, 0, 1)
 	terminalType := vcp.EventResponseIncomplete
-	if d.pendingFinish != "" {
-		terminalType = vcp.EventResponseCompleted
+	if d.pendingTerminal != "" {
+		terminalType = d.pendingTerminal
 	} else if transportErr != nil {
 		terminalType = vcp.EventResponseFailed
 	}
 	terminal := d.emitter.event(terminalType)
-	if d.pendingFinish != "" {
+	if d.pendingTerminal != "" {
 		terminal.FinishReason = d.pendingFinish
+		terminal.ErrorCode = d.pendingErrorCode
+		if d.pendingErrorCode != "" {
+			d.report.ErrorOrRetryAdvice = d.pendingErrorCode
+		}
 	} else if transportErr != nil {
 		terminal.ErrorCode = "transport"
 	} else {
@@ -178,6 +218,57 @@ func (d *StreamDecoder) Events() []vcp.Event {
 		events[index] = cloneStreamEvent(d.allEvents[index])
 	}
 	return events
+}
+
+// Report returns an isolated client-safe conversion report accumulated from actual stream events.
+// Report 返回从真实流事件累积而来的隔离客户端安全转换报告。
+func (d *StreamDecoder) Report() vcp.ExecutionReport {
+	if d == nil {
+		return vcp.ExecutionReport{}
+	}
+	report := d.report
+	report.ConversionSummary = append([]string(nil), d.report.ConversionSummary...)
+	report.Usage = cloneStreamUsage(d.report.Usage)
+	return report
+}
+
+// UpstreamResponseID returns the stable provider response identifier observed in this stream.
+// UpstreamResponseID 返回在此流中观察到的稳定 Provider 响应标识。
+func (d *StreamDecoder) UpstreamResponseID() string {
+	if d == nil {
+		return ""
+	}
+	return d.upstreamResponseID
+}
+
+// observeChunkMetadata validates documented Chat chunk discriminators and records metadata with no VCP response carrier.
+// observeChunkMetadata 校验文档化 Chat 分片判别字段，并记录没有 VCP 响应承载字段的元数据。
+func (d *StreamDecoder) observeChunkMetadata(chunk Chunk) error {
+	if d == nil {
+		return fmt.Errorf("%w: decoder is required", ErrInvalidUpstreamResponse)
+	}
+	if chunk.Object != "" && chunk.Object != "chat.completion.chunk" {
+		return fmt.Errorf("%w: unsupported stream object %q", ErrInvalidUpstreamResponse, chunk.Object)
+	}
+	if chunk.Model != "" {
+		d.appendReportSummary("openai_chat.response.model.omitted")
+	}
+	if chunk.Created != nil {
+		d.appendReportSummary("openai_chat.response.created_at.omitted")
+	}
+	if chunk.ServiceTier != "" {
+		d.appendReportSummary("openai_chat.response.service_tier.omitted")
+	}
+	if chunk.SystemFingerprint != "" {
+		d.appendReportSummary("openai_chat.response.system_fingerprint.omitted")
+	}
+	reportUnrepresentedUsageMetadata(&d.report, chunk.Usage)
+	for choiceIndex := range chunk.Choices {
+		if errChoice := reportChoiceMetadata(&d.report, chunk.Choices[choiceIndex]); errChoice != nil {
+			return errChoice
+		}
+	}
+	return nil
 }
 
 // cloneStreamEvent returns a deep copy of pointer-backed replay data.
@@ -223,18 +314,30 @@ func cloneStreamInt64(source *int64) *int64 {
 	return &cloned
 }
 
+// cloneStreamUsage returns an independent provider usage observation for report snapshots.
+// cloneStreamUsage 为报告快照返回独立的 Provider 用量观测。
+func cloneStreamUsage(source *vcp.UsageObservation) *vcp.UsageObservation {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.InputTokens = cloneStreamInt64(source.InputTokens)
+	cloned.OutputTokens = cloneStreamInt64(source.OutputTokens)
+	cloned.ReasoningTokens = cloneStreamInt64(source.ReasoningTokens)
+	cloned.CacheReadTokens = cloneStreamInt64(source.CacheReadTokens)
+	cloned.CacheCreationTokens = cloneStreamInt64(source.CacheCreationTokens)
+	cloned.TotalTokens = cloneStreamInt64(source.TotalTokens)
+	return &cloned
+}
+
 // emitText emits one actual text fragment without conflating network chunks and items.
 // emitText 发出一个真实文本片段且不混淆网络分片与项目。
 func (d *StreamDecoder) emitText(choiceIndex int, kind vcp.ContextKind, fragment string, output *[]vcp.Event) error {
-	state, exists := d.texts[choiceIndex]
+	key := textKey(choiceIndex, kind)
+	state, exists := d.texts[key]
 	if !exists {
-		state = &streamText{itemID: vcp.DeriveID("itm", d.emitter.responseID, string(kind), fmt.Sprint(choiceIndex)), kind: kind}
-		d.texts[choiceIndex] = state
-	}
-	if state.kind != kind {
-		warning := d.emitter.itemEvent(vcp.EventWarningRaised, state.itemID)
-		warning.WarningCode = "openai_chat.choice.mixed_content_kind"
-		return d.emit(warning, output)
+		state = &streamText{choiceIndex: choiceIndex, itemID: vcp.DeriveID("itm", d.emitter.responseID, string(kind), fmt.Sprint(choiceIndex)), kind: kind}
+		d.texts[key] = state
 	}
 	if !state.started {
 		item := vcp.OutputItem{ItemID: state.itemID, Kind: kind, Status: vcp.OutputItemInProgress}
@@ -253,6 +356,9 @@ func (d *StreamDecoder) emitText(choiceIndex int, kind vcp.ContextKind, fragment
 // emitTool emits real indexed argument deltas while retaining stable VCP identity.
 // emitTool 发出真实索引参数增量并保持稳定 VCP 身份。
 func (d *StreamDecoder) emitTool(choiceIndex int, delta ToolCallDelta, output *[]vcp.Event) error {
+	if errType := validateChatToolType(delta.Type); errType != nil {
+		return errType
+	}
 	key := toolKey(choiceIndex, delta.Index)
 	state, exists := d.tools[key]
 	if !exists {
@@ -309,12 +415,19 @@ func (d *StreamDecoder) emitTool(choiceIndex int, delta ToolCallDelta, output *[
 	return nil
 }
 
-// finishChoice hydrates terminal tool fields and confirms the response terminal.
-// finishChoice 水合终态工具字段并确认响应终态。
+// finishChoice preserves complete terminal assistant fields, hydrates prior deltas, and confirms the response terminal.
+// finishChoice 保留完整终态助手字段、水合既有增量并确认响应终态。
 func (d *StreamDecoder) finishChoice(choice Choice, output *[]vcp.Event) error {
+	if errHydrate := d.hydrateTerminalOnlyFields(choice, output); errHydrate != nil {
+		return errHydrate
+	}
 	terminalCalls := make(map[int]ToolCall)
 	if choice.Message != nil {
-		for index, call := range choice.Message.ToolCalls {
+		calls, errCalls := assistantToolCalls(choice.Message)
+		if errCalls != nil {
+			return errCalls
+		}
+		for index, call := range calls {
 			terminalCalls[index] = call
 		}
 	}
@@ -362,12 +475,53 @@ func (d *StreamDecoder) finishChoice(choice Choice, output *[]vcp.Event) error {
 			return errDone
 		}
 	}
-	if text, exists := d.texts[choice.Index]; exists && text.started {
-		if errDone := d.emit(d.emitter.itemEvent(vcp.EventItemCompleted, text.itemID), output); errDone != nil {
-			return errDone
+	for _, kind := range []vcp.ContextKind{vcp.ContextMessage, vcp.ContextRefusal, vcp.ContextReasoning} {
+		if text, exists := d.texts[textKey(choice.Index, kind)]; exists && text.started {
+			if errDone := d.emit(d.emitter.itemEvent(vcp.EventItemCompleted, text.itemID), output); errDone != nil {
+				return errDone
+			}
 		}
 	}
-	d.pendingFinish = safeFinishReason(choice.FinishReason)
+	if d.pendingTerminal == "" {
+		d.pendingTerminal, d.pendingFinish, d.pendingErrorCode = terminalForFinishReason(choice.FinishReason)
+	}
+	return nil
+}
+
+// hydrateTerminalOnlyFields emits complete terminal assistant fields only when the stream did not previously emit their deltas.
+// hydrateTerminalOnlyFields 仅在流此前未发出对应增量时发出完整终态助手字段。
+func (d *StreamDecoder) hydrateTerminalOnlyFields(choice Choice, output *[]vcp.Event) error {
+	if choice.Message == nil {
+		return nil
+	}
+	if choice.Message.Content != "" {
+		if _, textExists := d.texts[textKey(choice.Index, vcp.ContextMessage)]; !textExists {
+			if errContent := d.emitText(choice.Index, vcp.ContextMessage, choice.Message.Content, output); errContent != nil {
+				return errContent
+			}
+		}
+	}
+	if choice.Message.Refusal != "" {
+		if _, refusalExists := d.texts[textKey(choice.Index, vcp.ContextRefusal)]; !refusalExists {
+			if errRefusal := d.emitText(choice.Index, vcp.ContextRefusal, choice.Message.Refusal, output); errRefusal != nil {
+				return errRefusal
+			}
+		}
+	}
+	calls, errCalls := assistantToolCalls(choice.Message)
+	if errCalls != nil {
+		return errCalls
+	}
+	for toolIndex, call := range calls {
+		key := toolKey(choice.Index, toolIndex)
+		if _, toolExists := d.tools[key]; toolExists {
+			continue
+		}
+		terminalDelta := ToolCallDelta{Index: toolIndex, ID: call.ID, Type: call.Type, Function: call.Function}
+		if errTool := d.emitTool(choice.Index, terminalDelta, output); errTool != nil {
+			return errTool
+		}
+	}
 	return nil
 }
 
@@ -377,6 +531,15 @@ func (d *StreamDecoder) emit(event vcp.Event, output *[]vcp.Event) error {
 	if errApply := d.reducer.Apply(event); errApply != nil {
 		return errApply
 	}
+	if event.Type == vcp.EventWarningRaised && event.WarningCode != "" {
+		d.appendReportSummary(event.WarningCode)
+	}
+	if event.Type == vcp.EventUsageUpdated && event.Usage != nil {
+		d.report.Usage = cloneStreamUsage(event.Usage)
+	}
+	if event.Type == vcp.EventResponseFailed && event.ErrorCode != "" {
+		d.report.ErrorOrRetryAdvice = event.ErrorCode
+	}
 	d.allEvents = append(d.allEvents, event)
 	if output != nil {
 		*output = append(*output, event)
@@ -384,8 +547,25 @@ func (d *StreamDecoder) emit(event vcp.Event, output *[]vcp.Event) error {
 	return nil
 }
 
+// appendReportSummary adds one stable conversion code exactly once.
+// appendReportSummary 仅追加一次稳定转换代码。
+func (d *StreamDecoder) appendReportSummary(code string) {
+	for _, existing := range d.report.ConversionSummary {
+		if existing == code {
+			return
+		}
+	}
+	d.report.ConversionSummary = append(d.report.ConversionSummary, code)
+}
+
 // toolKey returns a stable choice-and-index key.
 // toolKey 返回稳定的候选与索引组合键。
 func toolKey(choiceIndex int, toolIndex int) string {
 	return fmt.Sprintf("%d:%d", choiceIndex, toolIndex)
+}
+
+// textKey returns a stable choice-and-semantic-kind key.
+// textKey 返回稳定的候选与语义类型组合键。
+func textKey(choiceIndex int, kind vcp.ContextKind) string {
+	return fmt.Sprintf("%d:%s", choiceIndex, kind)
 }

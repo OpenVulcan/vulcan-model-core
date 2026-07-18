@@ -99,8 +99,14 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 	needsProjection := false
 	mediaFeatures := make(map[CapabilityFeature]struct{})
 	needsReasoning := request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.Summary
+	needsStrictSchema := len(request.GenerationPolicy.StrictJSONSchema) > 0
 	needsContinuation := request.ReasoningPolicy.ContinuationID != ""
 	for _, item := range request.Context {
+		// Non-model items remain in the Router ledger but must never create upstream capability demands.
+		// 非模型可见项目保留在 Router 账本中，但绝不能产生上游能力需求。
+		if item.Visibility != VisibilityModel {
+			continue
+		}
 		if item.Kind == ContextDelegatedResult || item.Kind == ContextInstruction {
 			needsProjection = true
 		}
@@ -128,6 +134,12 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 	}
 	if len(request.Tools) > 0 {
 		demands = append(demands, requiredDemand(FeatureStructuredToolCalling, false))
+		for _, tool := range request.Tools {
+			if tool.Strict {
+				needsStrictSchema = true
+				break
+			}
+		}
 		if request.ToolPolicy.Parallel {
 			demands = append(demands, requiredDemand(FeatureParallelToolCalling, false))
 		}
@@ -135,7 +147,7 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 			demands = append(demands, requiredDemand(FeatureStreamingToolArguments, false))
 		}
 	}
-	if len(request.GenerationPolicy.StrictJSONSchema) > 0 {
+	if needsStrictSchema {
 		demands = append(demands, requiredDemand(FeatureStrictSchema, false))
 	}
 	mediaNames := make([]string, 0, len(mediaFeatures))

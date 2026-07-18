@@ -1,6 +1,13 @@
+// Portions of this request projection are adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 本请求投影的部分逻辑改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The adapted scope is typed Chat request compatibility while VCP remains the sole canonical state.
+// 改编范围是类型化 Chat 请求兼容，VCP 仍是唯一规范状态。
 package chat
 
 import (
+	"encoding/json"
 	"fmt"
 	"strings"
 	"time"
@@ -12,13 +19,17 @@ import (
 // ProjectRequest compiles one VCP request for an exact already-resolved target.
 // ProjectRequest 为一个已精确解析的目标编译 VCP 请求。
 func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time) (ProjectedRequest, error) {
+	if errRequest := request.Validate(); errRequest != nil {
+		return ProjectedRequest{}, errRequest
+	}
 	if errTarget := validateTarget(target); errTarget != nil {
 		return ProjectedRequest{}, errTarget
 	}
 	if lineageID == "" {
 		return ProjectedRequest{}, fmt.Errorf("%w: lineage_id is required", ErrInvalidTarget)
 	}
-	availability := capabilityAvailability(request, capabilities)
+	reasoningNative := supportsRequestedReasoning(request, capabilities)
+	availability := capabilityAvailability(request, capabilities, reasoningNative)
 	plan, errPlan := vcp.PlanCapabilities(request, availability, target.CatalogRevision, now)
 	if errPlan != nil {
 		return ProjectedRequest{}, errPlan
@@ -41,10 +52,20 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 	}
 	if len(request.Tools) > 0 {
 		upstream.Tools = make([]Tool, 0, len(request.Tools))
+		// wireToolNames prevents two distinct VCP tool identities from collapsing into one Chat function name.
+		// wireToolNames 防止两个不同的 VCP 工具身份折叠为同一个 Chat 函数名称。
+		wireToolNames := make(map[string]struct{}, len(request.Tools))
 		for _, tool := range request.Tools {
 			if tool.Kind != vcp.ToolFunction {
 				return ProjectedRequest{}, fmt.Errorf("%w: tool kind %q is not a Chat function", ErrUnsupportedContext, tool.Kind)
 			}
+			if tool.Namespace != "" {
+				return ProjectedRequest{}, fmt.Errorf("%w: Chat has no native function namespace carrier for tool %q", ErrUnsupportedContext, tool.Name)
+			}
+			if _, exists := wireToolNames[tool.Name]; exists {
+				return ProjectedRequest{}, fmt.Errorf("%w: duplicate Chat function name %q", ErrUnsupportedContext, tool.Name)
+			}
+			wireToolNames[tool.Name] = struct{}{}
 			upstream.Tools = append(upstream.Tools, Tool{Type: "function", Function: FunctionDefinition{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters, Strict: tool.Strict}})
 		}
 		choice := request.ToolPolicy.Choice
@@ -52,15 +73,23 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 			choice = vcp.ToolChoiceAuto
 		}
 		upstream.ToolChoice = &ToolChoice{Mode: choice, FunctionName: request.ToolPolicy.NamedTool}
-		parallel := request.ToolPolicy.Parallel
-		upstream.ParallelToolCalls = &parallel
+		if capabilities.ParallelTools {
+			parallel := request.ToolPolicy.Parallel
+			upstream.ParallelToolCalls = &parallel
+		}
 	}
 	if len(request.GenerationPolicy.StrictJSONSchema) > 0 {
-		upstream.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: request.GenerationPolicy.StrictJSONSchema}
+		upstream.ResponseFormat = &ResponseFormat{Type: "json_schema", JSONSchema: JSONSchemaConfiguration{Name: "vulcan_response", Schema: append(json.RawMessage(nil), request.GenerationPolicy.StrictJSONSchema...), Strict: true}}
 	}
+	if reasoningMode, selected := plan.Decision(vcp.FeatureReasoning); selected && reasoningMode == vcp.CapabilityNative && request.ReasoningPolicy.Effort != "" {
+		upstream.ReasoningEffort = request.ReasoningPolicy.Effort
+	}
+	// callProjections preserves the exact provider call identifier needed by later tool results.
+	// callProjections 保留后续工具结果所需的精确 Provider 调用标识。
+	callProjections := make(map[string]string)
 	for _, item := range request.Context {
 		position := len(upstream.Messages)
-		message, mode, equivalence, ruleID, frameID, digest, include, errMessage := projectItem(item, request, capabilities, lineageID, position)
+		message, mode, equivalence, ruleID, frameID, digest, include, errMessage := projectItem(item, request, capabilities, callProjections, lineageID, position)
 		if errMessage != nil {
 			return ProjectedRequest{}, errMessage
 		}
@@ -68,6 +97,12 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 			upstream.Messages = append(upstream.Messages, message)
 		} else {
 			position = -1
+		}
+		if include && item.Kind == vcp.ContextToolCall && item.ToolCall != nil {
+			if item.ToolCall.UpstreamID == "" {
+				return ProjectedRequest{}, fmt.Errorf("%w: historical tool call %q has no verified upstream call identifier", ErrUnsupportedContext, item.ToolCall.ToolCallID)
+			}
+			callProjections[item.ToolCall.ToolCallID] = item.ToolCall.UpstreamID
 		}
 		entry := vcp.ProjectionEntry{
 			ProjectionID: projectionID, LineageID: lineageID, CanonicalItemID: item.ItemID,
@@ -116,7 +151,7 @@ func validateSelectionBinding(selection vcp.ModelSelection, target resolve.Targe
 
 // capabilityAvailability converts verified Profile behavior into request planning evidence.
 // capabilityAvailability 将经过验证的 Profile 行为转换为请求规划证据。
-func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapabilities) []vcp.CapabilityAvailability {
+func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapabilities, reasoningNative bool) []vcp.CapabilityAvailability {
 	projectionNative := true
 	projectionTriggered := false
 	for _, item := range request.Context {
@@ -140,7 +175,7 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 		{Feature: vcp.FeatureParallelToolCalling, Native: capabilities.ParallelTools},
 		{Feature: vcp.FeatureStreamingToolArguments, Native: capabilities.StreamingToolArguments},
 		{Feature: vcp.FeatureStrictSchema, Native: capabilities.StrictJSONSchema},
-		{Feature: vcp.FeatureReasoning, Native: capabilities.Reasoning},
+		{Feature: vcp.FeatureReasoning, Native: reasoningNative},
 		{Feature: vcp.FeatureReasoningContinuation, Native: false},
 		{Feature: vcp.FeatureExplicitPromptCache, Native: false},
 		{Feature: vcp.FeatureRemoteCompaction, Native: false},
@@ -154,9 +189,33 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 	return availability
 }
 
+// supportsRequestedReasoning reports whether this Chat profile can faithfully carry the requested reasoning control.
+// supportsRequestedReasoning 报告此 Chat Profile 是否能忠实承载所请求的推理控制。
+func supportsRequestedReasoning(request vcp.VulcanRequest, capabilities ProfileCapabilities) bool {
+	// OpenAI Chat has reasoning_effort but no typed carrier for visible reasoning summaries or historical reasoning items.
+	// OpenAI Chat 具有 reasoning_effort，但没有可见推理摘要或历史推理项目的类型化载体。
+	if !capabilities.Reasoning || request.ReasoningPolicy.Summary {
+		return false
+	}
+	for _, item := range request.Context {
+		if item.Kind == vcp.ContextReasoning {
+			return false
+		}
+	}
+	return true
+}
+
 // projectItem maps one canonical item to one exact Chat carrier and ledger decision.
 // projectItem 将一个规范项目映射到一个精确 Chat 载体和账本决策。
-func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, lineageID string, position int) (Message, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, callProjections map[string]string, lineageID string, position int) (Message, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+	// Client and audit scopes are Router-local, so sending them upstream would violate the VCP visibility boundary.
+	// 客户端和审计作用域仅限 Router 本地，因此将其发送上游会违反 VCP 可见性边界。
+	if item.Visibility != vcp.VisibilityModel {
+		return Message{}, vcp.CapabilityOmitted, vcp.EquivalenceNone, "openai_chat.visibility.omitted.v1", "", "", false, nil
+	}
+	if item.ProviderStateRef != "" {
+		return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: opaque provider state has no Chat request carrier", ErrUnsupportedContext)
+	}
 	text, errText := vcp.TextContent(item.Content)
 	if errText != nil && item.Kind != vcp.ContextToolCall {
 		return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: item %q: %v", ErrUnsupportedContext, item.ItemID, errText)
@@ -184,14 +243,26 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 		if item.ToolCall == nil {
 			return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: missing tool call payload", ErrUnsupportedContext)
 		}
-		call := ToolCall{ID: item.ToolCall.ToolCallID, Type: "function", Function: FunctionCall{Name: item.ToolCall.Name, Arguments: item.ToolCall.Arguments}}
+		if item.ToolCall.Namespace != "" {
+			return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: Chat has no native function namespace carrier for tool call %q", ErrUnsupportedContext, item.ToolCall.ToolCallID)
+		}
+		if item.ToolCall.UpstreamID == "" {
+			return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: historical tool call %q has no verified upstream call identifier", ErrUnsupportedContext, item.ToolCall.ToolCallID)
+		}
+		call := ToolCall{ID: item.ToolCall.UpstreamID, Type: "function", Function: FunctionCall{Name: item.ToolCall.Name, Arguments: item.ToolCall.Arguments}}
 		return Message{Role: "assistant", ToolCalls: []ToolCall{call}}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.tool_call.native.v1", "", "", true, nil
 	case vcp.ContextToolResult:
-		return Message{Role: "tool", ToolCallID: item.ToolResult.ToolCallID, Content: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.tool_result.native.v1", "", "", true, nil
-	case vcp.ContextReasoning:
-		if capabilities.Reasoning && item.Reasoning != nil && item.Reasoning.Summary {
-			return Message{Role: "assistant", Content: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.reasoning_summary.native.v1", "", "", true, nil
+		if item.ToolResult == nil {
+			return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: missing tool result payload", ErrUnsupportedContext)
 		}
+		upstreamCallID, exists := callProjections[item.ToolResult.ToolCallID]
+		if !exists {
+			return Message{}, "", "", "", "", "", false, fmt.Errorf("%w: tool result %q has no preceding tool call", ErrUnsupportedContext, item.ToolResult.ToolCallID)
+		}
+		return Message{Role: "tool", ToolCallID: upstreamCallID, Content: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.tool_result.native.v1", "", "", true, nil
+	case vcp.ContextReasoning:
+		// A plain assistant message would erase the VCP reasoning kind, so it is not a native Chat replay carrier.
+		// 普通 assistant 消息会抹去 VCP 推理类型，因此不能作为原生 Chat 回放载体。
 		return Message{}, vcp.CapabilityOmitted, vcp.EquivalenceNone, "openai_chat.reasoning.omitted.v1", "", "", false, nil
 	case vcp.ContextRefusal:
 		return Message{Role: "assistant", Content: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_chat.refusal_history.native.v1", "", "", true, nil

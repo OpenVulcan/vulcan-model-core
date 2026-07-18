@@ -46,6 +46,28 @@ func TestVulcanRequestValidateRejectsUnknownClosedEnums(t *testing.T) {
 	}
 }
 
+// TestVulcanRequestValidateAllowsCustomTools verifies that freeform tools remain a closed valid VCP variant.
+// TestVulcanRequestValidateAllowsCustomTools 验证自由格式工具仍是封闭且有效的 VCP 变体。
+func TestVulcanRequestValidateAllowsCustomTools(t *testing.T) {
+	request := testTextRequest()
+	request.Tools = []ToolDefinition{{Kind: ToolCustom, Name: "apply_patch", Description: "Apply a textual patch"}}
+
+	if errValidate := request.Validate(); errValidate != nil {
+		t.Fatalf("Validate() error = %v", errValidate)
+	}
+}
+
+// TestVulcanRequestValidateRejectsStrictNonFunctionTools verifies strict schema intent cannot be attached to a tool without a function-schema carrier.
+// TestVulcanRequestValidateRejectsStrictNonFunctionTools 验证严格 Schema 意图不能附加到没有函数 Schema 载体的工具。
+func TestVulcanRequestValidateRejectsStrictNonFunctionTools(t *testing.T) {
+	request := testTextRequest()
+	request.Tools = []ToolDefinition{{Kind: ToolCustom, Name: "apply_patch", Strict: true}}
+
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("Validate() error = %v, want ErrInvalidRequest", errValidate)
+	}
+}
+
 // TestVulcanRequestValidateRemoteCompactionExclusiveInput verifies the required previous-response-or-context exclusive choice.
 // TestVulcanRequestValidateRemoteCompactionExclusiveInput 校验远程压缩必须在先前响应与上下文之间二选一。
 func TestVulcanRequestValidateRemoteCompactionExclusiveInput(t *testing.T) {

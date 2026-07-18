@@ -1,3 +1,9 @@
+// Stream fixtures cover behavior adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 流式夹具覆盖改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66 的行为。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The fixtures verify typed Chat SSE compatibility without importing CLIProxyAPI runtime code.
+// 夹具验证类型化 Chat SSE 兼容行为，不导入 CLIProxyAPI 运行时代码。
 package chat
 
 import (
@@ -107,6 +113,32 @@ func TestStreamDecoderCompletedIgnoresLaterTransportError(t *testing.T) {
 	}
 	if decoder.Response().Status != vcp.ResponseCompleted {
 		t.Fatalf("status = %q", decoder.Response().Status)
+	}
+}
+
+// TestStreamDecoderMapsNonSuccessFinishReasons verifies deferred stream terminal selection preserves truncation and safety outcomes.
+// TestStreamDecoderMapsNonSuccessFinishReasons 验证延迟流终态选择会保留截断和安全结果。
+func TestStreamDecoderMapsNonSuccessFinishReasons(t *testing.T) {
+	truncated, errNew := NewStreamDecoder("resp_stream_length", time.Unix(54, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	if _, errPush := truncated.Push(Chunk{Choices: []Choice{{Index: 0, FinishReason: "length"}}}); errPush != nil {
+		t.Fatalf("truncated Push() error = %v", errPush)
+	}
+	if _, errClose := truncated.Close(nil); errClose != nil || truncated.Response().Status != vcp.ResponseIncomplete || truncated.Response().FinishReason != "length" {
+		t.Fatalf("truncated response = %#v, err = %v", truncated.Response(), errClose)
+	}
+
+	filtered, errNew := NewStreamDecoder("resp_stream_filtered", time.Unix(55, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	if _, errPush := filtered.Push(Chunk{Choices: []Choice{{Index: 0, FinishReason: "content_filter"}}}); errPush != nil {
+		t.Fatalf("filtered Push() error = %v", errPush)
+	}
+	if _, errClose := filtered.Close(nil); errClose != nil || filtered.Response().Status != vcp.ResponseFailed || filtered.Response().ErrorCode != "openai_chat.content_filter" {
+		t.Fatalf("filtered response = %#v, err = %v", filtered.Response(), errClose)
 	}
 }
 

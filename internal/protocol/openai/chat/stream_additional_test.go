@@ -1,6 +1,14 @@
+// Stream fixtures cover behavior adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 流式夹具覆盖改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66 的行为。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The fixtures verify supplemental typed Chat SSE compatibility without importing CLIProxyAPI runtime code.
+// 夹具验证补充类型化 Chat SSE 兼容行为，不导入 CLIProxyAPI 运行时代码。
 package chat
 
 import (
+	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -103,6 +111,126 @@ func TestStreamDecoderHydratesToolNameOnlyReportedAtTerminal(t *testing.T) {
 	tool := decoder.Response().Items[0].ToolCall
 	if tool.Name != "lookup_weather" || tool.Arguments != `{"city":"Paris"}` || tool.Status != vcp.ToolCallCompleted {
 		t.Fatalf("terminal tool = %#v", tool)
+	}
+}
+
+// TestStreamDecoderPreservesTerminalOnlyAssistantFields verifies complete terminal data is not lost when no prior delta exists.
+// TestStreamDecoderPreservesTerminalOnlyAssistantFields 验证不存在先前增量时不会丢失完整终态助手数据。
+func TestStreamDecoderPreservesTerminalOnlyAssistantFields(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("resp_terminal_only_fields", time.Unix(611, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	if _, errPush := decoder.Push(Chunk{Choices: []Choice{{
+		Index: 0,
+		Message: &AssistantMessage{
+			Content: "final answer",
+			ToolCalls: []ToolCall{{
+				ID:       "upstream_terminal_call",
+				Type:     "function",
+				Function: FunctionCall{Name: "lookup_weather", Arguments: `{"city":"Paris"}`},
+			}},
+		},
+		FinishReason: "tool_calls",
+	}}}); errPush != nil {
+		t.Fatalf("Push(terminal-only) error = %v", errPush)
+	}
+	if _, errClose := decoder.Close(nil); errClose != nil {
+		t.Fatalf("Close() error = %v", errClose)
+	}
+	response := decoder.Response()
+	if response.Status != vcp.ResponseCompleted || len(response.Items) != 2 {
+		t.Fatalf("response = %#v", response)
+	}
+	if len(response.Items[0].Content) != 1 || response.Items[0].Content[0].Text != "final answer" {
+		t.Fatalf("terminal message = %#v", response.Items[0])
+	}
+	tool := response.Items[1].ToolCall
+	if tool == nil || tool.Name != "lookup_weather" || tool.Arguments != `{"city":"Paris"}` || tool.UpstreamID != "upstream_terminal_call" || tool.Status != vcp.ToolCallCompleted {
+		t.Fatalf("terminal tool = %#v", tool)
+	}
+}
+
+// TestStreamDecoderPreservesContentAndRefusalForOneChoice verifies one choice can carry distinct message and refusal items without dropping either lifecycle.
+// TestStreamDecoderPreservesContentAndRefusalForOneChoice 验证一个候选可携带独立消息和拒绝项目而不会丢失任一生命周期。
+func TestStreamDecoderPreservesContentAndRefusalForOneChoice(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("resp_content_and_refusal", time.Unix(612, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	if _, errPush := decoder.Push(Chunk{Choices: []Choice{{
+		Index: 0, Delta: &Delta{Content: "partial answer", Refusal: "restricted detail"}, FinishReason: "stop",
+	}}}); errPush != nil {
+		t.Fatalf("Push() error = %v", errPush)
+	}
+	if _, errClose := decoder.Close(nil); errClose != nil {
+		t.Fatalf("Close() error = %v", errClose)
+	}
+	response := decoder.Response()
+	if response.Status != vcp.ResponseCompleted || len(response.Items) != 2 {
+		t.Fatalf("response = %#v", response)
+	}
+	if response.Items[0].Kind != vcp.ContextMessage || response.Items[0].Content[0].Text != "partial answer" {
+		t.Fatalf("message item = %#v", response.Items[0])
+	}
+	if response.Items[1].Kind != vcp.ContextRefusal || response.Items[1].Content[0].Text != "restricted detail" {
+		t.Fatalf("refusal item = %#v", response.Items[1])
+	}
+}
+
+// TestStreamDecoderAuditsChunkMetadataAndProjectsLegacyFunctionDelta verifies documented chunk metadata is auditable and the legacy function delta remains a closed tool call.
+// TestStreamDecoderAuditsChunkMetadataAndProjectsLegacyFunctionDelta 验证文档化分片元数据可审计，且旧版函数增量仍保持为封闭工具调用。
+func TestStreamDecoderAuditsChunkMetadataAndProjectsLegacyFunctionDelta(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("resp_chunk_metadata", time.Unix(613, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	created := int64(7)
+	audioTokens := int64(1)
+	if _, errPush := decoder.Push(Chunk{
+		ID: "chatcmpl_chunk_metadata", Object: "chat.completion.chunk", Created: &created, Model: "actual-model", ServiceTier: "priority", SystemFingerprint: "provider-fingerprint",
+		Usage: &Usage{PromptDetails: &PromptTokenDetails{AudioTokens: &audioTokens}},
+		Choices: []Choice{{
+			Index: 0, Logprobs: &UnsupportedResponsePayload{}, Delta: &Delta{FunctionCall: &FunctionCall{Name: "lookup", Arguments: `{}`}}, FinishReason: "function_call",
+		}},
+	}); errPush != nil {
+		t.Fatalf("Push() error = %v", errPush)
+	}
+	if _, errClose := decoder.Close(nil); errClose != nil {
+		t.Fatalf("Close() error = %v", errClose)
+	}
+	response := decoder.Response()
+	if response.Status != vcp.ResponseCompleted || len(response.Items) != 1 || response.Items[0].ToolCall == nil || response.Items[0].ToolCall.Name != "lookup" {
+		t.Fatalf("response = %#v", response)
+	}
+	// summaryCodes lists each metadata group that must remain a fixed audit code rather than response content.
+	// summaryCodes 列出每个必须保持为固定审计代码而不能成为响应内容的元数据组。
+	summaryCodes := []string{
+		"openai_chat.response.model.omitted",
+		"openai_chat.response.created_at.omitted",
+		"openai_chat.response.service_tier.omitted",
+		"openai_chat.response.system_fingerprint.omitted",
+		"openai_chat.choice.logprobs.omitted",
+		"openai_chat.usage.supplemental_tokens.omitted",
+		"openai_chat.function_call.deprecated_projected",
+	}
+	for _, summaryCode := range summaryCodes {
+		if !slices.Contains(decoder.Report().ConversionSummary, summaryCode) {
+			t.Fatalf("report = %#v, missing summary %q", decoder.Report(), summaryCode)
+		}
+	}
+}
+
+// TestStreamDecoderRejectsNonFunctionToolDelta verifies a custom or future Chat tool call cannot be silently treated as a function call.
+// TestStreamDecoderRejectsNonFunctionToolDelta 验证 custom 或未来 Chat 工具调用不能被静默当作函数调用处理。
+func TestStreamDecoderRejectsNonFunctionToolDelta(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("resp_non_function_tool", time.Unix(614, 0))
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	_, errPush := decoder.Push(Chunk{Choices: []Choice{{Index: 0, Delta: &Delta{ToolCalls: []ToolCallDelta{{Index: 0, Type: "custom", Function: FunctionCall{Name: "opaque"}}}}}}})
+	if !errors.Is(errPush, ErrInvalidUpstreamResponse) {
+		t.Fatalf("Push() error = %v, want ErrInvalidUpstreamResponse", errPush)
 	}
 }
 

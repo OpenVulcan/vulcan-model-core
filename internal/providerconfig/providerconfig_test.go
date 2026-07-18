@@ -11,13 +11,47 @@ import (
 // testProtocolProfile 返回一个就绪且允许用户配置的协议元数据测试夹具。
 func testProtocolProfile() ProtocolProfile {
 	return ProtocolProfile{
-		ID:                 "openai.responses.v1",
-		Version:            "1",
-		DisplayName:        "OpenAI Responses",
-		UserConfigurable:   true,
-		RuntimeReady:       true,
-		ModelDiscovery:     SupportSupported,
+		ID:               "openai.responses.v1",
+		Version:          "1",
+		DisplayName:      "OpenAI Responses",
+		UserConfigurable: true,
+		RuntimeReady:     true,
+		ModelDiscovery:   SupportSupported,
+		Capabilities: []ProtocolCapabilityFact{
+			{Capability: ProtocolCapabilityStructuredTools, Status: SupportSupported},
+			{Capability: ProtocolCapabilityStreamingToolArguments, Status: SupportSupported},
+		},
 		AllowedAuthMethods: []AuthMethodType{AuthMethodBearer, AuthMethodHeaderKey},
+	}
+}
+
+// TestProtocolProfileCapabilityFactsRejectInvalidAndRemainIsolated verifies closed capability facts are validated and registry snapshots cannot be mutated externally.
+// TestProtocolProfileCapabilityFactsRejectInvalidAndRemainIsolated 验证封闭能力事实会被校验，且注册表快照不能被外部修改。
+func TestProtocolProfileCapabilityFactsRejectInvalidAndRemainIsolated(t *testing.T) {
+	invalidProfile := testProtocolProfile()
+	invalidProfile.Capabilities = append(invalidProfile.Capabilities, ProtocolCapabilityFact{Capability: ProtocolCapability("unknown"), Status: SupportSupported})
+	if errValidate := invalidProfile.Validate(); errValidate == nil {
+		t.Fatal("ProtocolProfile.Validate() accepted an unknown capability")
+	}
+	duplicateProfile := testProtocolProfile()
+	duplicateProfile.Capabilities = append(duplicateProfile.Capabilities, ProtocolCapabilityFact{Capability: ProtocolCapabilityStructuredTools, Status: SupportUnsupported})
+	if errValidate := duplicateProfile.Validate(); errValidate == nil {
+		t.Fatal("ProtocolProfile.Validate() accepted a duplicate capability")
+	}
+	registry := NewProtocolRegistry()
+	profile := testProtocolProfile()
+	if errRegister := registry.Register(profile); errRegister != nil {
+		t.Fatalf("Register() error = %v", errRegister)
+	}
+	profile.Capabilities[0].Status = SupportUnsupported
+	stored, exists := registry.Lookup(profile.ID)
+	if !exists || stored.Capabilities[0].Status != SupportSupported {
+		t.Fatalf("stored profile = %#v", stored)
+	}
+	stored.Capabilities[0].Status = SupportUnsupported
+	again, existsAgain := registry.Lookup(profile.ID)
+	if !existsAgain || again.Capabilities[0].Status != SupportSupported {
+		t.Fatalf("isolated profile = %#v", again)
 	}
 }
 

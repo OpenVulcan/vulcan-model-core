@@ -1,3 +1,9 @@
+// Portions of this response adapter are adapted from CLIProxyAPI commit 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66.
+// 本响应适配器的部分逻辑改编自 CLIProxyAPI 固定提交 9f4f53ca5a4d1474e3f7eb61d6ffc984995f1f66。
+// Source paths: sdk/api/handlers/openai/openai_handlers.go and internal/runtime/executor/openai_compat_executor.go.
+// 来源路径：sdk/api/handlers/openai/openai_handlers.go 和 internal/runtime/executor/openai_compat_executor.go。
+// The adapted scope is typed Chat terminal, tool, refusal, and usage behavior without a CLIProxyAPI runtime dependency.
+// 改编范围是类型化 Chat 终态、工具、拒绝和用量行为，且不引入 CLIProxyAPI 运行时依赖。
 package chat
 
 import (
@@ -27,6 +33,9 @@ func DecodeResponse(responseID string, upstream Response, now time.Time) (vcp.Re
 		return vcp.Response{}, nil, vcp.ExecutionReport{}, errStart
 	}
 	report := vcp.ExecutionReport{ResponseID: responseID, ExecutionID: vcp.DeriveID("exec", responseID, upstream.ID)}
+	if errMetadata := reportResponseMetadata(&report, upstream); errMetadata != nil {
+		return vcp.Response{}, nil, report, errMetadata
+	}
 	if upstream.Error != nil {
 		failed := emitter.event(vcp.EventResponseFailed)
 		failed.ErrorCode = safeErrorCode(upstream.Error)
@@ -76,8 +85,12 @@ func DecodeResponse(responseID string, upstream Response, now time.Time) (vcp.Re
 				return vcp.Response{}, nil, report, errDone
 			}
 		}
-		for toolIndex := range choice.Message.ToolCalls {
-			call := choice.Message.ToolCalls[toolIndex]
+		calls, errCalls := assistantToolCalls(choice.Message)
+		if errCalls != nil {
+			return vcp.Response{}, nil, report, errCalls
+		}
+		for toolIndex := range calls {
+			call := calls[toolIndex]
 			itemID := vcp.DeriveID("itm", responseID, "tool", fmt.Sprint(choice.Index), fmt.Sprint(toolIndex))
 			toolCallID := call.ID
 			synthesized := false
@@ -145,12 +158,156 @@ func DecodeResponse(responseID string, upstream Response, now time.Time) (vcp.Re
 		report.ConversionSummary = append(report.ConversionSummary, "openai_chat.response.finish_reason_missing")
 		return reducer.Snapshot(), events, report, nil
 	}
-	terminal := emitter.event(vcp.EventResponseCompleted)
-	terminal.FinishReason = safeFinishReason(upstream.Choices[0].FinishReason)
+	terminalType, finishReason, errorCode := terminalForFinishReason(upstream.Choices[0].FinishReason)
+	terminal := emitter.event(terminalType)
+	terminal.FinishReason = finishReason
+	terminal.ErrorCode = errorCode
 	if errTerminal := appendEvent(terminal); errTerminal != nil {
 		return vcp.Response{}, nil, report, errTerminal
 	}
+	if errorCode != "" {
+		report.ErrorOrRetryAdvice = errorCode
+	}
 	return reducer.Snapshot(), events, report, nil
+}
+
+// reportResponseMetadata validates closed response discriminators and records every documented response field that lacks a VCP carrier.
+// reportResponseMetadata 校验封闭响应判别字段，并记录每个缺少 VCP 承载字段的文档化响应字段。
+func reportResponseMetadata(report *vcp.ExecutionReport, upstream Response) error {
+	if report == nil {
+		return fmt.Errorf("%w: execution report is required", ErrInvalidUpstreamResponse)
+	}
+	if upstream.Object != "" && upstream.Object != "chat.completion" {
+		return fmt.Errorf("%w: unsupported response object %q", ErrInvalidUpstreamResponse, upstream.Object)
+	}
+	if upstream.Model != "" {
+		appendChatSummary(report, "openai_chat.response.model.omitted")
+	}
+	if upstream.Created != nil {
+		appendChatSummary(report, "openai_chat.response.created_at.omitted")
+	}
+	if upstream.ServiceTier != "" {
+		appendChatSummary(report, "openai_chat.response.service_tier.omitted")
+	}
+	if upstream.SystemFingerprint != "" {
+		appendChatSummary(report, "openai_chat.response.system_fingerprint.omitted")
+	}
+	reportUnrepresentedUsageMetadata(report, upstream.Usage)
+	for choiceIndex := range upstream.Choices {
+		if errChoice := reportChoiceMetadata(report, upstream.Choices[choiceIndex]); errChoice != nil {
+			return errChoice
+		}
+	}
+	return nil
+}
+
+// reportChoiceMetadata validates closed Chat choice payloads and records safe omissions without retaining provider payload contents.
+// reportChoiceMetadata 校验封闭 Chat 候选载荷，并在不保留 Provider 载荷内容的前提下记录安全省略。
+func reportChoiceMetadata(report *vcp.ExecutionReport, choice Choice) error {
+	if report == nil {
+		return fmt.Errorf("%w: execution report is required", ErrInvalidUpstreamResponse)
+	}
+	if choice.Logprobs != nil {
+		appendChatSummary(report, "openai_chat.choice.logprobs.omitted")
+	}
+	if choice.Message != nil {
+		if choice.Message.Role != "" && choice.Message.Role != "assistant" {
+			return fmt.Errorf("%w: unsupported assistant message role %q", ErrInvalidUpstreamResponse, choice.Message.Role)
+		}
+		if choice.Message.Audio != nil {
+			return fmt.Errorf("%w: audio output is outside the first-phase Chat profile", ErrInvalidUpstreamResponse)
+		}
+		if len(choice.Message.Annotations) > 0 {
+			appendChatSummary(report, "openai_chat.message.annotations.omitted")
+		}
+		if choice.Message.FunctionCall != nil {
+			appendChatSummary(report, "openai_chat.function_call.deprecated_projected")
+		}
+		if _, errCalls := assistantToolCalls(choice.Message); errCalls != nil {
+			return errCalls
+		}
+	}
+	if choice.Delta != nil {
+		if choice.Delta.Role != "" && choice.Delta.Role != "assistant" {
+			return fmt.Errorf("%w: unsupported assistant delta role %q", ErrInvalidUpstreamResponse, choice.Delta.Role)
+		}
+		if choice.Delta.Audio != nil {
+			return fmt.Errorf("%w: audio output is outside the first-phase Chat profile", ErrInvalidUpstreamResponse)
+		}
+		if choice.Delta.FunctionCall != nil {
+			if len(choice.Delta.ToolCalls) > 0 {
+				return fmt.Errorf("%w: deprecated function_call and tool_calls cannot coexist", ErrInvalidUpstreamResponse)
+			}
+			appendChatSummary(report, "openai_chat.function_call.deprecated_projected")
+		}
+		for toolIndex := range choice.Delta.ToolCalls {
+			if errType := validateChatToolType(choice.Delta.ToolCalls[toolIndex].Type); errType != nil {
+				return errType
+			}
+		}
+	}
+	return nil
+}
+
+// reportUnrepresentedUsageMetadata records documented Chat usage details that VCP cannot account for without inventing a token category.
+// reportUnrepresentedUsageMetadata 记录 VCP 无法在不虚构 Token 类别的前提下计量的文档化 Chat 用量明细。
+func reportUnrepresentedUsageMetadata(report *vcp.ExecutionReport, usage *Usage) {
+	if report == nil || usage == nil {
+		return
+	}
+	if (usage.PromptDetails != nil && (usage.PromptDetails.AudioTokens != nil || usage.PromptDetails.TextTokens != nil || usage.PromptDetails.ImageTokens != nil)) || (usage.CompletionDetails != nil && (usage.CompletionDetails.AudioTokens != nil || usage.CompletionDetails.AcceptedPredictionTokens != nil || usage.CompletionDetails.RejectedPredictionTokens != nil)) {
+		appendChatSummary(report, "openai_chat.usage.supplemental_tokens.omitted")
+	}
+	if usage.CostInUSDTicks != nil {
+		appendChatSummary(report, "openai_chat.usage.cost.omitted")
+	}
+	if usage.NumSourcesUsed != nil {
+		appendChatSummary(report, "openai_chat.usage.sources.omitted")
+	}
+}
+
+// appendChatSummary adds one stable client-safe conversion code at most once.
+// appendChatSummary 至多一次添加一个稳定且客户端安全的转换代码。
+func appendChatSummary(report *vcp.ExecutionReport, code string) {
+	if report == nil || code == "" {
+		return
+	}
+	for _, existing := range report.ConversionSummary {
+		if existing == code {
+			return
+		}
+	}
+	report.ConversionSummary = append(report.ConversionSummary, code)
+}
+
+// assistantToolCalls converts the mutually exclusive current and deprecated Chat tool carriers into one closed function-call sequence.
+// assistantToolCalls 将互斥的当前与已废弃 Chat 工具载体转换为一个封闭函数调用序列。
+func assistantToolCalls(message *AssistantMessage) ([]ToolCall, error) {
+	if message == nil {
+		return nil, nil
+	}
+	if message.FunctionCall != nil && len(message.ToolCalls) > 0 {
+		return nil, fmt.Errorf("%w: deprecated function_call and tool_calls cannot coexist", ErrInvalidUpstreamResponse)
+	}
+	calls := append([]ToolCall(nil), message.ToolCalls...)
+	if message.FunctionCall != nil {
+		calls = append(calls, ToolCall{Type: "function", Function: *message.FunctionCall})
+	}
+	for callIndex := range calls {
+		if errType := validateChatToolType(calls[callIndex].Type); errType != nil {
+			return nil, errType
+		}
+	}
+	return calls, nil
+}
+
+// validateChatToolType rejects non-function output calls because this profile only declares and restores function tools.
+// validateChatToolType 拒绝非 function 输出调用，因为此 Profile 只声明和恢复 function 工具。
+func validateChatToolType(toolType string) error {
+	if toolType == "" || toolType == "function" {
+		return nil
+	}
+	return fmt.Errorf("%w: unsupported Chat tool call type %q", ErrInvalidUpstreamResponse, toolType)
 }
 
 // emitter creates deterministic stable VCP event identities.
@@ -222,6 +379,21 @@ func safeFinishReason(value string) string {
 		return value
 	}
 	return "unknown"
+}
+
+// terminalForFinishReason maps documented Chat terminal causes without reporting truncation or safety filtering as success.
+// terminalForFinishReason 映射文档化 Chat 终态原因，绝不把截断或安全过滤报告为成功。
+func terminalForFinishReason(value string) (vcp.EventType, string, string) {
+	switch value {
+	case "stop", "tool_calls", "function_call":
+		return vcp.EventResponseCompleted, safeFinishReason(value), ""
+	case "length":
+		return vcp.EventResponseIncomplete, "length", ""
+	case "content_filter":
+		return vcp.EventResponseFailed, "", "openai_chat.content_filter"
+	default:
+		return vcp.EventResponseFailed, "", "openai_chat.unrecognized_finish_reason"
+	}
 }
 
 // safeDiagnosticCode reports whether an upstream value is a bounded non-sensitive identifier.
