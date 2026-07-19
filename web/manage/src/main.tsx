@@ -1,23 +1,25 @@
-import { StrictMode } from "react";
-import { createRoot } from "react-dom/client";
+import { StrictMode } from "react"
+import { createRoot } from "react-dom/client"
+import { BrowserRouter } from "react-router-dom"
 
-import App from "./App";
-import "./styles.css";
+import { App } from "@/App"
+import { I18nProvider } from "@/i18n"
+import "@/index.css"
 
-// rootElement is the sole Vite document mount point for the local management interface.
-// rootElement 是本地管理界面的唯一 Vite 文档挂载点。
-const rootElement = document.getElementById("root");
+// applicationRoot is the single Vite mount point for the management interface.
+// applicationRoot 是管理界面的唯一 Vite 挂载点。
+const applicationRoot = document.getElementById("root")
 
-if (rootElement === null) {
-  throw new Error("Vite management root element is required");
+if (applicationRoot === null) {
+  throw new Error("Application root element was not found.")
 }
 
-// root owns the React application lifecycle under the fixed local management page.
-// root 管理固定本地管理页面下的 React 应用生命周期。
-const root = createRoot(rootElement);
-
-root.render(
+createRoot(applicationRoot).render(
   <StrictMode>
-    <App />
+    <I18nProvider>
+      <BrowserRouter>
+        <App />
+      </BrowserRouter>
+    </I18nProvider>
   </StrictMode>
-);
+)

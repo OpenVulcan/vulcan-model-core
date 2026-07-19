@@ -86,7 +86,7 @@ make run
 
 ## Local management page
 
-The management page is an independent React + Vite development service in `web2/manage`. It replaces the legacy management homepage, provides the Dashboard at `/`, and keeps the administrator credential page at `/login` in the same application. It proxies only `/vulcan/manage` to the core and is fixed to `127.0.0.1:13520`.
+The management page is an independent React + Vite development service in `web/manage`. It provides the administrator login and management workspace in one application, proxies only `/vulcan/manage` to the core, and is fixed to `127.0.0.1:13520`.
 
 ```powershell
 make vite start
@@ -101,7 +101,7 @@ make vite stop
 ```bash
 gofmt -w .
 go test ./...
-cd web2/manage && npm test
+cd web/manage && npm test
 ```
 
 Run with the default local control-plane listener and prescribed local paths:

@@ -23,7 +23,7 @@ if (-not (Test-Path -LiteralPath $projectRootFullPath -PathType Container)) {
 
 # managementDirectory owns the Vite package and its node_modules installation.
 # managementDirectory 管理 Vite 包及其 node_modules 安装目录。
-$managementDirectory = Join-Path -Path $projectRootFullPath -ChildPath "web2/manage"
+$managementDirectory = Join-Path -Path $projectRootFullPath -ChildPath "web/manage"
 if (-not (Test-Path -LiteralPath $managementDirectory -PathType Container)) {
     throw "Management-page directory was not found: $managementDirectory"
 }

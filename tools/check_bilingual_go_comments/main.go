@@ -114,8 +114,8 @@ func sourcePaths(arguments []string) ([]string, error) {
 // excludedDirectory reports whether one repository-relative directory is generated, external, or intentionally verbatim.
 // excludedDirectory 报告一个仓库相对目录是否属于生成内容、外部内容或必须原样保留的内容。
 func excludedDirectory(path string) bool {
-	return path == ".git" || path == "output" || path == "web2/manage/node_modules" || path == "internal/thirdparty/cliproxyapi" ||
-		strings.HasPrefix(path, ".git/") || strings.HasPrefix(path, "output/") || strings.HasPrefix(path, "web2/manage/node_modules/") || strings.HasPrefix(path, "internal/thirdparty/cliproxyapi/")
+	return path == ".git" || path == "output" || path == "web/manage/node_modules" || path == "internal/thirdparty/cliproxyapi" ||
+		strings.HasPrefix(path, ".git/") || strings.HasPrefix(path, "output/") || strings.HasPrefix(path, "web/manage/node_modules/") || strings.HasPrefix(path, "internal/thirdparty/cliproxyapi/")
 }
 
 // inspectFile parses one Go file and checks declarations and named struct or interface fields.

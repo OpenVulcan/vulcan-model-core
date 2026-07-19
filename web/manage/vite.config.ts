@@ -1,10 +1,18 @@
-import { defineConfig } from "vite";
+import path from "node:path";
+
+import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
 
 // default exports the loopback-only Vite development configuration for the local management interface.
 // default 导出本地管理界面的仅环回 Vite 开发配置。
 export default defineConfig({
-  plugins: [react()],
+  plugins: [react(), tailwindcss()],
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src")
+    }
+  },
   server: {
     host: "127.0.0.1",
     port: 13520,
