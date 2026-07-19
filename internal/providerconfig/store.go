@@ -14,9 +14,12 @@ type Store interface {
 	// ListProviderGroups returns code-owned management-only provider groups.
 	// ListProviderGroups 返回代码拥有且仅供管理使用的供应商分组。
 	ListProviderGroups(context.Context) ([]ProviderGroup, error)
-	// SaveCustomDefinition creates or updates one custom provider definition.
-	// SaveCustomDefinition 创建或更新一个自定义供应商定义。
+	// SaveCustomDefinition creates one custom provider definition; replacements require an atomic migration.
+	// SaveCustomDefinition 创建一个自定义供应商定义；替换必须使用原子迁移。
 	SaveCustomDefinition(context.Context, ProviderDefinition) error
+	// SaveCustomDefinitionMigration atomically replaces one custom definition and transitions its complete instance set.
+	// SaveCustomDefinitionMigration 原子替换一个自定义定义并转换其完整实例集合。
+	SaveCustomDefinitionMigration(context.Context, CustomDefinitionMigration) error
 	// GetDefinition resolves one system or custom provider definition.
 	// GetDefinition 解析一个系统或自定义供应商定义。
 	GetDefinition(context.Context, string) (ProviderDefinition, error)
@@ -29,6 +32,12 @@ type Store interface {
 	// DeleteSystemOnboarding removes one newly created configuration during cross-store compensation.
 	// DeleteSystemOnboarding 在跨存储补偿期间删除一份新创建配置。
 	DeleteSystemOnboarding(context.Context, SystemOnboarding) error
+	// SaveCustomOnboarding atomically creates one custom definition and its complete initial access graph.
+	// SaveCustomOnboarding 原子创建一个自定义 Definition 及其完整初始访问图。
+	SaveCustomOnboarding(context.Context, CustomOnboarding) error
+	// DeleteCustomOnboarding removes one unchanged newly created custom definition and access graph during compensation.
+	// DeleteCustomOnboarding 在补偿期间删除一个未变化的新建自定义 Definition 与访问图。
+	DeleteCustomOnboarding(context.Context, CustomOnboarding) error
 	// SaveInstance creates or updates one provider instance.
 	// SaveInstance 创建或更新一个供应商实例。
 	SaveInstance(context.Context, ProviderInstance) error
@@ -147,6 +156,75 @@ func (s *MemoryStore) DeleteSystemOnboarding(ctx context.Context, onboarding Sys
 	return nil
 }
 
+// SaveCustomOnboarding atomically commits one new custom definition and executable graph in memory.
+// SaveCustomOnboarding 在内存中原子提交一个新的自定义 Definition 与可执行图。
+func (s *MemoryStore) SaveCustomOnboarding(ctx context.Context, onboarding CustomOnboarding) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if errDefinition := ValidateCustomDefinition(onboarding.Definition, s.protocols); errDefinition != nil {
+		return errDefinition
+	}
+	if errValidate := ValidateCustomOnboarding(onboarding); errValidate != nil {
+		return errValidate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if _, exists := s.customDefinitions[onboarding.Definition.ID]; exists {
+		return fmt.Errorf("%w: custom provider definition %s", ErrAlreadyRegistered, onboarding.Definition.ID)
+	}
+	if _, exists := s.instances[onboarding.Instance.ID]; exists {
+		return fmt.Errorf("%w: provider instance %s", ErrAlreadyRegistered, onboarding.Instance.ID)
+	}
+	for _, current := range s.instances {
+		if current.Handle == onboarding.Instance.Handle {
+			return fmt.Errorf("%w: provider handle %s", ErrAlreadyRegistered, onboarding.Instance.Handle)
+		}
+	}
+	if _, exists := s.endpoints[onboarding.Endpoint.ID]; exists {
+		return fmt.Errorf("%w: provider endpoint %s", ErrAlreadyRegistered, onboarding.Endpoint.ID)
+	}
+	if _, exists := s.credentials[onboarding.Credential.ID]; exists {
+		return fmt.Errorf("%w: credential %s", ErrAlreadyRegistered, onboarding.Credential.ID)
+	}
+	if _, exists := s.bindings[onboarding.Binding.ID]; exists {
+		return fmt.Errorf("%w: access binding %s", ErrAlreadyRegistered, onboarding.Binding.ID)
+	}
+	s.customDefinitions[onboarding.Definition.ID] = cloneProviderDefinition(onboarding.Definition)
+	s.instances[onboarding.Instance.ID] = cloneProviderInstance(onboarding.Instance)
+	s.endpoints[onboarding.Endpoint.ID] = onboarding.Endpoint
+	s.credentials[onboarding.Credential.ID] = cloneCredential(onboarding.Credential)
+	s.bindings[onboarding.Binding.ID] = cloneAccessBinding(onboarding.Binding)
+	return nil
+}
+
+// DeleteCustomOnboarding removes one exact unchanged custom onboarding graph atomically in memory.
+// DeleteCustomOnboarding 在内存中原子删除一个精确且未变化的自定义录入图。
+func (s *MemoryStore) DeleteCustomOnboarding(ctx context.Context, onboarding CustomOnboarding) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	definition, definitionExists := s.customDefinitions[onboarding.Definition.ID]
+	instance, instanceExists := s.instances[onboarding.Instance.ID]
+	endpoint, endpointExists := s.endpoints[onboarding.Endpoint.ID]
+	credential, credentialExists := s.credentials[onboarding.Credential.ID]
+	binding, bindingExists := s.bindings[onboarding.Binding.ID]
+	if !definitionExists || !instanceExists || !endpointExists || !credentialExists || !bindingExists {
+		return fmt.Errorf("%w: custom onboarding graph", ErrNotFound)
+	}
+	if definition.Revision != onboarding.Definition.Revision || instance.DefinitionID != definition.ID || instance.Revision != onboarding.Instance.Revision || endpoint.ProviderInstanceID != instance.ID || endpoint.Revision != onboarding.Endpoint.Revision || credential.ProviderInstanceID != instance.ID || credential.Revision != onboarding.Credential.Revision || binding.ProviderInstanceID != instance.ID || binding.Revision != onboarding.Binding.Revision {
+		return errors.New("custom onboarding compensation target changed")
+	}
+	delete(s.bindings, onboarding.Binding.ID)
+	delete(s.credentials, onboarding.Credential.ID)
+	delete(s.endpoints, onboarding.Endpoint.ID)
+	delete(s.instances, onboarding.Instance.ID)
+	delete(s.customDefinitions, onboarding.Definition.ID)
+	return nil
+}
+
 // ListProviderGroups returns code-owned groups without reading persisted execution configuration.
 // ListProviderGroups 返回代码拥有的分组，且不读取持久化执行配置。
 func (s *MemoryStore) ListProviderGroups(ctx context.Context) ([]ProviderGroup, error) {
@@ -202,8 +280,8 @@ func NewMemoryStore(protocols *ProtocolRegistry, systems *SystemRegistry) (*Memo
 	}, nil
 }
 
-// SaveCustomDefinition creates or updates one validated custom definition.
-// SaveCustomDefinition 创建或更新一个经过校验的自定义定义。
+// SaveCustomDefinition creates one validated custom definition and reserves replacement for the migration operation.
+// SaveCustomDefinition 创建一个经过校验的自定义定义，并将替换操作保留给迁移接口。
 func (s *MemoryStore) SaveCustomDefinition(ctx context.Context, definition ProviderDefinition) error {
 	if err := contextError(ctx); err != nil {
 		return err
@@ -213,10 +291,40 @@ func (s *MemoryStore) SaveCustomDefinition(ctx context.Context, definition Provi
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, exists := s.customDefinitions[definition.ID]; exists && definition.Revision <= current.Revision {
-		return invalid("custom provider definition revision must increase")
+	if _, exists := s.customDefinitions[definition.ID]; exists {
+		return fmt.Errorf("%w: provider definition %s", ErrAlreadyRegistered, definition.ID)
 	}
 	s.customDefinitions[definition.ID] = cloneProviderDefinition(definition)
+	return nil
+}
+
+// SaveCustomDefinitionMigration atomically replaces one custom definition and transitions every owned instance in memory.
+// SaveCustomDefinitionMigration 在内存中原子替换一个自定义定义并转换其拥有的全部实例。
+func (s *MemoryStore) SaveCustomDefinitionMigration(ctx context.Context, migration CustomDefinitionMigration) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	currentDefinition, exists := s.customDefinitions[migration.Definition.ID]
+	if !exists {
+		return fmt.Errorf("%w: provider definition %s", ErrNotFound, migration.Definition.ID)
+	}
+	// currentInstances captures the exact definition-owned set under the same write lock used for commit.
+	// currentInstances 在提交所用的同一写锁下捕获精确的定义所属集合。
+	currentInstances := make([]ProviderInstance, 0)
+	for _, instance := range s.instances {
+		if instance.DefinitionID == migration.Definition.ID {
+			currentInstances = append(currentInstances, cloneProviderInstance(instance))
+		}
+	}
+	if errMigration := ValidateCustomDefinitionMigration(migration, currentDefinition, currentInstances, s.protocols); errMigration != nil {
+		return errMigration
+	}
+	s.customDefinitions[migration.Definition.ID] = cloneProviderDefinition(migration.Definition)
+	for _, instance := range migration.Instances {
+		s.instances[instance.ID] = cloneProviderInstance(instance)
+	}
 	return nil
 }
 
@@ -265,22 +373,32 @@ func (s *MemoryStore) SaveInstance(ctx context.Context, instance ProviderInstanc
 	if err := instance.Validate(); err != nil {
 		return err
 	}
-	definition, errDefinition := s.GetDefinition(ctx, instance.DefinitionID)
-	if errDefinition != nil {
-		return errDefinition
+	systemDefinition, systemExists := s.systems.Lookup(instance.DefinitionID)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	definition := systemDefinition
+	if !systemExists {
+		customDefinition, customExists := s.customDefinitions[instance.DefinitionID]
+		if !customExists {
+			return fmt.Errorf("%w: provider definition %s", ErrNotFound, instance.DefinitionID)
+		}
+		definition = customDefinition
 	}
 	if instance.DefinitionRevision != definition.Revision {
 		return invalid("provider instance definition revision does not match current definition")
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	for instanceID, current := range s.instances {
 		if current.Handle == instance.Handle && instanceID != instance.ID {
 			return fmt.Errorf("%w: provider handle %s", ErrAlreadyRegistered, instance.Handle)
 		}
 	}
-	if current, exists := s.instances[instance.ID]; exists && instance.Revision <= current.Revision {
-		return invalid("provider instance revision must increase")
+	if current, exists := s.instances[instance.ID]; exists {
+		if errMutation := current.ValidateMutation(instance); errMutation != nil {
+			return errMutation
+		}
+		if instance.Revision <= current.Revision {
+			return invalid("provider instance revision must increase")
+		}
 	}
 	s.instances[instance.ID] = cloneProviderInstance(instance)
 	return nil
@@ -346,8 +464,13 @@ func (s *MemoryStore) SaveEndpoint(ctx context.Context, endpoint Endpoint) error
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, exists := s.endpoints[endpoint.ID]; exists && endpoint.Revision <= current.Revision {
-		return invalid("endpoint revision must increase")
+	if current, exists := s.endpoints[endpoint.ID]; exists {
+		if endpoint.Revision <= current.Revision {
+			return invalid("endpoint revision must increase")
+		}
+		if errMutation := definition.ValidateEndpointMutation(current, endpoint); errMutation != nil {
+			return errMutation
+		}
 	}
 	s.endpoints[endpoint.ID] = endpoint
 	return nil
@@ -395,6 +518,14 @@ func (s *MemoryStore) SaveCredential(ctx context.Context, credential Credential)
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if current, exists := s.credentials[credential.ID]; exists {
+		if errMutation := current.ValidateMutation(credential); errMutation != nil {
+			return errMutation
+		}
+		if credential.Revision <= current.Revision {
+			return invalid("credential revision must increase")
+		}
+	}
 	for credentialID, current := range s.credentials {
 		if credentialID == credential.ID || current.ProviderInstanceID != credential.ProviderInstanceID {
 			continue
@@ -405,9 +536,6 @@ func (s *MemoryStore) SaveCredential(ctx context.Context, credential Credential)
 		if credential.PrincipalKey != "" && current.PrincipalKey == credential.PrincipalKey {
 			return fmt.Errorf("%w: credential principal", ErrAlreadyRegistered)
 		}
-	}
-	if current, exists := s.credentials[credential.ID]; exists && credential.Revision <= current.Revision {
-		return invalid("credential revision must increase")
 	}
 	s.credentials[credential.ID] = cloneCredential(credential)
 	return nil
@@ -468,8 +596,13 @@ func (s *MemoryStore) SaveBinding(ctx context.Context, binding AccessBinding) er
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if current, exists := s.bindings[binding.ID]; exists && binding.Revision <= current.Revision {
-		return invalid("access binding revision must increase")
+	if current, exists := s.bindings[binding.ID]; exists {
+		if errMutation := current.ValidateMutation(binding); errMutation != nil {
+			return errMutation
+		}
+		if binding.Revision <= current.Revision {
+			return invalid("access binding revision must increase")
+		}
 	}
 	s.bindings[binding.ID] = cloneAccessBinding(binding)
 	return nil

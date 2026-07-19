@@ -29,6 +29,82 @@ func TestExecutionRegistryDispatchesExactDefinitionAndProfile(t *testing.T) {
 	}
 }
 
+// TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition verifies dynamic dispatch uses the exact custom definition snapshot.
+// TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition 验证动态分派使用精确的自定义 Definition 快照。
+func TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition(t *testing.T) {
+	registry := NewExecutionRegistry()
+	factory := &recordingCustomDriverFactory{}
+	if errRegister := registry.RegisterCustomFactory(factory); errRegister != nil {
+		t.Fatalf("RegisterCustomFactory() error = %v", errRegister)
+	}
+	request := validExecutionRequest()
+	request.Definition.Kind = providerconfig.DefinitionKindCustom
+	request.Definition.Revision = 7
+	result, errExecute := registry.Execute(context.Background(), request)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if factory.definition.ID != request.Definition.ID || factory.definition.Revision != 7 || !factory.driver.executed || result.UpstreamResponseID != "res-upstream" {
+		t.Fatalf("factory definition = %#v, driver = %#v, result = %#v", factory.definition, factory.driver, result)
+	}
+}
+
+// TestExecutionRegistryNeverUsesCustomFactoryForSystemDefinition verifies runtime factories cannot capture missing system integrations.
+// TestExecutionRegistryNeverUsesCustomFactoryForSystemDefinition 验证运行时 Factory 不能接管缺失的系统集成。
+func TestExecutionRegistryNeverUsesCustomFactoryForSystemDefinition(t *testing.T) {
+	registry := NewExecutionRegistry()
+	factory := &recordingCustomDriverFactory{}
+	if errRegister := registry.RegisterCustomFactory(factory); errRegister != nil {
+		t.Fatalf("RegisterCustomFactory() error = %v", errRegister)
+	}
+	_, errExecute := registry.Execute(context.Background(), validExecutionRequest())
+	if !errors.Is(errExecute, ErrExecutionDriverNotFound) || factory.called {
+		t.Fatalf("Execute() error = %v, factory called = %v", errExecute, factory.called)
+	}
+}
+
+// TestExecutionRegistryRejectsCustomFactoryOwnershipDrift verifies a factory cannot return a Driver for another definition.
+// TestExecutionRegistryRejectsCustomFactoryOwnershipDrift 验证 Factory 不能返回属于其他 Definition 的 Driver。
+func TestExecutionRegistryRejectsCustomFactoryOwnershipDrift(t *testing.T) {
+	registry := NewExecutionRegistry()
+	factory := &recordingCustomDriverFactory{definitionOverride: "definition-foreign"}
+	if errRegister := registry.RegisterCustomFactory(factory); errRegister != nil {
+		t.Fatalf("RegisterCustomFactory() error = %v", errRegister)
+	}
+	request := validExecutionRequest()
+	request.Definition.Kind = providerconfig.DefinitionKindCustom
+	_, errExecute := registry.Execute(context.Background(), request)
+	if !errors.Is(errExecute, ErrExecutionBinding) {
+		t.Fatalf("Execute() error = %v, want ErrExecutionBinding", errExecute)
+	}
+}
+
+// TestExecutionRegistryRejectsDuplicateCustomFactory verifies custom runtime ownership remains singular.
+// TestExecutionRegistryRejectsDuplicateCustomFactory 验证自定义运行时归属保持唯一。
+func TestExecutionRegistryRejectsDuplicateCustomFactory(t *testing.T) {
+	registry := NewExecutionRegistry()
+	if errRegister := registry.RegisterCustomFactory(&recordingCustomDriverFactory{}); errRegister != nil {
+		t.Fatalf("first RegisterCustomFactory() error = %v", errRegister)
+	}
+	if errRegister := registry.RegisterCustomFactory(&recordingCustomDriverFactory{}); !errors.Is(errRegister, ErrCustomExecutionFactoryDuplicate) {
+		t.Fatalf("second RegisterCustomFactory() error = %v, want ErrCustomExecutionFactoryDuplicate", errRegister)
+	}
+}
+
+// TestExecutionRegistryRejectsTypedNilExtensions verifies nil pointer implementations cannot panic during registration or factory dispatch.
+// TestExecutionRegistryRejectsTypedNilExtensions 验证 nil 指针实现不能在注册或 Factory 分派期间触发 panic。
+func TestExecutionRegistryRejectsTypedNilExtensions(t *testing.T) {
+	registry := NewExecutionRegistry()
+	var driver *recordingExecutionDriver
+	if errRegister := registry.Register(driver); !errors.Is(errRegister, ErrExecutionDriverRequired) {
+		t.Fatalf("Register(typed nil) error = %v, want ErrExecutionDriverRequired", errRegister)
+	}
+	var factory *recordingCustomDriverFactory
+	if errRegister := registry.RegisterCustomFactory(factory); !errors.Is(errRegister, ErrCustomExecutionFactoryRequired) {
+		t.Fatalf("RegisterCustomFactory(typed nil) error = %v, want ErrCustomExecutionFactoryRequired", errRegister)
+	}
+}
+
 // TestExecutionRequestRejectsChannelProfileMismatch verifies a Driver cannot execute another channel profile.
 // TestExecutionRequestRejectsChannelProfileMismatch 验证 Driver 不能执行其他 Channel Profile。
 func TestExecutionRequestRejectsChannelProfileMismatch(t *testing.T) {
@@ -133,6 +209,36 @@ type recordingExecutionDriver struct {
 	// executed reports whether Execute received a validated request.
 	// executed 表示 Execute 是否收到已校验请求。
 	executed bool
+}
+
+// recordingCustomDriverFactory captures immutable custom definition snapshots for registry tests.
+// recordingCustomDriverFactory 捕获不可变的自定义 Definition 快照以供注册表测试。
+type recordingCustomDriverFactory struct {
+	// definition records the exact snapshot supplied by the registry.
+	// definition 记录注册表提供的精确快照。
+	definition providerconfig.ProviderDefinition
+	// definitionOverride optionally forces invalid returned Driver ownership.
+	// definitionOverride 可选地强制返回无效的 Driver 归属。
+	definitionOverride string
+	// driver records execution performed by the factory-created Driver.
+	// driver 记录 Factory 创建的 Driver 所执行的调用。
+	driver *recordingExecutionDriver
+	// called reports whether the registry invoked this Factory.
+	// called 表示注册表是否调用了此 Factory。
+	called bool
+}
+
+// BuildCustomDriver records one custom snapshot and returns an exactly bound test Driver unless ownership drift is requested.
+// BuildCustomDriver 记录一个自定义快照，并在未要求归属漂移时返回精确绑定的测试 Driver。
+func (f *recordingCustomDriverFactory) BuildCustomDriver(definition providerconfig.ProviderDefinition) (ExecutionDriver, error) {
+	f.called = true
+	f.definition = definition
+	definitionID := definition.ID
+	if f.definitionOverride != "" {
+		definitionID = f.definitionOverride
+	}
+	f.driver = &recordingExecutionDriver{definitionID: definitionID, profileID: definition.ProtocolProfileID}
+	return f.driver, nil
 }
 
 // ProviderDefinitionID returns the test Driver definition ownership.

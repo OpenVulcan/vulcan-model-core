@@ -786,14 +786,19 @@ func ReadSSE(reader io.Reader, consume func(SSEEnvelope) error) error {
 	// eventName 和 dataLines 在空行分隔符前保存当前 SSE 帧。
 	eventName := ""
 	dataLines := make([]string, 0)
+	// frameBytes bounds the joined data payload across multiple individually valid SSE lines.
+	// frameBytes 限制跨多条单独有效 SSE 行连接后的数据载荷。
+	frameBytes := 0
 	dispatch := func() error {
 		if len(dataLines) == 0 {
 			eventName = ""
+			frameBytes = 0
 			return nil
 		}
 		envelope := SSEEnvelope{Event: eventName, Data: []byte(strings.Join(dataLines, "\n"))}
 		eventName = ""
 		dataLines = dataLines[:0]
+		frameBytes = 0
 		return consume(envelope)
 	}
 	for scanner.Scan() {
@@ -816,6 +821,16 @@ func ReadSSE(reader io.Reader, consume func(SSEEnvelope) error) error {
 		case "event":
 			eventName = value
 		case "data":
+			if len(dataLines) > 0 {
+				if frameBytes >= maximumSSELineBytes {
+					return fmt.Errorf("%w: SSE frame exceeds the data limit", ErrInvalidUpstreamResponse)
+				}
+				frameBytes++
+			}
+			if len(value) > maximumSSELineBytes-frameBytes {
+				return fmt.Errorf("%w: SSE frame exceeds the data limit", ErrInvalidUpstreamResponse)
+			}
+			frameBytes += len(value)
 			dataLines = append(dataLines, value)
 		}
 	}

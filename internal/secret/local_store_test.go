@@ -71,6 +71,73 @@ func TestLocalStoreRejectsTraversalReference(t *testing.T) {
 	}
 }
 
+// TestLocalStoreClearsTransientPlaintextCopies verifies protection adapters cannot retain store-owned plaintext buffers after return.
+// TestLocalStoreClearsTransientPlaintextCopies 验证保护适配器返回后不能保留存储层拥有的明文缓冲区。
+func TestLocalStoreClearsTransientPlaintextCopies(t *testing.T) {
+	protector := &retainingProtector{}
+	store, errStore := newLocalStore(t.TempDir(), protector)
+	if errStore != nil {
+		t.Fatalf("newLocalStore() error = %v", errStore)
+	}
+	original := []byte("sensitive-provider-token")
+	reference, errPut := store.Put(context.Background(), original)
+	if errPut != nil {
+		t.Fatalf("Put() error = %v", errPut)
+	}
+	if string(original) != "sensitive-provider-token" {
+		t.Fatalf("Put() mutated caller-owned bytes: %q", original)
+	}
+	if !allZero(protector.protectInput) {
+		t.Fatalf("Protect() input retained plaintext: %q", protector.protectInput)
+	}
+	got, errGet := store.Get(context.Background(), reference)
+	if errGet != nil {
+		t.Fatalf("Get() error = %v", errGet)
+	}
+	if string(got) != "sensitive-provider-token" {
+		t.Fatalf("Get() = %q", got)
+	}
+	if !allZero(protector.unprotectedOutput) {
+		t.Fatalf("Unprotect() output retained plaintext: %q", protector.unprotectedOutput)
+	}
+}
+
+// allZero reports whether every byte in one retained test buffer was cleared.
+// allZero 报告一个被保留的测试缓冲区是否已全部清零。
+func allZero(value []byte) bool {
+	for _, item := range value {
+		if item != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// retainingProtector deliberately retains store-owned buffers so tests can observe post-call clearing.
+// retainingProtector 有意保留存储层拥有的缓冲区，以便测试观察调用后的清零行为。
+type retainingProtector struct {
+	// protectInput retains the exact buffer passed to Protect.
+	// protectInput 保留传给 Protect 的精确缓冲区。
+	protectInput []byte
+	// unprotectedOutput retains the exact buffer returned by Unprotect.
+	// unprotectedOutput 保留 Unprotect 返回的精确缓冲区。
+	unprotectedOutput []byte
+}
+
+// Protect retains its input and emits deterministic non-plaintext bytes.
+// Protect 保留输入并生成确定性的非明文字节。
+func (p *retainingProtector) Protect(value []byte) ([]byte, error) {
+	p.protectInput = value
+	return []byte("protected-payload"), nil
+}
+
+// Unprotect returns one retained plaintext buffer for the store to copy and clear.
+// Unprotect 返回一个被保留的明文缓冲区，供存储层复制并清零。
+func (p *retainingProtector) Unprotect([]byte) ([]byte, error) {
+	p.unprotectedOutput = []byte("sensitive-provider-token")
+	return p.unprotectedOutput, nil
+}
+
 // reversingProtector is a deterministic test-only protector that proves LocalStore uses its protection boundary.
 // reversingProtector 是确定性的仅测试保护器，用于证明 LocalStore 使用其保护边界。
 type reversingProtector struct{}

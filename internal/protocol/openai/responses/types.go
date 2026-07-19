@@ -213,7 +213,11 @@ func (c ToolChoice) MarshalJSON() ([]byte, error) {
 	// namedChoice is the closed Responses named-tool representation.
 	// namedChoice 是封闭的 Responses 指定工具表示。
 	namedChoice := struct {
+		// Type identifies the exact named tool category.
+		// Type 标识精确的具名工具类别。
 		Type string `json:"type"`
+		// Name identifies the exact selected tool.
+		// Name 标识精确选定的工具。
 		Name string `json:"name"`
 	}{Type: c.Type, Name: c.Name}
 	return json.Marshal(namedChoice)

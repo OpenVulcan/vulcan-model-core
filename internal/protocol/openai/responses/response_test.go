@@ -290,8 +290,12 @@ func TestDecodeResponseMapsSafeNonCompletedTerminals(t *testing.T) {
 		// upstream contains the provider terminal snapshot under test.
 		// upstream 包含待测的 Provider 终态快照。
 		upstream Response
-		status   vcp.ResponseStatus
-		code     string
+		// status is the expected canonical terminal status.
+		// status 是预期的规范终态状态。
+		status vcp.ResponseStatus
+		// code is the optional safe provider error code.
+		// code 是可选的安全供应商错误码。
+		code string
 	}{
 		{name: "incomplete", upstream: Response{ID: "upstream-incomplete", Status: "incomplete", IncompleteDetails: &IncompleteDetails{Reason: "max_output"}}, status: vcp.ResponseIncomplete},
 		{name: "failed", upstream: Response{ID: "upstream-failed", Status: "failed", Error: &Error{Code: "rate_limited"}}, status: vcp.ResponseFailed, code: "rate_limited"},

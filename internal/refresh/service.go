@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
@@ -19,9 +20,6 @@ var (
 	// ErrDriverNotFound reports a system definition without a trusted registered driver.
 	// ErrDriverNotFound 表示系统定义没有已注册的受信任 Driver。
 	ErrDriverNotFound = errors.New("trusted provider driver not found")
-	// ErrModelDiscoveryUnsupported reports a driver that cannot build model metadata.
-	// ErrModelDiscoveryUnsupported 表示 Driver 无法构建模型元数据。
-	ErrModelDiscoveryUnsupported = errors.New("provider model discovery is unsupported")
 )
 
 // DriverRegistry resolves one trusted system-provider driver by definition identifier.
@@ -52,7 +50,7 @@ type Service struct {
 // NewService creates one provider metadata refresh coordinator.
 // NewService 创建一个供应商元数据刷新协调器。
 func NewService(configurations providerconfig.Store, catalogs catalog.Store, drivers DriverRegistry) (*Service, error) {
-	if configurations == nil || catalogs == nil || drivers == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) || dependency.IsNil(drivers) {
 		return nil, errors.New("provider configuration, catalog, and driver registries are required")
 	}
 	targetResolver, errResolver := resolve.New(configurations, catalogs)
@@ -83,16 +81,33 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 		return catalog.Snapshot{}, fmt.Errorf("%w: %s", ErrDriverNotFound, instance.DefinitionID)
 	}
 	driverDefinition := driver.Definition()
+	if errReaders := validateDeclaredMetadataReaders(driver, driverDefinition); errReaders != nil {
+		return catalog.Snapshot{}, errReaders
+	}
 	discoverer, supportsDiscovery := driver.(provider.ModelDiscoverer)
-	if driverDefinition.Features.ModelDiscovery != providerconfig.SupportSupported || !supportsDiscovery {
-		return catalog.Snapshot{}, fmt.Errorf("%w: %s", ErrModelDiscoveryUnsupported, instance.DefinitionID)
+	// discovery preserves the prior model catalog when this provider exposes only account metadata readers.
+	// discovery 在供应商只暴露账号元数据读取器时保留之前的模型目录。
+	discovery := provider.ModelDiscoveryResult{ObservedAt: now}
+	currentSnapshot, errCurrentSnapshot := s.catalogs.Get(ctx, instance.ID)
+	if errCurrentSnapshot == nil {
+		discovery.Models = append([]catalog.ProviderModel(nil), currentSnapshot.Models...)
+		discovery.Offerings = append([]catalog.ModelOffering(nil), currentSnapshot.Offerings...)
+		discovery.Profiles = append([]catalog.ExecutionProfile(nil), currentSnapshot.Profiles...)
+	} else if !errors.Is(errCurrentSnapshot, catalog.ErrSnapshotNotFound) {
+		return catalog.Snapshot{}, errCurrentSnapshot
 	}
-	discovery, errDiscovery := discoverer.DiscoverModels(ctx, provider.DiscoveryRequest{ProviderInstance: instance})
-	if errDiscovery != nil {
-		return catalog.Snapshot{}, fmt.Errorf("discover provider models: %w", errDiscovery)
-	}
-	if discovery.ObservedAt.IsZero() {
-		return catalog.Snapshot{}, errors.New("provider model discovery observed time is required")
+	if driverDefinition.Features.ModelDiscovery == providerconfig.SupportSupported {
+		if !supportsDiscovery {
+			return catalog.Snapshot{}, errors.New("provider declares model discovery without a ModelDiscoverer")
+		}
+		freshDiscovery, errDiscovery := discoverer.DiscoverModels(ctx, provider.DiscoveryRequest{ProviderInstance: instance})
+		if errDiscovery != nil {
+			return catalog.Snapshot{}, fmt.Errorf("discover provider models: %w", errDiscovery)
+		}
+		if freshDiscovery.ObservedAt.IsZero() {
+			return catalog.Snapshot{}, errors.New("provider model discovery observed time is required")
+		}
+		discovery = freshDiscovery
 	}
 	credentials, errCredentials := s.configurations.ListCredentials(ctx, instance.ID)
 	if errCredentials != nil {
@@ -105,10 +120,54 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 	entitlementByID := make(map[string]catalog.ModelEntitlement)
 	allowanceByID := make(map[string]catalog.AllowanceSnapshot)
 	for _, credential := range credentials {
+		if !credential.RuntimeEligibleAt(now) {
+			continue
+		}
+		// aggregateReader preserves consistency when one provider response contains multiple metadata classes.
+		// aggregateReader 在一个供应商响应包含多类元数据时保持一致性。
+		if aggregateReader, supported := driver.(provider.CredentialMetadataReader); supported {
+			metadata, errMetadata := aggregateReader.ReadCredentialMetadata(ctx, instance, credential)
+			if errMetadata != nil {
+				return catalog.Snapshot{}, fmt.Errorf("read provider metadata for credential %s: %w", credential.ID, errMetadata)
+			}
+			if errOwnership := validateCredentialMetadataOwnership(credential, metadata.Plan, metadata.Entitlements, metadata.Allowances); errOwnership != nil {
+				return catalog.Snapshot{}, fmt.Errorf("validate provider metadata ownership for credential %s: %w", credential.ID, errOwnership)
+			}
+			if driverDefinition.Features.PlanReader == providerconfig.SupportSupported {
+				if metadata.Plan == nil {
+					return catalog.Snapshot{}, errors.New("provider aggregate metadata omitted its declared plan")
+				}
+				if errAppend := appendUnique(metadata.Plan.ID, *metadata.Plan, planByID, &plans); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			} else if metadata.Plan != nil {
+				return catalog.Snapshot{}, errors.New("provider aggregate metadata returned an undeclared plan")
+			}
+			if driverDefinition.Features.EntitlementReader != providerconfig.SupportSupported && len(metadata.Entitlements) > 0 {
+				return catalog.Snapshot{}, errors.New("provider aggregate metadata returned undeclared entitlements")
+			}
+			for _, entitlement := range metadata.Entitlements {
+				if errAppend := appendUnique(entitlement.ID, entitlement, entitlementByID, &entitlements); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
+			if driverDefinition.Features.AllowanceReader != providerconfig.SupportSupported && len(metadata.Allowances) > 0 {
+				return catalog.Snapshot{}, errors.New("provider aggregate metadata returned undeclared allowances")
+			}
+			for _, allowance := range metadata.Allowances {
+				if errAppend := appendUnique(allowance.ID, allowance, allowanceByID, &allowances); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
+			continue
+		}
 		if planReader, supported := driver.(provider.PlanReader); driverDefinition.Features.PlanReader == providerconfig.SupportSupported && supported {
 			plan, errPlan := planReader.ReadPlan(ctx, instance, credential)
 			if errPlan != nil {
 				return catalog.Snapshot{}, fmt.Errorf("read provider plan for credential %s: %w", credential.ID, errPlan)
+			}
+			if errOwnership := validateCredentialMetadataOwnership(credential, &plan, nil, nil); errOwnership != nil {
+				return catalog.Snapshot{}, fmt.Errorf("validate provider plan ownership for credential %s: %w", credential.ID, errOwnership)
 			}
 			if errAppend := appendUnique(plan.ID, plan, planByID, &plans); errAppend != nil {
 				return catalog.Snapshot{}, errAppend
@@ -118,6 +177,9 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 			credentialEntitlements, errEntitlements := entitlementReader.ReadEntitlements(ctx, instance, credential)
 			if errEntitlements != nil {
 				return catalog.Snapshot{}, fmt.Errorf("read provider entitlements for credential %s: %w", credential.ID, errEntitlements)
+			}
+			if errOwnership := validateCredentialMetadataOwnership(credential, nil, credentialEntitlements, nil); errOwnership != nil {
+				return catalog.Snapshot{}, fmt.Errorf("validate provider entitlement ownership for credential %s: %w", credential.ID, errOwnership)
 			}
 			for _, entitlement := range credentialEntitlements {
 				if errAppend := appendUnique(entitlement.ID, entitlement, entitlementByID, &entitlements); errAppend != nil {
@@ -130,6 +192,9 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 			if errAllowances != nil {
 				return catalog.Snapshot{}, fmt.Errorf("read provider allowances for credential %s: %w", credential.ID, errAllowances)
 			}
+			if errOwnership := validateCredentialMetadataOwnership(credential, nil, nil, credentialAllowances); errOwnership != nil {
+				return catalog.Snapshot{}, fmt.Errorf("validate provider allowance ownership for credential %s: %w", credential.ID, errOwnership)
+			}
 			for _, allowance := range credentialAllowances {
 				if errAppend := appendUnique(allowance.ID, allowance, allowanceByID, &allowances); errAppend != nil {
 					return catalog.Snapshot{}, errAppend
@@ -138,11 +203,8 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 		}
 	}
 	revision := uint64(1)
-	current, errCurrent := s.catalogs.Get(ctx, instance.ID)
-	if errCurrent == nil {
-		revision = current.Revision + 1
-	} else if !errors.Is(errCurrent, catalog.ErrSnapshotNotFound) {
-		return catalog.Snapshot{}, errCurrent
+	if errCurrentSnapshot == nil {
+		revision = currentSnapshot.Revision + 1
 	}
 	snapshot := catalog.Snapshot{
 		ProviderInstanceID: instance.ID,
@@ -167,6 +229,73 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 		return catalog.Snapshot{}, errSave
 	}
 	return snapshot, nil
+}
+
+// validateCredentialMetadataOwnership verifies that one reader cannot attach account metadata to another credential or unbound shared scope.
+// validateCredentialMetadataOwnership 校验一个读取器不能把账号元数据挂到其他凭据或未绑定的共享作用域。
+func validateCredentialMetadataOwnership(credential providerconfig.Credential, plan *catalog.PlanSnapshot, entitlements []catalog.ModelEntitlement, allowances []catalog.AllowanceSnapshot) error {
+	if plan != nil {
+		if plan.ProviderInstanceID != credential.ProviderInstanceID {
+			return fmt.Errorf("plan %s belongs to provider instance %s, not %s", plan.ID, plan.ProviderInstanceID, credential.ProviderInstanceID)
+		}
+		if plan.CredentialID != credential.ID {
+			return fmt.Errorf("plan %s belongs to credential %s, not %s", plan.ID, plan.CredentialID, credential.ID)
+		}
+	}
+	for _, entitlement := range entitlements {
+		if entitlement.ProviderInstanceID != credential.ProviderInstanceID {
+			return fmt.Errorf("entitlement %s belongs to provider instance %s, not %s", entitlement.ID, entitlement.ProviderInstanceID, credential.ProviderInstanceID)
+		}
+		if entitlement.CredentialID != credential.ID {
+			return fmt.Errorf("entitlement %s belongs to credential %s, not %s", entitlement.ID, entitlement.CredentialID, credential.ID)
+		}
+	}
+	for _, allowance := range allowances {
+		if allowance.ProviderInstanceID != credential.ProviderInstanceID {
+			return fmt.Errorf("allowance %s belongs to provider instance %s, not %s", allowance.ID, allowance.ProviderInstanceID, credential.ProviderInstanceID)
+		}
+		switch allowance.Scope {
+		case catalog.ScopeCredential:
+			if allowance.ScopeID != credential.ID {
+				return fmt.Errorf("allowance %s belongs to credential %s, not %s", allowance.ID, allowance.ScopeID, credential.ID)
+			}
+		case catalog.ScopeSubscription, catalog.ScopeOrganization, catalog.ScopeProject, catalog.ScopeBillingAccount:
+			if !credentialOwnsSharedAllowanceScope(credential, allowance) {
+				return fmt.Errorf("allowance %s belongs to unbound %s scope %s", allowance.ID, allowance.Scope, allowance.ScopeID)
+			}
+		}
+	}
+	return nil
+}
+
+// credentialOwnsSharedAllowanceScope reports whether one provider-reported shared allowance matches an exact stored credential scope reference.
+// credentialOwnsSharedAllowanceScope 报告供应商返回的共享额度是否精确匹配已存储的凭据作用域引用。
+func credentialOwnsSharedAllowanceScope(credential providerconfig.Credential, allowance catalog.AllowanceSnapshot) bool {
+	for _, scopeReference := range credential.ScopeRefs {
+		if scopeReference.Kind == string(allowance.Scope) && scopeReference.ID == allowance.ScopeID {
+			return true
+		}
+	}
+	return false
+}
+
+// validateDeclaredMetadataReaders rejects supported feature declarations that have no concrete trusted reader.
+// validateDeclaredMetadataReaders 拒绝没有具体受信任读取器的已支持功能声明。
+func validateDeclaredMetadataReaders(driver provider.Driver, definition providerconfig.ProviderDefinition) error {
+	_, supportsAggregate := driver.(provider.CredentialMetadataReader)
+	_, supportsPlan := driver.(provider.PlanReader)
+	_, supportsEntitlements := driver.(provider.EntitlementReader)
+	_, supportsAllowances := driver.(provider.AllowanceReader)
+	if definition.Features.PlanReader == providerconfig.SupportSupported && !supportsAggregate && !supportsPlan {
+		return errors.New("provider declares plan reading without a PlanReader")
+	}
+	if definition.Features.EntitlementReader == providerconfig.SupportSupported && !supportsAggregate && !supportsEntitlements {
+		return errors.New("provider declares entitlement reading without an EntitlementReader")
+	}
+	if definition.Features.AllowanceReader == providerconfig.SupportSupported && !supportsAggregate && !supportsAllowances {
+		return errors.New("provider declares allowance reading without an AllowanceReader")
+	}
+	return nil
 }
 
 // appendUnique appends one provider record or accepts an identical shared-scope duplicate.

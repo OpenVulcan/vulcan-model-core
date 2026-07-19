@@ -90,6 +90,38 @@ func TestMessagesDriverPreservesCopiedClaudeExecutionBoundary(t *testing.T) {
 	}
 }
 
+// TestAdaptClaudeRequestHeadersKeepsBrowserHeaderAPIKeyOnly verifies Claude Code OAuth does not impersonate browser API-key mode.
+// TestAdaptClaudeRequestHeadersKeepsBrowserHeaderAPIKeyOnly 验证 Claude Code OAuth 不会伪装成浏览器 API Key 模式。
+func TestAdaptClaudeRequestHeadersKeepsBrowserHeaderAPIKeyOnly(t *testing.T) {
+	execution := anthropicTestExecution("https://api.anthropic.com", "secret-reference")
+	apiKeyRequest, errAPIKey := adaptClaudeRequestHeaders(execution, transport.Request{})
+	if errAPIKey != nil {
+		t.Fatalf("adaptClaudeRequestHeaders(API key) error = %v", errAPIKey)
+	}
+	if !requestHeaderEquals(apiKeyRequest.Headers, "Anthropic-Dangerous-Direct-Browser-Access", "true") {
+		t.Fatalf("API-key headers = %#v", apiKeyRequest.Headers)
+	}
+	execution.Definition.AuthMethods[0].Type = providerconfig.AuthMethodOAuth
+	oauthRequest, errOAuth := adaptClaudeRequestHeaders(execution, transport.Request{})
+	if errOAuth != nil {
+		t.Fatalf("adaptClaudeRequestHeaders(OAuth) error = %v", errOAuth)
+	}
+	if requestHeaderEquals(oauthRequest.Headers, "Anthropic-Dangerous-Direct-Browser-Access", "true") {
+		t.Fatalf("OAuth headers = %#v", oauthRequest.Headers)
+	}
+}
+
+// requestHeaderEquals reports whether one exact transport header has the expected value.
+// requestHeaderEquals 判断一个精确 Transport Header 是否具有预期值。
+func requestHeaderEquals(headers []transport.Header, name string, value string) bool {
+	for _, header := range headers {
+		if header.Name == name && header.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
 // anthropicTestExecution returns one complete exact Anthropic execution fixture.
 // anthropicTestExecution 返回一条完整精确的 Anthropic 执行夹具。
 func anthropicTestExecution(baseURL string, secretReference string) provider.ExecutionRequest {

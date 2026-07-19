@@ -189,8 +189,14 @@ func (c ToolChoice) MarshalJSON() ([]byte, error) {
 	// namedChoice is the closed OpenAI named-function representation.
 	// namedChoice 是封闭的 OpenAI 指定函数表示。
 	namedChoice := struct {
-		Type     string `json:"type"`
+		// Type fixes the named tool choice to a function.
+		// Type 将具名工具选择固定为函数。
+		Type string `json:"type"`
+		// Function contains the exact selected function identity.
+		// Function 包含精确选定的函数身份。
 		Function struct {
+			// Name is the exact selected function name.
+			// Name 是精确选定的函数名称。
 			Name string `json:"name"`
 		} `json:"function"`
 	}{Type: "function"}

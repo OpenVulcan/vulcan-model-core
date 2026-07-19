@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
@@ -25,7 +26,7 @@ type Resolver struct {
 // New creates a provider-scoped target resolver without any protocol implementation.
 // New 创建一个不包含任何协议实现的供应商作用域目标解析器。
 func New(configurations providerconfig.Store, catalogs catalog.Store) (*Resolver, error) {
-	if configurations == nil || catalogs == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration and catalog stores are required")
 	}
 	return &Resolver{configurations: configurations, catalogs: catalogs}, nil
@@ -96,7 +97,7 @@ func (r *Resolver) SummarizeSnapshot(ctx context.Context, snapshot catalog.Snaps
 				pool.CoolingCredentials++
 				continue
 			}
-			if !credentialReady(credential, now) {
+			if !credential.RuntimeEligibleAt(now) {
 				pool.InvalidCredentials++
 				continue
 			}
@@ -229,7 +230,7 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 			continue
 		}
 		diagnostics.AllowanceCandidates++
-		if endpoint.Status != providerconfig.EndpointReady || !credentialReady(credential, request.Now) {
+		if endpoint.Status != providerconfig.EndpointReady || !credential.RuntimeEligibleAt(request.Now) {
 			continue
 		}
 		diagnostics.ReadyCandidates++
@@ -445,22 +446,6 @@ func allowanceApplies(allowance catalog.AllowanceSnapshot, credential providerco
 		}
 	}
 	return false
-}
-
-// credentialReady reports whether a credential is executable at the fixed evaluation time.
-// credentialReady 返回凭据在固定评估时间是否可以执行。
-func credentialReady(credential providerconfig.Credential, now time.Time) bool {
-	if credential.ExpiresAt != nil && !credential.ExpiresAt.After(now) {
-		return false
-	}
-	switch credential.Status {
-	case providerconfig.CredentialActive:
-		return true
-	case providerconfig.CredentialCooling:
-		return credential.CoolingUntil != nil && !credential.CoolingUntil.After(now)
-	default:
-		return false
-	}
 }
 
 // allowsModel reports whether an access binding permits one provider model.

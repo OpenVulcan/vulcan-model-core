@@ -20,9 +20,9 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 	t.Helper()
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
-		ID:                 "anthropic.messages.v1",
+		ID:                 "openai.chat",
 		Version:            "1",
-		DisplayName:        "Anthropic Messages",
+		DisplayName:        "OpenAI Chat Completions",
 		UserConfigurable:   true,
 		RuntimeReady:       true,
 		ModelDiscovery:     providerconfig.SupportUnsupported,
@@ -41,7 +41,7 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 		DriverID:            "sqlite-test",
 		DriverVersion:       "1.0.0",
 		ConfigSchemaVersion: "1",
-		ProtocolProfileID:   "anthropic.messages.v1",
+		ProtocolProfileID:   "openai.chat",
 		EndpointProfileID:   "default",
 		AuthMethodIDs:       []string{"bearer"},
 		RuntimeReady:        true,
@@ -81,6 +81,12 @@ func sqliteTestCapabilities() catalog.ModelCapabilities {
 // sqliteTestSnapshot returns one minimal valid provider catalog.
 // sqliteTestSnapshot 返回一个最小有效供应商目录。
 func sqliteTestSnapshot(observedAt time.Time) catalog.Snapshot {
+	// resetAt fixes one calendar allowance boundary for persistence round-trip coverage.
+	// resetAt 固定一个日历额度边界以覆盖持久化往返。
+	resetAt := observedAt.Add(24 * time.Hour)
+	// remaining preserves an exact fractional credit amount without floating-point conversion.
+	// remaining 在不经过浮点转换的情况下保留精确小数 Credit 数量。
+	remaining := "125.5"
 	return catalog.Snapshot{
 		ProviderInstanceID: "pvi_sqlite",
 		Models: []catalog.ProviderModel{{
@@ -113,6 +119,39 @@ func sqliteTestSnapshot(observedAt time.Time) catalog.Snapshot {
 			PoolPolicy:         catalog.PoolStrictProfile,
 			CapabilityRevision: 1,
 			Revision:           1,
+		}},
+		Plans: []catalog.PlanSnapshot{{
+			ID:                 "plan_sqlite_account",
+			ProviderInstanceID: "pvi_sqlite",
+			CredentialID:       "cred_sqlite",
+			PlanCode:           "pro",
+			PlanName:           "Pro",
+			Status:             "active",
+			ObservedAt:         observedAt,
+			ExpiresAt:          observedAt.Add(5 * time.Minute),
+			Revision:           1,
+		}},
+		Allowances: []catalog.AllowanceSnapshot{{
+			ID:                 "allow_sqlite_monthly",
+			ProviderInstanceID: "pvi_sqlite",
+			Kind:               catalog.AllowanceWindowQuota,
+			Scope:              catalog.ScopeCredential,
+			ScopeID:            "cred_sqlite",
+			Metric:             "monthly_credits",
+			Unit:               catalog.UnitProviderCredits,
+			Remaining:          &remaining,
+			Status:             catalog.AllowanceAvailable,
+			Mandatory:          true,
+			Window: &catalog.AllowanceWindow{
+				Kind:         catalog.WindowCalendar,
+				CalendarUnit: "month",
+				TimeZone:     "Asia/Shanghai",
+				ResetAt:      &resetAt,
+			},
+			Source:     catalog.ModelSourceProviderAPI,
+			ObservedAt: observedAt,
+			ExpiresAt:  observedAt.Add(5 * time.Minute),
+			Revision:   1,
 		}},
 		Revision:   1,
 		ObservedAt: observedAt,
@@ -168,7 +207,7 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 		t.Fatalf("create management service: %v", errService)
 	}
 	customDefinition, errCustomDefinition := service.CreateCustomDefinition(ctx, management.CreateCustomDefinitionInput{
-		ID: "custom_sqlite", DisplayName: "SQLite Custom", ProtocolProfileID: "anthropic.messages.v1", AuthMethod: providerconfig.AuthMethodBearer,
+		ID: "custom_sqlite", DisplayName: "SQLite Custom", ProtocolProfileID: "openai.chat", AuthMethod: providerconfig.AuthMethodBearer,
 	})
 	if errCustomDefinition != nil {
 		t.Fatalf("create custom provider definition: %v", errCustomDefinition)
@@ -188,7 +227,7 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	secretValue := []byte("super-secret-token-must-not-enter-sqlite")
 	credential, errCredential := service.AddCredential(ctx, management.AddCredentialInput{
 		ID: "cred_sqlite", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Account",
-		PrincipalKey: "account-sqlite", Fingerprint: "fingerprint-sqlite", Secret: secretValue,
+		PrincipalKey: "account-sqlite", Secret: secretValue,
 	})
 	if errCredential != nil {
 		t.Fatalf("add credential: %v", errCredential)
@@ -252,5 +291,14 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	restoredSnapshot, errRestoredSnapshot := reopenedCatalogs.Get(ctx, instance.ID)
 	if errRestoredSnapshot != nil || restoredSnapshot.Revision != 1 {
 		t.Fatalf("restore catalog revision=%d error=%v", restoredSnapshot.Revision, errRestoredSnapshot)
+	}
+	if len(restoredSnapshot.Plans) != 1 || restoredSnapshot.Plans[0].PlanCode != "pro" {
+		t.Fatalf("restored plans = %#v", restoredSnapshot.Plans)
+	}
+	if len(restoredSnapshot.Allowances) != 1 || restoredSnapshot.Allowances[0].Window == nil || restoredSnapshot.Allowances[0].Window.TimeZone != "Asia/Shanghai" {
+		t.Fatalf("restored allowances = %#v", restoredSnapshot.Allowances)
+	}
+	if restoredSnapshot.Allowances[0].Remaining == nil || *restoredSnapshot.Allowances[0].Remaining != "125.5" {
+		t.Fatalf("restored exact remaining amount = %#v", restoredSnapshot.Allowances[0].Remaining)
 	}
 }

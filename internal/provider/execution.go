@@ -9,6 +9,7 @@ import (
 	"sync"
 	"time"
 
+	dependencycheck "github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
@@ -25,6 +26,12 @@ var (
 	// ErrExecutionDriverNotFound reports a target with no matching exact execution driver.
 	// ErrExecutionDriverNotFound 表示 Target 没有匹配的精确执行 Driver。
 	ErrExecutionDriverNotFound = errors.New("provider execution driver is not registered")
+	// ErrCustomExecutionFactoryRequired reports a missing custom-provider execution factory registration.
+	// ErrCustomExecutionFactoryRequired 表示缺少自定义供应商执行 Factory 注册。
+	ErrCustomExecutionFactoryRequired = errors.New("custom provider execution driver factory is required")
+	// ErrCustomExecutionFactoryDuplicate reports overlapping ownership of runtime custom-provider execution.
+	// ErrCustomExecutionFactoryDuplicate 表示运行时自定义供应商执行归属发生重叠。
+	ErrCustomExecutionFactoryDuplicate = errors.New("custom provider execution driver factory is already registered")
 	// ErrExecutionBinding reports a definition, channel, target, or continuation mismatch.
 	// ErrExecutionBinding 表示 Definition、Channel、Target 或 Continuation 不匹配。
 	ErrExecutionBinding = errors.New("invalid provider execution binding")
@@ -245,6 +252,14 @@ type ExecutionDriver interface {
 	Execute(context.Context, ExecutionRequest) (ExecutionResult, error)
 }
 
+// CustomExecutionDriverFactory creates one request-scoped Driver from an immutable persisted custom definition snapshot.
+// CustomExecutionDriverFactory 根据不可变的已持久化自定义 Definition 快照创建一个请求作用域 Driver。
+type CustomExecutionDriverFactory interface {
+	// BuildCustomDriver validates the closed custom shape and returns a Driver bound to that exact definition revision.
+	// BuildCustomDriver 校验封闭的自定义形态，并返回绑定到该精确 Definition 修订的 Driver。
+	BuildCustomDriver(providerconfig.ProviderDefinition) (ExecutionDriver, error)
+}
+
 // ExecutionRegistry dispatches to a Driver selected only by target definition and definition-owned channel profile.
 // ExecutionRegistry 仅按 Target Definition 和 Definition 拥有的 Channel Profile 分派 Driver。
 type ExecutionRegistry struct {
@@ -254,6 +269,9 @@ type ExecutionRegistry struct {
 	// drivers maps one exact definition/profile pair to one Driver.
 	// drivers 将一个精确 Definition/Profile 对映射到一个 Driver。
 	drivers map[string]ExecutionDriver
+	// customFactory owns the sole protocol-whitelisted runtime path for persisted custom definitions.
+	// customFactory 拥有已持久化自定义 Definition 唯一受协议白名单约束的运行时路径。
+	customFactory CustomExecutionDriverFactory
 }
 
 // NewExecutionRegistry creates an empty provider-scoped execution registry.
@@ -265,7 +283,7 @@ func NewExecutionRegistry() *ExecutionRegistry {
 // Register adds one Driver and rejects overlapping ownership of a definition/profile pair.
 // Register 添加一个 Driver 并拒绝重叠拥有同一 Definition/Profile 对。
 func (r *ExecutionRegistry) Register(driver ExecutionDriver) error {
-	if driver == nil {
+	if r == nil || isNilExecutionDependency(driver) {
 		return ErrExecutionDriverRequired
 	}
 	definitionID := strings.TrimSpace(driver.ProviderDefinitionID())
@@ -280,6 +298,21 @@ func (r *ExecutionRegistry) Register(driver ExecutionDriver) error {
 		return fmt.Errorf("%w: %s / %s", ErrExecutionDriverDuplicate, definitionID, profileID)
 	}
 	r.drivers[key] = driver
+	return nil
+}
+
+// RegisterCustomFactory installs the sole runtime factory for persisted custom definitions.
+// RegisterCustomFactory 安装已持久化自定义 Definition 的唯一运行时 Factory。
+func (r *ExecutionRegistry) RegisterCustomFactory(factory CustomExecutionDriverFactory) error {
+	if r == nil || isNilExecutionDependency(factory) {
+		return ErrCustomExecutionFactoryRequired
+	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.customFactory != nil {
+		return ErrCustomExecutionFactoryDuplicate
+	}
+	r.customFactory = factory
 	return nil
 }
 
@@ -315,11 +348,32 @@ func (r *ExecutionRegistry) Execute(ctx context.Context, request ExecutionReques
 	key := executionDriverKey(request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	r.mu.RLock()
 	driver, exists := r.drivers[key]
+	customFactory := r.customFactory
 	r.mu.RUnlock()
+	if !exists && request.Definition.Kind == providerconfig.DefinitionKindCustom {
+		if customFactory == nil {
+			return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrCustomExecutionFactoryRequired, request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
+		}
+		var errFactory error
+		driver, errFactory = customFactory.BuildCustomDriver(request.Definition)
+		if errFactory != nil {
+			return ExecutionResult{}, errFactory
+		}
+		if isNilExecutionDependency(driver) || driver.ProviderDefinitionID() != request.Definition.ID || driver.ProtocolProfileID() != request.Definition.ProtocolProfileID {
+			return ExecutionResult{}, fmt.Errorf("%w: custom driver ownership differs from immutable definition", ErrExecutionBinding)
+		}
+		exists = true
+	}
 	if !exists {
 		return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	}
 	return driver.Execute(ctx, request)
+}
+
+// isNilExecutionDependency recognizes typed nil implementations before invoking extension-owned interface methods.
+// isNilExecutionDependency 在调用扩展所有的接口方法前识别带类型的 nil 实现。
+func isNilExecutionDependency(dependency any) bool {
+	return dependencycheck.IsNil(dependency)
 }
 
 // executionDriverKey creates a collision-free internal key from exact owned identifiers.

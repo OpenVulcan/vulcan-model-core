@@ -14,10 +14,18 @@ func TestDecodeResponseMarksIncompleteChoiceBoundaries(t *testing.T) {
 	// boundaryCase defines one malformed first-choice boundary and its safe diagnostic code.
 	// boundaryCase 定义一种格式错误的首选项边界及其安全诊断代码。
 	type boundaryCase struct {
-		name             string
-		choice           Choice
+		// name identifies the malformed terminal boundary fixture.
+		// name 标识格式错误的终态边界夹具。
+		name string
+		// choice is the incomplete upstream choice under test.
+		// choice 是待测的不完整上游选项。
+		choice Choice
+		// wantFinishReason is the safe canonical finish reason.
+		// wantFinishReason 是安全的规范结束原因。
 		wantFinishReason string
-		wantSummaryCode  string
+		// wantSummaryCode is the expected projection diagnostic code.
+		// wantSummaryCode 是预期的投影诊断代码。
+		wantSummaryCode string
 	}
 
 	// testCases covers missing terminal assistant data and missing terminal evidence independently.

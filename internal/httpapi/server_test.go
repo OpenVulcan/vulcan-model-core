@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
@@ -76,6 +77,9 @@ func (staticManagementQuery) GetInstance(context.Context, string) (management.Pr
 // GetCatalog returns one model with two safe execution profiles.
 // GetCatalog 返回一个具有两个安全执行规格的模型。
 func (staticManagementQuery) GetCatalog(context.Context, string) (management.CatalogView, error) {
+	// resetAt fixes the client-visible provider recovery boundary.
+	// resetAt 固定客户端可见的供应商恢复边界。
+	resetAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
 	return management.CatalogView{
 		ProviderInstanceID: "pvi_test",
 		Models: []management.ModelView{{
@@ -84,6 +88,11 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 				{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 262144}}},
 				{ID: "profile_test_1m", DisplayName: "1M", Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 1048576}}},
 			}}},
+		}},
+		Allowances: []management.AllowanceView{{
+			Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, Metric: "monthly_requests", Unit: catalog.UnitRequests, Status: catalog.AllowanceAvailable, Mandatory: true,
+			Window:     &management.AllowanceWindowView{Kind: catalog.WindowCalendar, CalendarUnit: "month", TimeZone: "Asia/Shanghai", ResetAt: &resetAt},
+			ObservedAt: resetAt.Add(-time.Hour), ExpiresAt: resetAt,
 		}},
 		Revision: 1,
 	}, nil
@@ -111,6 +120,21 @@ func (staticManagementQuery) ListBindings(context.Context, string) ([]management
 // staticManagementCommands 满足变更依赖，而路由测试聚焦认证和脱敏。
 type staticManagementCommands struct{}
 
+// staticMetadataRefresh records the exact provider instance requested by authenticated route tests.
+// staticMetadataRefresh 记录认证路由测试请求的精确供应商实例。
+type staticMetadataRefresh struct {
+	// providerInstanceID is the last exact refresh target.
+	// providerInstanceID 是最后一次精确刷新目标。
+	providerInstanceID string
+}
+
+// Refresh records one explicit refresh request and returns a non-sensitive snapshot identity.
+// Refresh 记录一次显式刷新请求并返回不敏感的快照身份。
+func (r *staticMetadataRefresh) Refresh(_ context.Context, providerInstanceID string, observedAt time.Time) (catalog.Snapshot, error) {
+	r.providerInstanceID = providerInstanceID
+	return catalog.Snapshot{ProviderInstanceID: providerInstanceID, Revision: 1, ObservedAt: observedAt}, nil
+}
+
 // OnboardSystemProvider returns an empty onboarding result for route-table tests.
 // OnboardSystemProvider 为路由表测试返回空录入结果。
 func (staticManagementCommands) OnboardSystemProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
@@ -121,6 +145,48 @@ func (staticManagementCommands) OnboardSystemProvider(context.Context, managemen
 // OnboardKimiDeviceProvider 为路由表测试返回空录入结果。
 func (staticManagementCommands) OnboardKimiDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
 	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardXAIDeviceProvider returns an empty onboarding result for route-table tests.
+// OnboardXAIDeviceProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardXAIDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardCodexDeviceProvider returns an empty onboarding result for route-table tests.
+// OnboardCodexDeviceProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardCodexDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardCodexOAuthProvider returns an empty onboarding result for route-table tests.
+// OnboardCodexOAuthProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardCodexOAuthProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardClaudeOAuthProvider returns an empty onboarding result for route-table tests.
+// OnboardClaudeOAuthProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardClaudeOAuthProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardAntigravityOAuthProvider returns an empty onboarding result for route-table tests.
+// OnboardAntigravityOAuthProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardAntigravityOAuthProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardVertexServiceAccountProvider satisfies the management command contract for route tests.
+// OnboardVertexServiceAccountProvider 为路由测试实现管理命令合同。
+func (staticManagementCommands) OnboardVertexServiceAccountProvider(context.Context, management.OnboardSystemProviderInput, string) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardCustomProvider reports that the static fixture does not execute custom onboarding flows.
+// OnboardCustomProvider 报告静态夹具不执行自定义录入流程。
+func (staticManagementCommands) OnboardCustomProvider(context.Context, management.OnboardCustomProviderInput) (management.CustomProviderOnboardingResult, error) {
+	return management.CustomProviderOnboardingResult{}, errors.New("static command fixture")
 }
 
 // CreateCustomDefinition reports that the static fixture does not execute mutation flows.
@@ -303,9 +369,15 @@ func TestReadyEndpointRequiresProvider(t *testing.T) {
 	// cases cover empty and executable provider catalogs.
 	// cases 覆盖空目录和可执行供应商目录。
 	cases := []struct {
-		name        string
+		// name labels the isolated readiness case.
+		// name 标记隔离的就绪检查用例。
+		name string
+		// providerIDs supplies the executable provider snapshot.
+		// providerIDs 提供可执行供应商快照。
 		providerIDs []string
-		wantStatus  int
+		// wantStatus is the expected readiness HTTP status.
+		// wantStatus 是预期的就绪 HTTP 状态。
+		wantStatus int
 	}{
 		{name: "empty", wantStatus: http.StatusServiceUnavailable},
 		{name: "registered", providerIDs: []string{"anthropic"}, wantStatus: http.StatusOK},
@@ -329,6 +401,38 @@ func TestReadyEndpointRequiresProvider(t *testing.T) {
 				t.Fatalf("status = %d, want %d", recorder.Code, testCase.wantStatus)
 			}
 		})
+	}
+}
+
+// TestServerConstructionRejectsTypedNilDependencies verifies dependency interfaces cannot defer nil panics into request handling.
+// TestServerConstructionRejectsTypedNilDependencies 验证依赖接口不会把 nil panic 延迟到请求处理阶段。
+func TestServerConstructionRejectsTypedNilDependencies(t *testing.T) {
+	// nilCatalog is a typed nil that still satisfies ProviderCatalog when stored in an interface.
+	// nilCatalog 是存入接口后仍满足 ProviderCatalog 的带类型 nil。
+	var nilCatalog *staticCatalog
+	if _, errServer := New(nilCatalog); !errors.Is(errServer, ErrProviderCatalogRequired) {
+		t.Fatalf("typed nil catalog error = %v, want ErrProviderCatalogRequired", errServer)
+	}
+	// access supplies both required key-management interfaces for complete control-plane fixtures.
+	// access 为完整控制面夹具提供两个必需的密钥管理接口。
+	access := staticControlAccess{}
+	// nilQuery proves one required interface cannot hide a typed nil pointer.
+	// nilQuery 证明必需接口不能隐藏一个带类型 nil 指针。
+	var nilQuery *staticManagementQuery
+	_, errRequired := NewWithControlPlane(staticCatalog{}, ControlPlane{
+		Query: nilQuery, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+	})
+	if errRequired == nil {
+		t.Fatal("typed nil required control dependency was accepted")
+	}
+	// nilMetadataRefresh proves an optional typed nil is rejected instead of registering a panic-prone route.
+	// nilMetadataRefresh 证明可选的带类型 nil 会被拒绝，而不是注册一个可能 panic 的路由。
+	var nilMetadataRefresh *staticMetadataRefresh
+	_, errOptional := NewWithControlPlane(staticCatalog{}, ControlPlane{
+		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: nilMetadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+	})
+	if errOptional == nil {
+		t.Fatal("typed nil optional control dependency was accepted")
 	}
 }
 
@@ -371,8 +475,11 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	// access owns the same deterministic fixture for management and call-plane interfaces.
 	// access 为管理和调用面接口拥有同一确定性夹具。
 	access := staticControlAccess{}
+	// metadataRefresh records only an authenticated explicit account-data refresh.
+	// metadataRefresh 仅记录经过认证的显式账号数据刷新。
+	metadataRefresh := &staticMetadataRefresh{}
 	server, errServer := NewWithControlPlane(staticCatalog{}, ControlPlane{
-		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: metadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
 	})
 	if errServer != nil {
 		t.Fatalf("create control-plane server: %v", errServer)
@@ -413,6 +520,36 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 			}
 		}
 	}
+	// ambiguousManagementRequest proves duplicate Authorization values cannot be interpreted differently by a proxy and the management server.
+	// ambiguousManagementRequest 证明重复 Authorization 值不会被代理与管理服务端作出不同解释。
+	ambiguousManagementRequest := httptest.NewRequest(http.MethodGet, "/vulcan/manage/provider-groups", nil)
+	ambiguousManagementRequest.Header.Add("Authorization", "Bearer manage-key")
+	ambiguousManagementRequest.Header.Add("Authorization", "Bearer conflicting-key")
+	ambiguousManagementRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(ambiguousManagementRecorder, ambiguousManagementRequest)
+	if ambiguousManagementRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("duplicate management authorization status=%d, want %d", ambiguousManagementRecorder.Code, http.StatusUnauthorized)
+	}
+	// unauthenticatedRefresh proves a state-changing metadata read never inherits loopback trust.
+	// unauthenticatedRefresh 证明会触发状态变更的元数据读取绝不继承环回信任。
+	unauthenticatedRefresh := httptest.NewRequest(http.MethodPost, "/vulcan/manage/provider-instances/pvi_test/catalog/refresh", nil)
+	unauthenticatedRefreshRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(unauthenticatedRefreshRecorder, unauthenticatedRefresh)
+	if unauthenticatedRefreshRecorder.Code != http.StatusUnauthorized || metadataRefresh.providerInstanceID != "" {
+		t.Fatalf("unauthenticated metadata refresh status=%d target=%q", unauthenticatedRefreshRecorder.Code, metadataRefresh.providerInstanceID)
+	}
+	// authenticatedRefresh exercises the exact protected refresh route and safe catalog projection.
+	// authenticatedRefresh 执行精确受保护刷新路由与安全目录投影。
+	authenticatedRefresh := httptest.NewRequest(http.MethodPost, "/vulcan/manage/provider-instances/pvi_test/catalog/refresh", nil)
+	authenticatedRefresh.Header.Set("Authorization", "Bearer manage-key")
+	authenticatedRefreshRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(authenticatedRefreshRecorder, authenticatedRefresh)
+	if authenticatedRefreshRecorder.Code != http.StatusOK || metadataRefresh.providerInstanceID != "pvi_test" {
+		t.Fatalf("authenticated metadata refresh status=%d target=%q body=%s", authenticatedRefreshRecorder.Code, metadataRefresh.providerInstanceID, authenticatedRefreshRecorder.Body.String())
+	}
+	if !strings.Contains(authenticatedRefreshRecorder.Body.String(), `"time_zone":"Asia/Shanghai"`) || strings.Contains(authenticatedRefreshRecorder.Body.String(), "scope_id") {
+		t.Fatalf("metadata refresh response lost safe window semantics or leaked scope identity: %s", authenticatedRefreshRecorder.Body.String())
+	}
 	// callRequest proves a management credential cannot authorize the call plane.
 	// callRequest 证明管理凭据不能授权调用面。
 	callRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/models", nil)
@@ -427,6 +564,16 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	server.Handler().ServeHTTP(callRecorder, callRequest)
 	if callRecorder.Code != http.StatusOK {
 		t.Fatalf("call-plane status=%d body=%s", callRecorder.Code, callRecorder.Body.String())
+	}
+	// ambiguousCallRequest proves the same duplicate-header rejection protects the call plane.
+	// ambiguousCallRequest 证明相同的重复请求头拒绝规则也保护调用面。
+	ambiguousCallRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/models", nil)
+	ambiguousCallRequest.Header.Add("Authorization", "Bearer call-key")
+	ambiguousCallRequest.Header.Add("Authorization", "Bearer conflicting-key")
+	ambiguousCallRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(ambiguousCallRecorder, ambiguousCallRequest)
+	if ambiguousCallRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("duplicate call authorization status=%d, want %d", ambiguousCallRecorder.Code, http.StatusUnauthorized)
 	}
 	// legacyRequest verifies the old read-only management namespace is not exposed beside the authenticated surface.
 	// legacyRequest 验证旧只读管理命名空间不会与认证接口面并存。

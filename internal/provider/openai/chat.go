@@ -17,6 +17,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	chatprofile "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -27,6 +28,15 @@ var (
 	// ErrInvalidChatDriver reports an unconfigured OpenAI Chat execution driver.
 	// ErrInvalidChatDriver 表示未配置的 OpenAI Chat 执行 Driver。
 	ErrInvalidChatDriver = errors.New("invalid OpenAI Chat execution driver")
+)
+
+const (
+	// openAIChatEndpointPath is the system-provider path appended to an origin-only endpoint.
+	// openAIChatEndpointPath 是追加到仅含 Origin 的系统供应商 Endpoint 的路径。
+	openAIChatEndpointPath = "/v1/chat/completions"
+	// openAICompatibilityEndpointPath is CLIProxyAPI's exact path appended to a versioned compatibility Base URL.
+	// openAICompatibilityEndpointPath 是 CLIProxyAPI 追加到带版本兼容 Base URL 的精确路径。
+	openAICompatibilityEndpointPath = "/chat/completions"
 )
 
 // ChatDriver executes one explicitly registered OpenAI Chat protocol profile for one immutable provider definition.
@@ -47,6 +57,20 @@ type ChatDriver struct {
 	// allowedAuthMethods is the closed set of credential acquisition types that this Bearer wire adapter may encode.
 	// allowedAuthMethods 是此 Bearer 线路适配器可以编码的封闭凭据获取类型集合。
 	allowedAuthMethods []providerconfig.AuthMethodType
+	// endpointPath is the immutable profile-specific path appended to the selected endpoint Base URL.
+	// endpointPath 是追加到选定 Endpoint Base URL 的不可变 Profile 特定路径。
+	endpointPath string
+	// requestAdapter applies one explicitly registered provider-specific wire adjustment after typed projection.
+	// requestAdapter 在类型化投影后应用一个显式注册的供应商专用 wire 调整。
+	requestAdapter ChatRequestAdapter
+}
+
+// ChatRequestAdapter applies provider-specific wire behavior without weakening the typed Chat protocol boundary.
+// ChatRequestAdapter 在不削弱类型化 Chat 协议边界的前提下应用供应商专用 wire 行为。
+type ChatRequestAdapter interface {
+	// Adapt mutates only the projected request copy and returns non-secret headers for the immutable execution target.
+	// Adapt 仅修改投影请求副本，并为不可变执行 Target 返回非秘密请求头。
+	Adapt(context.Context, provider.ExecutionRequest, *chatprofile.Request) ([]transport.Header, error)
 }
 
 // NewChatDriver creates a driver permanently bound to one provider definition, registered Chat profile, and transport client.
@@ -58,7 +82,31 @@ func NewChatDriver(definitionID string, profileID string, client *transport.Clie
 // NewBearerChatDriver creates a Chat driver with an explicit closed set of Bearer-compatible credential types.
 // NewBearerChatDriver 使用显式封闭的 Bearer 兼容凭据类型集合创建 Chat Driver。
 func NewBearerChatDriver(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType) (*ChatDriver, error) {
+	return newBearerChatDriver(definitionID, profileID, client, capabilities, allowedAuthMethods, openAIChatEndpointPath, nil)
+}
+
+// NewBearerChatDriverWithRequestAdapter creates a Bearer Chat driver with one required provider-specific wire adapter.
+// NewBearerChatDriverWithRequestAdapter 使用一个必需的供应商专用 wire 适配器创建 Bearer Chat Driver。
+func NewBearerChatDriverWithRequestAdapter(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, requestAdapter ChatRequestAdapter) (*ChatDriver, error) {
+	if dependency.IsNil(requestAdapter) {
+		return nil, ErrInvalidChatDriver
+	}
+	return newBearerChatDriver(definitionID, profileID, client, capabilities, allowedAuthMethods, openAIChatEndpointPath, requestAdapter)
+}
+
+// NewOpenAICompatibilityDriver creates CLIProxyAPI's exact OpenAICompatibility Chat driver with Bearer authentication.
+// NewOpenAICompatibilityDriver 使用 Bearer 认证创建 CLIProxyAPI 的精确 OpenAICompatibility Chat Driver。
+func NewOpenAICompatibilityDriver(definitionID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities) (*ChatDriver, error) {
+	return newBearerChatDriver(definitionID, chatprofile.ProfileID, client, capabilities, []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer}, openAICompatibilityEndpointPath, nil)
+}
+
+// newBearerChatDriver validates and copies one closed Bearer-compatible Chat execution shape.
+// newBearerChatDriver 校验并复制一个封闭的 Bearer 兼容 Chat 执行形态。
+func newBearerChatDriver(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, endpointPath string, requestAdapter ChatRequestAdapter) (*ChatDriver, error) {
 	if strings.TrimSpace(definitionID) == "" || strings.TrimSpace(profileID) == "" || client == nil {
+		return nil, ErrInvalidChatDriver
+	}
+	if endpointPath != openAIChatEndpointPath && endpointPath != openAICompatibilityEndpointPath {
 		return nil, ErrInvalidChatDriver
 	}
 	if len(allowedAuthMethods) == 0 {
@@ -71,7 +119,7 @@ func NewBearerChatDriver(definitionID string, profileID string, client *transpor
 			return nil, fmt.Errorf("%w: authentication type %q cannot use a Bearer header", ErrInvalidChatDriver, authMethod)
 		}
 	}
-	return &ChatDriver{definitionID: definitionID, profileID: profileID, client: client, capabilities: capabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...)}, nil
+	return &ChatDriver{definitionID: definitionID, profileID: profileID, client: client, capabilities: capabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...), endpointPath: endpointPath, requestAdapter: requestAdapter}, nil
 }
 
 // ProviderDefinitionID returns the exact definition that owns this Chat driver.
@@ -108,13 +156,23 @@ func (d *ChatDriver) Execute(ctx context.Context, execution provider.ExecutionRe
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}
+	// headers begins with the profile-owned content type before an explicit provider adapter appends non-secret wire identity.
+	// headers 以 Profile 所有的内容类型开始，随后由显式供应商适配器追加非秘密 wire 身份。
+	headers := []transport.Header{{Name: "Content-Type", Value: "application/json"}}
+	if d.requestAdapter != nil {
+		adaptedHeaders, errAdapt := d.requestAdapter.Adapt(ctx, execution, &projected.Upstream)
+		if errAdapt != nil {
+			return provider.ExecutionResult{}, errAdapt
+		}
+		headers = append(headers, adaptedHeaders...)
+	}
 	encodedRequest, errMarshal := json.Marshal(projected.Upstream)
 	if errMarshal != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: encode request: %v", ErrInvalidChatDriver, errMarshal)
 	}
 	outbound := transport.Request{
-		Binding: execution.Binding, Method: http.MethodPost, Path: "/v1/chat/completions", Body: encodedRequest,
-		Headers:        []transport.Header{{Name: "Content-Type", Value: "application/json"}},
+		Binding: execution.Binding, Method: http.MethodPost, Path: d.endpointPath, Body: encodedRequest,
+		Headers:        headers,
 		Authentication: transport.Authentication{Mode: transport.AuthenticationBearer},
 		Stream:         projected.Upstream.Stream, IdempotencyKey: execution.Request.IdempotencyKey,
 	}
@@ -134,8 +192,12 @@ func (d *ChatDriver) executeResponse(ctx context.Context, outbound transport.Req
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
 	}()
+	boundedBody, errBound := transport.NewBoundedResponseReader(upstreamResponse.Body, transport.MaximumNonStreamingResponseBytes)
+	if errBound != nil {
+		return provider.ExecutionResult{}, fmt.Errorf("%w: bound response: %v", chatprofile.ErrInvalidUpstreamResponse, errBound)
+	}
 	var upstream chatprofile.Response
-	decoder := json.NewDecoder(upstreamResponse.Body)
+	decoder := json.NewDecoder(boundedBody)
 	if errDecode := decoder.Decode(&upstream); errDecode != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: decode response: %v", chatprofile.ErrInvalidUpstreamResponse, errDecode)
 	}

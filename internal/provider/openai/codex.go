@@ -40,11 +40,10 @@ func NewCodexDriver(definitionID string, client *transport.Client, capabilities 
 		Headers: []transport.Header{
 			{Name: "Content-Type", Value: "application/json"},
 			{Name: "User-Agent", Value: codexUserAgent},
-			{Name: "Originator", Value: "codex-tui"},
 			{Name: "Connection", Value: "Keep-Alive"},
 		},
 		Authentication:         transport.Authentication{Mode: transport.AuthenticationBearer},
-		AllowedAuthMethods:     []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodOAuth, providerconfig.AuthMethodBearer},
+		AllowedAuthMethods:     []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodOAuth, providerconfig.AuthMethodBearer, providerconfig.AuthMethodDeviceFlow},
 		StreamInputMode:        translateddriver.StreamInputLine,
 		ForceUpstreamStream:    true,
 		ForceTranslationStream: true,
@@ -74,13 +73,11 @@ func adaptCodexRequestHeaders(execution provider.ExecutionRequest, outbound tran
 	if authType == "" {
 		return transport.Request{}, fmt.Errorf("%w: Codex credential auth method is missing", translateddriver.ErrInvalidDriver)
 	}
-	outbound.Headers = append(outbound.Headers,
-		transport.Header{Name: "Session_id", Value: uuid.NewString()},
-		transport.Header{Name: "X-Client-Request-Id", Value: uuid.NewString()},
-	)
+	outbound.Headers = append(outbound.Headers, transport.Header{Name: "Session_id", Value: uuid.NewString()})
 	if authType == providerconfig.AuthMethodAPIKey {
 		return outbound, nil
 	}
+	outbound.Headers = append(outbound.Headers, transport.Header{Name: "Originator", Value: "codex-tui"})
 	// accountID is the unique explicit ChatGPT account scope required for non-API-key Codex authentication.
 	// accountID 是非 API Key Codex 认证要求的唯一显式 ChatGPT 账号作用域。
 	accountID := ""

@@ -116,8 +116,12 @@ func (d *ResponsesDriver) executeResponse(ctx context.Context, outbound transpor
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
 	}()
+	boundedBody, errBound := transport.NewBoundedResponseReader(upstreamResponse.Body, transport.MaximumNonStreamingResponseBytes)
+	if errBound != nil {
+		return provider.ExecutionResult{}, fmt.Errorf("%w: bound response: %v", responsesprofile.ErrInvalidUpstreamResponse, errBound)
+	}
 	var upstream responsesprofile.Response
-	decoder := json.NewDecoder(upstreamResponse.Body)
+	decoder := json.NewDecoder(boundedBody)
 	if errDecode := decoder.Decode(&upstream); errDecode != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: decode response: %v", responsesprofile.ErrInvalidUpstreamResponse, errDecode)
 	}

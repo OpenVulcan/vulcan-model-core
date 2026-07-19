@@ -3,7 +3,7 @@ package catalog
 import (
 	"errors"
 	"fmt"
-	"math/big"
+	"math"
 	"regexp"
 	"strings"
 )
@@ -18,6 +18,9 @@ var (
 	// currencyCodePattern restricts monetary allowances to normalized ISO-style currency codes.
 	// currencyCodePattern 将货币资源限制为规范化的 ISO 风格货币代码。
 	currencyCodePattern = regexp.MustCompile(`^[A-Z]{3}$`)
+	// nonNegativeDecimalPattern accepts only JSON-compatible non-negative decimal notation.
+	// nonNegativeDecimalPattern 仅接受与 JSON 兼容的非负十进制表示法。
+	nonNegativeDecimalPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
 )
 
 // Validate verifies one atomic provider-scoped catalog and all cross references.
@@ -119,6 +122,9 @@ func (s Snapshot) Validate() error {
 		}
 	}
 	planIDs := make(map[string]struct{}, len(s.Plans))
+	// planSubjects enforces the singular current-plan contract for each exact credential.
+	// planSubjects 为每个精确凭据强制执行单一当前套餐合同。
+	planSubjects := make(map[string]string, len(s.Plans))
 	for _, plan := range s.Plans {
 		if err := plan.Validate(); err != nil {
 			return err
@@ -130,6 +136,10 @@ func (s Snapshot) Validate() error {
 			return invalid("duplicate plan snapshot id %q", plan.ID)
 		}
 		planIDs[plan.ID] = struct{}{}
+		if existingPlanID, exists := planSubjects[plan.CredentialID]; exists {
+			return invalid("credential %q has multiple plan snapshots %q and %q", plan.CredentialID, existingPlanID, plan.ID)
+		}
+		planSubjects[plan.CredentialID] = plan.ID
 	}
 	allowanceIDs := make(map[string]struct{}, len(s.Allowances))
 	for _, allowance := range s.Allowances {
@@ -308,6 +318,11 @@ func (a AllowanceSnapshot) Validate() error {
 	if strings.TrimSpace(a.ScopeID) == "" || strings.TrimSpace(a.Metric) == "" || !validModelSource(a.Source) || a.Revision == 0 {
 		return invalid("allowance scope id, metric, source, and revision are required")
 	}
+	if a.Scope == ScopeCredential {
+		if err := validatePrefixedID("credential allowance scope id", a.ScopeID, "cred_"); err != nil {
+			return err
+		}
+	}
 	if a.Unit == UnitMinorCurrency && !currencyCodePattern.MatchString(a.Currency) {
 		return invalid("minor currency allowance requires an ISO currency code")
 	}
@@ -319,7 +334,7 @@ func (a AllowanceSnapshot) Validate() error {
 			return invalid("allowance %s must be a non-negative decimal string", field)
 		}
 	}
-	if a.RemainingRatio != nil && (*a.RemainingRatio < 0 || *a.RemainingRatio > 1) {
+	if a.RemainingRatio != nil && (math.IsNaN(*a.RemainingRatio) || *a.RemainingRatio < 0 || *a.RemainingRatio > 1) {
 		return invalid("allowance remaining ratio must be between zero and one")
 	}
 	if a.Kind == AllowanceWindowQuota {
@@ -410,13 +425,26 @@ func (p PoolSummary) Validate() error {
 			return invalid("pool counts cannot be negative")
 		}
 	}
-	if p.EntitledCredentials > p.ConfiguredCredentials || p.ReadyCredentials > p.EntitledCredentials || p.Revision == 0 || p.ObservedAt.IsZero() {
+	// classifiedCredentials counts mutually exclusive runtime outcome classes beneath the entitled pool.
+	// classifiedCredentials 统计已授权账号池下互斥的运行时结果分类。
+	classifiedCredentials := p.ReadyCredentials + p.CoolingCredentials + p.ExhaustedCredentials + p.InvalidCredentials
+	if p.EntitledCredentials > p.ConfiguredCredentials || p.ReadyCredentials > p.EntitledCredentials || p.CoolingCredentials > p.EntitledCredentials || p.ExhaustedCredentials > p.EntitledCredentials || p.InvalidCredentials > p.EntitledCredentials || classifiedCredentials > p.EntitledCredentials || p.Revision == 0 || p.ObservedAt.IsZero() {
 		return invalid("pool count relationships, revision, or observed time are invalid")
 	}
+	if p.ExhaustedCredentials == 0 && (len(p.BlockingAllowanceKinds) > 0 || p.EarliestResetAt != nil) {
+		return invalid("pool blocking allowances require an exhausted credential")
+	}
+	// seenAllowanceKinds prevents duplicated diagnostic categories in one pool summary.
+	// seenAllowanceKinds 防止一个账号池摘要中出现重复诊断类别。
+	seenAllowanceKinds := make(map[AllowanceKind]struct{}, len(p.BlockingAllowanceKinds))
 	for _, allowanceKind := range p.BlockingAllowanceKinds {
 		if !validAllowanceKind(allowanceKind) {
 			return invalid("pool blocking allowance kind %q is invalid", allowanceKind)
 		}
+		if _, exists := seenAllowanceKinds[allowanceKind]; exists {
+			return invalid("pool blocking allowance kind %q is duplicated", allowanceKind)
+		}
+		seenAllowanceKinds[allowanceKind] = struct{}{}
 	}
 	return nil
 }
@@ -424,11 +452,7 @@ func (p PoolSummary) Validate() error {
 // validNonNegativeDecimal reports whether one string is an exact non-negative decimal.
 // validNonNegativeDecimal 返回字符串是否是精确非负十进制数。
 func validNonNegativeDecimal(value string) bool {
-	if strings.TrimSpace(value) != value || value == "" {
-		return false
-	}
-	rational, valid := new(big.Rat).SetString(value)
-	return valid && rational.Sign() >= 0
+	return nonNegativeDecimalPattern.MatchString(value)
 }
 
 // validCapabilityLevel reports whether a capability level is explicitly defined.

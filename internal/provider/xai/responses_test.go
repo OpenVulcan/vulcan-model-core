@@ -136,6 +136,53 @@ func TestResponsesDriverRejectsNonAPIKeyCredentialBeforeNetwork(t *testing.T) {
 	}
 }
 
+// TestBearerResponsesDriverRejectsIncompatibleAuthenticationPolicy verifies constructor policy cannot authorize non-Bearer secret shapes.
+// TestBearerResponsesDriverRejectsIncompatibleAuthenticationPolicy 验证构造策略不能授权非 Bearer Secret 形态。
+func TestBearerResponsesDriverRejectsIncompatibleAuthenticationPolicy(t *testing.T) {
+	client, errClient := transport.NewClient(&http.Client{}, secret.NewMemoryStore(), transport.RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	if _, errDriver := NewBearerResponsesDriver("definition-1", client, xairesponses.ProfileCapabilities{}, []providerconfig.AuthMethodType{providerconfig.AuthMethodServiceAccount}); !errors.Is(errDriver, ErrInvalidResponsesDriver) {
+		t.Fatalf("NewBearerResponsesDriver() error = %v, want ErrInvalidResponsesDriver", errDriver)
+	}
+	if _, errDriver := NewBearerResponsesDriver("definition-1", client, xairesponses.ProfileCapabilities{}, []providerconfig.AuthMethodType{providerconfig.AuthMethodOAuth, providerconfig.AuthMethodOAuth}); !errors.Is(errDriver, ErrInvalidResponsesDriver) {
+		t.Fatalf("duplicate NewBearerResponsesDriver() error = %v, want ErrInvalidResponsesDriver", errDriver)
+	}
+}
+
+// TestXAITransportRequestAddsCLIIdentityOnlyForAccountProxy verifies the copied Grok CLI header boundary.
+// TestXAITransportRequestAddsCLIIdentityOnlyForAccountProxy 验证复制的 Grok CLI Header 边界。
+func TestXAITransportRequestAddsCLIIdentityOnlyForAccountProxy(t *testing.T) {
+	execution := provider.ExecutionRequest{Binding: transport.Binding{Endpoint: providerconfig.Endpoint{BaseURL: cliChatProxyBaseURL}}}
+	request, errRequest := xaiTransportRequest("/responses", xairesponses.Request{}, execution)
+	if errRequest != nil {
+		t.Fatalf("xaiTransportRequest() error = %v", errRequest)
+	}
+	if !xaiHeaderEquals(request.Headers, grokTokenAuthHeader, grokTokenAuthValue) || !xaiHeaderEquals(request.Headers, "x-grok-client-version", grokClientVersion) || !xaiHeaderEquals(request.Headers, "User-Agent", "xai-grok-workspace/"+grokClientVersion) {
+		t.Fatalf("account proxy headers = %#v", request.Headers)
+	}
+	execution.Binding.Endpoint.BaseURL = "https://api.x.ai/v1"
+	officialRequest, errOfficial := xaiTransportRequest("/responses", xairesponses.Request{}, execution)
+	if errOfficial != nil {
+		t.Fatalf("xaiTransportRequest(official) error = %v", errOfficial)
+	}
+	if xaiHeaderEquals(officialRequest.Headers, grokTokenAuthHeader, grokTokenAuthValue) {
+		t.Fatalf("official API headers = %#v", officialRequest.Headers)
+	}
+}
+
+// xaiHeaderEquals reports whether one exact transport header has the expected value.
+// xaiHeaderEquals 判断一个精确 Transport Header 是否具有预期值。
+func xaiHeaderEquals(headers []transport.Header, name string, value string) bool {
+	for _, header := range headers {
+		if header.Name == name && header.Value == value {
+			return true
+		}
+	}
+	return false
+}
+
 // writeXAISSE writes one valid typed xAI stream event using the SSE framing consumed by the driver.
 // writeXAISSE 使用 Driver 消费的 SSE 分帧写入一个有效类型化 xAI 流事件。
 func writeXAISSE(t *testing.T, writer io.Writer, event xairesponses.StreamEvent) {

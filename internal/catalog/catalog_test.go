@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 )
@@ -151,6 +152,38 @@ func TestSnapshotSupportsMultipleProfilesAndAllowanceShapes(t *testing.T) {
 	}
 }
 
+// TestSnapshotRejectsNonDecimalAllowanceAmounts verifies exact amount fields cannot smuggle fraction or non-decimal notation.
+// TestSnapshotRejectsNonDecimalAllowanceAmounts 验证精确金额字段不能混入分数或非十进制表示法。
+func TestSnapshotRejectsNonDecimalAllowanceAmounts(t *testing.T) {
+	// invalidAmounts enumerates lexical forms accepted by math/big.Rat but forbidden by the catalog decimal contract.
+	// invalidAmounts 枚举 math/big.Rat 会接受但目录十进制合同禁止的词法形式。
+	invalidAmounts := []string{"1/2", "0x10", "01", "+1"}
+	for _, invalidAmount := range invalidAmounts {
+		// snapshot isolates each invalid exact amount in the same otherwise valid catalog fixture.
+		// snapshot 在同一个其他字段均有效的目录夹具中隔离每个无效精确金额。
+		snapshot := testCatalogSnapshot()
+		snapshot.Allowances[0].Remaining = &invalidAmount
+		if err := snapshot.Validate(); err == nil {
+			t.Fatalf("expected invalid allowance amount %q to be rejected", invalidAmount)
+		}
+	}
+}
+
+// TestSnapshotRejectsNaNAllowanceRatio verifies a non-finite ratio cannot bypass range comparisons.
+// TestSnapshotRejectsNaNAllowanceRatio 验证非有限比例不能绕过范围比较。
+func TestSnapshotRejectsNaNAllowanceRatio(t *testing.T) {
+	// invalidRatio represents the IEEE value for which both ordered range comparisons are false.
+	// invalidRatio 表示两个有序范围比较结果都为假的 IEEE 数值。
+	invalidRatio := math.NaN()
+	// snapshot carries the invalid ratio through the complete catalog validator.
+	// snapshot 通过完整目录校验器承载无效比例。
+	snapshot := testCatalogSnapshot()
+	snapshot.Allowances[0].RemainingRatio = &invalidRatio
+	if err := snapshot.Validate(); err == nil {
+		t.Fatal("expected NaN allowance ratio to be rejected")
+	}
+}
+
 // TestSnapshotRejectsMultipleDefaultProfiles verifies unambiguous client profile selection.
 // TestSnapshotRejectsMultipleDefaultProfiles 校验客户端规格选择无歧义。
 func TestSnapshotRejectsMultipleDefaultProfiles(t *testing.T) {
@@ -170,6 +203,55 @@ func TestSnapshotRejectsDuplicateCredentialModelEntitlements(t *testing.T) {
 	snapshot.Entitlements = append(snapshot.Entitlements, duplicate)
 	if err := snapshot.Validate(); err == nil {
 		t.Fatal("expected duplicate credential-model entitlement rejection")
+	}
+}
+
+// TestSnapshotRejectsMultiplePlansForOneCredential verifies the current-plan contract cannot double-count one account.
+// TestSnapshotRejectsMultiplePlansForOneCredential 验证当前套餐合同不能重复计算同一个账号。
+func TestSnapshotRejectsMultiplePlansForOneCredential(t *testing.T) {
+	snapshot := testCatalogSnapshot()
+	// firstPlan is the first otherwise valid current plan for the shared credential.
+	// firstPlan 是共享凭据的第一条其他字段均有效的当前套餐。
+	firstPlan := PlanSnapshot{ID: "plan_kimi_first", ProviderInstanceID: snapshot.ProviderInstanceID, CredentialID: "cred_kimi_account", PlanCode: "first", PlanName: "First", Status: "active", ObservedAt: snapshot.ObservedAt, ExpiresAt: snapshot.ObservedAt.Add(time.Hour), Revision: 1}
+	// secondPlan changes identity and provider tier while retaining the forbidden duplicate credential subject.
+	// secondPlan 更改标识与供应商等级，同时保留被禁止的重复凭据主体。
+	secondPlan := firstPlan
+	secondPlan.ID = "plan_kimi_second"
+	secondPlan.PlanCode = "second"
+	secondPlan.PlanName = "Second"
+	snapshot.Plans = []PlanSnapshot{firstPlan, secondPlan}
+	if err := snapshot.Validate(); err == nil {
+		t.Fatal("expected duplicate credential plan rejection")
+	}
+}
+
+// TestPoolSummaryRejectsImpossibleCredentialClassifications verifies disjoint runtime categories cannot exceed the entitled pool.
+// TestPoolSummaryRejectsImpossibleCredentialClassifications 验证互斥运行时分类不能超过已授权账号池。
+func TestPoolSummaryRejectsImpossibleCredentialClassifications(t *testing.T) {
+	// pool starts from a valid ready-only summary before each isolated corruption.
+	// pool 在每项隔离破坏前从有效的仅就绪摘要开始。
+	pool := testCatalogSnapshot().Pools[0]
+	pool.CoolingCredentials = 1
+	if err := pool.Validate(); err == nil {
+		t.Fatal("expected overlapping ready and cooling credential counts to be rejected")
+	}
+	pool = testCatalogSnapshot().Pools[0]
+	pool.ReadyCredentials = 0
+	pool.BlockingAllowanceKinds = []AllowanceKind{AllowanceBalance}
+	if err := pool.Validate(); err == nil {
+		t.Fatal("expected blocking allowance without exhausted credentials to be rejected")
+	}
+}
+
+// TestCredentialAllowanceRequiresCredentialIdentifier verifies credential-scoped resources cannot use an unrelated provider subject.
+// TestCredentialAllowanceRequiresCredentialIdentifier 验证凭据作用域资源不能使用无关供应商主体。
+func TestCredentialAllowanceRequiresCredentialIdentifier(t *testing.T) {
+	// allowance starts from one valid credential-scoped resource observation.
+	// allowance 从一条有效的凭据作用域资源观测开始。
+	allowance := testCatalogSnapshot().Allowances[0]
+	allowance.ScopeID = "account-upstream"
+	if err := allowance.Validate(); err == nil {
+		t.Fatal("expected malformed credential allowance scope rejection")
 	}
 }
 

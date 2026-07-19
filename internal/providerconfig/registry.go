@@ -238,9 +238,9 @@ func ValidateCustomDefinition(definition ProviderDefinition, protocols *Protocol
 	}
 	for _, authMethod := range definition.AuthMethods {
 		switch authMethod.Type {
-		case AuthMethodBearer, AuthMethodHeaderKey, AuthMethodQueryKey, AuthMethodNone:
+		case AuthMethodBearer, AuthMethodHeaderKey:
 		default:
-			return invalid("custom provider auth method %q is not supported", authMethod.Type)
+			return invalid("custom provider auth method %q has no registered execution factory", authMethod.Type)
 		}
 		if _, exists := allowedAuthTypes[authMethod.Type]; !exists {
 			return invalid("protocol profile %q does not allow auth method %q", profile.ID, authMethod.Type)
@@ -264,4 +264,10 @@ func cloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
 	definition.AuthMethods = append([]AuthMethodDefinition(nil), definition.AuthMethods...)
 	definition.EndpointPresets = append([]EndpointPreset(nil), definition.EndpointPresets...)
 	return definition
+}
+
+// CloneProviderDefinition returns a mutation-safe copy for trusted drivers crossing package boundaries.
+// CloneProviderDefinition 为跨包使用的受信任 Driver 返回防止外部修改的副本。
+func CloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
+	return cloneProviderDefinition(definition)
 }

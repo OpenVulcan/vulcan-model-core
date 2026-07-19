@@ -44,8 +44,8 @@ func NewConfigurationStore(database *Database, protocols *providerconfig.Protoco
 	return &ConfigurationStore{database: database, protocols: protocols, systems: systems}, nil
 }
 
-// SaveCustomDefinition creates or updates one validated custom provider definition.
-// SaveCustomDefinition 创建或更新一个经过校验的自定义供应商定义。
+// SaveCustomDefinition creates one validated custom provider definition; replacements require an atomic migration.
+// SaveCustomDefinition 创建一个经过校验的自定义供应商定义；替换必须使用原子迁移。
 func (s *ConfigurationStore) SaveCustomDefinition(ctx context.Context, definition providerconfig.ProviderDefinition) error {
 	if err := validateContext(ctx); err != nil {
 		return err
@@ -57,10 +57,102 @@ func (s *ConfigurationStore) SaveCustomDefinition(ctx context.Context, definitio
 	if errPayload != nil {
 		return errPayload
 	}
-	return s.saveRevisioned(ctx, `
+	if definition.Revision > math.MaxInt64 {
+		return invalidConfiguration("custom provider definition revision exceeds SQLite integer range")
+	}
+	result, errInsert := s.database.sql.ExecContext(ctx, `
 		INSERT INTO custom_provider_definitions(id, revision, payload) VALUES (?, ?, ?)
-		ON CONFLICT(id) DO UPDATE SET revision = excluded.revision, payload = excluded.payload
-		WHERE excluded.revision > custom_provider_definitions.revision`, definition.ID, definition.Revision, "custom provider definition", payload)
+		ON CONFLICT(id) DO NOTHING`, definition.ID, int64(definition.Revision), payload)
+	if errInsert != nil {
+		return fmt.Errorf("save custom provider definition: %w", errInsert)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("read custom provider definition write result: %w", errRows)
+	}
+	if rowsAffected != 1 {
+		return fmt.Errorf("%w: provider definition %s", providerconfig.ErrAlreadyRegistered, definition.ID)
+	}
+	return nil
+}
+
+// SaveCustomDefinitionMigration atomically replaces one custom definition and transitions every owned instance in SQLite.
+// SaveCustomDefinitionMigration 在 SQLite 中原子替换一个自定义定义并转换其拥有的全部实例。
+func (s *ConfigurationStore) SaveCustomDefinitionMigration(ctx context.Context, migration providerconfig.CustomDefinitionMigration) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	currentDefinition, errDefinition := s.GetDefinition(ctx, migration.Definition.ID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	currentInstances, errInstances := s.ListInstances(ctx, migration.Definition.ID)
+	if errInstances != nil {
+		return errInstances
+	}
+	if errMigration := providerconfig.ValidateCustomDefinitionMigration(migration, currentDefinition, currentInstances, s.protocols); errMigration != nil {
+		return errMigration
+	}
+	if migration.Definition.Revision > math.MaxInt64 {
+		return invalidConfiguration("custom provider definition revision exceeds SQLite integer range")
+	}
+	definitionPayload, errPayload := marshalPayload(migration.Definition)
+	if errPayload != nil {
+		return errPayload
+	}
+	// instancePayloads and currentRevisions preserve validated values across the transaction boundary.
+	// instancePayloads 与 currentRevisions 跨事务边界保留经过校验的值。
+	instancePayloads := make(map[string][]byte, len(migration.Instances))
+	currentRevisions := make(map[string]uint64, len(currentInstances))
+	for _, current := range currentInstances {
+		currentRevisions[current.ID] = current.Revision
+	}
+	for _, instance := range migration.Instances {
+		if instance.Revision > math.MaxInt64 {
+			return invalidConfiguration("provider instance revision exceeds SQLite integer range")
+		}
+		payload, errInstancePayload := marshalPayload(instance)
+		if errInstancePayload != nil {
+			return errInstancePayload
+		}
+		instancePayloads[instance.ID] = payload
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin custom definition migration transaction: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	definitionResult, errDefinitionUpdate := transaction.ExecContext(ctx, `
+		UPDATE custom_provider_definitions SET revision = ?, payload = ?
+		WHERE id = ? AND revision = ?`, int64(migration.Definition.Revision), definitionPayload, migration.Definition.ID, int64(currentDefinition.Revision))
+	if errDefinitionUpdate != nil {
+		return fmt.Errorf("update custom provider definition migration: %w", errDefinitionUpdate)
+	}
+	if errResult := requireSingleMutation(definitionResult, "custom provider definition migration"); errResult != nil {
+		return errResult
+	}
+	var persistedInstanceCount int
+	if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_instances WHERE definition_id = ?`, migration.Definition.ID).Scan(&persistedInstanceCount); errCount != nil {
+		return fmt.Errorf("count custom definition migration instances: %w", errCount)
+	}
+	if persistedInstanceCount != len(migration.Instances) {
+		return invalidConfiguration("custom definition migration instance set changed concurrently")
+	}
+	for _, instance := range migration.Instances {
+		instanceResult, errInstanceUpdate := transaction.ExecContext(ctx, `
+			UPDATE provider_instances SET handle = ?, status = ?, revision = ?, payload = ?
+			WHERE id = ? AND definition_id = ? AND revision = ?`, instance.Handle, instance.Status, int64(instance.Revision), instancePayloads[instance.ID], instance.ID, migration.Definition.ID, int64(currentRevisions[instance.ID]))
+		if errInstanceUpdate != nil {
+			return fmt.Errorf("update custom definition migration instance %s: %w", instance.ID, errInstanceUpdate)
+		}
+		if errResult := requireSingleMutation(instanceResult, "custom definition migration instance "+instance.ID); errResult != nil {
+			return errResult
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit custom definition migration transaction: %w", errCommit)
+	}
+	return nil
 }
 
 // GetDefinition resolves one immutable system or persisted custom provider definition.
@@ -200,6 +292,84 @@ func (s *ConfigurationStore) DeleteSystemOnboarding(ctx context.Context, onboard
 	return nil
 }
 
+// SaveCustomOnboarding atomically inserts one custom definition and its complete executable graph in SQLite.
+// SaveCustomOnboarding 在 SQLite 中原子插入一个自定义 Definition 及其完整可执行图。
+func (s *ConfigurationStore) SaveCustomOnboarding(ctx context.Context, onboarding providerconfig.CustomOnboarding) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	if errDefinition := providerconfig.ValidateCustomDefinition(onboarding.Definition, s.protocols); errDefinition != nil {
+		return errDefinition
+	}
+	if errValidate := providerconfig.ValidateCustomOnboarding(onboarding); errValidate != nil {
+		return errValidate
+	}
+	definitionPayload, errPayload := marshalPayload(onboarding.Definition)
+	if errPayload != nil {
+		return errPayload
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin custom provider onboarding transaction: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	if _, errInsert := transaction.ExecContext(ctx, `INSERT INTO custom_provider_definitions(id, revision, payload) VALUES (?, ?, ?)`, onboarding.Definition.ID, onboarding.Definition.Revision, definitionPayload); errInsert != nil {
+		return fmt.Errorf("insert custom provider definition: %w", errInsert)
+	}
+	if errInsert := insertOnboardingInstance(ctx, transaction, onboarding.Instance); errInsert != nil {
+		return errInsert
+	}
+	if errInsert := insertOnboardingEndpoint(ctx, transaction, onboarding.Endpoint); errInsert != nil {
+		return errInsert
+	}
+	if errInsert := insertOnboardingCredential(ctx, transaction, onboarding.Credential); errInsert != nil {
+		return errInsert
+	}
+	if errInsert := insertOnboardingBinding(ctx, transaction, onboarding.Binding); errInsert != nil {
+		return errInsert
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit custom provider onboarding transaction: %w", errCommit)
+	}
+	return nil
+}
+
+// DeleteCustomOnboarding removes one exact unchanged custom definition and instance graph in a compensation transaction.
+// DeleteCustomOnboarding 在一个补偿事务中删除精确且未变化的自定义 Definition 与实例图。
+func (s *ConfigurationStore) DeleteCustomOnboarding(ctx context.Context, onboarding providerconfig.CustomOnboarding) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	definitionPayload, errPayload := marshalPayload(onboarding.Definition)
+	if errPayload != nil {
+		return errPayload
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin custom onboarding compensation: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	if errDelete := deleteCompensationRow(ctx, transaction, "access binding", `DELETE FROM access_bindings WHERE id = ? AND provider_instance_id = ? AND revision = ?`, onboarding.Binding.ID, onboarding.Instance.ID, onboarding.Binding.Revision); errDelete != nil {
+		return errDelete
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "credential", `DELETE FROM provider_credentials WHERE id = ? AND provider_instance_id = ? AND revision = ?`, onboarding.Credential.ID, onboarding.Instance.ID, onboarding.Credential.Revision); errDelete != nil {
+		return errDelete
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "endpoint", `DELETE FROM provider_endpoints WHERE id = ? AND provider_instance_id = ? AND revision = ?`, onboarding.Endpoint.ID, onboarding.Instance.ID, onboarding.Endpoint.Revision); errDelete != nil {
+		return errDelete
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "provider instance", `DELETE FROM provider_instances WHERE id = ? AND definition_id = ? AND revision = ?`, onboarding.Instance.ID, onboarding.Definition.ID, onboarding.Instance.Revision); errDelete != nil {
+		return errDelete
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "custom provider definition", `DELETE FROM custom_provider_definitions WHERE id = ? AND revision = ? AND payload = ?`, onboarding.Definition.ID, onboarding.Definition.Revision, definitionPayload); errDelete != nil {
+		return errDelete
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit custom onboarding compensation: %w", errCommit)
+	}
+	return nil
+}
+
 // deleteCompensationRow deletes exactly one unchanged onboarding row inside the caller-owned transaction.
 // deleteCompensationRow 在调用方事务内精确删除一条未变化的录入记录。
 func deleteCompensationRow(ctx context.Context, transaction *sql.Tx, entityName string, statement string, arguments ...any) error {
@@ -278,9 +448,21 @@ func (s *ConfigurationStore) SaveInstance(ctx context.Context, instance provider
 	if err := instance.Validate(); err != nil {
 		return err
 	}
-	definition, errDefinition := s.GetDefinition(ctx, instance.DefinitionID)
-	if errDefinition != nil {
-		return errDefinition
+	current, errCurrent := s.GetInstance(ctx, instance.ID)
+	if errCurrent == nil {
+		if errMutation := current.ValidateMutation(instance); errMutation != nil {
+			return errMutation
+		}
+	} else if !errors.Is(errCurrent, providerconfig.ErrNotFound) {
+		return errCurrent
+	}
+	definition, systemDefinition := s.systems.Lookup(instance.DefinitionID)
+	if !systemDefinition {
+		var errDefinition error
+		definition, errDefinition = s.GetDefinition(ctx, instance.DefinitionID)
+		if errDefinition != nil {
+			return errDefinition
+		}
 	}
 	if instance.DefinitionRevision != definition.Revision {
 		return invalidConfiguration("provider instance definition revision does not match current definition")
@@ -297,11 +479,46 @@ func (s *ConfigurationStore) SaveInstance(ctx context.Context, instance provider
 	if errPayload != nil {
 		return errPayload
 	}
-	return s.saveRevisioned(ctx, `
-		INSERT INTO provider_instances(id, definition_id, handle, status, revision, payload) VALUES (?, ?, ?, ?, ?, ?)
+	if systemDefinition {
+		return s.saveRevisioned(ctx, `
+			INSERT INTO provider_instances(id, definition_id, handle, status, revision, payload) VALUES (?, ?, ?, ?, ?, ?)
+			ON CONFLICT(id) DO UPDATE SET definition_id = excluded.definition_id, handle = excluded.handle,
+			status = excluded.status, revision = excluded.revision, payload = excluded.payload
+			WHERE excluded.revision > provider_instances.revision
+			AND excluded.definition_id = provider_instances.definition_id`, instance.ID, instance.Revision, "provider instance", payload, instance.DefinitionID, instance.Handle, instance.Status)
+	}
+	return s.saveCustomInstanceRevisioned(ctx, instance, payload)
+}
+
+// saveCustomInstanceRevisioned persists one custom instance only while its exact definition revision remains current.
+// saveCustomInstanceRevisioned 仅在其精确的定义修订仍为当前版本时持久化一个自定义实例。
+func (s *ConfigurationStore) saveCustomInstanceRevisioned(ctx context.Context, instance providerconfig.ProviderInstance, payload []byte) error {
+	if instance.Revision > math.MaxInt64 || instance.DefinitionRevision > math.MaxInt64 {
+		return invalidConfiguration("provider instance revision exceeds SQLite integer range")
+	}
+	result, errExec := s.database.sql.ExecContext(ctx, `
+		INSERT INTO provider_instances(id, definition_id, handle, status, revision, payload)
+		SELECT ?, ?, ?, ?, ?, ?
+		WHERE EXISTS (
+			SELECT 1 FROM custom_provider_definitions WHERE id = ? AND revision = ?
+		)
 		ON CONFLICT(id) DO UPDATE SET definition_id = excluded.definition_id, handle = excluded.handle,
 		status = excluded.status, revision = excluded.revision, payload = excluded.payload
-		WHERE excluded.revision > provider_instances.revision`, instance.ID, instance.Revision, "provider instance", payload, instance.DefinitionID, instance.Handle, instance.Status)
+		WHERE excluded.revision > provider_instances.revision
+		AND excluded.definition_id = provider_instances.definition_id`,
+		instance.ID, instance.DefinitionID, instance.Handle, instance.Status, int64(instance.Revision), payload,
+		instance.DefinitionID, int64(instance.DefinitionRevision))
+	if errExec != nil {
+		return fmt.Errorf("save provider instance: %w", errExec)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("read provider instance write result: %w", errRows)
+	}
+	if rowsAffected != 1 {
+		return invalidConfiguration("provider instance revision or custom definition changed concurrently")
+	}
+	return nil
 }
 
 // GetInstance returns one persisted provider instance.
@@ -354,6 +571,14 @@ func (s *ConfigurationStore) SaveEndpoint(ctx context.Context, endpoint provider
 	if errPreset := definition.ValidateEndpointPreset(endpoint); errPreset != nil {
 		return errPreset
 	}
+	current, errCurrent := s.getEndpoint(ctx, endpoint.ID)
+	if errCurrent == nil {
+		if errMutation := definition.ValidateEndpointMutation(current, endpoint); errMutation != nil {
+			return errMutation
+		}
+	} else if !errors.Is(errCurrent, providerconfig.ErrNotFound) {
+		return errCurrent
+	}
 	payload, errPayload := marshalPayload(endpoint)
 	if errPayload != nil {
 		return errPayload
@@ -362,7 +587,9 @@ func (s *ConfigurationStore) SaveEndpoint(ctx context.Context, endpoint provider
 		INSERT INTO provider_endpoints(id, provider_instance_id, channel_id, status, revision, payload) VALUES (?, ?, ?, ?, ?, ?)
 		ON CONFLICT(id) DO UPDATE SET provider_instance_id = excluded.provider_instance_id, channel_id = excluded.channel_id,
 		status = excluded.status, revision = excluded.revision, payload = excluded.payload
-		WHERE excluded.revision > provider_endpoints.revision`, endpoint.ID, endpoint.Revision, "provider endpoint", payload, endpoint.ProviderInstanceID, endpoint.ChannelID, endpoint.Status)
+		WHERE excluded.revision > provider_endpoints.revision
+		AND excluded.provider_instance_id = provider_endpoints.provider_instance_id
+		AND excluded.channel_id = provider_endpoints.channel_id`, endpoint.ID, endpoint.Revision, "provider endpoint", payload, endpoint.ProviderInstanceID, endpoint.ChannelID, endpoint.Status)
 }
 
 // ListEndpoints returns stable endpoint snapshots for one provider instance.
@@ -381,6 +608,14 @@ func (s *ConfigurationStore) SaveCredential(ctx context.Context, credential prov
 	}
 	if err := credential.Validate(); err != nil {
 		return err
+	}
+	current, errCurrent := s.getCredential(ctx, credential.ID)
+	if errCurrent == nil {
+		if errMutation := current.ValidateMutation(credential); errMutation != nil {
+			return errMutation
+		}
+	} else if !errors.Is(errCurrent, providerconfig.ErrNotFound) {
+		return errCurrent
 	}
 	_, definition, errOwner := s.instanceDefinition(ctx, credential.ProviderInstanceID)
 	if errOwner != nil {
@@ -402,7 +637,9 @@ func (s *ConfigurationStore) SaveCredential(ctx context.Context, credential prov
 		ON CONFLICT(id) DO UPDATE SET provider_instance_id = excluded.provider_instance_id, auth_method_id = excluded.auth_method_id,
 		principal_key = excluded.principal_key, fingerprint = excluded.fingerprint, status = excluded.status,
 		revision = excluded.revision, payload = excluded.payload
-		WHERE excluded.revision > provider_credentials.revision`, credential.ID, credential.Revision, "provider credential", payload,
+		WHERE excluded.revision > provider_credentials.revision
+		AND excluded.provider_instance_id = provider_credentials.provider_instance_id
+		AND excluded.auth_method_id = provider_credentials.auth_method_id`, credential.ID, credential.Revision, "provider credential", payload,
 		credential.ProviderInstanceID, credential.AuthMethodID, credential.PrincipalKey, credential.Fingerprint, credential.Status)
 }
 
@@ -422,6 +659,14 @@ func (s *ConfigurationStore) SaveBinding(ctx context.Context, binding providerco
 	}
 	if err := binding.Validate(); err != nil {
 		return err
+	}
+	current, errCurrent := s.getBinding(ctx, binding.ID)
+	if errCurrent == nil {
+		if errMutation := current.ValidateMutation(binding); errMutation != nil {
+			return errMutation
+		}
+	} else if !errors.Is(errCurrent, providerconfig.ErrNotFound) {
+		return errCurrent
 	}
 	_, definition, errOwner := s.instanceDefinition(ctx, binding.ProviderInstanceID)
 	if errOwner != nil {
@@ -458,7 +703,9 @@ func (s *ConfigurationStore) SaveBinding(ctx context.Context, binding providerco
 		ON CONFLICT(id) DO UPDATE SET provider_instance_id = excluded.provider_instance_id, channel_id = excluded.channel_id,
 		endpoint_id = excluded.endpoint_id, credential_id = excluded.credential_id, priority = excluded.priority,
 		enabled = excluded.enabled, revision = excluded.revision, payload = excluded.payload
-		WHERE excluded.revision > access_bindings.revision`, binding.ID, binding.Revision, "access binding", payload,
+		WHERE excluded.revision > access_bindings.revision
+		AND excluded.provider_instance_id = access_bindings.provider_instance_id
+		AND excluded.channel_id = access_bindings.channel_id`, binding.ID, binding.Revision, "access binding", payload,
 		binding.ProviderInstanceID, binding.ChannelID, binding.EndpointID, binding.CredentialID, binding.Priority, enabled)
 }
 
@@ -546,6 +793,23 @@ func (s *ConfigurationStore) getCredential(ctx context.Context, credentialID str
 	return credential, nil
 }
 
+// getBinding returns one validated access binding by identifier.
+// getBinding 按标识返回一个经过校验的访问绑定。
+func (s *ConfigurationStore) getBinding(ctx context.Context, bindingID string) (providerconfig.AccessBinding, error) {
+	var binding providerconfig.AccessBinding
+	errGet := s.getPayload(ctx, `SELECT payload FROM access_bindings WHERE id = ?`, bindingID, &binding)
+	if errors.Is(errGet, sql.ErrNoRows) {
+		return providerconfig.AccessBinding{}, fmt.Errorf("%w: access binding %s", providerconfig.ErrNotFound, bindingID)
+	}
+	if errGet != nil {
+		return providerconfig.AccessBinding{}, fmt.Errorf("query access binding: %w", errGet)
+	}
+	if errValidate := binding.Validate(); errValidate != nil {
+		return providerconfig.AccessBinding{}, fmt.Errorf("validate persisted access binding: %w", errValidate)
+	}
+	return binding, nil
+}
+
 // getPayload reads and decodes one typed JSON payload.
 // getPayload 读取并解码一个强类型 JSON Payload。
 func (s *ConfigurationStore) getPayload(ctx context.Context, query string, identifier string, destination any) error {
@@ -561,6 +825,21 @@ func (s *ConfigurationStore) getPayload(ctx context.Context, query string, ident
 
 // saveRevisioned executes one optimistic revision upsert and rejects stale writes.
 // saveRevisioned 执行一次乐观修订号 Upsert 并拒绝过期写入。
+// requireSingleMutation verifies one compare-and-swap statement changed exactly one persisted record.
+// requireSingleMutation 校验一条比较交换语句恰好变更了一条持久化记录。
+func requireSingleMutation(result sql.Result, entityName string) error {
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("read %s write result: %w", entityName, errRows)
+	}
+	if rowsAffected != 1 {
+		return invalidConfiguration("%s changed concurrently", entityName)
+	}
+	return nil
+}
+
+// saveRevisioned inserts or updates one payload only when its revision advances.
+// saveRevisioned 仅在修订号推进时插入或更新一个 Payload。
 func (s *ConfigurationStore) saveRevisioned(ctx context.Context, query string, identifier string, revision uint64, entityName string, payload []byte, valuesBeforeRevision ...any) error {
 	if revision > math.MaxInt64 {
 		return invalidConfiguration("revision exceeds SQLite integer range")

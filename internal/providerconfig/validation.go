@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+	"slices"
 	"strings"
+	"time"
 )
 
 var (
@@ -47,10 +49,17 @@ func (p ProtocolProfile) Validate() error {
 		}
 		capabilities[fact.Capability] = struct{}{}
 	}
+	// allowedAuthMethods prevents one protocol profile from declaring the same authentication contract twice.
+	// allowedAuthMethods 防止一个协议 Profile 重复声明同一认证契约。
+	allowedAuthMethods := make(map[AuthMethodType]struct{}, len(p.AllowedAuthMethods))
 	for _, authMethod := range p.AllowedAuthMethods {
 		if !validAuthMethodType(authMethod) {
 			return invalid("protocol profile auth method %q is invalid", authMethod)
 		}
+		if _, exists := allowedAuthMethods[authMethod]; exists {
+			return invalid("protocol profile auth method %q is duplicated", authMethod)
+		}
+		allowedAuthMethods[authMethod] = struct{}{}
 	}
 	return nil
 }
@@ -142,10 +151,17 @@ func (d ProviderDefinition) Validate() error {
 		}
 		authMethods[authMethod.ID] = struct{}{}
 	}
+	// protocolAuthMethods prevents duplicated references from changing protocol authentication semantics.
+	// protocolAuthMethods 防止重复引用改变协议认证语义。
+	protocolAuthMethods := make(map[string]struct{}, len(d.AuthMethodIDs))
 	for _, authMethodID := range d.AuthMethodIDs {
 		if err := validateIdentifier("provider protocol auth method id", authMethodID); err != nil {
 			return err
 		}
+		if _, exists := protocolAuthMethods[authMethodID]; exists {
+			return invalid("provider protocol auth method %q is duplicated", authMethodID)
+		}
+		protocolAuthMethods[authMethodID] = struct{}{}
 		if _, exists := authMethods[authMethodID]; !exists {
 			return invalid("provider protocol references unknown auth method %q", authMethodID)
 		}
@@ -211,12 +227,30 @@ func (p EndpointPreset) Validate() error {
 	if err := validateIdentifier("endpoint preset id", p.ID); err != nil {
 		return err
 	}
-	parsedURL, errParse := url.ParseRequestURI(p.BaseURL)
-	if errParse != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		return invalid("endpoint preset base url must be an absolute http or https url")
+	if errBaseURL := validateBaseURL("endpoint preset base url", p.BaseURL); errBaseURL != nil {
+		return errBaseURL
 	}
 	if strings.TrimSpace(p.Region) == "" {
 		return invalid("endpoint preset region is required")
+	}
+	if p.RegionalBaseURLTemplate == "" {
+		if p.GlobalBaseURL != "" {
+			return invalid("endpoint preset global base url requires a regional template")
+		}
+		return nil
+	}
+	if p.UserEditable || strings.Count(p.RegionalBaseURLTemplate, "{region}") != 1 {
+		return invalid("derived endpoint preset requires one non-editable {region} placeholder")
+	}
+	if errRegion := validateEndpointRegion(p.Region); errRegion != nil {
+		return errRegion
+	}
+	derivedBaseURL, errDerived := p.derivedBaseURL(p.Region)
+	if errDerived != nil {
+		return errDerived
+	}
+	if derivedBaseURL != p.BaseURL {
+		return invalid("endpoint preset base url must match its default derived region")
 	}
 	return nil
 }
@@ -257,6 +291,21 @@ func (i ProviderInstance) Validate() error {
 	return nil
 }
 
+// ValidateMutation verifies an existing provider instance keeps its definition ownership and creation time.
+// ValidateMutation 校验现有供应商实例保持其定义所有权与创建时间不变。
+func (i ProviderInstance) ValidateMutation(next ProviderInstance) error {
+	if i.ID == "" || i.ID != next.ID {
+		return invalid("provider instance mutation requires matching identifiers")
+	}
+	if i.DefinitionID != next.DefinitionID {
+		return invalid("provider instance definition ownership is immutable")
+	}
+	if !i.CreatedAt.Equal(next.CreatedAt) {
+		return invalid("provider instance creation time is immutable")
+	}
+	return nil
+}
+
 // Validate verifies one concrete endpoint record.
 // Validate 校验一个具体端点记录。
 func (e Endpoint) Validate() error {
@@ -269,9 +318,8 @@ func (e Endpoint) Validate() error {
 	if err := validateIdentifier("endpoint channel id", e.ChannelID); err != nil {
 		return err
 	}
-	parsedURL, errParse := url.ParseRequestURI(e.BaseURL)
-	if errParse != nil || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
-		return invalid("endpoint base url must be an absolute http or https url")
+	if errBaseURL := validateBaseURL("endpoint base url", e.BaseURL); errBaseURL != nil {
+		return errBaseURL
 	}
 	if !validEndpointStatus(e.Status) || e.Revision == 0 {
 		return invalid("endpoint status or revision is invalid")
@@ -314,6 +362,34 @@ func (c Credential) Validate() error {
 	return nil
 }
 
+// RuntimeEligibleAt reports whether this credential may participate in upstream work at the evaluation time.
+// RuntimeEligibleAt 表示该凭据在评估时刻是否可以参与上游工作。
+func (c Credential) RuntimeEligibleAt(now time.Time) bool {
+	if c.ExpiresAt != nil && !c.ExpiresAt.After(now) {
+		return false
+	}
+	switch c.Status {
+	case CredentialActive:
+		return true
+	case CredentialCooling:
+		return c.CoolingUntil != nil && !c.CoolingUntil.After(now)
+	default:
+		return false
+	}
+}
+
+// ValidateMutation verifies an existing credential keeps its provider and authentication ownership.
+// ValidateMutation 校验现有凭据保持其供应商与认证方式所有权不变。
+func (c Credential) ValidateMutation(next Credential) error {
+	if c.ID == "" || c.ID != next.ID {
+		return invalid("credential mutation requires matching identifiers")
+	}
+	if c.ProviderInstanceID != next.ProviderInstanceID || c.AuthMethodID != next.AuthMethodID {
+		return invalid("credential provider and authentication ownership are immutable")
+	}
+	return nil
+}
+
 // Validate verifies one credential commercial scope reference.
 // Validate 校验一个凭据商业作用域引用。
 func (s ScopeReference) Validate() error {
@@ -347,10 +423,42 @@ func (b AccessBinding) Validate() error {
 	if b.Revision == 0 {
 		return invalid("access binding revision must be positive")
 	}
+	// allowedModels keeps one binding policy canonical and prevents duplicate model rules.
+	// allowedModels 保持绑定策略规范化并防止重复模型规则。
+	allowedModels := make(map[string]struct{}, len(b.AllowedModelIDs))
 	for _, modelID := range b.AllowedModelIDs {
 		if err := validateIdentifier("access binding model id", modelID); err != nil {
 			return err
 		}
+		if _, exists := allowedModels[modelID]; exists {
+			return invalid("access binding model id %q is duplicated", modelID)
+		}
+		allowedModels[modelID] = struct{}{}
+	}
+	return nil
+}
+
+// ValidateMutation verifies an existing binding keeps its provider and protocol-channel ownership.
+// ValidateMutation 校验现有绑定保持其供应商与协议通道所有权不变。
+func (b AccessBinding) ValidateMutation(next AccessBinding) error {
+	if b.ID == "" || b.ID != next.ID {
+		return invalid("access binding mutation requires matching identifiers")
+	}
+	if b.ProviderInstanceID != next.ProviderInstanceID || b.ChannelID != next.ChannelID {
+		return invalid("access binding provider and channel ownership are immutable")
+	}
+	return nil
+}
+
+// validateBaseURL verifies a credential-free absolute HTTP(S) base URL while preserving provider-owned paths.
+// validateBaseURL 校验不含凭据的绝对 HTTP(S) 基础 URL，同时保留供应商自有路径。
+func validateBaseURL(field string, value string) error {
+	parsedURL, errParse := url.Parse(value)
+	if errParse != nil || !parsedURL.IsAbs() || parsedURL.Host == "" || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return invalid("%s must be an absolute http or https url", field)
+	}
+	if parsedURL.User != nil || parsedURL.ForceQuery || parsedURL.RawQuery != "" || parsedURL.Fragment != "" || strings.Contains(value, "#") {
+		return invalid("%s cannot contain user information, query, or fragment", field)
 	}
 	return nil
 }
@@ -406,12 +514,74 @@ func (d ProviderDefinition) ValidateEndpointPreset(endpoint Endpoint) error {
 		if preset.BaseURL == endpoint.BaseURL && preset.Region == endpoint.Region {
 			return nil
 		}
+		if preset.RegionalBaseURLTemplate != "" {
+			derivedBaseURL, errDerived := preset.derivedBaseURL(endpoint.Region)
+			if errDerived == nil && derivedBaseURL == endpoint.BaseURL {
+				return nil
+			}
+		}
 		if preset.UserEditable {
 			hasEditablePreset = true
 		}
 	}
 	if !hasEditablePreset {
 		return invalid("endpoint must exactly match one fixed system provider preset")
+	}
+	return nil
+}
+
+// ValidateEndpointMutation prevents a provider-derived system origin from changing after credential-bound onboarding.
+// ValidateEndpointMutation 防止供应商派生的系统 Origin 在凭据绑定录入后发生变化。
+func (d ProviderDefinition) ValidateEndpointMutation(current Endpoint, next Endpoint) error {
+	if current.ID == "" || current.ID != next.ID {
+		return invalid("endpoint mutation requires matching identifiers")
+	}
+	if current.ProviderInstanceID != next.ProviderInstanceID || current.ChannelID != next.ChannelID {
+		return invalid("endpoint provider and channel ownership are immutable")
+	}
+	if d.Kind != DefinitionKindSystem {
+		return nil
+	}
+	for _, preset := range d.EndpointPresets {
+		if preset.RegionalBaseURLTemplate == "" {
+			continue
+		}
+		currentBaseURL, errCurrent := preset.derivedBaseURL(current.Region)
+		if errCurrent == nil && currentBaseURL == current.BaseURL && (current.BaseURL != next.BaseURL || current.Region != next.Region) {
+			return invalid("provider-derived system endpoint origin and region are immutable after onboarding")
+		}
+	}
+	return nil
+}
+
+// derivedBaseURL materializes one safe provider-owned regional origin from a closed preset template.
+// derivedBaseURL 从封闭预设模板实例化一个安全的供应商所有区域 Origin。
+func (p EndpointPreset) derivedBaseURL(region string) (string, error) {
+	if errRegion := validateEndpointRegion(region); errRegion != nil {
+		return "", errRegion
+	}
+	baseURL := strings.Replace(p.RegionalBaseURLTemplate, "{region}", region, 1)
+	if region == "global" && p.GlobalBaseURL != "" {
+		baseURL = p.GlobalBaseURL
+	}
+	parsedURL, errParse := url.ParseRequestURI(baseURL)
+	if errParse != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return "", invalid("derived endpoint base url must be an absolute credential-free HTTPS origin")
+	}
+	return baseURL, nil
+}
+
+// validateEndpointRegion accepts only normalized host- and path-safe provider region identifiers.
+// validateEndpointRegion 仅接受规范化且对 Host 与 Path 安全的供应商区域标识。
+func validateEndpointRegion(region string) error {
+	if region == "" || region != strings.ToLower(strings.TrimSpace(region)) {
+		return invalid("derived endpoint region must be normalized")
+	}
+	for _, character := range region {
+		if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+			continue
+		}
+		return invalid("derived endpoint region contains unsupported characters")
 	}
 	return nil
 }
@@ -477,6 +647,112 @@ func ValidateSystemOnboarding(onboarding SystemOnboarding, definition ProviderDe
 	return nil
 }
 
+// ValidateCustomOnboarding verifies one complete single-protocol custom definition and initial executable graph before persistence.
+// ValidateCustomOnboarding 在持久化前校验一个完整单协议自定义 Definition 与初始可执行图。
+func ValidateCustomOnboarding(onboarding CustomOnboarding) error {
+	definition := onboarding.Definition
+	if definition.Kind != DefinitionKindCustom || onboarding.Instance.DefinitionID != definition.ID {
+		return invalid("custom onboarding requires its exact custom provider definition")
+	}
+	if errDefinition := definition.Validate(); errDefinition != nil {
+		return errDefinition
+	}
+	if len(definition.EndpointPresets) != 0 || len(definition.AuthMethodIDs) != 1 || definition.AuthMethodIDs[0] != "default" || len(definition.AuthMethods) != 1 || definition.AuthMethods[0].ID != "default" {
+		return invalid("custom onboarding requires one default authentication method and no code-owned endpoint presets")
+	}
+	// expectedAuthType is fixed by the selected execution factory rather than supplied independently by users.
+	// expectedAuthType 由所选执行 Factory 固定，而不是由用户独立提供。
+	expectedAuthType := AuthMethodType("")
+	switch definition.EndpointProfileID {
+	case CustomEndpointProfileOpenAICompatibility:
+		expectedAuthType = AuthMethodBearer
+	case CustomEndpointProfileVertexCompatibility:
+		expectedAuthType = AuthMethodHeaderKey
+	default:
+		return invalid("custom onboarding endpoint profile %q has no execution factory", definition.EndpointProfileID)
+	}
+	if definition.AuthMethods[0].Type != expectedAuthType {
+		return invalid("custom onboarding authentication does not match endpoint profile %q", definition.EndpointProfileID)
+	}
+	if errInstance := onboarding.Instance.Validate(); errInstance != nil {
+		return errInstance
+	}
+	if onboarding.Instance.DefinitionRevision != definition.Revision || onboarding.Instance.Status != LifecycleReady {
+		return invalid("custom onboarding instance must be ready and match the definition revision")
+	}
+	if errEndpoint := onboarding.Endpoint.Validate(); errEndpoint != nil {
+		return errEndpoint
+	}
+	if onboarding.Endpoint.ProviderInstanceID != onboarding.Instance.ID || onboarding.Endpoint.ChannelID != definition.ProtocolProfileID || onboarding.Endpoint.Status != EndpointReady {
+		return invalid("custom onboarding endpoint is outside its exact protocol channel")
+	}
+	if errCredential := onboarding.Credential.Validate(); errCredential != nil {
+		return errCredential
+	}
+	if onboarding.Credential.ProviderInstanceID != onboarding.Instance.ID || onboarding.Credential.AuthMethodID != "default" || onboarding.Credential.Status != CredentialActive {
+		return invalid("custom onboarding credential is outside its exact authentication method")
+	}
+	if errBinding := onboarding.Binding.Validate(); errBinding != nil {
+		return errBinding
+	}
+	if onboarding.Binding.ProviderInstanceID != onboarding.Instance.ID || onboarding.Binding.ChannelID != definition.ProtocolProfileID || onboarding.Binding.EndpointID != onboarding.Endpoint.ID || onboarding.Binding.CredentialID != onboarding.Credential.ID || !onboarding.Binding.Enabled {
+		return invalid("custom onboarding binding does not close the exact protocol access path")
+	}
+	return nil
+}
+
+// ValidateCustomDefinitionMigration verifies one replacement definition and the complete, otherwise unchanged instance transition.
+// ValidateCustomDefinitionMigration 校验一个替换定义及完整且除此之外未变化的实例转换。
+func ValidateCustomDefinitionMigration(migration CustomDefinitionMigration, currentDefinition ProviderDefinition, currentInstances []ProviderInstance, protocols *ProtocolRegistry) error {
+	if errDefinition := ValidateCustomDefinition(migration.Definition, protocols); errDefinition != nil {
+		return errDefinition
+	}
+	if currentDefinition.Kind != DefinitionKindCustom || migration.Definition.ID != currentDefinition.ID {
+		return invalid("custom definition migration requires its exact current custom definition")
+	}
+	if migration.Definition.Revision != currentDefinition.Revision+1 {
+		return invalid("custom definition migration revision must increase exactly once")
+	}
+	if len(migration.Instances) != len(currentInstances) {
+		return invalid("custom definition migration must contain every existing provider instance")
+	}
+	// currentByID proves the migration neither omits nor invents definition-owned instances.
+	// currentByID 证明迁移既不遗漏也不虚构该定义拥有的实例。
+	currentByID := make(map[string]ProviderInstance, len(currentInstances))
+	for _, current := range currentInstances {
+		if current.DefinitionID != currentDefinition.ID {
+			return invalid("custom definition migration current instance ownership is invalid")
+		}
+		if _, exists := currentByID[current.ID]; exists {
+			return invalid("duplicate current custom definition instance %q", current.ID)
+		}
+		currentByID[current.ID] = current
+	}
+	for _, next := range migration.Instances {
+		current, exists := currentByID[next.ID]
+		if !exists {
+			return invalid("custom definition migration contains an unknown provider instance %q", next.ID)
+		}
+		if errInstance := next.Validate(); errInstance != nil {
+			return errInstance
+		}
+		if errMutation := current.ValidateMutation(next); errMutation != nil {
+			return errMutation
+		}
+		if next.DefinitionRevision != migration.Definition.Revision || next.Status != LifecycleMigrationRequired || next.Revision != current.Revision+1 {
+			return invalid("custom definition migration instance state or revision is invalid")
+		}
+		if next.Handle != current.Handle || next.DisplayName != current.DisplayName || next.ProxyRef != current.ProxyRef || !slices.Equal(next.DisabledModelIDs, current.DisabledModelIDs) {
+			return invalid("custom definition migration may only change migration state and revisions")
+		}
+		delete(currentByID, next.ID)
+	}
+	if len(currentByID) != 0 {
+		return invalid("custom definition migration omitted existing provider instances")
+	}
+	return nil
+}
+
 // validSupportStatus reports whether a support state is explicitly defined.
 // validSupportStatus 返回支持状态是否已显式定义。
 func validSupportStatus(status SupportStatus) bool {
@@ -487,7 +763,7 @@ func validSupportStatus(status SupportStatus) bool {
 // validAuthMethodType 返回认证方式类型是否已显式定义。
 func validAuthMethodType(authMethod AuthMethodType) bool {
 	switch authMethod {
-	case AuthMethodOAuth, AuthMethodDeviceFlow, AuthMethodAPIKey, AuthMethodBearer, AuthMethodHeaderKey, AuthMethodQueryKey, AuthMethodNone:
+	case AuthMethodOAuth, AuthMethodDeviceFlow, AuthMethodAPIKey, AuthMethodBearer, AuthMethodHeaderKey, AuthMethodQueryKey, AuthMethodServiceAccount, AuthMethodNone:
 		return true
 	default:
 		return false

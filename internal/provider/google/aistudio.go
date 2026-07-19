@@ -152,8 +152,12 @@ func (d *AIStudioDriver) CountTokens(ctx context.Context, execution provider.Exe
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
 	}()
+	boundedBody, errBound := transport.NewBoundedResponseReader(upstreamResponse.Body, transport.MaximumNonStreamingResponseBytes)
+	if errBound != nil {
+		return aistudio.CountTokensResult{}, fmt.Errorf("%w: bound countTokens response: %v", aistudio.ErrInvalidUpstreamResponse, errBound)
+	}
 	var upstream aistudio.CountTokensResponse
-	decoder := json.NewDecoder(upstreamResponse.Body)
+	decoder := json.NewDecoder(boundedBody)
 	if errDecode := decoder.Decode(&upstream); errDecode != nil {
 		return aistudio.CountTokensResult{}, fmt.Errorf("%w: decode countTokens response: %v", aistudio.ErrInvalidUpstreamResponse, errDecode)
 	}
@@ -181,8 +185,12 @@ func (d *AIStudioDriver) executeResponse(ctx context.Context, outbound transport
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
 	}()
+	boundedBody, errBound := transport.NewBoundedResponseReader(upstreamResponse.Body, transport.MaximumNonStreamingResponseBytes)
+	if errBound != nil {
+		return provider.ExecutionResult{}, fmt.Errorf("%w: bound response: %v", aistudio.ErrInvalidUpstreamResponse, errBound)
+	}
 	var upstream aistudio.GenerateContentResponse
-	decoder := json.NewDecoder(upstreamResponse.Body)
+	decoder := json.NewDecoder(boundedBody)
 	if errDecode := decoder.Decode(&upstream); errDecode != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: decode response: %v", aistudio.ErrInvalidUpstreamResponse, errDecode)
 	}

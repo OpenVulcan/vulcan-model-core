@@ -3,9 +3,11 @@ package provider
 import (
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
@@ -35,7 +37,7 @@ func NewRegistry(definitions *providerconfig.SystemRegistry) (*Registry, error) 
 // Register validates a driver capability contract and registers its immutable definition.
 // Register 校验 Driver 能力合同并注册其不可变定义。
 func (r *Registry) Register(driver Driver) error {
-	if driver == nil {
+	if dependency.IsNil(driver) {
 		return errors.New("provider driver is required")
 	}
 	definition := driver.Definition()
@@ -50,7 +52,12 @@ func (r *Registry) Register(driver Driver) error {
 	if _, exists := r.drivers[definition.ID]; exists {
 		return fmt.Errorf("provider driver %s is already registered", definition.ID)
 	}
-	if err := r.definitions.Register(definition); err != nil {
+	registeredDefinition, exists := r.definitions.Lookup(definition.ID)
+	if exists {
+		if !reflect.DeepEqual(registeredDefinition, definition) {
+			return fmt.Errorf("provider driver definition %s differs from the registered system definition", definition.ID)
+		}
+	} else if err := r.definitions.Register(definition); err != nil {
 		return err
 	}
 	r.drivers[definition.ID] = driver

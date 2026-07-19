@@ -3,6 +3,8 @@
 package anthropic
 
 import (
+	"fmt"
+
 	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
@@ -52,8 +54,8 @@ func newMessagesDriver(definitionID string, client *transport.Client, capabiliti
 			{Name: "Content-Type", Value: "application/json"},
 			{Name: "Anthropic-Version", Value: "2023-06-01"},
 			{Name: "Anthropic-Beta", Value: anthropicDefaultBetas},
-			{Name: "Anthropic-Dangerous-Direct-Browser-Access", Value: "true"},
 			{Name: "X-App", Value: "cli"},
+			{Name: "Connection", Value: "keep-alive"},
 		},
 		Authentication:         authentication,
 		AllowedAuthMethods:     append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...),
@@ -70,6 +72,15 @@ func newMessagesDriver(definitionID string, client *transport.Client, capabiliti
 // adaptClaudeRequestHeaders preserves CLIProxyAPI's stable session and per-request identity headers without exposing secrets.
 // adaptClaudeRequestHeaders 在不暴露 Secret 的前提下保留 CLIProxyAPI 的稳定会话和逐请求身份 Header。
 func adaptClaudeRequestHeaders(execution provider.ExecutionRequest, outbound transport.Request) (transport.Request, error) {
+	// authMethod selects the exact provider-declared mode that controls the browser-access fingerprint.
+	// authMethod 选择精确的供应商声明模式，用于控制浏览器访问指纹。
+	authMethod, authMethodExists := execution.Definition.AuthMethod(execution.Binding.Credential.AuthMethodID)
+	if !authMethodExists {
+		return transport.Request{}, fmt.Errorf("%w: Claude credential auth method is missing", translateddriver.ErrInvalidDriver)
+	}
+	if authMethod.Type == providerconfig.AuthMethodAPIKey || authMethod.Type == providerconfig.AuthMethodHeaderKey {
+		outbound.Headers = append(outbound.Headers, transport.Header{Name: "Anthropic-Dangerous-Direct-Browser-Access", Value: "true"})
+	}
 	// sessionID remains stable for one immutable credential while avoiding secret-derived identifiers in logs or metadata.
 	// sessionID 对一个不可变 Credential 保持稳定，同时避免在日志或元数据中使用 Secret 派生标识。
 	sessionID := uuid.NewSHA1(uuid.NameSpaceOID, []byte("vulcan:claude-session:"+execution.Binding.Credential.ID)).String()

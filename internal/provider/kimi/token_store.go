@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
 
@@ -19,7 +20,7 @@ type AccessTokenStore struct {
 // NewAccessTokenStore creates a provider-specific secret projection without duplicating protected storage.
 // NewAccessTokenStore 创建供应商专用秘密投影且不复制受保护存储。
 func NewAccessTokenStore(delegate secret.Store) (*AccessTokenStore, error) {
-	if delegate == nil {
+	if dependency.IsNil(delegate) {
 		return nil, errors.New("Kimi token delegate store is required")
 	}
 	return &AccessTokenStore{delegate: delegate}, nil
@@ -43,6 +44,9 @@ func (s *AccessTokenStore) Get(ctx context.Context, reference string) ([]byte, e
 	if !bytes.HasPrefix(value, []byte(tokenDocumentPrefix)) {
 		return value, nil
 	}
+	// The complete refreshable document is no longer needed after the access-token projection is copied.
+	// 完整的可刷新文档在复制 Access Token 投影后不再需要。
+	defer clear(value)
 	token, errToken := UnmarshalToken(value)
 	if errToken != nil {
 		return nil, errToken

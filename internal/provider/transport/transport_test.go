@@ -12,6 +12,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -123,6 +124,19 @@ func TestNewClientRejectsStandardClientRedirectBeforeSecondTarget(t *testing.T) 
 	}
 }
 
+// TestNewClientRejectsTypedNilDependencies verifies boxed nil transports and secret stores cannot survive construction.
+// TestNewClientRejectsTypedNilDependencies 验证装箱后的 nil Transport 与 Secret Store 无法通过构造。
+func TestNewClientRejectsTypedNilDependencies(t *testing.T) {
+	var httpClient *http.Client
+	if _, errClient := NewClient(httpClient, secret.NewMemoryStore(), RetryPolicy{}); !errors.Is(errClient, ErrHTTPClientRequired) {
+		t.Fatalf("typed nil HTTP client error = %v, want ErrHTTPClientRequired", errClient)
+	}
+	var secretStore *secret.MemoryStore
+	if _, errClient := NewClient(http.DefaultClient, secretStore, RetryPolicy{}); !errors.Is(errClient, ErrSecretStoreRequired) {
+		t.Fatalf("typed nil secret store error = %v, want ErrSecretStoreRequired", errClient)
+	}
+}
+
 // TestClientRetriesOnlyWithIdempotencyKey verifies that a transient same-target retry needs explicit replay protection.
 // TestClientRetriesOnlyWithIdempotencyKey 验证瞬态同 Target 重试需要明确的重放保护。
 func TestClientRetriesOnlyWithIdempotencyKey(t *testing.T) {
@@ -187,6 +201,94 @@ func TestClientDoesNotRetryWithoutIdempotencyKey(t *testing.T) {
 	}
 }
 
+// TestRetryPolicyBoundsProviderDelayAndDefaultCap verifies untrusted Retry-After values cannot exceed configured backoff bounds.
+// TestRetryPolicyBoundsProviderDelayAndDefaultCap 验证不受信任的 Retry-After 值不能超过已配置的退避边界。
+func TestRetryPolicyBoundsProviderDelayAndDefaultCap(t *testing.T) {
+	// providerDelay simulates an upstream attempt to suspend one retry for an hour.
+	// providerDelay 模拟上游试图将一次重试暂停一小时。
+	providerDelay := time.Hour
+	if delay := (RetryPolicy{InitialBackoff: 2 * time.Second}).delay(3, nil); delay != 2*time.Second {
+		t.Fatalf("default maximum backoff delay = %s, want 2s", delay)
+	}
+	if delay := (RetryPolicy{InitialBackoff: 2 * time.Second, MaxBackoff: 5 * time.Second}).delay(3, nil); delay != 5*time.Second {
+		t.Fatalf("exponential capped delay = %s, want 5s", delay)
+	}
+	if delay := (RetryPolicy{InitialBackoff: time.Second, MaxBackoff: 5 * time.Second}).delay(1, &providerDelay); delay != 5*time.Second {
+		t.Fatalf("provider capped delay = %s, want 5s", delay)
+	}
+	if delay := (RetryPolicy{InitialBackoff: time.Duration(1 << 62), MaxBackoff: time.Duration(1<<63 - 1)}).delay(2, nil); delay != time.Duration(1<<63-1) {
+		t.Fatalf("overflow-safe capped delay = %s, want maximum time.Duration", delay)
+	}
+	if delay := (RetryPolicy{}).delay(1, &providerDelay); delay != 0 {
+		t.Fatalf("zero-backoff provider delay = %s, want immediate retry", delay)
+	}
+}
+
+// TestRetryAfterRejectsTrailingAndOverflowValues verifies seconds parsing is exact and cannot wrap time.Duration.
+// TestRetryAfterRejectsTrailingAndOverflowValues 验证秒数解析保持精确且不能使 time.Duration 回绕。
+func TestRetryAfterRejectsTrailingAndOverflowValues(t *testing.T) {
+	for _, invalidValue := range []string{"10 trailing", "9223372036854775807", "-1"} {
+		if delay := parseRetryAfter(invalidValue, time.Now()); delay != nil {
+			t.Fatalf("parseRetryAfter(%q) = %s, want nil", invalidValue, *delay)
+		}
+	}
+	if delay := parseRetryAfter("10", time.Now()); delay == nil || *delay != 10*time.Second {
+		t.Fatalf("parseRetryAfter(10) = %v, want 10s", delay)
+	}
+}
+
+// TestRetryPolicyRejectsNegativeBackoffWithDefaultAttempts verifies default single-attempt mode does not hide invalid configuration.
+// TestRetryPolicyRejectsNegativeBackoffWithDefaultAttempts 验证默认单次尝试模式不会掩盖无效配置。
+func TestRetryPolicyRejectsNegativeBackoffWithDefaultAttempts(t *testing.T) {
+	if _, errAttempts := (RetryPolicy{InitialBackoff: -time.Second}).attempts(); !errors.Is(errAttempts, ErrInvalidRequest) {
+		t.Fatalf("RetryPolicy.attempts() error = %v, want ErrInvalidRequest", errAttempts)
+	}
+}
+
+// TestRequestRejectsInvalidHTTPHeaderMetadata verifies every caller-owned header channel is sanitized before a custom HTTPDoer can observe it.
+// TestRequestRejectsInvalidHTTPHeaderMetadata 验证每个调用方拥有的 Header 通道都会在自定义 HTTPDoer 观察前完成净化。
+func TestRequestRejectsInvalidHTTPHeaderMetadata(t *testing.T) {
+	// cases contains isolated malformed header channels over the same otherwise-valid binding.
+	// cases 包含基于同一其他字段有效绑定的独立异常 Header 通道。
+	cases := []struct {
+		// name identifies the rejected transport boundary.
+		// name 标识被拒绝的传输边界。
+		name string
+		// mutate injects one invalid header fact.
+		// mutate 注入一个无效 Header 事实。
+		mutate func(*Request)
+	}{
+		{name: "field name", mutate: func(request *Request) { request.Headers = []Header{{Name: "X-Test\r\nInjected", Value: "value"}} }},
+		{name: "field value", mutate: func(request *Request) { request.Headers = []Header{{Name: "X-Test", Value: "value\r\nInjected: yes"}} }},
+		{name: "host override", mutate: func(request *Request) { request.Headers = []Header{{Name: "Host", Value: "other.example"}} }},
+		{name: "idempotency key", mutate: func(request *Request) { request.IdempotencyKey = "key\r\nInjected: yes" }},
+		{name: "authentication field", mutate: func(request *Request) {
+			request.Authentication = Authentication{Mode: AuthenticationHeader, HeaderName: "Bad Header"}
+		}},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := testRequest("https://provider.example", "secret-reference")
+			testCase.mutate(&request)
+			if errValidate := request.Validate(); errValidate == nil {
+				t.Fatal("Request.Validate() error = nil, want invalid header rejection")
+			}
+		})
+	}
+}
+
+// TestApplyAuthenticationRejectsCredentialHeaderInjection verifies protected credential bytes cannot escape into another HTTP field.
+// TestApplyAuthenticationRejectsCredentialHeaderInjection 验证受保护凭据字节不能逸出到另一个 HTTP 字段。
+func TestApplyAuthenticationRejectsCredentialHeaderInjection(t *testing.T) {
+	request, errRequest := http.NewRequest(http.MethodPost, "https://provider.example/v1/responses", nil)
+	if errRequest != nil {
+		t.Fatalf("http.NewRequest() error = %v", errRequest)
+	}
+	if errApply := applyAuthentication(request, Authentication{Mode: AuthenticationBearer}, []byte("token\r\nInjected: yes")); !errors.Is(errApply, ErrInvalidBinding) {
+		t.Fatalf("applyAuthentication() error = %v, want ErrInvalidBinding", errApply)
+	}
+}
+
 // TestClientDoStreamSetsEventAccept verifies that SSE requests remain HTTP requests with explicit content negotiation.
 // TestClientDoStreamSetsEventAccept 验证 SSE 请求仍是带明确内容协商的 HTTP 请求。
 func TestClientDoStreamSetsEventAccept(t *testing.T) {
@@ -212,6 +314,105 @@ func TestClientDoStreamSetsEventAccept(t *testing.T) {
 		t.Fatalf("DoStream() error = %v", errDo)
 	}
 	defer DrainAndClose(response)
+}
+
+// TestBoundedResponseReaderDistinguishesExactEOFAndOverflow verifies response limits never masquerade truncation as success.
+// TestBoundedResponseReaderDistinguishesExactEOFAndOverflow 验证响应限制绝不会把截断伪装成成功。
+func TestBoundedResponseReaderDistinguishesExactEOFAndOverflow(t *testing.T) {
+	exact, errExact := NewBoundedResponseReader(strings.NewReader("1234"), 4)
+	if errExact != nil {
+		t.Fatalf("create exact bounded reader: %v", errExact)
+	}
+	exactBody, errReadExact := io.ReadAll(exact)
+	if errReadExact != nil || string(exactBody) != "1234" {
+		t.Fatalf("exact body=%q error=%v", exactBody, errReadExact)
+	}
+	overflow, errOverflow := NewBoundedResponseReader(strings.NewReader("12345"), 4)
+	if errOverflow != nil {
+		t.Fatalf("create overflow bounded reader: %v", errOverflow)
+	}
+	overflowBody, errReadOverflow := io.ReadAll(overflow)
+	if !errors.Is(errReadOverflow, ErrResponseTooLarge) || string(overflowBody) != "1234" {
+		t.Fatalf("overflow body=%q error=%v", overflowBody, errReadOverflow)
+	}
+}
+
+// TestDrainAndCloseBoundsCleanupAndAlwaysCloses verifies cleanup neither consumes an unbounded body nor leaks one that returns a read error.
+// TestDrainAndCloseBoundsCleanupAndAlwaysCloses 验证清理既不会消费无界正文，也不会泄漏返回读取错误的正文。
+func TestDrainAndCloseBoundsCleanupAndAlwaysCloses(t *testing.T) {
+	t.Run("bounded", func(t *testing.T) {
+		body := &trackingReadCloser{reader: strings.NewReader(strings.Repeat("x", int(maximumResponseDrainBytes*2)))}
+		if errClose := DrainAndClose(&http.Response{Body: body}); errClose != nil {
+			t.Fatalf("DrainAndClose() error = %v", errClose)
+		}
+		if !body.closed || body.readBytes != maximumResponseDrainBytes {
+			t.Fatalf("closed=%v read=%d, want closed with %d-byte drain", body.closed, body.readBytes, maximumResponseDrainBytes)
+		}
+	})
+	t.Run("read error", func(t *testing.T) {
+		body := &trackingReadCloser{reader: failingReader{}}
+		if errClose := DrainAndClose(&http.Response{Body: body}); !errors.Is(errClose, io.ErrUnexpectedEOF) {
+			t.Fatalf("DrainAndClose() error = %v, want io.ErrUnexpectedEOF", errClose)
+		}
+		if !body.closed {
+			t.Fatal("response body was not closed after read error")
+		}
+	})
+}
+
+// trackingReadCloser records the exact cleanup read budget and close state.
+// trackingReadCloser 记录精确的清理读取预算与关闭状态。
+type trackingReadCloser struct {
+	// reader supplies the controlled response body bytes.
+	// reader 提供受控响应正文字节。
+	reader io.Reader
+	// readBytes records bytes consumed by cleanup.
+	// readBytes 记录清理消费的字节数。
+	readBytes int64
+	// closed records whether cleanup released the body.
+	// closed 记录清理是否释放了正文。
+	closed bool
+}
+
+// Read delegates to the controlled reader and records consumed bytes.
+// Read 委托给受控 Reader 并记录已消费字节。
+func (r *trackingReadCloser) Read(destination []byte) (int, error) {
+	read, errRead := r.reader.Read(destination)
+	r.readBytes += int64(read)
+	return read, errRead
+}
+
+// Close records deterministic response-body release.
+// Close 记录确定性的响应正文释放。
+func (r *trackingReadCloser) Close() error {
+	r.closed = true
+	return nil
+}
+
+// failingReader returns one deterministic body-read failure.
+// failingReader 返回一个确定性的正文读取失败。
+type failingReader struct{}
+
+// Read returns io.ErrUnexpectedEOF without producing bytes.
+// Read 在不产生字节的情况下返回 io.ErrUnexpectedEOF。
+func (failingReader) Read([]byte) (int, error) {
+	return 0, io.ErrUnexpectedEOF
+}
+
+// TestValidateAbsoluteHTTPURLRejectsUnsafeProviderLinks verifies management-visible links cannot carry credentials or executable schemes.
+// TestValidateAbsoluteHTTPURLRejectsUnsafeProviderLinks 验证管理可见链接不能携带凭据或可执行 Scheme。
+func TestValidateAbsoluteHTTPURLRejectsUnsafeProviderLinks(t *testing.T) {
+	for _, rawURL := range []string{"javascript:alert(1)", "file:///tmp/token", "https://user:secret@auth.example/verify", "/relative/verify"} {
+		if _, errValidate := ValidateAbsoluteHTTPURL(rawURL); errValidate == nil {
+			t.Errorf("ValidateAbsoluteHTTPURL(%q) unexpectedly succeeded", rawURL)
+		}
+	}
+	// normalizedURL is the exact credential-free link returned after surrounding whitespace is removed.
+	// normalizedURL 是移除首尾空白后返回的精确无凭据链接。
+	normalizedURL, errValidate := ValidateAbsoluteHTTPURL("  https://auth.example/verify?code=ABCD  ")
+	if errValidate != nil || normalizedURL != "https://auth.example/verify?code=ABCD" {
+		t.Fatalf("ValidateAbsoluteHTTPURL() = %q, %v", normalizedURL, errValidate)
+	}
 }
 
 // testRequest creates one complete provider-scoped request fixture.

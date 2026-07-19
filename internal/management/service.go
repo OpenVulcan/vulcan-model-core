@@ -5,15 +5,23 @@ package management
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
+	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
+	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
+	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
+	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -25,17 +33,17 @@ type OnboardSystemProviderInput struct {
 	// DefinitionID selects one exact code-owned provider variant.
 	// DefinitionID 选择一个精确的代码拥有供应商变体。
 	DefinitionID string
-	// Handle is the stable workspace-visible routing alias.
-	// Handle 是工作区可见的稳定路由别名。
+	// Handle optionally carries an internal routing alias; atomic management onboarding leaves it empty for server generation.
+	// Handle 可选携带内部路由别名；原子管理录入会将其留空并由服务端生成。
 	Handle string
-	// DisplayName is the editable management-facing instance name.
-	// DisplayName 是可编辑的管理端实例名称。
+	// DisplayName is the sole operator-authored name when provider identity cannot supply one.
+	// DisplayName 是供应商身份无法提供名称时唯一由操作员填写的名称。
 	DisplayName string
 	// AuthMethodID selects one authentication method declared by the definition.
 	// AuthMethodID 选择定义声明的一种认证方式。
 	AuthMethodID string
-	// CredentialLabel is the safe operator-visible account label.
-	// CredentialLabel 是安全且操作员可见的账号标签。
+	// CredentialLabel is derived from DisplayName or provider-issued identity metadata.
+	// CredentialLabel 由 DisplayName 或供应商签发的身份元数据派生。
 	CredentialLabel string
 	// PrincipalKey is the provider-reported stable account identity when available.
 	// PrincipalKey 是可用时供应商报告的稳定账号身份。
@@ -43,23 +51,183 @@ type OnboardSystemProviderInput struct {
 	// Secret contains transient credential material and is never written to SQLite.
 	// Secret 包含临时凭据材料且绝不写入 SQLite。
 	Secret []byte
+	// ScopeRefs contains only provider-reported scopes established by a server-owned authorization flow.
+	// ScopeRefs 仅包含由服务端拥有授权流程建立的供应商报告作用域。
+	ScopeRefs []providerconfig.ScopeReference
+	// endpointBaseURL is set only by a provider-owned onboarding workflow after validating uploaded credentials.
+	// endpointBaseURL 仅由供应商专属录入流程在校验上传凭据后设置。
+	endpointBaseURL string
+	// endpointRegion is set only by a provider-owned onboarding workflow after normalizing its location.
+	// endpointRegion 仅由供应商专属录入流程在规范化区域后设置。
+	endpointRegion string
+	// credentialExpiresAt is set only from provider-issued token metadata.
+	// credentialExpiresAt 仅根据供应商签发的 Token 元数据设置。
+	credentialExpiresAt *time.Time
+}
+
+// applyResolvedProviderName fills the instance and credential labels from one exact provider identity when the caller supplied no name.
+// applyResolvedProviderName 在调用方未提供名称时，使用一个精确的供应商身份填充实例与凭据标签。
+func applyResolvedProviderName(input *OnboardSystemProviderInput, providerIdentity string) {
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	input.CredentialLabel = strings.TrimSpace(input.CredentialLabel)
+	resolvedIdentity := strings.TrimSpace(providerIdentity)
+	if input.DisplayName == "" {
+		input.DisplayName = resolvedIdentity
+	}
+	if input.CredentialLabel == "" {
+		input.CredentialLabel = resolvedIdentity
+		if input.CredentialLabel == "" {
+			input.CredentialLabel = input.DisplayName
+		}
+	}
 }
 
 // OnboardSystemProvider atomically creates one complete system-provider access path with secret compensation.
 // OnboardSystemProvider 通过秘密补偿原子创建一条完整系统供应商访问路径。
 func (s *Service) OnboardSystemProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
-	return s.onboardSystemProvider(ctx, input, false)
+	return s.onboardSystemProvider(ctx, input, "")
 }
 
 // OnboardKimiDeviceProvider atomically stores one server-acquired and format-validated Kimi device credential.
 // OnboardKimiDeviceProvider 原子存储一个由服务端获取且格式已校验的 Kimi 设备凭据。
 func (s *Service) OnboardKimiDeviceProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
-	return s.onboardSystemProvider(ctx, input, true)
+	token, errToken := providerkimi.UnmarshalToken(input.Secret)
+	if errToken != nil {
+		return providerconfig.SystemOnboarding{}, errToken
+	}
+	input.PrincipalKey = ""
+	input.ScopeRefs = nil
+	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	applyResolvedProviderName(&input, "")
+	return s.onboardSystemProvider(ctx, input, "kimi")
+}
+
+// OnboardXAIDeviceProvider atomically stores one server-acquired and validated xAI device credential.
+// OnboardXAIDeviceProvider 原子存储一个由服务端获取且已校验的 xAI 设备凭据。
+func (s *Service) OnboardXAIDeviceProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	token, errToken := providerxai.UnmarshalToken(input.Secret)
+	if errToken != nil {
+		return providerconfig.SystemOnboarding{}, errToken
+	}
+	input.PrincipalKey = token.Subject
+	if input.PrincipalKey == "" {
+		input.PrincipalKey = token.Email
+	}
+	input.ScopeRefs = nil
+	identityLabel := token.Email
+	if identityLabel == "" {
+		identityLabel = token.Subject
+	}
+	applyResolvedProviderName(&input, identityLabel)
+	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	return s.onboardSystemProvider(ctx, input, "xai")
+}
+
+// OnboardCodexDeviceProvider atomically stores one server-acquired and validated Codex device credential.
+// OnboardCodexDeviceProvider 原子存储一个由服务端获取且已校验的 Codex 设备凭据。
+func (s *Service) OnboardCodexDeviceProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	if input.AuthMethodID != "device_flow" {
+		return providerconfig.SystemOnboarding{}, errors.New("Codex device onboarding requires the exact device_flow authentication method")
+	}
+	return s.onboardCodexProvider(ctx, input)
+}
+
+// OnboardCodexOAuthProvider atomically stores one server-acquired and validated Codex browser OAuth credential.
+// OnboardCodexOAuthProvider 原子存储一个由服务端获取且已校验的 Codex 浏览器 OAuth 凭据。
+func (s *Service) OnboardCodexOAuthProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	if input.AuthMethodID != "oauth" {
+		return providerconfig.SystemOnboarding{}, errors.New("Codex browser onboarding requires the exact oauth authentication method")
+	}
+	return s.onboardCodexProvider(ctx, input)
+}
+
+// onboardCodexProvider derives immutable account metadata from one protected token document.
+// onboardCodexProvider 从一个受保护 Token 文档派生不可变账号元数据。
+func (s *Service) onboardCodexProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	token, errToken := provideropenai.UnmarshalCodexToken(input.Secret)
+	if errToken != nil {
+		return providerconfig.SystemOnboarding{}, errToken
+	}
+	if strings.TrimSpace(token.AccountID) == "" {
+		return providerconfig.SystemOnboarding{}, errors.New("Codex account onboarding requires the provider-reported ChatGPT account ID")
+	}
+	input.PrincipalKey = token.AccountID
+	input.ScopeRefs = []providerconfig.ScopeReference{{Kind: "account", ID: token.AccountID}}
+	identityLabel := token.Email
+	if identityLabel == "" {
+		identityLabel = token.AccountID
+	}
+	applyResolvedProviderName(&input, identityLabel)
+	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt.Unix())
+	return s.onboardSystemProvider(ctx, input, "codex")
+}
+
+// OnboardClaudeOAuthProvider atomically stores one server-acquired and validated Claude Code OAuth credential.
+// OnboardClaudeOAuthProvider 原子存储一个由服务端获取且已校验的 Claude Code OAuth 凭据。
+func (s *Service) OnboardClaudeOAuthProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	token, errToken := provideranthropic.UnmarshalClaudeToken(input.Secret)
+	if errToken != nil {
+		return providerconfig.SystemOnboarding{}, errToken
+	}
+	input.PrincipalKey = token.AccountID
+	if input.PrincipalKey == "" {
+		input.PrincipalKey = token.Email
+	}
+	input.ScopeRefs = nil
+	if token.OrganizationID != "" {
+		input.ScopeRefs = []providerconfig.ScopeReference{{Kind: string(catalog.ScopeOrganization), ID: token.OrganizationID}}
+	}
+	identityLabel := token.Email
+	if identityLabel == "" {
+		identityLabel = token.AccountID
+	}
+	applyResolvedProviderName(&input, identityLabel)
+	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	return s.onboardSystemProvider(ctx, input, "claude")
+}
+
+// OnboardAntigravityOAuthProvider atomically stores one server-acquired and validated Antigravity OAuth credential.
+// OnboardAntigravityOAuthProvider 原子存储一个由服务端获取且已校验的 Antigravity OAuth 凭据。
+func (s *Service) OnboardAntigravityOAuthProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	token, errToken := providergoogle.UnmarshalAntigravityToken(input.Secret)
+	if errToken != nil {
+		return providerconfig.SystemOnboarding{}, errToken
+	}
+	input.PrincipalKey = token.Email
+	input.ScopeRefs = []providerconfig.ScopeReference{{Kind: "project", ID: token.ProjectID}}
+	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	applyResolvedProviderName(&input, token.Email)
+	return s.onboardSystemProvider(ctx, input, "antigravity")
+}
+
+// OnboardVertexServiceAccountProvider normalizes uploaded JSON and derives all identity, project, and endpoint facts server-side.
+// OnboardVertexServiceAccountProvider 在服务端规范化上传 JSON 并派生全部身份、Project 与 Endpoint 事实。
+func (s *Service) OnboardVertexServiceAccountProvider(ctx context.Context, input OnboardSystemProviderInput, location string) (providerconfig.SystemOnboarding, error) {
+	defer clear(input.Secret)
+	credential, errCredential := providergoogle.ParseVertexCredential(input.Secret, location)
+	if errCredential != nil {
+		return providerconfig.SystemOnboarding{}, errCredential
+	}
+	protected, errProtected := providergoogle.MarshalVertexCredential(credential)
+	if errProtected != nil {
+		return providerconfig.SystemOnboarding{}, errProtected
+	}
+	defer clear(protected)
+	input.Secret = protected
+	input.PrincipalKey = credential.Email
+	input.ScopeRefs = []providerconfig.ScopeReference{{Kind: "project", ID: credential.ProjectID}}
+	input.endpointBaseURL = providergoogle.VertexBaseURL(credential.Location)
+	input.endpointRegion = credential.Location
+	applyResolvedProviderName(&input, credential.Email)
+	return s.onboardSystemProvider(ctx, input, "vertex")
 }
 
 // onboardSystemProvider enforces the acquisition boundary before committing one complete provider graph.
 // onboardSystemProvider 在提交完整供应商图之前强制执行凭据获取边界。
-func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystemProviderInput, serverAcquiredDeviceCredential bool) (providerconfig.SystemOnboarding, error) {
+func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystemProviderInput, serverAcquiredProvider string) (providerconfig.SystemOnboarding, error) {
+	input.Handle = strings.TrimSpace(input.Handle)
+	applyResolvedProviderName(&input, "")
+	input.PrincipalKey = strings.TrimSpace(input.PrincipalKey)
 	definition, errDefinition := s.configurations.GetDefinition(ctx, input.DefinitionID)
 	if errDefinition != nil {
 		return providerconfig.SystemOnboarding{}, errDefinition
@@ -68,15 +236,92 @@ func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystem
 	if definition.Kind != providerconfig.DefinitionKindSystem || !authMethodExists {
 		return providerconfig.SystemOnboarding{}, fmt.Errorf("system provider onboarding requires an exact system definition and authentication method")
 	}
-	if serverAcquiredDeviceCredential {
-		if definition.DriverID != "kimi" || authMethod.Type != providerconfig.AuthMethodDeviceFlow {
-			return providerconfig.SystemOnboarding{}, fmt.Errorf("server-acquired Kimi onboarding requires a Kimi device-flow definition")
+	if serverAcquiredProvider != "" {
+		expectedAuthType := providerconfig.AuthMethodDeviceFlow
+		switch serverAcquiredProvider {
+		case "antigravity", "claude":
+			expectedAuthType = providerconfig.AuthMethodOAuth
+		case "vertex":
+			expectedAuthType = providerconfig.AuthMethodServiceAccount
 		}
-		if _, errToken := providerkimi.UnmarshalToken(input.Secret); errToken != nil {
-			return providerconfig.SystemOnboarding{}, errToken
+		if definition.DriverID != serverAcquiredProvider {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("server-acquired onboarding requires the exact %s %s definition", serverAcquiredProvider, expectedAuthType)
 		}
-	} else if authMethod.Type == providerconfig.AuthMethodDeviceFlow || authMethod.Type == providerconfig.AuthMethodOAuth {
-		return providerconfig.SystemOnboarding{}, fmt.Errorf("interactive provider credentials require their server-owned authorization workflow")
+		if serverAcquiredProvider == "codex" {
+			if authMethod.Type != providerconfig.AuthMethodDeviceFlow && authMethod.Type != providerconfig.AuthMethodOAuth {
+				return providerconfig.SystemOnboarding{}, errors.New("server-acquired Codex onboarding requires device_flow or oauth authentication")
+			}
+		} else if authMethod.Type != expectedAuthType {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("server-acquired onboarding requires the exact %s %s definition", serverAcquiredProvider, expectedAuthType)
+		}
+		switch serverAcquiredProvider {
+		case "kimi":
+			if _, errToken := providerkimi.UnmarshalToken(input.Secret); errToken != nil {
+				return providerconfig.SystemOnboarding{}, errToken
+			}
+			if input.PrincipalKey != "" || len(input.ScopeRefs) != 0 {
+				return providerconfig.SystemOnboarding{}, errors.New("Kimi onboarding does not accept caller-authored account identity or scopes")
+			}
+		case "xai":
+			token, errToken := providerxai.UnmarshalToken(input.Secret)
+			if errToken != nil {
+				return providerconfig.SystemOnboarding{}, errToken
+			}
+			principalKey := token.Subject
+			if principalKey == "" {
+				principalKey = token.Email
+			}
+			if input.PrincipalKey != principalKey || len(input.ScopeRefs) != 0 {
+				return providerconfig.SystemOnboarding{}, errors.New("xAI onboarding requires the exact provider-reported account identity without caller-authored scopes")
+			}
+		case "codex":
+			token, errToken := provideropenai.UnmarshalCodexToken(input.Secret)
+			if errToken != nil {
+				return providerconfig.SystemOnboarding{}, errToken
+			}
+			if input.PrincipalKey != token.AccountID || len(input.ScopeRefs) != 1 || input.ScopeRefs[0] != (providerconfig.ScopeReference{Kind: "account", ID: token.AccountID}) {
+				return providerconfig.SystemOnboarding{}, errors.New("Codex onboarding requires the exact provider-reported account scope")
+			}
+		case "claude":
+			token, errToken := provideranthropic.UnmarshalClaudeToken(input.Secret)
+			if errToken != nil {
+				return providerconfig.SystemOnboarding{}, errToken
+			}
+			principalKey := token.AccountID
+			if principalKey == "" {
+				principalKey = token.Email
+			}
+			expectedScopes := []providerconfig.ScopeReference(nil)
+			if token.OrganizationID != "" {
+				expectedScopes = []providerconfig.ScopeReference{{Kind: string(catalog.ScopeOrganization), ID: token.OrganizationID}}
+			}
+			if input.PrincipalKey != principalKey || !slices.Equal(input.ScopeRefs, expectedScopes) {
+				return providerconfig.SystemOnboarding{}, errors.New("Claude onboarding requires the exact provider-reported account and organization identity")
+			}
+		case "antigravity":
+			token, errToken := providergoogle.UnmarshalAntigravityToken(input.Secret)
+			if errToken != nil {
+				return providerconfig.SystemOnboarding{}, errToken
+			}
+			if input.PrincipalKey != token.Email || len(input.ScopeRefs) != 1 || input.ScopeRefs[0].Kind != "project" || input.ScopeRefs[0].ID != token.ProjectID {
+				return providerconfig.SystemOnboarding{}, errors.New("Antigravity onboarding requires the exact provider-reported account and project identity")
+			}
+		case "vertex":
+			credential, errCredential := providergoogle.UnmarshalVertexCredential(input.Secret)
+			if errCredential != nil {
+				return providerconfig.SystemOnboarding{}, errCredential
+			}
+			if input.PrincipalKey != credential.Email || len(input.ScopeRefs) != 1 || input.ScopeRefs[0] != (providerconfig.ScopeReference{Kind: "project", ID: credential.ProjectID}) {
+				return providerconfig.SystemOnboarding{}, errors.New("Vertex onboarding requires the exact service-account identity and project scope")
+			}
+			if input.endpointRegion != credential.Location || input.endpointBaseURL != providergoogle.VertexBaseURL(credential.Location) {
+				return providerconfig.SystemOnboarding{}, errors.New("Vertex onboarding requires the exact normalized regional endpoint")
+			}
+		default:
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("server-acquired provider %s is unsupported", serverAcquiredProvider)
+		}
+	} else if authMethod.Type == providerconfig.AuthMethodDeviceFlow || authMethod.Type == providerconfig.AuthMethodOAuth || authMethod.Type == providerconfig.AuthMethodServiceAccount {
+		return providerconfig.SystemOnboarding{}, fmt.Errorf("specialized provider credentials require their server-owned authorization workflow")
 	}
 	if len(input.Secret) == 0 {
 		return providerconfig.SystemOnboarding{}, fmt.Errorf("system provider onboarding secret is required")
@@ -87,7 +332,9 @@ func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystem
 	}
 	onboarding, errBuild := s.buildSystemOnboarding(definition, input, secretReference)
 	if errBuild != nil {
-		_ = s.secrets.Delete(context.WithoutCancel(ctx), secretReference)
+		if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), secretReference); errDelete != nil {
+			return providerconfig.SystemOnboarding{}, fmt.Errorf("build system provider onboarding: %w; compensate secret: %w", errBuild, errDelete)
+		}
 		return providerconfig.SystemOnboarding{}, errBuild
 	}
 	if errSave := s.configurations.SaveSystemOnboarding(ctx, onboarding); errSave != nil {
@@ -97,6 +344,9 @@ func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystem
 		return providerconfig.SystemOnboarding{}, errSave
 	}
 	snapshot, errCatalog := buildSystemCatalog(onboarding, definition, s.now().UTC())
+	if errCatalog == nil && serverAcquiredProvider == "codex" {
+		snapshot, errCatalog = appendInitialCodexMetadata(snapshot, onboarding, input.Secret)
+	}
 	if errCatalog == nil {
 		errCatalog = s.catalogs.Save(ctx, snapshot)
 	}
@@ -116,6 +366,24 @@ func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystem
 	return onboarding, nil
 }
 
+// appendInitialCodexMetadata atomically adds the token's current plan and exact allowed-model set to a new account catalog.
+// appendInitialCodexMetadata 将 Token 当前套餐与精确允许模型集合原子添加到新账号目录。
+func appendInitialCodexMetadata(snapshot catalog.Snapshot, onboarding providerconfig.SystemOnboarding, protectedToken []byte) (catalog.Snapshot, error) {
+	metadata, errMetadata := provideropenai.CodexCredentialMetadataFromToken(protectedToken, onboarding.Instance, onboarding.Credential, snapshot.ObservedAt)
+	if errMetadata != nil {
+		return catalog.Snapshot{}, errMetadata
+	}
+	if metadata.Plan == nil {
+		return catalog.Snapshot{}, fmt.Errorf("%w: initial Codex metadata omitted its plan", provider.ErrMetadataResponseInvalid)
+	}
+	snapshot.Plans = append(snapshot.Plans, *metadata.Plan)
+	snapshot.Entitlements = append(snapshot.Entitlements, metadata.Entitlements...)
+	if errValidate := snapshot.Validate(); errValidate != nil {
+		return catalog.Snapshot{}, fmt.Errorf("validate initial Codex metadata: %w", errValidate)
+	}
+	return snapshot, nil
+}
+
 // buildSystemOnboarding constructs server-owned identifiers, fixed endpoints, and bindings for one definition.
 // buildSystemOnboarding 为一个定义构建服务端拥有的标识、固定端点和绑定。
 func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefinition, input OnboardSystemProviderInput, secretReference string) (providerconfig.SystemOnboarding, error) {
@@ -128,12 +396,13 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 		return providerconfig.SystemOnboarding{}, errCredentialID
 	}
 	now := s.now().UTC()
-	// fingerprint is derived by the trusted service so clients cannot choose duplicate-detection metadata.
-	// fingerprint 由受信任服务派生，客户端不能选择排重元数据。
-	fingerprintBytes := sha256.Sum256(input.Secret)
+	handle := input.Handle
+	if handle == "" {
+		handle = "provider-" + strings.TrimPrefix(instanceID, "pvi_")
+	}
 	onboarding := providerconfig.SystemOnboarding{
-		Instance:   providerconfig.ProviderInstance{ID: instanceID, DefinitionID: definition.ID, Handle: input.Handle, DisplayName: input.DisplayName, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now},
-		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: input.AuthMethodID, Label: input.CredentialLabel, PrincipalKey: input.PrincipalKey, SecretRef: secretReference, Fingerprint: hex.EncodeToString(fingerprintBytes[:]), Status: providerconfig.CredentialActive, Revision: 1},
+		Instance:   providerconfig.ProviderInstance{ID: instanceID, DefinitionID: definition.ID, Handle: handle, DisplayName: input.DisplayName, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now},
+		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: input.AuthMethodID, Label: input.CredentialLabel, PrincipalKey: input.PrincipalKey, SecretRef: secretReference, Fingerprint: credentialFingerprint(input.Secret), Status: providerconfig.CredentialActive, ScopeRefs: append([]providerconfig.ScopeReference(nil), input.ScopeRefs...), ExpiresAt: input.credentialExpiresAt, Revision: 1},
 	}
 	if len(definition.EndpointPresets) != 1 {
 		return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition requires exactly one onboarding endpoint preset")
@@ -142,6 +411,15 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 		return providerconfig.SystemOnboarding{}, fmt.Errorf("provider protocol does not allow authentication method %q", input.AuthMethodID)
 	}
 	preset := definition.EndpointPresets[0]
+	baseURL := preset.BaseURL
+	region := preset.Region
+	if input.endpointBaseURL != "" || input.endpointRegion != "" {
+		if input.endpointBaseURL == "" || input.endpointRegion == "" {
+			return providerconfig.SystemOnboarding{}, errors.New("provider-owned endpoint override requires both base URL and region")
+		}
+		baseURL = input.endpointBaseURL
+		region = input.endpointRegion
+	}
 	endpointID, errEndpointID := generateID("ep_")
 	if errEndpointID != nil {
 		return providerconfig.SystemOnboarding{}, errEndpointID
@@ -150,7 +428,7 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 	if errBindingID != nil {
 		return providerconfig.SystemOnboarding{}, errBindingID
 	}
-	onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: preset.BaseURL, Region: preset.Region, Status: providerconfig.EndpointReady, Revision: 1})
+	onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: baseURL, Region: region, Status: providerconfig.EndpointReady, Revision: 1})
 	onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, EndpointID: endpointID, CredentialID: credentialID, Priority: definition.Priority, Enabled: true, Revision: 1})
 	return onboarding, nil
 }
@@ -187,7 +465,7 @@ type Service struct {
 // NewService creates one provider configuration application service.
 // NewService 创建一个供应商配置应用服务。
 func NewService(configurations providerconfig.Store, secrets secret.Store, catalogs catalog.Store) (*Service, error) {
-	if configurations == nil || secrets == nil || catalogs == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(secrets) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration, secret, and catalog stores are required")
 	}
 	return &Service{configurations: configurations, secrets: secrets, catalogs: catalogs, now: time.Now}, nil
@@ -208,6 +486,220 @@ type CreateCustomDefinitionInput struct {
 	// AuthMethod selects one generic custom-provider authentication mechanism.
 	// AuthMethod 选择一种通用自定义供应商认证机制。
 	AuthMethod providerconfig.AuthMethodType
+}
+
+// OnboardCustomProviderInput contains the sole initial configuration for one executable compatibility provider.
+// OnboardCustomProviderInput 包含一个可执行兼容供应商的唯一初始配置。
+type OnboardCustomProviderInput struct {
+	// DisplayName is reused as the provider, instance, and credential label so users enter one visible name.
+	// DisplayName 同时作为供应商、实例与凭据标签，使用户只需输入一个可见名称。
+	DisplayName string
+	// Handle is the stable workspace-visible routing identifier.
+	// Handle 是工作区可见的稳定路由标识。
+	Handle string
+	// ProtocolProfileID selects one exact custom execution factory profile.
+	// ProtocolProfileID 选择一个精确的自定义执行 Factory Profile。
+	ProtocolProfileID string
+	// BaseURL is the operator-owned versioned compatibility endpoint.
+	// BaseURL 是操作员拥有的带版本兼容 Endpoint。
+	BaseURL string
+	// Secret contains one transient Bearer or header API key and is never persisted outside Secret Store.
+	// Secret 包含一个临时 Bearer 或 Header API Key，且绝不在 Secret Store 之外持久化。
+	Secret []byte
+	// UpstreamModelID is the exact wire model identifier exposed by this endpoint.
+	// UpstreamModelID 是此 Endpoint 暴露的精确 Wire 模型标识。
+	UpstreamModelID string
+	// ModelDisplayName is the optional management-facing model label.
+	// ModelDisplayName 是可选的管理界面模型标签。
+	ModelDisplayName string
+}
+
+// CustomProviderOnboardingResult contains the committed custom graph and its initial user-declared catalog.
+// CustomProviderOnboardingResult 包含已提交的自定义图与初始用户声明目录。
+type CustomProviderOnboardingResult struct {
+	// Configuration is the atomically persisted custom definition and access graph.
+	// Configuration 是原子持久化的自定义 Definition 与访问图。
+	Configuration providerconfig.CustomOnboarding
+	// Catalog is the initial one-model catalog committed after configuration persistence.
+	// Catalog 是配置持久化后提交的初始单模型目录。
+	Catalog catalog.Snapshot
+	// ProviderModelID is the server-allocated identifier of the sole initial model.
+	// ProviderModelID 是服务端为唯一初始模型分配的标识。
+	ProviderModelID string
+}
+
+// OnboardCustomProvider atomically creates one whitelisted compatibility definition, access path, secret, and model catalog.
+// OnboardCustomProvider 原子创建一个白名单兼容 Definition、访问路径、Secret 与模型目录。
+func (s *Service) OnboardCustomProvider(ctx context.Context, input OnboardCustomProviderInput) (CustomProviderOnboardingResult, error) {
+	if s == nil {
+		return CustomProviderOnboardingResult{}, errors.New("provider management service is required")
+	}
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	input.Handle = strings.TrimSpace(input.Handle)
+	input.ProtocolProfileID = strings.TrimSpace(input.ProtocolProfileID)
+	input.BaseURL = strings.TrimSpace(input.BaseURL)
+	input.UpstreamModelID = strings.TrimSpace(input.UpstreamModelID)
+	input.ModelDisplayName = strings.TrimSpace(input.ModelDisplayName)
+	if input.DisplayName == "" || input.Handle == "" || input.BaseURL == "" || input.UpstreamModelID == "" || len(input.Secret) == 0 {
+		return CustomProviderOnboardingResult{}, errors.New("custom provider name, handle, endpoint, secret, and upstream model are required")
+	}
+	if input.ModelDisplayName == "" {
+		input.ModelDisplayName = input.UpstreamModelID
+	}
+	authMethod, errAuthMethod := customProviderAuthMethod(input.ProtocolProfileID)
+	if errAuthMethod != nil {
+		return CustomProviderOnboardingResult{}, errAuthMethod
+	}
+	identifiers, errIdentifiers := generateCustomOnboardingIdentifiers()
+	if errIdentifiers != nil {
+		return CustomProviderOnboardingResult{}, errIdentifiers
+	}
+	definition := customDefinition(identifiers.definitionID, 1, CreateCustomDefinitionInput{DisplayName: input.DisplayName, ProtocolProfileID: input.ProtocolProfileID, AuthMethod: authMethod})
+	secretReference, errSecret := s.secrets.Put(ctx, input.Secret)
+	if errSecret != nil {
+		return CustomProviderOnboardingResult{}, errSecret
+	}
+	// operationTime keeps every record created by this logical operation on one authoritative timestamp.
+	// operationTime 使本次逻辑操作创建的全部记录共享一个权威时间戳。
+	operationTime := s.now().UTC()
+	onboarding := buildCustomOnboarding(definition, identifiers, input, secretReference, operationTime)
+	if errSave := s.configurations.SaveCustomOnboarding(ctx, onboarding); errSave != nil {
+		if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), secretReference); errDelete != nil {
+			return CustomProviderOnboardingResult{}, fmt.Errorf("save custom provider onboarding: %w; compensate secret: %v", errSave, errDelete)
+		}
+		return CustomProviderOnboardingResult{}, errSave
+	}
+	catalogService, errCatalogService := NewCustomCatalogService(s.configurations, s.catalogs)
+	if errCatalogService != nil {
+		return CustomProviderOnboardingResult{}, compensateCustomOnboarding(ctx, s, onboarding, secretReference, errCatalogService)
+	}
+	snapshot, errCatalog := catalogService.SaveCustomCatalog(ctx, initialCustomCatalogInput(onboarding, identifiers, input, operationTime))
+	if errCatalog != nil {
+		return CustomProviderOnboardingResult{}, compensateCustomOnboarding(ctx, s, onboarding, secretReference, errCatalog)
+	}
+	return CustomProviderOnboardingResult{Configuration: onboarding, Catalog: snapshot, ProviderModelID: identifiers.modelID}, nil
+}
+
+// customOnboardingIdentifiers contains server-owned identifiers for one new custom provider graph and model catalog.
+// customOnboardingIdentifiers 包含一个新自定义供应商图与模型目录的服务端所有标识。
+type customOnboardingIdentifiers struct {
+	// definitionID identifies the custom provider definition.
+	// definitionID 标识自定义供应商 Definition。
+	definitionID string
+	// instanceID identifies the initial provider instance.
+	// instanceID 标识初始供应商实例。
+	instanceID string
+	// endpointID identifies the compatibility endpoint.
+	// endpointID 标识兼容 Endpoint。
+	endpointID string
+	// credentialID identifies the protected credential metadata.
+	// credentialID 标识受保护凭据元数据。
+	credentialID string
+	// bindingID identifies the executable access binding.
+	// bindingID 标识可执行访问绑定。
+	bindingID string
+	// modelID identifies the initial provider model.
+	// modelID 标识初始供应商模型。
+	modelID string
+	// offeringID identifies the initial model offering.
+	// offeringID 标识初始模型 Offering。
+	offeringID string
+	// profileID identifies the default execution profile.
+	// profileID 标识默认执行 Profile。
+	profileID string
+}
+
+// generateCustomOnboardingIdentifiers allocates every identity before any secret or configuration mutation.
+// generateCustomOnboardingIdentifiers 在任何 Secret 或配置变更前分配全部身份。
+func generateCustomOnboardingIdentifiers() (customOnboardingIdentifiers, error) {
+	identifiers := customOnboardingIdentifiers{}
+	// targets binds each domain prefix to its exact destination field before persistence starts.
+	// targets 在持久化开始前将每个领域前缀绑定到其精确目标字段。
+	targets := []struct {
+		// prefix is the domain-specific identifier prefix.
+		// prefix 是领域专用标识前缀。
+		prefix string
+		// value receives the generated identifier.
+		// value 接收生成的标识。
+		value *string
+	}{
+		{prefix: "custom_", value: &identifiers.definitionID},
+		{prefix: "pvi_", value: &identifiers.instanceID},
+		{prefix: "ep_", value: &identifiers.endpointID},
+		{prefix: "cred_", value: &identifiers.credentialID},
+		{prefix: "bind_", value: &identifiers.bindingID},
+		{prefix: "model_", value: &identifiers.modelID},
+		{prefix: "offer_", value: &identifiers.offeringID},
+		{prefix: "profile_", value: &identifiers.profileID},
+	}
+	for _, target := range targets {
+		identifier, errIdentifier := generateID(target.prefix)
+		if errIdentifier != nil {
+			return customOnboardingIdentifiers{}, errIdentifier
+		}
+		*target.value = identifier
+	}
+	return identifiers, nil
+}
+
+// customProviderAuthMethod returns the one fixed secret carrier implemented for a whitelisted custom protocol.
+// customProviderAuthMethod 返回白名单自定义协议实现的唯一固定 Secret 载体。
+func customProviderAuthMethod(protocolProfileID string) (providerconfig.AuthMethodType, error) {
+	switch protocolProfileID {
+	case protocolchat.ProfileID:
+		return providerconfig.AuthMethodBearer, nil
+	case protocolaistudio.ProfileID:
+		return providerconfig.AuthMethodHeaderKey, nil
+	default:
+		return "", fmt.Errorf("custom provider protocol profile %q has no registered execution factory", protocolProfileID)
+	}
+}
+
+// buildCustomOnboarding constructs one exact ready graph after the secret has entered protected storage.
+// buildCustomOnboarding 在 Secret 进入受保护存储后构建一个精确就绪图。
+func buildCustomOnboarding(definition providerconfig.ProviderDefinition, identifiers customOnboardingIdentifiers, input OnboardCustomProviderInput, secretReference string, now time.Time) providerconfig.CustomOnboarding {
+	return providerconfig.CustomOnboarding{
+		Definition: definition,
+		Instance:   providerconfig.ProviderInstance{ID: identifiers.instanceID, DefinitionID: definition.ID, Handle: input.Handle, DisplayName: input.DisplayName, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now},
+		Endpoint:   providerconfig.Endpoint{ID: identifiers.endpointID, ProviderInstanceID: identifiers.instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: input.BaseURL, Status: providerconfig.EndpointReady, Revision: 1},
+		Credential: providerconfig.Credential{ID: identifiers.credentialID, ProviderInstanceID: identifiers.instanceID, AuthMethodID: "default", Label: input.DisplayName, SecretRef: secretReference, Fingerprint: credentialFingerprint(input.Secret), Status: providerconfig.CredentialActive, Revision: 1},
+		Binding:    providerconfig.AccessBinding{ID: identifiers.bindingID, ProviderInstanceID: identifiers.instanceID, ChannelID: definition.ProtocolProfileID, EndpointID: identifiers.endpointID, CredentialID: identifiers.credentialID, Priority: 10, Enabled: true, Revision: 1},
+	}
+}
+
+// initialCustomCatalogInput builds one evidence-honest text model whose unknown capabilities remain explicit.
+// initialCustomCatalogInput 构建一个证据诚实的文本模型，并显式保留未知能力。
+func initialCustomCatalogInput(onboarding providerconfig.CustomOnboarding, identifiers customOnboardingIdentifiers, input OnboardCustomProviderInput, observedAt time.Time) SaveCustomCatalogInput {
+	// capabilities explicitly preserve the absence of upstream capability evidence.
+	// capabilities 显式保留缺少上游能力证据这一事实。
+	capabilities := catalog.ModelCapabilities{
+		ToolCalling: catalog.CapabilityUnknown, ParallelToolCalls: catalog.CapabilityUnknown,
+		StreamingToolArguments: catalog.CapabilityUnknown, StrictJSONSchema: catalog.CapabilityUnknown,
+		Reasoning: catalog.CapabilityUnknown, InputModalities: []string{"text"}, OutputModalities: []string{"text"},
+	}
+	return SaveCustomCatalogInput{
+		ProviderInstanceID: onboarding.Instance.ID,
+		Models:             []catalog.ProviderModel{{ID: identifiers.modelID, ProviderInstanceID: onboarding.Instance.ID, UpstreamModelID: input.UpstreamModelID, DisplayName: input.ModelDisplayName, Source: catalog.ModelSourceUserDeclared, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1}},
+		Offerings:          []catalog.ModelOffering{{ID: identifiers.offeringID, ProviderInstanceID: onboarding.Instance.ID, ProviderModelID: identifiers.modelID, UpstreamModelID: input.UpstreamModelID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1}},
+		Profiles:           []catalog.ExecutionProfile{{ID: identifiers.profileID, ProviderInstanceID: onboarding.Instance.ID, OfferingID: identifiers.offeringID, DisplayName: "Default", Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchSeamless, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1}},
+		ObservedAt:         observedAt,
+	}
+}
+
+// compensateCustomOnboarding removes catalog, configuration, and secret state after any post-configuration failure.
+// compensateCustomOnboarding 在配置后的任意失败后删除目录、配置与 Secret 状态。
+func compensateCustomOnboarding(ctx context.Context, service *Service, onboarding providerconfig.CustomOnboarding, secretReference string, cause error) error {
+	compensationContext := context.WithoutCancel(ctx)
+	errCatalogCleanup := service.catalogs.Delete(compensationContext, onboarding.Instance.ID)
+	if errors.Is(errCatalogCleanup, catalog.ErrSnapshotNotFound) {
+		errCatalogCleanup = nil
+	}
+	errConfigurationCleanup := service.configurations.DeleteCustomOnboarding(compensationContext, onboarding)
+	errSecretCleanup := service.secrets.Delete(compensationContext, secretReference)
+	if errCatalogCleanup != nil || errConfigurationCleanup != nil || errSecretCleanup != nil {
+		return fmt.Errorf("save custom provider catalog: %w; compensate catalog: %v; compensate configuration: %v; compensate secret: %v", cause, errCatalogCleanup, errConfigurationCleanup, errSecretCleanup)
+	}
+	return cause
 }
 
 // CreateCustomDefinition builds and persists one constrained custom provider definition.
@@ -262,9 +754,6 @@ func (s *Service) UpdateCustomDefinition(ctx context.Context, input UpdateCustom
 		ProtocolProfileID: input.ProtocolProfileID,
 		AuthMethod:        input.AuthMethod,
 	})
-	if errSave := s.configurations.SaveCustomDefinition(ctx, updated); errSave != nil {
-		return providerconfig.ProviderDefinition{}, errSave
-	}
 	instances, errInstances := s.configurations.ListInstances(ctx, current.ID)
 	if errInstances != nil {
 		return providerconfig.ProviderDefinition{}, errInstances
@@ -272,14 +761,14 @@ func (s *Service) UpdateCustomDefinition(ctx context.Context, input UpdateCustom
 	// migrationTime is shared so all transitioned instances form one management operation snapshot.
 	// migrationTime 被共享，使全部转换实例形成一次管理操作快照。
 	migrationTime := s.now().UTC()
-	for _, instance := range instances {
-		instance.DefinitionRevision = updated.Revision
-		instance.Status = providerconfig.LifecycleMigrationRequired
-		instance.Revision++
-		instance.UpdatedAt = migrationTime
-		if errSaveInstance := s.configurations.SaveInstance(ctx, instance); errSaveInstance != nil {
-			return providerconfig.ProviderDefinition{}, fmt.Errorf("mark provider instance %s migration required: %w", instance.ID, errSaveInstance)
-		}
+	for index := range instances {
+		instances[index].DefinitionRevision = updated.Revision
+		instances[index].Status = providerconfig.LifecycleMigrationRequired
+		instances[index].Revision++
+		instances[index].UpdatedAt = migrationTime
+	}
+	if errSave := s.configurations.SaveCustomDefinitionMigration(ctx, providerconfig.CustomDefinitionMigration{Definition: updated, Instances: instances}); errSave != nil {
+		return providerconfig.ProviderDefinition{}, errSave
 	}
 	return updated, nil
 }
@@ -293,7 +782,7 @@ func customDefinition(definitionID string, revision uint64, input CreateCustomDe
 		DisplayName:         input.DisplayName,
 		ConfigSchemaVersion: "1",
 		ProtocolProfileID:   input.ProtocolProfileID,
-		EndpointProfileID:   "custom",
+		EndpointProfileID:   customEndpointProfileID(input.ProtocolProfileID),
 		AuthMethodIDs:       []string{"default"},
 		RuntimeReady:        true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{
@@ -308,6 +797,19 @@ func customDefinition(definitionID string, revision uint64, input CreateCustomDe
 			AllowanceReader:   providerconfig.SupportUnsupported,
 		},
 		Revision: revision,
+	}
+}
+
+// customEndpointProfileID maps the complete executable custom protocol whitelist to one exact endpoint shape.
+// customEndpointProfileID 将完整可执行自定义协议白名单映射到一个精确 Endpoint 形态。
+func customEndpointProfileID(protocolProfileID string) string {
+	switch protocolProfileID {
+	case protocolchat.ProfileID:
+		return providerconfig.CustomEndpointProfileOpenAICompatibility
+	case protocolaistudio.ProfileID:
+		return providerconfig.CustomEndpointProfileVertexCompatibility
+	default:
+		return ""
 	}
 }
 
@@ -516,9 +1018,6 @@ type AddCredentialInput struct {
 	// PrincipalKey is the stable upstream account identity when known.
 	// PrincipalKey 是已知时稳定的上游账号身份。
 	PrincipalKey string
-	// Fingerprint is the irreversible duplicate-detection value.
-	// Fingerprint 是不可逆的排重值。
-	Fingerprint string
 	// ScopeRefs lists shared commercial and organizational scopes.
 	// ScopeRefs 列出共享商业与组织作用域。
 	ScopeRefs []providerconfig.ScopeReference
@@ -555,7 +1054,7 @@ func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (
 		Label:              input.Label,
 		PrincipalKey:       input.PrincipalKey,
 		SecretRef:          secretReference,
-		Fingerprint:        input.Fingerprint,
+		Fingerprint:        credentialFingerprint(input.Secret),
 		Status:             providerconfig.CredentialActive,
 		ScopeRefs:          append([]providerconfig.ScopeReference(nil), input.ScopeRefs...),
 		Revision:           1,
@@ -581,28 +1080,47 @@ type UpdateCredentialInput struct {
 	// Label is the replacement management-facing credential label.
 	// Label 是替换后的管理界面凭据标签。
 	Label string
-	// PrincipalKey is the replacement optional upstream account identity.
-	// PrincipalKey 是替换后的可选上游账号身份。
+	// PrincipalKey replaces operator-owned account metadata and may only echo or omit provider-derived identity.
+	// PrincipalKey 替换操作员拥有的账号元数据；对供应商派生身份只能原样回传或省略。
 	PrincipalKey string
-	// Fingerprint is the replacement irreversible duplicate-detection value.
-	// Fingerprint 是替换后的不可逆排重值。
-	Fingerprint string
-	// ScopeRefs is the replacement set of commercial and organizational scopes.
-	// ScopeRefs 是替换后的商业和组织作用域集合。
+	// ScopeRefs replaces operator-owned scopes and may only echo or omit provider-derived scopes.
+	// ScopeRefs 替换操作员拥有的作用域；对供应商派生作用域只能原样回传或省略。
 	ScopeRefs []providerconfig.ScopeReference
 }
 
-// UpdateCredential replaces non-secret credential metadata without reading or returning secret bytes.
-// UpdateCredential 替换非秘密凭据元数据且不读取或返回 Secret 字节。
+// UpdateCredential replaces operator-owned metadata while preserving provider-derived identity and scope facts.
+// UpdateCredential 替换操作员拥有的元数据，同时保留供应商派生的身份与作用域事实。
 func (s *Service) UpdateCredential(ctx context.Context, input UpdateCredentialInput) (providerconfig.Credential, error) {
 	credential, errCredential := s.credential(ctx, input.ProviderInstanceID, input.CredentialID)
 	if errCredential != nil {
 		return providerconfig.Credential{}, errCredential
 	}
+	instance, errInstance := s.configurations.GetInstance(ctx, input.ProviderInstanceID)
+	if errInstance != nil {
+		return providerconfig.Credential{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return providerconfig.Credential{}, errDefinition
+	}
+	authMethod, exists := definition.AuthMethod(credential.AuthMethodID)
+	if !exists {
+		return providerconfig.Credential{}, errors.New("provider credential references an unknown authentication method")
+	}
 	credential.Label = input.Label
-	credential.PrincipalKey = input.PrincipalKey
-	credential.Fingerprint = input.Fingerprint
-	credential.ScopeRefs = append([]providerconfig.ScopeReference(nil), input.ScopeRefs...)
+	if providerOwnsCredentialMaterial(authMethod.Type) {
+		// Empty values mean the caller omitted immutable fields; non-empty conflicting values are explicit tampering.
+		// 空值表示调用方省略不可变字段；非空冲突值则是显式篡改。
+		if input.PrincipalKey != "" && input.PrincipalKey != credential.PrincipalKey {
+			return providerconfig.Credential{}, errors.New("provider-derived credential identity is immutable")
+		}
+		if input.ScopeRefs != nil && !slices.Equal(input.ScopeRefs, credential.ScopeRefs) {
+			return providerconfig.Credential{}, errors.New("provider-derived credential scopes are immutable")
+		}
+	} else {
+		credential.PrincipalKey = input.PrincipalKey
+		credential.ScopeRefs = append([]providerconfig.ScopeReference(nil), input.ScopeRefs...)
+	}
 	credential.Revision++
 	if errSave := s.configurations.SaveCredential(ctx, credential); errSave != nil {
 		return providerconfig.Credential{}, errSave
@@ -622,9 +1140,6 @@ type RotateCredentialSecretInput struct {
 	// Secret contains the transient replacement credential bytes.
 	// Secret 包含临时替换凭据字节。
 	Secret []byte
-	// Fingerprint is the replacement irreversible duplicate-detection value for the new secret.
-	// Fingerprint 是新 Secret 的替换不可逆排重值。
-	Fingerprint string
 }
 
 // RotateCredentialSecret writes a replacement secret before changing metadata and cleans up the old secret afterwards.
@@ -640,30 +1155,11 @@ func (s *Service) RotateCredentialSecret(ctx context.Context, input RotateCreden
 	if len(input.Secret) == 0 {
 		return providerconfig.Credential{}, fmt.Errorf("replacement provider credential secret is required")
 	}
-	// replacementReference is written first so the existing credential remains usable if protection fails.
-	// replacementReference 先写入，因此保护失败时既有凭据仍可用。
-	replacementReference, errPut := s.secrets.Put(ctx, input.Secret)
-	if errPut != nil {
-		return providerconfig.Credential{}, errPut
-	}
-	previousReference := credential.SecretRef
-	credential.SecretRef = replacementReference
-	credential.Fingerprint = input.Fingerprint
-	credential.Revision++
-	if errSave := s.configurations.SaveCredential(ctx, credential); errSave != nil {
-		if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), replacementReference); errDelete != nil {
-			return providerconfig.Credential{}, fmt.Errorf("save rotated credential metadata: %v; compensate replacement secret: %w", errSave, errDelete)
-		}
-		return providerconfig.Credential{}, errSave
-	}
-	if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), previousReference); errDelete != nil {
-		return providerconfig.Credential{}, fmt.Errorf("persisted rotated credential but could not delete previous secret: %w", errDelete)
-	}
-	return credential, nil
+	return persistCredentialSecretReplacement(ctx, s.configurations, s.secrets, credential, input.Secret)
 }
 
-// validateDirectSecretAuthMethod permits operator-supplied bytes only for non-interactive authentication methods declared by the exact instance definition.
-// validateDirectSecretAuthMethod 仅允许精确实例定义声明的非交互认证方式接收操作员提供的字节。
+// validateDirectSecretAuthMethod permits operator-supplied bytes only for operator-managed authentication methods declared by the exact instance definition.
+// validateDirectSecretAuthMethod 仅允许精确实例定义声明的操作员管理认证方式接收操作员提供的字节。
 func (s *Service) validateDirectSecretAuthMethod(ctx context.Context, instanceID string, authMethodID string) error {
 	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
 	if errInstance != nil {
@@ -677,10 +1173,16 @@ func (s *Service) validateDirectSecretAuthMethod(ctx context.Context, instanceID
 	if !exists {
 		return fmt.Errorf("provider credential requires an exact definition-owned authentication method")
 	}
-	if authMethod.Type == providerconfig.AuthMethodDeviceFlow || authMethod.Type == providerconfig.AuthMethodOAuth {
-		return fmt.Errorf("interactive provider credentials require their server-owned authorization workflow")
+	if providerOwnsCredentialMaterial(authMethod.Type) {
+		return fmt.Errorf("provider-owned credentials require their server-owned authorization workflow")
 	}
 	return nil
+}
+
+// providerOwnsCredentialMaterial reports authentication types whose bytes, identity, and scopes must be derived by a specialized provider workflow.
+// providerOwnsCredentialMaterial 报告必须由供应商专用流程派生字节、身份与作用域的认证类型。
+func providerOwnsCredentialMaterial(authMethodType providerconfig.AuthMethodType) bool {
+	return authMethodType == providerconfig.AuthMethodDeviceFlow || authMethodType == providerconfig.AuthMethodOAuth || authMethodType == providerconfig.AuthMethodServiceAccount
 }
 
 // AddBindingInput contains one endpoint-to-credential access relationship.
@@ -965,7 +1467,7 @@ type CustomCatalogService struct {
 // NewCustomCatalogService creates one user-declared model catalog manager.
 // NewCustomCatalogService 创建一个用户声明模型目录管理器。
 func NewCustomCatalogService(configurations providerconfig.Store, catalogs catalog.Store) (*CustomCatalogService, error) {
-	if configurations == nil || catalogs == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration and catalog stores are required")
 	}
 	targetResolver, errResolver := resolve.New(configurations, catalogs)
@@ -1086,6 +1588,16 @@ func (s *CustomCatalogService) customInstance(ctx context.Context, providerInsta
 		return providerconfig.ProviderInstance{}, fmt.Errorf("%w: %s", ErrCustomCatalogRequiresCustomProvider, instance.ID)
 	}
 	return instance, nil
+}
+
+// providerTokenExpiry converts one provider-issued Unix expiry into isolated credential metadata.
+// providerTokenExpiry 将一个供应商签发的 Unix 到期时间转换为隔离凭据元数据。
+func providerTokenExpiry(expiresAt int64) *time.Time {
+	if expiresAt <= 0 {
+		return nil
+	}
+	value := time.Unix(expiresAt, 0).UTC()
+	return &value
 }
 
 // cloneTimePointer copies one optional lifecycle timestamp.

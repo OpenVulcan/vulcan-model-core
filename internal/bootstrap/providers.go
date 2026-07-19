@@ -5,16 +5,19 @@ package bootstrap
 import (
 	"fmt"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
 
 const (
-	// KimiGroupID identifies the management-only Kimi provider family.
-	// KimiGroupID 标识仅供管理使用的 Kimi 供应商系列。
+	// KimiGroupID identifies the Kimi provider family.
+	// KimiGroupID 标识 Kimi 供应商系列。
 	KimiGroupID = "kimi"
 	// KimiCNDefinitionID identifies the Kimi Open Platform CN site.
 	// KimiCNDefinitionID 标识 Kimi 开放平台 CN 站点。
@@ -32,6 +35,9 @@ const (
 func RegisterSystemProviders(registry *providerconfig.SystemRegistry) error {
 	if registry == nil {
 		return fmt.Errorf("system provider registry is required")
+	}
+	if errProviders := registerCLIProxyProviderCatalog(registry); errProviders != nil {
+		return errProviders
 	}
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{
 		ID:             KimiGroupID,
@@ -53,9 +59,9 @@ func RegisterSystemProviders(registry *providerconfig.SystemRegistry) error {
 
 // RegisterKimiExecutionDrivers binds every runtime-ready Kimi definition to its sole OpenAI Chat execution driver.
 // RegisterKimiExecutionDrivers 将每个运行时就绪的 Kimi 定义绑定到其唯一的 OpenAI Chat 执行 Driver。
-func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlatformClient *transport.Client, codingClient *transport.Client) error {
-	if registry == nil || openPlatformClient == nil || codingClient == nil {
-		return fmt.Errorf("Kimi execution registry and transport clients are required")
+func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlatformClient *transport.Client, codingClient *transport.Client, secrets secret.Store) error {
+	if registry == nil || openPlatformClient == nil || codingClient == nil || dependency.IsNil(secrets) {
+		return fmt.Errorf("Kimi execution registry, transport clients, and protected secret store are required")
 	}
 	for _, definitionID := range []string{KimiCNDefinitionID, KimiGlobalDefinitionID} {
 		driver, errDriver := provideropenai.NewChatDriver(definitionID, protocolchat.ProfileID, openPlatformClient, kimiChatCapabilities())
@@ -66,7 +72,13 @@ func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlat
 			return fmt.Errorf("register Kimi Chat driver %s: %w", definitionID, errRegister)
 		}
 	}
-	codingChat, errCodingChat := provideropenai.NewBearerChatDriver(KimiCodingDefinitionID, protocolchat.ProfileID, codingClient, kimiChatCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodDeviceFlow})
+	// codingAdapter owns only the Kimi Coding model-name and non-secret device-header wire adaptation.
+	// codingAdapter 仅负责 Kimi Coding 模型名及非秘密设备请求头的 wire 适配。
+	codingAdapter, errCodingAdapter := providerkimi.NewCodingChatAdapter(secrets)
+	if errCodingAdapter != nil {
+		return fmt.Errorf("create Kimi Coding request adapter: %w", errCodingAdapter)
+	}
+	codingChat, errCodingChat := provideropenai.NewBearerChatDriverWithRequestAdapter(KimiCodingDefinitionID, protocolchat.ProfileID, codingClient, kimiChatCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodDeviceFlow}, codingAdapter)
 	if errCodingChat != nil {
 		return fmt.Errorf("create Kimi Coding Chat driver: %w", errCodingChat)
 	}

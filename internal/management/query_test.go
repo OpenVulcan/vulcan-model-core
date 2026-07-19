@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
@@ -34,7 +35,7 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 	}
 	credential, errCredential := commands.AddCredential(ctx, AddCredentialInput{
 		ID: "cred_query_redaction", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Safe Label",
-		PrincipalKey: "sensitive-principal", Fingerprint: "sensitive-fingerprint", Secret: []byte("sensitive-secret"),
+		PrincipalKey: "sensitive-principal", Secret: []byte("sensitive-secret"),
 	})
 	if errCredential != nil {
 		t.Fatalf("create credential: %v", errCredential)
@@ -118,7 +119,7 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	if errGroups != nil {
 		t.Fatalf("ListProviderGroups() error = %v", errGroups)
 	}
-	if len(groups) != 1 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 {
+	if len(groups) != 5 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 {
 		t.Fatalf("groups = %#v", groups)
 	}
 	variants := groups[0].ProviderDefinitions
@@ -127,5 +128,118 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	}
 	if variants[0].ModelCatalogID != variants[1].ModelCatalogID || variants[2].ModelCatalogID == variants[0].ModelCatalogID {
 		t.Fatalf("catalog ownership = %#v", variants)
+	}
+}
+
+// TestCatalogViewPreservesAllowanceWindowSemantics verifies the management projection retains calendar reset context while redacting scope identity.
+// TestCatalogViewPreservesAllowanceWindowSemantics 验证管理投影在脱敏作用域身份时仍保留日历重置上下文。
+func TestCatalogViewPreservesAllowanceWindowSemantics(t *testing.T) {
+	// resetAt fixes the provider-reported recovery boundary serialized to management clients.
+	// resetAt 固定序列化给管理客户端的供应商报告恢复边界。
+	resetAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	// rollingDuration exceeds JavaScript's safe integer range and proves the HTTP boundary remains exact.
+	// rollingDuration 超过 JavaScript 安全整数范围，用于证明 HTTP 边界仍保持精确。
+	rollingDuration := 365 * 24 * time.Hour
+	// snapshot contains calendar and rolling allowance nodes needed to verify the identity-safe projection.
+	// snapshot 包含验证身份安全投影所需的日历与滚动额度节点。
+	snapshot := catalog.Snapshot{
+		ProviderInstanceID: "pvi_window_projection",
+		Allowances: []catalog.AllowanceSnapshot{
+			{
+				Kind:    catalog.AllowanceWindowQuota,
+				Scope:   catalog.ScopeCredential,
+				ScopeID: "cred_sensitive_scope",
+				Window: &catalog.AllowanceWindow{
+					Kind:         catalog.WindowCalendar,
+					CalendarUnit: "month",
+					TimeZone:     "Asia/Shanghai",
+					ResetAt:      &resetAt,
+				},
+			},
+			{
+				Kind:    catalog.AllowanceWindowQuota,
+				Scope:   catalog.ScopeCredential,
+				ScopeID: "cred_sensitive_rolling_scope",
+				Window: &catalog.AllowanceWindow{
+					Kind:     catalog.WindowRolling,
+					Duration: rollingDuration,
+				},
+			},
+		},
+	}
+	// view is the exact DTO returned by management catalog endpoints.
+	// view 是管理目录端点返回的精确 DTO。
+	view := catalogView(snapshot, nil)
+	if len(view.Allowances) != 2 || view.Allowances[0].Window == nil || view.Allowances[1].Window == nil {
+		t.Fatalf("allowance projection = %#v", view.Allowances)
+	}
+	if view.Allowances[0].Window.TimeZone != "Asia/Shanghai" || view.Allowances[0].Window.CalendarUnit != "month" {
+		t.Fatalf("allowance window projection = %#v", view.Allowances[0].Window)
+	}
+	if view.Allowances[1].Window.Duration != "31536000000000000" {
+		t.Fatalf("rolling allowance duration = %q", view.Allowances[1].Window.Duration)
+	}
+	// encodedView proves the HTTP JSON contract retains the newly audited node name.
+	// encodedView 证明 HTTP JSON 合同保留了本轮审核补齐的节点名称。
+	encodedView, errEncode := json.Marshal(view)
+	if errEncode != nil {
+		t.Fatalf("encode catalog view: %v", errEncode)
+	}
+	if !strings.Contains(string(encodedView), `"time_zone":"Asia/Shanghai"`) || !strings.Contains(string(encodedView), `"duration":"31536000000000000"`) || strings.Contains(string(encodedView), "cred_") {
+		t.Fatalf("catalog view did not preserve safe window semantics: %s", encodedView)
+	}
+}
+
+// TestCatalogViewReportsProviderAuthorizedModels verifies explicit entitlements are not confused with local enablement policy.
+// TestCatalogViewReportsProviderAuthorizedModels 验证显式供应商授权不会与本地启用策略混淆。
+func TestCatalogViewReportsProviderAuthorizedModels(t *testing.T) {
+	// snapshot combines all-bound, explicitly allowed, and explicitly unproven model cases.
+	// snapshot 组合全部绑定、显式允许与未获得显式证明的模型场景。
+	snapshot := catalog.Snapshot{
+		Models: []catalog.ProviderModel{
+			{ID: "model_all_bound", EntitlementMode: catalog.EntitlementAllBoundCredentials},
+			{ID: "model_explicit_allowed", EntitlementMode: catalog.EntitlementExplicit},
+			{ID: "model_explicit_missing", EntitlementMode: catalog.EntitlementExplicit},
+		},
+		Entitlements: []catalog.ModelEntitlement{{ProviderModelID: "model_explicit_allowed", Availability: catalog.AvailabilityAllowed}},
+	}
+	// view disables the explicitly allowed model locally to prove the two states remain independent.
+	// view 在本地停用显式允许模型，以证明两种状态保持独立。
+	view := catalogView(snapshot, []string{"model_explicit_allowed"})
+	if len(view.Models) != 3 {
+		t.Fatalf("model view count = %d, want 3", len(view.Models))
+	}
+	// modelsByID makes each expected authorization state independent of presentation sorting.
+	// modelsByID 使每个预期授权状态不依赖展示排序。
+	modelsByID := make(map[string]ModelView, len(view.Models))
+	for _, model := range view.Models {
+		modelsByID[model.ID] = model
+	}
+	if !modelsByID["model_all_bound"].ProviderAuthorized || !modelsByID["model_explicit_allowed"].ProviderAuthorized || modelsByID["model_explicit_missing"].ProviderAuthorized {
+		t.Fatalf("provider authorization projection = %#v", modelsByID)
+	}
+	if modelsByID["model_explicit_allowed"].Enabled {
+		t.Fatal("provider authorization incorrectly overrode local disabled policy")
+	}
+}
+
+// TestCatalogViewSortsPlansByEveryIdentityField verifies map aggregation cannot randomize equal-code plan names.
+// TestCatalogViewSortsPlansByEveryIdentityField 验证 map 聚合不会随机排列代码相同但名称不同的套餐。
+func TestCatalogViewSortsPlansByEveryIdentityField(t *testing.T) {
+	// snapshot contains equal-code plans whose names and statuses exercise the complete deterministic order.
+	// snapshot 包含代码相同的套餐，其名称与状态用于覆盖完整确定性顺序。
+	snapshot := catalog.Snapshot{Plans: []catalog.PlanSnapshot{
+		{PlanCode: "pro", PlanName: "Zulu", Status: "active"},
+		{PlanCode: "pro", PlanName: "Alpha", Status: "inactive"},
+		{PlanCode: "pro", PlanName: "Alpha", Status: "active"},
+	}}
+	// plans is the redacted and aggregated management projection under test.
+	// plans 是待测的脱敏聚合管理投影。
+	plans := catalogView(snapshot, nil).Plans
+	if len(plans) != 3 {
+		t.Fatalf("plan view count = %d, want 3", len(plans))
+	}
+	if plans[0].PlanName != "Alpha" || plans[0].Status != "active" || plans[1].PlanName != "Alpha" || plans[1].Status != "inactive" || plans[2].PlanName != "Zulu" {
+		t.Fatalf("plan ordering = %#v", plans)
 	}
 }

@@ -34,18 +34,25 @@ func NewAntigravityDriver(definitionID string, client *transport.Client, capabil
 		StreamPath:   "/v1internal:streamGenerateContent?alt=sse",
 		Headers: []transport.Header{
 			{Name: "Content-Type", Value: "application/json"},
-			{Name: "User-Agent", Value: "antigravity/hub/2.2.1 darwin/arm64"},
 		},
 		Authentication:     transport.Authentication{Mode: transport.AuthenticationBearer},
 		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodOAuth, providerconfig.AuthMethodBearer},
 		StreamInputMode:    translateddriver.StreamInputPayload,
 		SendDonePayload:    true,
 		AdaptBody:          adaptAntigravityProject,
+		AdaptRequest:       adaptAntigravityRequest,
 	})
 	if errDriver != nil {
 		return nil, errDriver
 	}
 	return &AntigravityDriver{Driver: driver}, nil
+}
+
+// adaptAntigravityRequest applies CLIProxyAPI's dynamically refreshed short Hub User-Agent.
+// adaptAntigravityRequest 应用 CLIProxyAPI 动态刷新的简短 Hub User-Agent。
+func adaptAntigravityRequest(_ provider.ExecutionRequest, outbound transport.Request) (transport.Request, error) {
+	outbound.Headers = append(outbound.Headers, transport.Header{Name: "User-Agent", Value: AntigravityRequestUserAgent("")})
+	return outbound, nil
 }
 
 // adaptAntigravityProject sets the unique project scope required by the copied Antigravity envelope.

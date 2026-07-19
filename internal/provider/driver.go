@@ -81,6 +81,28 @@ type AllowanceReader interface {
 	ReadAllowances(context.Context, providerconfig.ProviderInstance, providerconfig.Credential) ([]catalog.AllowanceSnapshot, error)
 }
 
+// CredentialMetadataResult contains every account fact decoded from one provider observation.
+// CredentialMetadataResult 包含从一次供应商观测解码出的全部账号事实。
+type CredentialMetadataResult struct {
+	// Plan is the optional commercial plan returned by the provider observation.
+	// Plan 是供应商观测返回的可选商业套餐。
+	Plan *catalog.PlanSnapshot
+	// Entitlements contains account-specific model authorization observations.
+	// Entitlements 包含账号特定模型授权观测。
+	Entitlements []catalog.ModelEntitlement
+	// Allowances contains quota, balance, or credit observations from the same response.
+	// Allowances 包含来自同一响应的额度、余额或积分观测。
+	Allowances []catalog.AllowanceSnapshot
+}
+
+// CredentialMetadataReader is implemented when one provider call returns multiple account capability classes.
+// CredentialMetadataReader 由一次供应商调用返回多类账号能力的 Driver 实现。
+type CredentialMetadataReader interface {
+	// ReadCredentialMetadata returns one internally consistent account observation for one credential.
+	// ReadCredentialMetadata 为一个凭据返回一份内部一致的账号观测。
+	ReadCredentialMetadata(context.Context, providerconfig.ProviderInstance, providerconfig.Credential) (CredentialMetadataResult, error)
+}
+
 // ErrorObservation contains protocol-neutral upstream failure evidence.
 // ErrorObservation 包含协议无关的上游失败证据。
 type ErrorObservation struct {

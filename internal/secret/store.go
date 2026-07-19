@@ -91,9 +91,11 @@ func (s *MemoryStore) Delete(ctx context.Context, reference string) error {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.values[reference]; !exists {
+	value, exists := s.values[reference]
+	if !exists {
 		return fmt.Errorf("%w: %s", ErrNotFound, reference)
 	}
+	clear(value)
 	delete(s.values, reference)
 	return nil
 }

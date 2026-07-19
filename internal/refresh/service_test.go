@@ -25,6 +25,29 @@ type fakeKimiDriver struct {
 	// observedAt fixes every provider metadata timestamp.
 	// observedAt 固定全部供应商元数据时间戳。
 	observedAt time.Time
+	// metadataReads counts complete per-credential observations performed by the aggregate contract.
+	// metadataReads 统计聚合合同执行的完整逐凭据观测次数。
+	metadataReads *int
+}
+
+// metadataReaderlessDriver declares metadata capabilities without implementing any reader.
+// metadataReaderlessDriver 声明元数据能力但不实现任何读取器。
+type metadataReaderlessDriver struct {
+	// definition contains the intentionally inconsistent feature contract.
+	// definition 包含故意不一致的功能合同。
+	definition providerconfig.ProviderDefinition
+}
+
+// Definition returns the intentionally inconsistent test definition.
+// Definition 返回故意不一致的测试 Definition。
+func (d metadataReaderlessDriver) Definition() providerconfig.ProviderDefinition {
+	return d.definition
+}
+
+// ClassifyError reports no runtime classification for the metadata-only test double.
+// ClassifyError 表示仅元数据测试替身没有运行时错误分类。
+func (d metadataReaderlessDriver) ClassifyError(provider.ErrorObservation) (provider.ClassifiedError, bool) {
+	return provider.ClassifiedError{}, false
 }
 
 // Definition returns the immutable fake Kimi integration definition.
@@ -187,6 +210,27 @@ func (d fakeKimiDriver) ReadAllowances(_ context.Context, instance providerconfi
 	}}, nil
 }
 
+// ReadCredentialMetadata returns every fake account fact from one aggregate provider observation.
+// ReadCredentialMetadata 从一次聚合供应商观测返回全部 Fake 账号事实。
+func (d fakeKimiDriver) ReadCredentialMetadata(ctx context.Context, instance providerconfig.ProviderInstance, credential providerconfig.Credential) (provider.CredentialMetadataResult, error) {
+	if d.metadataReads != nil {
+		(*d.metadataReads)++
+	}
+	plan, errPlan := d.ReadPlan(ctx, instance, credential)
+	if errPlan != nil {
+		return provider.CredentialMetadataResult{}, errPlan
+	}
+	entitlements, errEntitlements := d.ReadEntitlements(ctx, instance, credential)
+	if errEntitlements != nil {
+		return provider.CredentialMetadataResult{}, errEntitlements
+	}
+	allowances, errAllowances := d.ReadAllowances(ctx, instance, credential)
+	if errAllowances != nil {
+		return provider.CredentialMetadataResult{}, errAllowances
+	}
+	return provider.CredentialMetadataResult{Plan: &plan, Entitlements: entitlements, Allowances: allowances}, nil
+}
+
 // fakeKimiCapabilities returns explicit text capabilities for one context shape.
 // fakeKimiCapabilities 返回一个上下文形态的显式文本能力。
 func fakeKimiCapabilities(contextWindow int64) catalog.ModelCapabilities {
@@ -218,6 +262,9 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	if errSystems != nil {
 		t.Fatalf("create system registry: %v", errSystems)
 	}
+	// metadataReads proves the coordinator chooses one aggregate observation per credential.
+	// metadataReads 证明协调器为每个凭据选择一次聚合观测。
+	metadataReads := 0
 	driver := fakeKimiDriver{definition: providerconfig.ProviderDefinition{
 		ID: "system_kimi_coding_plan", Kind: providerconfig.DefinitionKindSystem, DisplayName: "Kimi Coding Plan",
 		DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ConfigSchemaVersion: "1",
@@ -230,7 +277,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 			EntitlementReader: providerconfig.SupportSupported, AllowanceReader: providerconfig.SupportSupported,
 		},
 		Revision: 1,
-	}, observedAt: observedAt}
+	}, observedAt: observedAt, metadataReads: &metadataReads}
 	drivers, errDrivers := provider.NewRegistry(systems)
 	if errDrivers != nil {
 		t.Fatalf("create provider registry: %v", errDrivers)
@@ -260,8 +307,8 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 		t.Fatalf("add Kimi endpoint: %v", errEndpoint)
 	}
 	credentialInputs := []management.AddCredentialInput{
-		{ID: "cred_kimi_256k", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "256K", PrincipalKey: "account-256k", Fingerprint: "fingerprint-256k", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-256k"}}, Secret: []byte("secret-256k")},
-		{ID: "cred_kimi_1m", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "1M", PrincipalKey: "account-1m", Fingerprint: "fingerprint-1m", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-1m"}}, Secret: []byte("secret-1m")},
+		{ID: "cred_kimi_256k", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "256K", PrincipalKey: "account-256k", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-256k"}}, Secret: []byte("secret-256k")},
+		{ID: "cred_kimi_1m", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "1M", PrincipalKey: "account-1m", ScopeRefs: []providerconfig.ScopeReference{{Kind: "billing_account", ID: "billing-1m"}}, Secret: []byte("secret-1m")},
 	}
 	for index, input := range credentialInputs {
 		credential, errCredential := configurationService.AddCredential(ctx, input)
@@ -288,6 +335,9 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	}
 	if len(snapshot.Profiles) != 2 || len(snapshot.Pools) != 2 || len(snapshot.Plans) != 2 {
 		t.Fatalf("profiles=%d pools=%d plans=%d", len(snapshot.Profiles), len(snapshot.Pools), len(snapshot.Plans))
+	}
+	if metadataReads != len(credentialInputs) {
+		t.Fatalf("aggregate metadata reads=%d, want %d", metadataReads, len(credentialInputs))
 	}
 	queryService, errQueryService := management.NewQueryService(configurations, catalogs)
 	if errQueryService != nil {
@@ -330,5 +380,99 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	})
 	if !errors.Is(errResolve1M, resolve.ErrNoEligibleTarget) || len(diagnostics.BlockingAllowanceKinds) != 1 || diagnostics.BlockingAllowanceKinds[0] != catalog.AllowanceBalance {
 		t.Fatalf("expected exhausted 1M balance, error=%v diagnostics=%+v", errResolve1M, diagnostics)
+	}
+	if _, errDisable := configurationService.SetCredentialStatus(ctx, management.SetCredentialStatusInput{
+		ProviderInstanceID: instance.ID,
+		CredentialID:       "cred_kimi_1m",
+		Status:             providerconfig.CredentialDisabled,
+	}); errDisable != nil {
+		t.Fatalf("disable Kimi credential: %v", errDisable)
+	}
+	metadataReads = 0
+	disabledSnapshot, errDisabledRefresh := refreshService.Refresh(ctx, instance.ID, observedAt.Add(time.Minute))
+	if errDisabledRefresh != nil {
+		t.Fatalf("refresh with disabled credential: %v", errDisabledRefresh)
+	}
+	if metadataReads != 1 || len(disabledSnapshot.Plans) != 1 || disabledSnapshot.Plans[0].CredentialID != "cred_kimi_256k" {
+		t.Fatalf("disabled refresh reads=%d plans=%+v", metadataReads, disabledSnapshot.Plans)
+	}
+}
+
+// TestValidateDeclaredMetadataReadersRejectsMissingImplementations verifies supported metadata cannot silently become empty output.
+// TestValidateDeclaredMetadataReadersRejectsMissingImplementations 验证已支持元数据不能静默变为空输出。
+func TestValidateDeclaredMetadataReadersRejectsMissingImplementations(t *testing.T) {
+	testCases := []struct {
+		// name labels the isolated feature declaration.
+		// name 标记隔离的功能声明。
+		name string
+		// features contains the exact inconsistent contract under test.
+		// features 包含待测试的精确不一致合同。
+		features providerconfig.ProviderFeatureSet
+	}{
+		{name: "plan", features: providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportSupported}},
+		{name: "entitlement", features: providerconfig.ProviderFeatureSet{EntitlementReader: providerconfig.SupportSupported}},
+		{name: "allowance", features: providerconfig.ProviderFeatureSet{AllowanceReader: providerconfig.SupportSupported}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			driver := metadataReaderlessDriver{definition: providerconfig.ProviderDefinition{Features: testCase.features}}
+			if errValidate := validateDeclaredMetadataReaders(driver, driver.definition); errValidate == nil {
+				t.Fatal("validateDeclaredMetadataReaders() error = nil")
+			}
+		})
+	}
+}
+
+// TestNewServiceRejectsTypedNilDependencies verifies refresh orchestration cannot retain boxed nil stores or registries.
+// TestNewServiceRejectsTypedNilDependencies 验证刷新编排不会保留装箱后的 nil Store 或 Registry。
+func TestNewServiceRejectsTypedNilDependencies(t *testing.T) {
+	var configurations *providerconfig.MemoryStore
+	var drivers *provider.Registry
+	if _, errService := NewService(configurations, catalog.NewMemoryStore(), drivers); errService == nil {
+		t.Fatal("NewService() error = nil")
+	}
+}
+
+// TestValidateCredentialMetadataOwnershipRejectsForeignRecords verifies every credential-specific and shared-scope boundary.
+// TestValidateCredentialMetadataOwnershipRejectsForeignRecords 验证全部凭据特定与共享作用域边界。
+func TestValidateCredentialMetadataOwnershipRejectsForeignRecords(t *testing.T) {
+	credential := providerconfig.Credential{
+		ID:                 "cred_owner",
+		ProviderInstanceID: "pvi_owner",
+		ScopeRefs:          []providerconfig.ScopeReference{{Kind: "organization", ID: "organization-owner"}},
+	}
+	plan := catalog.PlanSnapshot{ID: "plan_owner", ProviderInstanceID: credential.ProviderInstanceID, CredentialID: credential.ID}
+	entitlement := catalog.ModelEntitlement{ID: "ent_owner", ProviderInstanceID: credential.ProviderInstanceID, CredentialID: credential.ID}
+	credentialAllowance := catalog.AllowanceSnapshot{ID: "allow_owner", ProviderInstanceID: credential.ProviderInstanceID, Scope: catalog.ScopeCredential, ScopeID: credential.ID}
+	sharedAllowance := catalog.AllowanceSnapshot{ID: "allow_shared", ProviderInstanceID: credential.ProviderInstanceID, Scope: catalog.ScopeOrganization, ScopeID: "organization-owner"}
+	if errValid := validateCredentialMetadataOwnership(credential, &plan, []catalog.ModelEntitlement{entitlement}, []catalog.AllowanceSnapshot{credentialAllowance, sharedAllowance}); errValid != nil {
+		t.Fatalf("validateCredentialMetadataOwnership() valid metadata error = %v", errValid)
+	}
+	testCases := []struct {
+		// name identifies the exact ownership boundary under test.
+		// name 标识待测试的精确所有权边界。
+		name string
+		// plan is the optional plan record supplied by the fake reader.
+		// plan 是 Fake 读取器提供的可选套餐记录。
+		plan *catalog.PlanSnapshot
+		// entitlements are the model authorization records supplied by the fake reader.
+		// entitlements 是 Fake 读取器提供的模型授权记录。
+		entitlements []catalog.ModelEntitlement
+		// allowances are the resource records supplied by the fake reader.
+		// allowances 是 Fake 读取器提供的资源记录。
+		allowances []catalog.AllowanceSnapshot
+	}{
+		{name: "foreign plan credential", plan: &catalog.PlanSnapshot{ID: "plan_foreign", ProviderInstanceID: credential.ProviderInstanceID, CredentialID: "cred_foreign"}},
+		{name: "foreign entitlement credential", entitlements: []catalog.ModelEntitlement{{ID: "ent_foreign", ProviderInstanceID: credential.ProviderInstanceID, CredentialID: "cred_foreign"}}},
+		{name: "foreign credential allowance", allowances: []catalog.AllowanceSnapshot{{ID: "allow_foreign", ProviderInstanceID: credential.ProviderInstanceID, Scope: catalog.ScopeCredential, ScopeID: "cred_foreign"}}},
+		{name: "unbound shared allowance", allowances: []catalog.AllowanceSnapshot{{ID: "allow_unbound", ProviderInstanceID: credential.ProviderInstanceID, Scope: catalog.ScopeOrganization, ScopeID: "organization-foreign"}}},
+		{name: "foreign provider instance", allowances: []catalog.AllowanceSnapshot{{ID: "allow_foreign_instance", ProviderInstanceID: "pvi_foreign", Scope: catalog.ScopeCredential, ScopeID: credential.ID}}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if errOwnership := validateCredentialMetadataOwnership(credential, testCase.plan, testCase.entitlements, testCase.allowances); errOwnership == nil {
+				t.Fatal("validateCredentialMetadataOwnership() error = nil")
+			}
+		})
 	}
 }

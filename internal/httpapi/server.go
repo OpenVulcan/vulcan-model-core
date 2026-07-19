@@ -8,6 +8,7 @@ import (
 	"errors"
 	"net/http"
 
+	dependencycheck "github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 )
 
@@ -94,7 +95,7 @@ func NewWithControlPlane(catalog ProviderCatalog, control ControlPlane) (*Server
 // newServer creates one immutable route table with an optional fully authenticated control plane.
 // newServer 创建一个带可选完整认证控制面的不可变路由表。
 func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) {
-	if catalog == nil {
+	if isNilHTTPDependency(catalog) {
 		return nil, ErrProviderCatalogRequired
 	}
 	// server owns the catalog before routes capture it.
@@ -115,9 +116,11 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("GET /vulcan/manage/provider-groups", server.requireManagement(http.HandlerFunc(server.handleProviderGroups)))
 		mux.Handle("GET /vulcan/manage/provider-definitions", server.requireManagement(http.HandlerFunc(server.handleProviderDefinitions)))
 		mux.Handle("POST /vulcan/manage/provider-definitions", server.requireManagement(http.HandlerFunc(server.handleCreateCustomDefinition)))
+		mux.Handle("POST /vulcan/manage/custom-providers/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardCustomProvider)))
 		mux.Handle("PUT /vulcan/manage/provider-definitions/{provider_definition_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateCustomDefinition)))
 		mux.Handle("GET /vulcan/manage/provider-instances", server.requireManagement(http.HandlerFunc(server.handleProviderInstances)))
 		mux.Handle("POST /vulcan/manage/provider-instances/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardSystemProvider)))
+		mux.Handle("POST /vulcan/manage/vertex/service-accounts/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardVertexServiceAccount)))
 		mux.Handle("POST /vulcan/manage/provider-instances", server.requireManagement(http.HandlerFunc(server.handleCreateInstance)))
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleProviderInstance)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateInstance)))
@@ -142,8 +145,36 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 			mux.Handle("POST /vulcan/manage/kimi/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardKimiDeviceFlow)))
 			mux.Handle("DELETE /vulcan/manage/kimi/device-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelKimiDeviceFlow)))
 		}
-		if control.KimiTokens != nil {
-			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshKimiCredential)))
+		if control.XAIDeviceFlows != nil {
+			mux.Handle("POST /vulcan/manage/xai/device-flows", server.requireManagement(http.HandlerFunc(server.handleStartXAIDeviceFlow)))
+			mux.Handle("POST /vulcan/manage/xai/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardXAIDeviceFlow)))
+			mux.Handle("DELETE /vulcan/manage/xai/device-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelXAIDeviceFlow)))
+		}
+		if control.CodexDeviceFlows != nil {
+			mux.Handle("POST /vulcan/manage/codex/device-flows", server.requireManagement(http.HandlerFunc(server.handleStartCodexDeviceFlow)))
+			mux.Handle("POST /vulcan/manage/codex/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardCodexDeviceFlow)))
+			mux.Handle("DELETE /vulcan/manage/codex/device-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelCodexDeviceFlow)))
+		}
+		if control.CodexOAuthFlows != nil {
+			mux.Handle("POST /vulcan/manage/codex/oauth-flows", server.requireManagement(http.HandlerFunc(server.handleStartCodexOAuthFlow)))
+			mux.Handle("POST /vulcan/manage/codex/oauth-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardCodexOAuthFlow)))
+			mux.Handle("DELETE /vulcan/manage/codex/oauth-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelCodexOAuthFlow)))
+		}
+		if control.ClaudeOAuthFlows != nil {
+			mux.Handle("POST /vulcan/manage/claude/oauth-flows", server.requireManagement(http.HandlerFunc(server.handleStartClaudeOAuthFlow)))
+			mux.Handle("POST /vulcan/manage/claude/oauth-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardClaudeOAuthFlow)))
+			mux.Handle("DELETE /vulcan/manage/claude/oauth-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelClaudeOAuthFlow)))
+		}
+		if control.AntigravityOAuthFlows != nil {
+			mux.Handle("POST /vulcan/manage/antigravity/oauth-flows", server.requireManagement(http.HandlerFunc(server.handleStartAntigravityOAuthFlow)))
+			mux.Handle("POST /vulcan/manage/antigravity/oauth-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardAntigravityOAuthFlow)))
+			mux.Handle("DELETE /vulcan/manage/antigravity/oauth-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelAntigravityOAuthFlow)))
+		}
+		if control.KimiTokens != nil || control.XAITokens != nil || control.CodexTokens != nil || control.ClaudeTokens != nil || control.AntigravityTokens != nil {
+			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderCredential)))
+		}
+		if control.MetadataRefresh != nil {
+			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/catalog/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderMetadata)))
 		}
 		mux.Handle("GET /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleAPIKeys)))
 		mux.Handle("POST /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleCreateAPIKey)))
@@ -155,6 +186,12 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 	}
 	server.handler = mux
 	return server, nil
+}
+
+// isNilHTTPDependency reports whether an interface is nil or contains a typed nil reference.
+// isNilHTTPDependency 返回接口是否为 nil 或包含带类型的 nil 引用。
+func isNilHTTPDependency(dependency any) bool {
+	return dependencycheck.IsNil(dependency)
 }
 
 // Handler returns the immutable HTTP handler.

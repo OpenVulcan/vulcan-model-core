@@ -11,9 +11,15 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
+	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
+	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 )
@@ -61,6 +67,27 @@ type ManagementCommands interface {
 	// OnboardKimiDeviceProvider accepts only a server-acquired and validated Kimi device credential.
 	// OnboardKimiDeviceProvider 仅接受由服务端获取并校验的 Kimi 设备凭据。
 	OnboardKimiDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardXAIDeviceProvider accepts only a server-acquired and validated xAI device credential.
+	// OnboardXAIDeviceProvider 仅接受由服务端获取并校验的 xAI 设备凭据。
+	OnboardXAIDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardCodexDeviceProvider accepts only a server-acquired and validated Codex device credential.
+	// OnboardCodexDeviceProvider 仅接受由服务端获取并校验的 Codex 设备凭据。
+	OnboardCodexDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardCodexOAuthProvider accepts only a server-acquired and validated Codex browser OAuth credential.
+	// OnboardCodexOAuthProvider 仅接受由服务端获取并校验的 Codex 浏览器 OAuth 凭据。
+	OnboardCodexOAuthProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardClaudeOAuthProvider accepts only a server-acquired and validated Claude Code OAuth credential.
+	// OnboardClaudeOAuthProvider 仅接受由服务端获取并校验的 Claude Code OAuth 凭据。
+	OnboardClaudeOAuthProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardAntigravityOAuthProvider accepts only a server-acquired and validated Antigravity OAuth credential.
+	// OnboardAntigravityOAuthProvider 仅接受由服务端获取并校验的 Antigravity OAuth 凭据。
+	OnboardAntigravityOAuthProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardVertexServiceAccountProvider accepts only a normalized Google service-account document and location.
+	// OnboardVertexServiceAccountProvider 仅接受规范化的 Google 服务账号文档与区域。
+	OnboardVertexServiceAccountProvider(context.Context, management.OnboardSystemProviderInput, string) (providerconfig.SystemOnboarding, error)
+	// OnboardCustomProvider atomically creates one executable custom compatibility provider and initial model.
+	// OnboardCustomProvider 原子创建一个可执行自定义兼容供应商与初始模型。
+	OnboardCustomProvider(context.Context, management.OnboardCustomProviderInput) (management.CustomProviderOnboardingResult, error)
 	// CreateCustomDefinition creates one user-owned provider definition.
 	// CreateCustomDefinition 创建一个用户拥有的供应商定义。
 	CreateCustomDefinition(context.Context, management.CreateCustomDefinitionInput) (providerconfig.ProviderDefinition, error)
@@ -111,8 +138,11 @@ type KimiDeviceFlows interface {
 	// Poll performs one bounded provider token exchange.
 	// Poll 执行一次有界供应商令牌交换。
 	Poll(context.Context, string) (providerkimi.Token, error)
-	// Cancel deletes one incomplete local authorization session.
-	// Cancel 删除一个未完成的本地授权会话。
+	// Release returns a delivered token lease when atomic onboarding fails.
+	// Release 在原子录入失败时归还已交付的 Token 租约。
+	Release(string)
+	// Cancel consumes one incomplete or completed local authorization session.
+	// Cancel 消费一个未完成或已完成的本地授权会话。
 	Cancel(string)
 }
 
@@ -121,6 +151,123 @@ type KimiDeviceFlows interface {
 type KimiTokenCommands interface {
 	// RefreshCredential replaces one exact refreshable credential.
 	// RefreshCredential 替换一个精确可刷新凭据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
+}
+
+// XAIDeviceFlows owns transient xAI account authorization sessions without exposing provider tokens.
+// XAIDeviceFlows 管理临时 xAI 账号授权会话且不暴露供应商 Token。
+type XAIDeviceFlows interface {
+	// Start creates one management-safe xAI verification session.
+	// Start 创建一个管理安全的 xAI 验证会话。
+	Start(context.Context) (providerxai.Flow, error)
+	// Poll performs one bounded xAI token exchange.
+	// Poll 执行一次有界 xAI Token 交换。
+	Poll(context.Context, string) (providerxai.Token, error)
+	// Release returns a delivered token lease when atomic onboarding fails.
+	// Release 在原子录入失败时归还已交付的 Token 租约。
+	Release(string)
+	// Cancel consumes one incomplete or completed local authorization session.
+	// Cancel 消费一个未完成或已完成的本地授权会话。
+	Cancel(string)
+}
+
+// XAITokenCommands refreshes completed xAI credentials behind the protected secret boundary.
+// XAITokenCommands 在受保护 Secret 边界后刷新已完成 xAI 凭据。
+type XAITokenCommands interface {
+	// RefreshCredential replaces one exact refreshable xAI credential.
+	// RefreshCredential 替换一个精确可刷新 xAI 凭据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
+}
+
+// CodexDeviceFlows owns transient Codex account authorization sessions without exposing provider tokens.
+// CodexDeviceFlows 管理临时 Codex 账号授权会话且不暴露供应商 Token。
+type CodexDeviceFlows interface {
+	// Start creates one management-safe Codex verification session.
+	// Start 创建一个管理安全的 Codex 验证会话。
+	Start(context.Context) (provideropenai.CodexDeviceFlow, error)
+	// Poll performs one bounded Codex token exchange.
+	// Poll 执行一次有界 Codex Token 交换。
+	Poll(context.Context, string) (provideropenai.CodexToken, error)
+	// Release returns a delivered token lease when atomic onboarding fails.
+	// Release 在原子录入失败时归还已交付的 Token 租约。
+	Release(string)
+	// Cancel consumes one incomplete or completed local authorization session.
+	// Cancel 消费一个未完成或已完成的本地授权会话。
+	Cancel(string)
+}
+
+// CodexOAuthFlows owns transient Codex browser PKCE state without exposing provider tokens.
+// CodexOAuthFlows 管理临时 Codex 浏览器 PKCE 状态且不暴露供应商 Token。
+type CodexOAuthFlows interface {
+	// Start creates one management-safe Codex browser authorization session.
+	// Start 创建一个管理安全的 Codex 浏览器授权会话。
+	Start(context.Context) (provideropenai.CodexOAuthFlow, error)
+	// Complete validates one pasted localhost callback and performs the provider exchange.
+	// Complete 校验一个粘贴的 localhost 回调并执行供应商交换。
+	Complete(context.Context, string, string) (provideropenai.CodexToken, error)
+	// Release returns a delivered token lease when atomic onboarding fails.
+	// Release 在原子录入失败时归还已交付的 Token 租约。
+	Release(string)
+	// Cancel consumes one incomplete or completed local authorization session.
+	// Cancel 消费一个未完成或已完成的本地授权会话。
+	Cancel(string)
+}
+
+// CodexTokenCommands refreshes completed Codex credentials behind the protected secret boundary.
+// CodexTokenCommands 在受保护 Secret 边界后刷新已完成 Codex 凭据。
+type CodexTokenCommands interface {
+	// RefreshCredential replaces one exact refreshable Codex credential.
+	// RefreshCredential 替换一个精确可刷新 Codex 凭据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
+}
+
+// ClaudeOAuthFlows owns transient Claude PKCE and consent state without exposing provider tokens.
+// ClaudeOAuthFlows 管理临时 Claude PKCE 与同意授权状态且不暴露供应商 Token。
+type ClaudeOAuthFlows interface {
+	// Start creates one management-safe Claude browser authorization session.
+	// Start 创建一个管理安全的 Claude 浏览器授权会话。
+	Start(context.Context) (provideranthropic.ClaudeOAuthFlow, error)
+	// Complete validates one callback or code#state value and performs the provider exchange.
+	// Complete 校验一个回调或 code#state 值并执行供应商交换。
+	Complete(context.Context, string, string) (provideranthropic.ClaudeToken, error)
+	// Release returns a delivered token lease when atomic onboarding fails.
+	// Release 在原子录入失败时归还已交付的 Token 租约。
+	Release(string)
+	// Cancel consumes one incomplete or completed local Claude authorization session.
+	// Cancel 消费一个未完成或已完成的本地 Claude 授权会话。
+	Cancel(string)
+}
+
+// ClaudeTokenCommands refreshes completed Claude Code credentials behind the protected secret boundary.
+// ClaudeTokenCommands 在受保护 Secret 边界后刷新已完成 Claude Code 凭据。
+type ClaudeTokenCommands interface {
+	// RefreshCredential replaces one exact refreshable Claude OAuth credential.
+	// RefreshCredential 替换一个精确可刷新 Claude OAuth 凭据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
+}
+
+// AntigravityOAuthFlows owns transient Google consent state without exposing provider tokens.
+// AntigravityOAuthFlows 管理临时 Google 同意授权状态且不暴露供应商 Token。
+type AntigravityOAuthFlows interface {
+	// Start creates one management-safe browser authorization session.
+	// Start 创建一个管理安全的浏览器授权会话。
+	Start(context.Context) (providergoogle.AntigravityOAuthFlow, error)
+	// Complete validates one pasted callback and performs bounded provider exchanges.
+	// Complete 校验一个粘贴回调并执行有界供应商交换。
+	Complete(context.Context, string, string) (providergoogle.AntigravityToken, error)
+	// Release returns a delivered token lease when atomic onboarding fails.
+	// Release 在原子录入失败时归还已交付的 Token 租约。
+	Release(string)
+	// Cancel consumes one incomplete or completed local authorization session.
+	// Cancel 消费一个未完成或已完成的本地授权会话。
+	Cancel(string)
+}
+
+// AntigravityTokenCommands refreshes completed Antigravity credentials behind the protected secret boundary.
+// AntigravityTokenCommands 在受保护 Secret 边界后刷新已完成 Antigravity 凭据。
+type AntigravityTokenCommands interface {
+	// RefreshCredential replaces one exact refreshable Antigravity credential.
+	// RefreshCredential 替换一个精确可刷新 Antigravity 凭据。
 	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
 }
 
@@ -141,6 +288,14 @@ type CustomCatalogOperations interface {
 	// SaveCustomCatalog replaces one complete custom-provider catalog revision.
 	// SaveCustomCatalog 替换一份完整的自定义供应商目录修订。
 	SaveCustomCatalog(context.Context, management.SaveCustomCatalogInput) (catalog.Snapshot, error)
+}
+
+// ProviderMetadataRefresh refreshes provider-native plan, entitlement, and allowance snapshots.
+// ProviderMetadataRefresh 刷新供应商原生套餐、授权与额度快照。
+type ProviderMetadataRefresh interface {
+	// Refresh atomically replaces metadata for one exact provider instance.
+	// Refresh 原子替换一个精确供应商实例的元数据。
+	Refresh(context.Context, string, time.Time) (catalog.Snapshot, error)
 }
 
 // ProtocolProfileQuery exposes immutable process-owned protocol metadata to the management surface.
@@ -166,6 +321,9 @@ type ControlPlane struct {
 	// CustomCatalogs reads and writes user-declared model metadata for custom providers only.
 	// CustomCatalogs 仅为自定义供应商读取和写入用户声明模型元数据。
 	CustomCatalogs CustomCatalogOperations
+	// MetadataRefresh refreshes provider-native account metadata when a trusted reader exists.
+	// MetadataRefresh 在存在受信任读取器时刷新供应商原生账号元数据。
+	MetadataRefresh ProviderMetadataRefresh
 	// Protocols exposes custom-provider-selectable protocol metadata.
 	// Protocols 暴露可供自定义供应商选择的协议元数据。
 	Protocols ProtocolProfileQuery
@@ -181,13 +339,53 @@ type ControlPlane struct {
 	// KimiTokens optionally enables explicit protected Coding Plan token refresh.
 	// KimiTokens 可选启用显式受保护 Coding Plan 令牌刷新。
 	KimiTokens KimiTokenCommands
+	// XAIDeviceFlows optionally enables server-owned xAI device authorization routes.
+	// XAIDeviceFlows 可选启用服务端拥有的 xAI 设备授权路由。
+	XAIDeviceFlows XAIDeviceFlows
+	// XAITokens optionally enables explicit protected xAI token refresh.
+	// XAITokens 可选启用显式受保护 xAI Token 刷新。
+	XAITokens XAITokenCommands
+	// CodexDeviceFlows optionally enables server-owned Codex device authorization routes.
+	// CodexDeviceFlows 可选启用服务端拥有的 Codex 设备授权路由。
+	CodexDeviceFlows CodexDeviceFlows
+	// CodexOAuthFlows optionally enables server-owned Codex browser authorization routes.
+	// CodexOAuthFlows 可选启用服务端拥有的 Codex 浏览器授权路由。
+	CodexOAuthFlows CodexOAuthFlows
+	// CodexTokens optionally enables explicit protected Codex token refresh.
+	// CodexTokens 可选启用显式受保护 Codex Token 刷新。
+	CodexTokens CodexTokenCommands
+	// ClaudeOAuthFlows optionally enables server-owned Claude Code consent routes.
+	// ClaudeOAuthFlows 可选启用服务端拥有的 Claude Code 同意授权路由。
+	ClaudeOAuthFlows ClaudeOAuthFlows
+	// ClaudeTokens optionally enables explicit protected Claude token refresh.
+	// ClaudeTokens 可选启用显式受保护 Claude Token 刷新。
+	ClaudeTokens ClaudeTokenCommands
+	// AntigravityOAuthFlows optionally enables server-owned Google consent routes.
+	// AntigravityOAuthFlows 可选启用服务端拥有的 Google 同意授权路由。
+	AntigravityOAuthFlows AntigravityOAuthFlows
+	// AntigravityTokens optionally enables explicit protected Antigravity token refresh.
+	// AntigravityTokens 可选启用显式受保护 Antigravity Token 刷新。
+	AntigravityTokens AntigravityTokenCommands
 }
 
 // validate verifies the complete authenticated control-plane dependency graph.
 // validate 校验完整的认证控制面依赖图。
 func (c ControlPlane) validate() error {
-	if c.Query == nil || c.Commands == nil || c.ModelAccess == nil || c.CustomCatalogs == nil || c.Protocols == nil || c.APIKeys == nil || c.Auth == nil {
-		return errors.New("complete authenticated control plane is required")
+	// requiredDependencies contains every interface called unconditionally by registered control-plane routes.
+	// requiredDependencies 包含注册控制面路由会无条件调用的全部接口。
+	requiredDependencies := []any{c.Query, c.Commands, c.ModelAccess, c.CustomCatalogs, c.Protocols, c.APIKeys, c.Auth}
+	for _, dependency := range requiredDependencies {
+		if isNilHTTPDependency(dependency) {
+			return errors.New("complete authenticated control plane is required")
+		}
+	}
+	// optionalDependencies may be absent, but a typed nil would register or dispatch an unusable service.
+	// optionalDependencies 可以缺省，但带类型的 nil 会注册或分派一个不可用服务。
+	optionalDependencies := []any{c.MetadataRefresh, c.KimiDeviceFlows, c.KimiTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
+	for _, dependency := range optionalDependencies {
+		if dependency != nil && isNilHTTPDependency(dependency) {
+			return errors.New("control-plane optional dependency must not contain a typed nil reference")
+		}
 	}
 	return nil
 }
@@ -420,6 +618,55 @@ type createCustomDefinitionRequest struct {
 	AuthMethod providerconfig.AuthMethodType `json:"auth_method"`
 }
 
+// onboardCustomProviderRequest decodes one complete custom compatibility provider and initial model.
+// onboardCustomProviderRequest 解码一个完整自定义兼容供应商与初始模型。
+type onboardCustomProviderRequest struct {
+	// DisplayName is the sole provider, instance, and credential display label.
+	// DisplayName 是唯一的供应商、实例与凭据显示标签。
+	DisplayName string `json:"display_name"`
+	// Handle is the stable workspace-visible routing identifier.
+	// Handle 是工作区可见的稳定路由标识。
+	Handle string `json:"handle"`
+	// ProtocolProfileID selects OpenAICompatibility or VertexCompat execution.
+	// ProtocolProfileID 选择 OpenAICompatibility 或 VertexCompat 执行。
+	ProtocolProfileID string `json:"protocol_profile_id"`
+	// BaseURL is the operator-owned compatibility endpoint.
+	// BaseURL 是操作员拥有的兼容 Endpoint。
+	BaseURL string `json:"base_url"`
+	// Secret is transient credential material and is never returned.
+	// Secret 是临时凭据材料且绝不返回。
+	Secret string `json:"secret"`
+	// UpstreamModelID is the exact model identifier sent on the wire.
+	// UpstreamModelID 是在 Wire 上发送的精确模型标识。
+	UpstreamModelID string `json:"upstream_model_id"`
+	// ModelDisplayName is an optional management-facing model label.
+	// ModelDisplayName 是可选的管理界面模型标签。
+	ModelDisplayName string `json:"model_display_name"`
+}
+
+// customProviderOnboardingResponse contains only identifiers from one committed custom onboarding transaction.
+// customProviderOnboardingResponse 仅包含一次已提交自定义录入事务的标识。
+type customProviderOnboardingResponse struct {
+	// ProviderDefinitionID identifies the committed custom definition.
+	// ProviderDefinitionID 标识已提交的自定义 Definition。
+	ProviderDefinitionID string `json:"provider_definition_id"`
+	// ProviderInstanceID identifies the committed provider instance.
+	// ProviderInstanceID 标识已提交的供应商实例。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// CredentialID identifies the committed non-secret credential metadata.
+	// CredentialID 标识已提交的非秘密凭据元数据。
+	CredentialID string `json:"credential_id"`
+	// EndpointID identifies the committed compatibility endpoint.
+	// EndpointID 标识已提交的兼容 Endpoint。
+	EndpointID string `json:"endpoint_id"`
+	// BindingID identifies the committed executable access binding.
+	// BindingID 标识已提交的可执行访问绑定。
+	BindingID string `json:"binding_id"`
+	// ProviderModelID identifies the sole initial user-declared model.
+	// ProviderModelID 标识唯一初始用户声明模型。
+	ProviderModelID string `json:"provider_model_id"`
+}
+
 // updateCustomDefinitionRequest decodes a typed custom-provider replacement request.
 // updateCustomDefinitionRequest 解码一个类型化自定义供应商替换请求。
 type updateCustomDefinitionRequest struct {
@@ -451,40 +698,79 @@ type createInstanceRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
-// onboardSystemProviderRequest decodes one complete API-key or completed-device-flow onboarding request.
-// onboardSystemProviderRequest 解码一次完整 API Key 或已完成设备授权的录入请求。
+// onboardSystemProviderRequest decodes one complete API-key onboarding request with a single operator-visible name.
+// onboardSystemProviderRequest 解码一次仅包含一个操作员可见名称的完整 API Key 录入请求。
 type onboardSystemProviderRequest struct {
 	// DefinitionID selects one exact system provider variant.
 	// DefinitionID 选择一个精确系统供应商变体。
 	DefinitionID string `json:"provider_definition_id"`
-	// Handle is the stable workspace-visible routing alias.
-	// Handle 是工作区可见的稳定路由别名。
-	Handle string `json:"handle"`
-	// DisplayName is the editable instance label.
-	// DisplayName 是可编辑的实例标签。
-	DisplayName string `json:"display_name"`
+	// Name is reused as the instance and credential label because API keys expose no provider identity.
+	// Name 同时作为实例与凭据标签，因为 API Key 不提供供应商身份。
+	Name string `json:"name"`
 	// AuthMethodID selects one definition-owned authentication method.
 	// AuthMethodID 选择一种由定义拥有的认证方式。
 	AuthMethodID string `json:"auth_method_id"`
-	// CredentialLabel is the safe operator-visible account label.
-	// CredentialLabel 是安全且操作员可见的账号标签。
-	CredentialLabel string `json:"credential_label"`
-	// PrincipalKey is the optional provider-reported account identity.
-	// PrincipalKey 是可选的供应商报告账号身份。
-	PrincipalKey string `json:"principal_key"`
 	// Secret contains transient credential material and is never returned.
 	// Secret 包含临时凭据材料且绝不返回。
 	Secret string `json:"secret"`
 }
 
-// kimiDeviceFlowOnboardRequest contains non-secret instance metadata applied after provider authorization succeeds.
-// kimiDeviceFlowOnboardRequest 包含供应商授权成功后应用的非秘密实例元数据。
-type kimiDeviceFlowOnboardRequest struct {
-	DefinitionID    string `json:"provider_definition_id"`
-	Handle          string `json:"handle"`
-	DisplayName     string `json:"display_name"`
-	CredentialLabel string `json:"credential_label"`
-	PrincipalKey    string `json:"principal_key"`
+// onboardVertexServiceAccountRequest decodes one server-validated Vertex service-account upload.
+// onboardVertexServiceAccountRequest 解码一次由服务端校验的 Vertex 服务账号上传。
+type onboardVertexServiceAccountRequest struct {
+	// DefinitionID must select the code-owned Google Vertex AI product.
+	// DefinitionID 必须选择代码拥有的 Google Vertex AI 产品。
+	DefinitionID string `json:"provider_definition_id"`
+	// Location selects global or one normalized Google Vertex region.
+	// Location 选择 global 或一个规范化 Google Vertex 区域。
+	Location string `json:"location"`
+	// ServiceAccount contains one transient JSON object and is never returned.
+	// ServiceAccount 包含一个临时 JSON 对象且绝不返回。
+	ServiceAccount json.RawMessage `json:"service_account"`
+}
+
+// deviceFlowOnboardRequest contains the exact product and an optional sole name for providers without account identity.
+// deviceFlowOnboardRequest 包含精确产品，以及不提供账号身份的供应商所需的可选唯一名称。
+type deviceFlowOnboardRequest struct {
+	// DefinitionID must select the exact device-flow system product.
+	// DefinitionID 必须选择精确的设备授权系统产品。
+	DefinitionID string `json:"provider_definition_id"`
+	// Name is required for Kimi and is the xAI fallback when its optional ID-token identity is absent.
+	// Name 对 Kimi 必填，并在 xAI 的可选 ID Token 身份缺失时作为回退名称。
+	Name string `json:"name"`
+}
+
+// antigravityOAuthOnboardRequest contains the pasted callback while Google supplies the account display identity.
+// antigravityOAuthOnboardRequest 包含粘贴回调，账号显示身份由 Google 提供。
+type antigravityOAuthOnboardRequest struct {
+	// DefinitionID must select the code-owned Google Antigravity product.
+	// DefinitionID 必须选择代码拥有的 Google Antigravity 产品。
+	DefinitionID string `json:"provider_definition_id"`
+	// CallbackURL is the exact localhost callback copied after Google consent.
+	// CallbackURL 是 Google 同意授权后复制的精确 localhost 回调地址。
+	CallbackURL string `json:"callback_url"`
+}
+
+// claudeOAuthOnboardRequest contains one pasted callback or code#state value while Claude supplies account identity.
+// claudeOAuthOnboardRequest 包含一个粘贴回调或 code#state 值，账号身份由 Claude 提供。
+type claudeOAuthOnboardRequest struct {
+	// DefinitionID must select the code-owned Claude Code product.
+	// DefinitionID 必须选择代码拥有的 Claude Code 产品。
+	DefinitionID string `json:"provider_definition_id"`
+	// CallbackURL is the exact localhost callback or CLIProxyAPI code#state value.
+	// CallbackURL 是精确本地回调或 CLIProxyAPI code#state 值。
+	CallbackURL string `json:"callback_url"`
+}
+
+// codexOAuthOnboardRequest contains one pasted localhost callback while OpenAI supplies account identity.
+// codexOAuthOnboardRequest 包含一个粘贴的 localhost 回调，账号身份由 OpenAI 提供。
+type codexOAuthOnboardRequest struct {
+	// DefinitionID must select the code-owned Codex Account product.
+	// DefinitionID 必须选择代码拥有的 Codex Account 产品。
+	DefinitionID string `json:"provider_definition_id"`
+	// CallbackURL is the exact provider-registered localhost callback copied from the browser.
+	// CallbackURL 是从浏览器复制的精确供应商注册 localhost 回调。
+	CallbackURL string `json:"callback_url"`
 }
 
 // onboardSystemProviderResponse returns only non-secret identifiers created by one atomic onboarding.
@@ -566,9 +852,6 @@ type createCredentialRequest struct {
 	// PrincipalKey is an optional upstream account identity accepted only for metadata persistence.
 	// PrincipalKey 是仅用于元数据持久化的可选上游账号身份。
 	PrincipalKey string `json:"principal_key"`
-	// Fingerprint is the irreversible duplicate-detection value.
-	// Fingerprint 是不可逆排重值。
-	Fingerprint string `json:"fingerprint"`
 	// ScopeRefs contains explicit commercial and organizational scope references.
 	// ScopeRefs 包含显式商业和组织作用域引用。
 	ScopeRefs []providerconfig.ScopeReference `json:"scope_refs"`
@@ -583,14 +866,11 @@ type updateCredentialRequest struct {
 	// Label is the replacement management-facing credential label.
 	// Label 是替换后的管理界面凭据标签。
 	Label string `json:"label"`
-	// PrincipalKey is the replacement optional upstream account identity.
-	// PrincipalKey 是替换后的可选上游账号身份。
+	// PrincipalKey replaces operator-owned identity and may only echo provider-derived identity.
+	// PrincipalKey 替换操作员拥有的身份；对供应商派生身份只能原样回传。
 	PrincipalKey string `json:"principal_key"`
-	// Fingerprint is the replacement irreversible duplicate-detection value.
-	// Fingerprint 是替换后的不可逆排重值。
-	Fingerprint string `json:"fingerprint"`
-	// ScopeRefs is the replacement set of commercial and organizational scope references.
-	// ScopeRefs 是替换后的商业和组织作用域引用集合。
+	// ScopeRefs replaces operator-owned scopes and may only echo provider-derived scopes.
+	// ScopeRefs 替换操作员拥有的作用域；对供应商派生作用域只能原样回传。
 	ScopeRefs []providerconfig.ScopeReference `json:"scope_refs"`
 }
 
@@ -600,9 +880,6 @@ type rotateCredentialSecretRequest struct {
 	// Secret is transient replacement upstream credential material and is never returned.
 	// Secret 是临时替换上游凭据材料且绝不返回。
 	Secret string `json:"secret"`
-	// Fingerprint is the replacement irreversible duplicate-detection value.
-	// Fingerprint 是替换后的不可逆排重值。
-	Fingerprint string `json:"fingerprint"`
 }
 
 // setCredentialStatusRequest decodes one explicit credential lifecycle transition.
@@ -694,12 +971,18 @@ func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 	})
 }
 
-// bearerToken extracts a single standard Bearer value without accepting alternate credential headers.
-// bearerToken 提取一个标准 Bearer 值且不接受替代凭据头。
+// bearerToken extracts exactly one standard Bearer value without accepting duplicate or alternate credential headers.
+// bearerToken 精确提取一个标准 Bearer 值，且不接受重复或替代凭据头。
 func bearerToken(request *http.Request) string {
-	// authorization is intentionally read once so a duplicated header cannot create ambiguous authentication.
-	// authorization 被有意仅读取一次，因此重复头不会创建歧义认证。
-	authorization := strings.TrimSpace(request.Header.Get("Authorization"))
+	// authorizationValues rejects intermediary-dependent interpretation when the same credential header appears more than once.
+	// authorizationValues 在同一凭据头出现多次时拒绝依赖中间代理的歧义解释。
+	authorizationValues := request.Header.Values("Authorization")
+	if len(authorizationValues) != 1 {
+		return ""
+	}
+	// authorization is the sole header value permitted to enter Bearer parsing.
+	// authorization 是唯一允许进入 Bearer 解析的请求头值。
+	authorization := strings.TrimSpace(authorizationValues[0])
 	if authorization == "" {
 		return ""
 	}
@@ -748,21 +1031,48 @@ func writeControlError(writer http.ResponseWriter, err error) {
 	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) || errors.Is(err, management.ErrProviderModelNotFound) || errors.Is(err, runtimeconfig.ErrAPIKeyNotFound) {
 		statusCode = http.StatusNotFound
 		errorCode = "not_found"
-	} else if errors.Is(err, providerkimi.ErrFlowNotFound) {
+	} else if errors.Is(err, providerkimi.ErrFlowNotFound) || errors.Is(err, providerxai.ErrFlowNotFound) || errors.Is(err, provideropenai.ErrCodexFlowNotFound) {
 		statusCode = http.StatusNotFound
 		errorCode = "device_flow_not_found"
-	} else if errors.Is(err, providerkimi.ErrAuthorizationExpired) {
+	} else if errors.Is(err, providergoogle.ErrAntigravityFlowNotFound) || errors.Is(err, provideranthropic.ErrClaudeOAuthFlowNotFound) || errors.Is(err, provideropenai.ErrCodexOAuthFlowNotFound) {
+		statusCode = http.StatusNotFound
+		errorCode = "oauth_flow_not_found"
+	} else if errors.Is(err, providerkimi.ErrAuthorizationExpired) || errors.Is(err, providerxai.ErrAuthorizationExpired) {
 		statusCode = http.StatusGone
 		errorCode = "device_flow_expired"
-	} else if errors.Is(err, providerkimi.ErrAuthorizationDenied) {
+	} else if errors.Is(err, providerkimi.ErrAuthorizationDenied) || errors.Is(err, providerxai.ErrAuthorizationDenied) {
 		statusCode = http.StatusForbidden
 		errorCode = "device_flow_denied"
-	} else if errors.Is(err, providerkimi.ErrAuthorizationPending) {
+	} else if errors.Is(err, providerkimi.ErrAuthorizationPending) || errors.Is(err, providerxai.ErrAuthorizationPending) || errors.Is(err, provideropenai.ErrCodexAuthorizationPending) {
 		statusCode = http.StatusConflict
 		errorCode = "device_flow_pending"
-	} else if errors.Is(err, providerkimi.ErrFlowLimitReached) {
+	} else if errors.Is(err, providergoogle.ErrAntigravityFlowInProgress) || errors.Is(err, provideranthropic.ErrClaudeOAuthFlowInProgress) || errors.Is(err, provideropenai.ErrCodexOAuthFlowInProgress) {
+		statusCode = http.StatusConflict
+		errorCode = "oauth_flow_in_progress"
+	} else if errors.Is(err, providerkimi.ErrFlowLimitReached) || errors.Is(err, providerxai.ErrFlowLimitReached) || errors.Is(err, provideropenai.ErrCodexFlowLimitReached) {
 		statusCode = http.StatusTooManyRequests
 		errorCode = "device_flow_limit_reached"
+	} else if errors.Is(err, providergoogle.ErrAntigravityFlowLimitReached) || errors.Is(err, provideranthropic.ErrClaudeOAuthFlowLimitReached) || errors.Is(err, provideropenai.ErrCodexOAuthFlowLimitReached) {
+		statusCode = http.StatusTooManyRequests
+		errorCode = "oauth_flow_limit_reached"
+	} else if errors.Is(err, provider.ErrAuthenticationRejected) {
+		statusCode = http.StatusFailedDependency
+		errorCode = "provider_authentication_rejected"
+	} else if errors.Is(err, provider.ErrAuthenticationUnavailable) {
+		statusCode = http.StatusServiceUnavailable
+		errorCode = "provider_authentication_unavailable"
+	} else if errors.Is(err, provider.ErrAuthenticationResponseInvalid) {
+		statusCode = http.StatusBadGateway
+		errorCode = "provider_authentication_invalid_response"
+	} else if errors.Is(err, provider.ErrMetadataAuthentication) {
+		statusCode = http.StatusFailedDependency
+		errorCode = "provider_metadata_authentication_failed"
+	} else if errors.Is(err, provider.ErrMetadataUnavailable) {
+		statusCode = http.StatusServiceUnavailable
+		errorCode = "provider_metadata_unavailable"
+	} else if errors.Is(err, provider.ErrMetadataResponseInvalid) {
+		statusCode = http.StatusBadGateway
+		errorCode = "provider_metadata_invalid_response"
 	} else if errors.Is(err, management.ErrSystemDefinitionImmutable) {
 		statusCode = http.StatusConflict
 		errorCode = "immutable_resource"
@@ -849,6 +1159,30 @@ func (s *Server) handleCreateCustomDefinition(writer http.ResponseWriter, reques
 	writeJSON(writer, http.StatusCreated, identifierResponse{ID: definition.ID})
 }
 
+// handleOnboardCustomProvider atomically commits one whitelisted compatibility provider without exposing its secret.
+// handleOnboardCustomProvider 原子提交一个白名单兼容供应商且不暴露其 Secret。
+func (s *Server) handleOnboardCustomProvider(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[onboardCustomProviderRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	result, errOnboard := s.control.Commands.OnboardCustomProvider(request.Context(), management.OnboardCustomProviderInput{
+		DisplayName: payload.DisplayName, Handle: payload.Handle, ProtocolProfileID: payload.ProtocolProfileID,
+		BaseURL: payload.BaseURL, Secret: []byte(payload.Secret), UpstreamModelID: payload.UpstreamModelID, ModelDisplayName: payload.ModelDisplayName,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	configuration := result.Configuration
+	writeJSON(writer, http.StatusCreated, customProviderOnboardingResponse{
+		ProviderDefinitionID: configuration.Definition.ID, ProviderInstanceID: configuration.Instance.ID,
+		CredentialID: configuration.Credential.ID, EndpointID: configuration.Endpoint.ID,
+		BindingID: configuration.Binding.ID, ProviderModelID: result.ProviderModelID,
+	})
+}
+
 // handleUpdateCustomDefinition replaces one existing custom definition only.
 // handleUpdateCustomDefinition 仅替换一个既有自定义定义。
 func (s *Server) handleUpdateCustomDefinition(writer http.ResponseWriter, request *http.Request) {
@@ -901,12 +1235,38 @@ func (s *Server) handleCreateInstance(writer http.ResponseWriter, request *http.
 func (s *Server) handleOnboardSystemProvider(writer http.ResponseWriter, request *http.Request) {
 	body, errDecode := decodeControlJSON[onboardSystemProviderRequest](writer, request)
 	if errDecode != nil {
+		writeControlError(writer, errDecode)
 		return
 	}
 	onboarding, errOnboard := s.control.Commands.OnboardSystemProvider(request.Context(), management.OnboardSystemProviderInput{
-		DefinitionID: body.DefinitionID, Handle: body.Handle, DisplayName: body.DisplayName, AuthMethodID: body.AuthMethodID,
-		CredentialLabel: body.CredentialLabel, PrincipalKey: body.PrincipalKey, Secret: []byte(body.Secret),
+		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: body.AuthMethodID,
+		CredentialLabel: body.Name, Secret: []byte(body.Secret),
 	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleOnboardVertexServiceAccount normalizes one uploaded document and returns only safe persisted identifiers.
+// handleOnboardVertexServiceAccount 规范化一个上传文档并仅返回安全的持久化标识。
+func (s *Server) handleOnboardVertexServiceAccount(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[onboardVertexServiceAccountRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	onboarding, errOnboard := s.control.Commands.OnboardVertexServiceAccountProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, AuthMethodID: "service_account", Secret: []byte(body.ServiceAccount),
+	}, body.Location)
 	if errOnboard != nil {
 		writeControlError(writer, errOnboard)
 		return
@@ -935,8 +1295,9 @@ func (s *Server) handleStartKimiDeviceFlow(writer http.ResponseWriter, request *
 // handleOnboardKimiDeviceFlow polls authorization once and atomically onboards a completed token.
 // handleOnboardKimiDeviceFlow 轮询一次授权并原子录入已完成令牌。
 func (s *Server) handleOnboardKimiDeviceFlow(writer http.ResponseWriter, request *http.Request) {
-	body, errDecode := decodeControlJSON[kimiDeviceFlowOnboardRequest](writer, request)
+	body, errDecode := decodeControlJSON[deviceFlowOnboardRequest](writer, request)
 	if errDecode != nil {
+		writeControlError(writer, errDecode)
 		return
 	}
 	flowID := request.PathValue("flow_id")
@@ -949,14 +1310,16 @@ func (s *Server) handleOnboardKimiDeviceFlow(writer http.ResponseWriter, request
 		writeControlError(writer, errPoll)
 		return
 	}
+	defer s.control.KimiDeviceFlows.Release(flowID)
 	secretValue, errMarshal := providerkimi.MarshalToken(token)
 	if errMarshal != nil {
 		writeControlError(writer, errMarshal)
 		return
 	}
+	defer clear(secretValue)
 	onboarding, errOnboard := s.control.Commands.OnboardKimiDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
-		DefinitionID: body.DefinitionID, Handle: body.Handle, DisplayName: body.DisplayName, AuthMethodID: "device_flow",
-		CredentialLabel: body.CredentialLabel, PrincipalKey: body.PrincipalKey, Secret: secretValue,
+		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow",
+		Secret: secretValue,
 	})
 	if errOnboard != nil {
 		writeControlError(writer, errOnboard)
@@ -980,15 +1343,373 @@ func (s *Server) handleCancelKimiDeviceFlow(writer http.ResponseWriter, request 
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-// handleRefreshKimiCredential refreshes one protected Coding Plan token and returns only its metadata identifier.
-// handleRefreshKimiCredential 刷新一个受保护 Coding Plan 令牌并仅返回其元数据标识。
-func (s *Server) handleRefreshKimiCredential(writer http.ResponseWriter, request *http.Request) {
-	credential, errRefresh := s.control.KimiTokens.RefreshCredential(request.Context(), request.PathValue("provider_instance_id"), request.PathValue("credential_id"))
+// handleStartXAIDeviceFlow starts one server-owned xAI account verification session.
+// handleStartXAIDeviceFlow 启动一个服务端拥有的 xAI 账号验证会话。
+func (s *Server) handleStartXAIDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	flow, errStart := s.control.XAIDeviceFlows.Start(request.Context())
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardXAIDeviceFlow polls once and atomically onboards a completed xAI token.
+// handleOnboardXAIDeviceFlow 轮询一次并原子录入已完成的 xAI Token。
+func (s *Server) handleOnboardXAIDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[deviceFlowOnboardRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errPoll := s.control.XAIDeviceFlows.Poll(request.Context(), flowID)
+	if errors.Is(errPoll, providerxai.ErrAuthorizationPending) {
+		writeJSON(writer, http.StatusAccepted, map[string]string{"status": "authorization_pending"})
+		return
+	}
+	if errPoll != nil {
+		writeControlError(writer, errPoll)
+		return
+	}
+	defer s.control.XAIDeviceFlows.Release(flowID)
+	secretValue, errMarshal := providerxai.MarshalToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	defer clear(secretValue)
+	onboarding, errOnboard := s.control.Commands.OnboardXAIDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow",
+		Secret: secretValue,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.XAIDeviceFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelXAIDeviceFlow removes one incomplete local xAI verification session.
+// handleCancelXAIDeviceFlow 删除一个未完成的本地 xAI 验证会话。
+func (s *Server) handleCancelXAIDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.XAIDeviceFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// handleStartCodexDeviceFlow starts one server-owned Codex verification session.
+// handleStartCodexDeviceFlow 启动一个服务端拥有的 Codex 验证会话。
+func (s *Server) handleStartCodexDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	flow, errStart := s.control.CodexDeviceFlows.Start(request.Context())
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardCodexDeviceFlow polls once and atomically onboards a completed Codex token.
+// handleOnboardCodexDeviceFlow 轮询一次并原子录入已完成的 Codex Token。
+func (s *Server) handleOnboardCodexDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[deviceFlowOnboardRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errPoll := s.control.CodexDeviceFlows.Poll(request.Context(), flowID)
+	if errors.Is(errPoll, provideropenai.ErrCodexAuthorizationPending) {
+		writeJSON(writer, http.StatusAccepted, map[string]string{"status": "authorization_pending"})
+		return
+	}
+	if errPoll != nil {
+		writeControlError(writer, errPoll)
+		return
+	}
+	defer s.control.CodexDeviceFlows.Release(flowID)
+	secretValue, errMarshal := provideropenai.MarshalCodexToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	defer clear(secretValue)
+	onboarding, errOnboard := s.control.Commands.OnboardCodexDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow",
+		Secret: secretValue,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.CodexDeviceFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelCodexDeviceFlow removes one incomplete local Codex verification session.
+// handleCancelCodexDeviceFlow 删除一个未完成的本地 Codex 验证会话。
+func (s *Server) handleCancelCodexDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.CodexDeviceFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// handleStartCodexOAuthFlow starts one server-owned Codex browser PKCE session.
+// handleStartCodexOAuthFlow 启动一个服务端拥有的 Codex 浏览器 PKCE 会话。
+func (s *Server) handleStartCodexOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	flow, errStart := s.control.CodexOAuthFlows.Start(request.Context())
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardCodexOAuthFlow completes PKCE exchange and atomically stores one Codex account credential.
+// handleOnboardCodexOAuthFlow 完成 PKCE 交换并原子存储一个 Codex 账号凭据。
+func (s *Server) handleOnboardCodexOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[codexOAuthOnboardRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errComplete := s.control.CodexOAuthFlows.Complete(request.Context(), flowID, body.CallbackURL)
+	if errComplete != nil {
+		writeControlError(writer, errComplete)
+		return
+	}
+	defer s.control.CodexOAuthFlows.Release(flowID)
+	secretValue, errMarshal := provideropenai.MarshalCodexToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	defer clear(secretValue)
+	onboarding, errOnboard := s.control.Commands.OnboardCodexOAuthProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, AuthMethodID: "oauth", Secret: secretValue,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.CodexOAuthFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelCodexOAuthFlow removes one local Codex browser authorization session.
+// handleCancelCodexOAuthFlow 删除一个本地 Codex 浏览器授权会话。
+func (s *Server) handleCancelCodexOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.CodexOAuthFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// handleStartClaudeOAuthFlow starts one server-owned Claude Code PKCE authorization session.
+// handleStartClaudeOAuthFlow 启动一个服务端拥有的 Claude Code PKCE 授权会话。
+func (s *Server) handleStartClaudeOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	flow, errStart := s.control.ClaudeOAuthFlows.Start(request.Context())
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardClaudeOAuthFlow completes PKCE exchange and atomically stores one Claude Code account credential.
+// handleOnboardClaudeOAuthFlow 完成 PKCE 交换并原子存储一个 Claude Code 账号凭据。
+func (s *Server) handleOnboardClaudeOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[claudeOAuthOnboardRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errComplete := s.control.ClaudeOAuthFlows.Complete(request.Context(), flowID, body.CallbackURL)
+	if errComplete != nil {
+		writeControlError(writer, errComplete)
+		return
+	}
+	defer s.control.ClaudeOAuthFlows.Release(flowID)
+	secretValue, errMarshal := provideranthropic.MarshalClaudeToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	defer clear(secretValue)
+	onboarding, errOnboard := s.control.Commands.OnboardClaudeOAuthProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, AuthMethodID: "oauth", Secret: secretValue,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.ClaudeOAuthFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelClaudeOAuthFlow removes one incomplete local Claude authorization session.
+// handleCancelClaudeOAuthFlow 删除一个未完成的本地 Claude 授权会话。
+func (s *Server) handleCancelClaudeOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.ClaudeOAuthFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// handleStartAntigravityOAuthFlow starts one server-owned Google consent session.
+// handleStartAntigravityOAuthFlow 启动一个服务端拥有的 Google 同意授权会话。
+func (s *Server) handleStartAntigravityOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	flow, errStart := s.control.AntigravityOAuthFlows.Start(request.Context())
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardAntigravityOAuthFlow completes consent and atomically stores the account and project credential.
+// handleOnboardAntigravityOAuthFlow 完成同意授权并原子存储账号与项目凭据。
+func (s *Server) handleOnboardAntigravityOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[antigravityOAuthOnboardRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errComplete := s.control.AntigravityOAuthFlows.Complete(request.Context(), flowID, body.CallbackURL)
+	if errComplete != nil {
+		writeControlError(writer, errComplete)
+		return
+	}
+	defer s.control.AntigravityOAuthFlows.Release(flowID)
+	secretValue, errMarshal := providergoogle.MarshalAntigravityToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	defer clear(secretValue)
+	onboarding, errOnboard := s.control.Commands.OnboardAntigravityOAuthProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, AuthMethodID: "oauth", Secret: secretValue,
+		ScopeRefs: []providerconfig.ScopeReference{{Kind: "project", ID: token.ProjectID}},
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.AntigravityOAuthFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelAntigravityOAuthFlow removes one incomplete local consent session.
+// handleCancelAntigravityOAuthFlow 删除一个未完成的本地同意授权会话。
+func (s *Server) handleCancelAntigravityOAuthFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.AntigravityOAuthFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// handleRefreshProviderCredential refreshes one supported protected provider token and returns only its metadata identifier.
+// handleRefreshProviderCredential 刷新一个受支持的受保护供应商 Token 并仅返回其元数据标识。
+func (s *Server) handleRefreshProviderCredential(writer http.ResponseWriter, request *http.Request) {
+	instanceID := request.PathValue("provider_instance_id")
+	credentialID := request.PathValue("credential_id")
+	instance, errInstance := s.control.Query.GetInstance(request.Context(), instanceID)
+	if errInstance != nil {
+		writeControlError(writer, errInstance)
+		return
+	}
+	var credential providerconfig.Credential
+	var errRefresh error
+	switch instance.DefinitionID {
+	case bootstrap.KimiCodingDefinitionID:
+		if s.control.KimiTokens == nil {
+			errRefresh = errors.New("Kimi token refresh is unavailable")
+		} else {
+			credential, errRefresh = s.control.KimiTokens.RefreshCredential(request.Context(), instanceID, credentialID)
+		}
+	case bootstrap.XAIOAuthDefinitionID:
+		if s.control.XAITokens == nil {
+			errRefresh = errors.New("xAI token refresh is unavailable")
+		} else {
+			credential, errRefresh = s.control.XAITokens.RefreshCredential(request.Context(), instanceID, credentialID)
+		}
+	case bootstrap.OpenAICodexDefinitionID:
+		if s.control.CodexTokens == nil {
+			errRefresh = errors.New("Codex token refresh is unavailable")
+		} else {
+			credential, errRefresh = s.control.CodexTokens.RefreshCredential(request.Context(), instanceID, credentialID)
+		}
+	case bootstrap.AnthropicClaudeCodeDefinitionID:
+		if s.control.ClaudeTokens == nil {
+			errRefresh = errors.New("Claude token refresh is unavailable")
+		} else {
+			credential, errRefresh = s.control.ClaudeTokens.RefreshCredential(request.Context(), instanceID, credentialID)
+		}
+	case bootstrap.GoogleAntigravityDefinitionID:
+		if s.control.AntigravityTokens == nil {
+			errRefresh = errors.New("Antigravity token refresh is unavailable")
+		} else {
+			credential, errRefresh = s.control.AntigravityTokens.RefreshCredential(request.Context(), instanceID, credentialID)
+		}
+	default:
+		errRefresh = errors.New("provider credential does not support explicit refresh")
+	}
 	if errRefresh != nil {
 		writeControlError(writer, errRefresh)
 		return
 	}
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
+}
+
+// handleRefreshProviderMetadata refreshes provider-native account metadata and returns the safe catalog view.
+// handleRefreshProviderMetadata 刷新供应商原生账号元数据并返回安全目录视图。
+func (s *Server) handleRefreshProviderMetadata(writer http.ResponseWriter, request *http.Request) {
+	if s.control.MetadataRefresh == nil {
+		writeJSON(writer, http.StatusNotImplemented, errorResponse{Error: "provider_metadata_refresh_unavailable"})
+		return
+	}
+	instanceID := request.PathValue("provider_instance_id")
+	if _, errRefresh := s.control.MetadataRefresh.Refresh(request.Context(), instanceID, time.Now().UTC()); errRefresh != nil {
+		writeControlError(writer, errRefresh)
+		return
+	}
+	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
+	if errView != nil {
+		writeControlError(writer, errView)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
 }
 
 // handleProviderInstance returns one management-safe provider instance view.
@@ -1293,7 +2014,7 @@ func (s *Server) handleCreateCredential(writer http.ResponseWriter, request *htt
 	}
 	credential, errCreate := s.control.Commands.AddCredential(request.Context(), management.AddCredentialInput{
 		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), AuthMethodID: payload.AuthMethodID, Label: payload.Label,
-		PrincipalKey: payload.PrincipalKey, Fingerprint: payload.Fingerprint, ScopeRefs: payload.ScopeRefs, Secret: []byte(payload.Secret),
+		PrincipalKey: payload.PrincipalKey, ScopeRefs: payload.ScopeRefs, Secret: []byte(payload.Secret),
 	})
 	if errCreate != nil {
 		writeControlError(writer, errCreate)
@@ -1312,7 +2033,7 @@ func (s *Server) handleUpdateCredential(writer http.ResponseWriter, request *htt
 	}
 	credential, errUpdate := s.control.Commands.UpdateCredential(request.Context(), management.UpdateCredentialInput{
 		ProviderInstanceID: request.PathValue("provider_instance_id"), CredentialID: request.PathValue("credential_id"), Label: payload.Label,
-		PrincipalKey: payload.PrincipalKey, Fingerprint: payload.Fingerprint, ScopeRefs: payload.ScopeRefs,
+		PrincipalKey: payload.PrincipalKey, ScopeRefs: payload.ScopeRefs,
 	})
 	if errUpdate != nil {
 		writeControlError(writer, errUpdate)
@@ -1330,7 +2051,7 @@ func (s *Server) handleRotateCredentialSecret(writer http.ResponseWriter, reques
 		return
 	}
 	credential, errRotate := s.control.Commands.RotateCredentialSecret(request.Context(), management.RotateCredentialSecretInput{
-		ProviderInstanceID: request.PathValue("provider_instance_id"), CredentialID: request.PathValue("credential_id"), Secret: []byte(payload.Secret), Fingerprint: payload.Fingerprint,
+		ProviderInstanceID: request.PathValue("provider_instance_id"), CredentialID: request.PathValue("credential_id"), Secret: []byte(payload.Secret),
 	})
 	if errRotate != nil {
 		writeControlError(writer, errRotate)

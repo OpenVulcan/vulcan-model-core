@@ -64,23 +64,14 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 		Route:               vcp.RouteSummary{ProviderDefinition: target.ProviderDefinitionID, Model: target.ProviderModelID, ExecutionProfile: target.ExecutionProfileID},
 		CapabilityDecisions: plan.ToExecutionDecisions(),
 	}
-	// trailingModelIndex identifies the only source-evidenced plain model prefill that AI Studio must omit.
-	// trailingModelIndex 标识 AI Studio 必须省略的唯一有来源证据的普通 model 预填项目。
-	trailingModelIndex := trailingModelPrefillIndex(request.Context)
-	for index, item := range request.Context {
+	// lastContentEntryIndex tracks the ledger owner of the final actual contents element after visibility and capability projection.
+	// lastContentEntryIndex 跟踪经过可见性与能力投影后最终实际 Contents 元素的账本所有者。
+	lastContentEntryIndex := -1
+	for _, item := range request.Context {
 		position := len(upstream.Contents)
 		content, carrier, mode, equivalence, ruleID, frameID, digest, include, errItem := projectItem(item, request, plan, capabilities, lineageID, position, referenceSet, callNames)
 		if errItem != nil {
 			return ProjectedRequest{}, errItem
-		}
-		if index == trailingModelIndex {
-			include = false
-			position = -1
-			carrier = "omitted:trailing_model_prefill"
-			mode = vcp.CapabilityOmitted
-			equivalence = vcp.EquivalenceNone
-			ruleID = "google_aistudio.trailing_model_prefill.omitted.v1"
-			report.ConversionSummary = appendSafeSummary(report.ConversionSummary, "google_aistudio.trailing_model_prefill.omitted")
 		}
 		// isSystemInstruction distinguishes a native system carrier from an omitted projection entry.
 		// isSystemInstruction 区分原生系统载体和已省略的投影条目。
@@ -110,6 +101,21 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 		}
 		if errAdd := ledger.Add(entry); errAdd != nil {
 			return ProjectedRequest{}, errAdd
+		}
+		if !isSystemInstruction && include {
+			lastContentEntryIndex = len(ledger.Entries) - 1
+		}
+	}
+	if lastContentEntryIndex >= 0 {
+		lastContentEntry := &ledger.Entries[lastContentEntryIndex]
+		if lastContentEntry.OriginalItem.Kind == vcp.ContextMessage && lastContentEntry.OriginalItem.Authority == vcp.AuthorityAssistant {
+			upstream.Contents = upstream.Contents[:len(upstream.Contents)-1]
+			lastContentEntry.UpstreamPosition = -1
+			lastContentEntry.CarrierRoleOrSlot = "omitted:trailing_model_prefill"
+			lastContentEntry.ProjectionMode = vcp.CapabilityOmitted
+			lastContentEntry.ExecutionEquivalence = vcp.EquivalenceNone
+			lastContentEntry.RuleID = "google_aistudio.trailing_model_prefill.omitted.v1"
+			report.ConversionSummary = appendSafeSummary(report.ConversionSummary, "google_aistudio.trailing_model_prefill.omitted")
 		}
 	}
 	if len(upstream.Contents) == 0 {
@@ -461,20 +467,6 @@ func projectFrame(item vcp.ContextItem, request vcp.VulcanRequest, lineageID str
 		return Content{}, "", "", "", "", "", "", false, fmt.Errorf("%w: item %q: %v", ErrUnsupportedContext, item.ItemID, errFrame)
 	}
 	return Content{Role: "user", Parts: []Part{{Text: encoded}}}, "contents:user.vulcan_frame", vcp.CapabilityProjected, vcp.EquivalenceAdvisory, "google_aistudio.context_frame.projected.v1", frame.FrameID, frame.Digest, true, nil
-}
-
-// trailingModelPrefillIndex identifies the documented unsupported final plain model prefill position.
-// trailingModelPrefillIndex 标识文档化的不受支持最终普通 model 预填位置。
-func trailingModelPrefillIndex(items []vcp.ContextItem) int {
-	if len(items) == 0 {
-		return -1
-	}
-	lastIndex := len(items) - 1
-	last := items[lastIndex]
-	if last.Visibility == vcp.VisibilityModel && last.Kind == vcp.ContextMessage && last.Authority == vcp.AuthorityAssistant {
-		return lastIndex
-	}
-	return -1
 }
 
 // toolIdentity returns a collision-free internal key for one canonical namespace and name pair.

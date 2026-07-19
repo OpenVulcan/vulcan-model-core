@@ -146,3 +146,10 @@ foreach ($embeddedAssetPath in $embeddedAssetPaths) {
 # The copied license satisfies the upstream MIT redistribution condition.
 # 复制许可证用于满足上游 MIT 再分发条件。
 Copy-Item -LiteralPath (Join-Path $sourceRoot "LICENSE") -Destination (Join-Path $targetRoot "LICENSE") -Force
+
+# The registration shim must live below the copied root solely to satisfy Go internal-package visibility rules.
+# 注册垫片必须位于复制根目录下，仅用于满足 Go 内部包可见性规则。
+$registerTemplate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "cliproxy_register.go.txt"))
+$registerTarget = [System.IO.Path]::GetFullPath((Join-Path $targetRoot "register/register.go"))
+New-Item -ItemType Directory -Force -Path ([System.IO.Path]::GetDirectoryName($registerTarget)) | Out-Null
+Copy-Item -LiteralPath $registerTemplate -Destination $registerTarget -Force

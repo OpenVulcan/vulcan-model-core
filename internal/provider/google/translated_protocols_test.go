@@ -64,7 +64,7 @@ func TestAntigravityDriverSetsProjectEnvelope(t *testing.T) {
 		if authorization := request.Header.Get("Authorization"); authorization != "Bearer test-secret" {
 			t.Errorf("Authorization = %q", authorization)
 		}
-		if userAgent := request.Header.Get("User-Agent"); userAgent != "antigravity/hub/2.2.1 darwin/arm64" {
+		if userAgent := request.Header.Get("User-Agent"); userAgent != AntigravityRequestUserAgent("") {
 			t.Errorf("User-Agent = %q", userAgent)
 		}
 		rawRequest, errRead := io.ReadAll(request.Body)

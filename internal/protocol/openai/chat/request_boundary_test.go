@@ -14,7 +14,11 @@ func TestProjectRequestRejectsExactModelSelectionTargetMismatch(t *testing.T) {
 	// mismatchCase defines one exact selection field that must remain bound to the resolved target.
 	// mismatchCase 定义一个必须与解析目标保持绑定的精确选择字段。
 	type mismatchCase struct {
-		name      string
+		// name identifies the exact immutable target field under test.
+		// name 标识待测的精确不可变目标字段。
+		name string
+		// selection contains the deliberately mismatched model selection.
+		// selection 包含有意构造的不匹配模型选择。
 		selection vcp.ModelSelection
 	}
 

@@ -87,6 +87,43 @@ func TestChatDriverExecutesBoundStream(t *testing.T) {
 	}
 }
 
+// TestOpenAICompatibilityDriverPreservesVersionedBaseURL verifies CLIProxyAPI's /chat/completions suffix does not duplicate /v1.
+// TestOpenAICompatibilityDriverPreservesVersionedBaseURL 验证 CLIProxyAPI 的 /chat/completions 后缀不会重复 /v1。
+func TestOpenAICompatibilityDriverPreservesVersionedBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/gateway/v1/chat/completions" {
+			t.Errorf("request path = %q", request.URL.Path)
+		}
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer test-secret" {
+			t.Errorf("Authorization = %q", authorization)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"chat-compat-1","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	baseDriver, execution := newChatDriverExecution(t, server.URL+"/gateway/v1", false)
+	driver, errDriver := NewOpenAICompatibilityDriver("definition-1", baseDriver.client, chatDriverCapabilities())
+	if errDriver != nil {
+		t.Fatalf("NewOpenAICompatibilityDriver() error = %v", errDriver)
+	}
+	execution.Binding.Target.ExecutionProfileID = chatprofile.ProfileID
+	execution.Binding.Credential.AuthMethodID = "default"
+	execution.Definition = providerconfig.ProviderDefinition{
+		ID: "definition-1", Kind: providerconfig.DefinitionKindCustom, ProtocolProfileID: chatprofile.ProfileID,
+		EndpointProfileID: providerconfig.CustomEndpointProfileOpenAICompatibility, AuthMethodIDs: []string{"default"}, RuntimeReady: true,
+		AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "default", Type: providerconfig.AuthMethodBearer}}, Revision: 1,
+	}
+	execution.Request.ModelSelection.ExecutionProfileID = chatprofile.ProfileID
+	result, errExecute := driver.Execute(context.Background(), execution)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if result.UpstreamResponseID != "chat-compat-1" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
 // TestChatDriverRejectsNonAPIKeyCredentialBeforeNetwork verifies a bearer wire request cannot be created from a differently typed credential.
 // TestChatDriverRejectsNonAPIKeyCredentialBeforeNetwork 验证不能使用类型不同的凭据创建 Bearer wire 请求。
 func TestChatDriverRejectsNonAPIKeyCredentialBeforeNetwork(t *testing.T) {

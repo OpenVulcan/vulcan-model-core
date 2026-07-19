@@ -94,9 +94,14 @@ func (s *LocalStore) Put(ctx context.Context, value []byte) (string, error) {
 	if len(value) == 0 {
 		return "", errors.New("secret value is required")
 	}
+	// plaintextCopy isolates caller ownership and is cleared immediately after the platform protection call completes.
+	// plaintextCopy 隔离调用方所有权，并在平台保护调用完成后立即清零。
+	plaintextCopy := append([]byte(nil), value...)
+	defer clear(plaintextCopy)
 	// protectedValue is created before reference allocation so a failed platform call creates no file.
 	// protectedValue 在分配引用前创建，因此失败的平台调用不会创建文件。
-	protectedValue, errProtect := s.protector.Protect(append([]byte(nil), value...))
+	protectedValue, errProtect := s.protector.Protect(plaintextCopy)
+	defer clear(protectedValue)
 	if errProtect != nil {
 		return "", fmt.Errorf("protect secret: %w", errProtect)
 	}
@@ -146,6 +151,7 @@ func (s *LocalStore) Get(ctx context.Context, reference string) ([]byte, error) 
 		return nil, fmt.Errorf("read protected secret: %w", errRead)
 	}
 	plainValue, errUnprotect := s.protector.Unprotect(protectedValue)
+	defer clear(plainValue)
 	if errUnprotect != nil {
 		return nil, fmt.Errorf("unprotect secret: %w", errUnprotect)
 	}

@@ -30,14 +30,30 @@ func TestDriverExecutesAllCopiedNonStreamProtocols(t *testing.T) {
 	// cases defines the exact request and response behavior inherited from each upstream executor.
 	// cases 定义从每个上游执行器继承的精确请求和响应行为。
 	cases := []struct {
-		name                   string
-		profile                protocolCase
-		response               string
-		contentType            string
+		// name identifies the copied executor behavior fixture.
+		// name 标识复制的执行器行为夹具。
+		name string
+		// profile fixes the protocol and its identifying request fact.
+		// profile 固定协议及其标志性请求事实。
+		profile protocolCase
+		// response is the exact upstream response body.
+		// response 是精确的上游响应正文。
+		response string
+		// contentType is the exact upstream response media type.
+		// contentType 是精确的上游响应媒体类型。
+		contentType string
+		// forceTranslationStream preserves a translator's always-streaming input shape.
+		// forceTranslationStream 保留转换器始终流式的输入形态。
 		forceTranslationStream bool
-		forceUpstreamStream    bool
-		wantText               string
-		wantStatus             vcp.ResponseStatus
+		// forceUpstreamStream preserves an executor's always-streaming request contract.
+		// forceUpstreamStream 保留执行器始终流式的请求合同。
+		forceUpstreamStream bool
+		// wantText is the expected canonical assistant text.
+		// wantText 是预期的规范助手文本。
+		wantText string
+		// wantStatus is the expected canonical terminal status.
+		// wantStatus 是预期的规范终态状态。
+		wantStatus vcp.ResponseStatus
 	}{
 		{
 			name: "claude", profile: protocolCase{id: messages.ProfileID, descriptor: messages.Profile(), requestField: "stream", requestValue: "true"},

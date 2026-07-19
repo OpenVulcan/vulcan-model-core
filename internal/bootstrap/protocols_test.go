@@ -37,14 +37,30 @@ func TestRegisterProtocolProfilesRegistersOnlySupportedCustomProfiles(t *testing
 		if profiles[index].ID != expectedID {
 			t.Fatalf("profile[%d].ID = %q, want %q", index, profiles[index].ID, expectedID)
 		}
-		if !profiles[index].UserConfigurable || !profiles[index].RuntimeReady {
-			t.Fatalf("profile[%d] must be user configurable and runtime ready: %#v", index, profiles[index])
+		if !profiles[index].RuntimeReady {
+			t.Fatalf("profile[%d] must be runtime ready: %#v", index, profiles[index])
 		}
 		if profiles[index].ModelDiscovery != providerconfig.SupportUnsupported {
 			t.Fatalf("profile[%d].ModelDiscovery = %q, want unsupported", index, profiles[index].ModelDiscovery)
 		}
-		if len(profiles[index].AllowedAuthMethods) != 4 || profiles[index].AllowedAuthMethods[0] != providerconfig.AuthMethodBearer || profiles[index].AllowedAuthMethods[1] != providerconfig.AuthMethodHeaderKey || profiles[index].AllowedAuthMethods[2] != providerconfig.AuthMethodQueryKey || profiles[index].AllowedAuthMethods[3] != providerconfig.AuthMethodNone {
-			t.Fatalf("profile[%d].AllowedAuthMethods = %#v, want generic custom authentication methods", index, profiles[index].AllowedAuthMethods)
+	}
+	// customProfiles is the complete executable whitelist evidenced by CLIProxyAPI's OpenAICompatibility and VertexCompat configurations.
+	// customProfiles 是由 CLIProxyAPI 的 OpenAICompatibility 与 VertexCompat 配置验证的完整可执行白名单。
+	customProfiles := map[string]providerconfig.AuthMethodType{
+		chat.ProfileID:     providerconfig.AuthMethodBearer,
+		aistudio.ProfileID: providerconfig.AuthMethodHeaderKey,
+	}
+	for _, profile := range profiles {
+		expectedAuth, custom := customProfiles[profile.ID]
+		if profile.UserConfigurable != custom {
+			t.Fatalf("profile %q UserConfigurable = %v, want %v", profile.ID, profile.UserConfigurable, custom)
+		}
+		if custom {
+			if len(profile.AllowedAuthMethods) != 1 || profile.AllowedAuthMethods[0] != expectedAuth {
+				t.Fatalf("profile %q AllowedAuthMethods = %#v, want only %q", profile.ID, profile.AllowedAuthMethods, expectedAuth)
+			}
+		} else if len(profile.AllowedAuthMethods) != 0 {
+			t.Fatalf("non-custom profile %q exposes auth methods %#v", profile.ID, profile.AllowedAuthMethods)
 		}
 	}
 }

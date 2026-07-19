@@ -175,14 +175,30 @@ func ParseFrame(encoded string) (Frame, error) {
 	// wireFrame is the strict XML representation accepted by the parser.
 	// wireFrame 是解析器接受的严格 XML 表示。
 	type wireFrame struct {
-		XMLName  xml.Name `xml:"vulcan-frame"`
-		Version  string   `xml:"version,attr"`
-		FrameID  string   `xml:"frame-id,attr"`
-		Kind     string   `xml:"kind,attr"`
-		Sequence string   `xml:"sequence,attr"`
-		Digest   string   `xml:"digest,attr"`
-		Purpose  string   `xml:"purpose,attr"`
-		Content  string   `xml:",chardata"`
+		// XMLName fixes the only accepted root element.
+		// XMLName 固定唯一接受的根元素。
+		XMLName xml.Name `xml:"vulcan-frame"`
+		// Version is the canonical frame protocol version.
+		// Version 是规范 Frame 协议版本。
+		Version string `xml:"version,attr"`
+		// FrameID is the immutable frame identifier.
+		// FrameID 是不可变 Frame 标识。
+		FrameID string `xml:"frame-id,attr"`
+		// Kind is the registered frame content category.
+		// Kind 是已注册的 Frame 内容类别。
+		Kind string `xml:"kind,attr"`
+		// Sequence is the canonical decimal event sequence.
+		// Sequence 是规范十进制事件序号。
+		Sequence string `xml:"sequence,attr"`
+		// Digest authenticates the canonical text content.
+		// Digest 认证规范文本内容。
+		Digest string `xml:"digest,attr"`
+		// Purpose fixes the frame interpretation boundary.
+		// Purpose 固定 Frame 解释边界。
+		Purpose string `xml:"purpose,attr"`
+		// Content is the exact canonical frame character data.
+		// Content 是精确的规范 Frame 字符数据。
+		Content string `xml:",chardata"`
 	}
 	var wire wireFrame
 	decoder := xml.NewDecoder(strings.NewReader(encoded))

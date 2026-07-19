@@ -22,9 +22,17 @@ func TestProjectRequestUsesCopiedProtocolTransformers(t *testing.T) {
 	// cases defines copied wire facts that uniquely identify each target transformer.
 	// cases 定义能够唯一标识每个目标转换器的复制 wire 事实。
 	cases := []struct {
-		name        string
-		profile     translatedresponses.Profile
+		// name identifies the copied request transformer fixture.
+		// name 标识复制的请求转换器夹具。
+		name string
+		// profile selects the exact copied protocol transformer.
+		// profile 选择精确的复制协议转换器。
+		profile translatedresponses.Profile
+		// assertField is the unique projected wire field under test.
+		// assertField 是待测的唯一投影 Wire 字段。
 		assertField string
+		// assertValue is the exact expected wire value.
+		// assertValue 是精确的预期 Wire 值。
 		assertValue string
 	}{
 		{name: "claude", profile: messages.Profile(), assertField: "messages.0.role", assertValue: "user"},
@@ -59,11 +67,21 @@ func TestDecodeNonStreamUsesCopiedProtocolTransformers(t *testing.T) {
 	// cases preserves upstream response fixtures shaped exactly like copied translator regression inputs.
 	// cases 保留与复制转换器回归输入形态完全一致的上游响应夹具。
 	cases := []struct {
-		name       string
-		profile    translatedresponses.Profile
-		raw        string
+		// name identifies the copied response transformer fixture.
+		// name 标识复制的响应转换器夹具。
+		name string
+		// profile selects the exact copied protocol transformer.
+		// profile 选择精确的复制协议转换器。
+		profile translatedresponses.Profile
+		// raw is the exact upstream response fixture.
+		// raw 是精确的上游响应夹具。
+		raw string
+		// wantStatus is the expected canonical lifecycle status.
+		// wantStatus 是预期的规范生命周期状态。
 		wantStatus vcp.ResponseStatus
-		wantText   string
+		// wantText is the expected canonical assistant text.
+		// wantText 是预期的规范助手文本。
+		wantText string
 	}{
 		{
 			name: "claude", profile: messages.Profile(), wantStatus: vcp.ResponseCompleted, wantText: "ok",

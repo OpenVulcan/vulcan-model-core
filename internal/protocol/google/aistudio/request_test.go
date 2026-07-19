@@ -98,6 +98,9 @@ func TestProjectRequestOmitsOnlyTrailingPlainModelPrefill(t *testing.T) {
 		aiStudioMessage("user-item", 1, vcp.AuthorityUser, "Question"),
 		aiStudioMessage("model-prefill", 2, vcp.AuthorityAssistant, "Prefill"),
 	}
+	auditOnly := aiStudioMessage("audit-only", 3, vcp.AuthorityAssistant, "Local audit text")
+	auditOnly.Visibility = vcp.VisibilityAuditOnly
+	request.Context = append(request.Context, auditOnly)
 
 	projected, errProject := ProjectRequest(request, aiStudioTarget(), aiStudioCapabilities(), "lineage-2", aiStudioNow())
 	if errProject != nil {
@@ -106,7 +109,7 @@ func TestProjectRequestOmitsOnlyTrailingPlainModelPrefill(t *testing.T) {
 	if len(projected.Upstream.Contents) != 1 || projected.Upstream.Contents[0].Role != "user" {
 		t.Fatalf("contents = %#v", projected.Upstream.Contents)
 	}
-	if len(projected.Ledger.Entries) != 2 || projected.Ledger.Entries[1].ProjectionMode != vcp.CapabilityOmitted || projected.Ledger.Entries[1].CarrierRoleOrSlot != "omitted:trailing_model_prefill" {
+	if len(projected.Ledger.Entries) != 3 || projected.Ledger.Entries[1].ProjectionMode != vcp.CapabilityOmitted || projected.Ledger.Entries[1].CarrierRoleOrSlot != "omitted:trailing_model_prefill" || projected.Ledger.Entries[2].ProjectionMode != vcp.CapabilityOmitted {
 		t.Fatalf("ledger = %#v", projected.Ledger.Entries)
 	}
 	if !aiStudioContainsSummary(projected.Report.ConversionSummary, "google_aistudio.trailing_model_prefill.omitted") {

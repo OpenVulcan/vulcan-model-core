@@ -4,9 +4,11 @@ import (
 	"context"
 	"errors"
 	"sort"
+	"strconv"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
@@ -24,7 +26,7 @@ type QueryService struct {
 // NewQueryService creates one client-safe management query service.
 // NewQueryService 创建一个客户端安全的管理查询服务。
 func NewQueryService(configurations providerconfig.Store, catalogs catalog.Store) (*QueryService, error) {
-	if configurations == nil || catalogs == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration and catalog stores are required")
 	}
 	return &QueryService{configurations: configurations, catalogs: catalogs}, nil
@@ -311,6 +313,9 @@ type ModelView struct {
 	// Enabled reports whether local management policy allows call-plane use of this model.
 	// Enabled 报告本地管理策略是否允许调用面使用该模型。
 	Enabled bool `json:"enabled"`
+	// ProviderAuthorized reports whether provider evidence permits at least one configured account to use this model.
+	// ProviderAuthorized 报告供应商证据是否允许至少一个已配置账号使用此模型。
+	ProviderAuthorized bool `json:"provider_authorized"`
 	// Offerings contains channel-specific products and selectable profiles.
 	// Offerings 包含通道特定产品与可选规格。
 	Offerings []OfferingView `json:"offerings"`
@@ -504,12 +509,15 @@ type AllowanceWindowView struct {
 	// Kind identifies rolling, calendar, or provider-defined window semantics.
 	// Kind 标识滚动、日历或供应商自定义窗口语义。
 	Kind catalog.WindowKind `json:"kind"`
-	// Duration is the rolling window length.
-	// Duration 是滚动窗口长度。
-	Duration time.Duration `json:"duration"`
+	// Duration is the exact base-10 nanosecond length of a rolling window.
+	// Duration 是滚动窗口精确的十进制纳秒时长。
+	Duration string `json:"duration"`
 	// CalendarUnit is the provider-normalized calendar unit.
 	// CalendarUnit 是供应商规范化日历单位。
 	CalendarUnit string `json:"calendar_unit,omitempty"`
+	// TimeZone identifies the provider calendar time zone when known.
+	// TimeZone 标识已知时的供应商日历时区。
+	TimeZone string `json:"time_zone,omitempty"`
 	// ResetAt is the next known reset time.
 	// ResetAt 是下一次已知重置时间。
 	ResetAt *time.Time `json:"reset_at,omitempty"`
@@ -770,6 +778,14 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 	for _, pool := range snapshot.Pools {
 		poolsByProfile[pool.ExecutionProfileID] = pool
 	}
+	// explicitlyAuthorizedModels records models allowed by at least one credential-specific provider entitlement.
+	// explicitlyAuthorizedModels 记录至少被一个凭据特定供应商授权允许的模型。
+	explicitlyAuthorizedModels := make(map[string]struct{})
+	for _, entitlement := range snapshot.Entitlements {
+		if entitlement.Availability == catalog.AvailabilityAllowed {
+			explicitlyAuthorizedModels[entitlement.ProviderModelID] = struct{}{}
+		}
+	}
 	models := make([]ModelView, 0, len(snapshot.Models))
 	for _, model := range snapshot.Models {
 		offeringViews := make([]OfferingView, 0, len(offeringsByModel[model.ID]))
@@ -806,7 +822,13 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 		sort.Slice(offeringViews, func(left int, right int) bool {
 			return offeringViews[left].ID < offeringViews[right].ID
 		})
-		models = append(models, ModelView{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName, EntitlementMode: model.EntitlementMode, Enabled: !modelDisabled(disabledModelIDs, model.ID), Offerings: offeringViews})
+		// explicitlyAuthorized records whether a credential-specific entitlement allows this exact model.
+		// explicitlyAuthorized 记录凭据特定授权是否允许此精确模型。
+		_, explicitlyAuthorized := explicitlyAuthorizedModels[model.ID]
+		// providerAuthorized keeps provider authorization separate from the local disabled-model policy.
+		// providerAuthorized 将供应商授权与本地停用模型策略保持分离。
+		providerAuthorized := model.EntitlementMode == catalog.EntitlementAllBoundCredentials || explicitlyAuthorized
+		models = append(models, ModelView{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName, EntitlementMode: model.EntitlementMode, Enabled: !modelDisabled(disabledModelIDs, model.ID), ProviderAuthorized: providerAuthorized, Offerings: offeringViews})
 	}
 	sort.Slice(models, func(left int, right int) bool {
 		return models[left].ID < models[right].ID
@@ -829,7 +851,7 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 			ExpiresAt:      allowance.ExpiresAt,
 		}
 		if allowance.Window != nil {
-			allowanceView.Window = &AllowanceWindowView{Kind: allowance.Window.Kind, Duration: allowance.Window.Duration, CalendarUnit: allowance.Window.CalendarUnit, ResetAt: cloneTime(allowance.Window.ResetAt)}
+			allowanceView.Window = &AllowanceWindowView{Kind: allowance.Window.Kind, Duration: strconv.FormatInt(int64(allowance.Window.Duration), 10), CalendarUnit: allowance.Window.CalendarUnit, TimeZone: allowance.Window.TimeZone, ResetAt: cloneTime(allowance.Window.ResetAt)}
 		}
 		allowances = append(allowances, allowanceView)
 	}
@@ -849,6 +871,9 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 	sort.Slice(plans, func(left int, right int) bool {
 		if plans[left].PlanCode != plans[right].PlanCode {
 			return plans[left].PlanCode < plans[right].PlanCode
+		}
+		if plans[left].PlanName != plans[right].PlanName {
+			return plans[left].PlanName < plans[right].PlanName
 		}
 		return plans[left].Status < plans[right].Status
 	})

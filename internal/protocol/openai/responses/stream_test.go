@@ -352,3 +352,13 @@ func TestReadSSEJoinsDataLines(t *testing.T) {
 		t.Fatalf("envelopes = %#v", envelopes)
 	}
 }
+
+// TestReadSSERejectsOversizedMultilineFrame verifies individually valid lines cannot create an unbounded aggregate payload.
+// TestReadSSERejectsOversizedMultilineFrame 验证单独有效的行不能创建无界聚合载荷。
+func TestReadSSERejectsOversizedMultilineFrame(t *testing.T) {
+	dataLine := "data: " + strings.Repeat("x", maximumSSELineBytes/2+1) + "\n"
+	errRead := ReadSSE(strings.NewReader(dataLine+dataLine+"\n"), func(SSEEnvelope) error { return nil })
+	if !errors.Is(errRead, ErrInvalidUpstreamResponse) {
+		t.Fatalf("ReadSSE() error = %v, want ErrInvalidUpstreamResponse", errRead)
+	}
+}

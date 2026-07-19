@@ -96,7 +96,7 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 		if errMessage != nil {
 			return ProjectedRequest{}, errMessage
 		}
-		if item.Kind == vcp.ContextReasoning && capabilities.ReasoningContent {
+		if item.Visibility == vcp.VisibilityModel && item.Kind == vcp.ContextReasoning && capabilities.ReasoningContent {
 			reasoningText, errReasoning := vcp.TextContent(item.Content)
 			if errReasoning != nil {
 				return ProjectedRequest{}, fmt.Errorf("%w: reasoning item %q: %v", ErrUnsupportedContext, item.ItemID, errReasoning)

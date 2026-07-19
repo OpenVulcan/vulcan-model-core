@@ -7,6 +7,7 @@
 package chat
 
 import (
+	"errors"
 	"strings"
 	"testing"
 )
@@ -24,5 +25,15 @@ func TestReadSSEPreservesEventAndMultilineData(t *testing.T) {
 	}
 	if len(envelopes) != 2 || envelopes[0].Event != "chat.chunk" || string(envelopes[0].Data) != "first\nsecond" || string(envelopes[1].Data) != "[DONE]" {
 		t.Fatalf("envelopes = %#v", envelopes)
+	}
+}
+
+// TestReadSSERejectsOversizedMultilineFrame verifies many valid lines cannot bypass the aggregate frame limit.
+// TestReadSSERejectsOversizedMultilineFrame 验证多条有效行不能绕过聚合帧上限。
+func TestReadSSERejectsOversizedMultilineFrame(t *testing.T) {
+	dataLine := "data: " + strings.Repeat("x", maximumSSELineBytes/2+1) + "\n"
+	errRead := ReadSSE(strings.NewReader(dataLine+dataLine+"\n"), func(SSEEnvelope) error { return nil })
+	if !errors.Is(errRead, ErrInvalidUpstreamResponse) {
+		t.Fatalf("ReadSSE() error = %v, want ErrInvalidUpstreamResponse", errRead)
 	}
 }

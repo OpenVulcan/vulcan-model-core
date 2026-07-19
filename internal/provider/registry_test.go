@@ -95,6 +95,28 @@ func TestRegistryAcceptsMatchingDriverContract(t *testing.T) {
 	}
 }
 
+// TestRegistryAcceptsDefinitionRegisteredDuringBootstrap verifies runtime driver binding does not duplicate immutable catalog registration.
+// TestRegistryAcceptsDefinitionRegisteredDuringBootstrap 验证运行时 Driver 绑定不会重复注册启动阶段的不可变目录。
+func TestRegistryAcceptsDefinitionRegisteredDuringBootstrap(t *testing.T) {
+	registry := testProviderRegistry(t)
+	definition := testProviderDefinition()
+	if errDefinition := registry.definitions.Register(definition); errDefinition != nil {
+		t.Fatalf("pre-register provider definition: %v", errDefinition)
+	}
+	if errDriver := registry.Register(testDriver{definition: definition}); errDriver != nil {
+		t.Fatalf("register driver for pre-registered definition: %v", errDriver)
+	}
+	changed := definition
+	changed.DriverVersion = "2.0.0"
+	secondRegistry, errRegistry := NewRegistry(registry.definitions)
+	if errRegistry != nil {
+		t.Fatalf("create second registry: %v", errRegistry)
+	}
+	if errDriver := secondRegistry.Register(testDriver{definition: changed}); errDriver == nil {
+		t.Fatal("expected mismatched pre-registered definition rejection")
+	}
+}
+
 // TestRegistryRejectsUnsupportedFeatureContract verifies metadata cannot overstate implementation.
 // TestRegistryRejectsUnsupportedFeatureContract 校验元数据不能夸大实际实现能力。
 func TestRegistryRejectsUnsupportedFeatureContract(t *testing.T) {
@@ -103,5 +125,14 @@ func TestRegistryRejectsUnsupportedFeatureContract(t *testing.T) {
 	definition.Features.ModelDiscovery = providerconfig.SupportSupported
 	if err := registry.Register(testDriver{definition: definition}); err == nil {
 		t.Fatal("expected missing ModelDiscoverer implementation rejection")
+	}
+}
+
+// TestRegistryRejectsTypedNilDriver verifies metadata registration cannot invoke methods on a boxed nil driver.
+// TestRegistryRejectsTypedNilDriver 验证元数据注册不会在装箱后的 nil Driver 上调用方法。
+func TestRegistryRejectsTypedNilDriver(t *testing.T) {
+	registry := testProviderRegistry(t)
+	if errRegister := registry.Register((*testDriver)(nil)); errRegister == nil {
+		t.Fatal("Register() error = nil")
 	}
 }

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
@@ -48,7 +49,7 @@ type SetModelEnabledInput struct {
 // NewModelAccessService creates one instance model-access application service.
 // NewModelAccessService 创建一个实例模型访问应用服务。
 func NewModelAccessService(configurations providerconfig.Store, catalogs catalog.Store) (*ModelAccessService, error) {
-	if configurations == nil || catalogs == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration and catalog stores are required")
 	}
 	return &ModelAccessService{configurations: configurations, catalogs: catalogs, now: time.Now}, nil

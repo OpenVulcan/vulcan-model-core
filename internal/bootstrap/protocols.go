@@ -33,70 +33,70 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			UserConfigurable:   true,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 		},
 		{
 			ID:                 openairesponses.ProfileID,
 			Version:            "1",
 			DisplayName:        "OpenAI Responses",
-			UserConfigurable:   true,
+			UserConfigurable:   false,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 xairesponses.ProfileID,
 			Version:            "1",
 			DisplayName:        "xAI Responses",
-			UserConfigurable:   true,
+			UserConfigurable:   false,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 aistudio.ProfileID,
 			Version:            "1",
-			DisplayName:        "Google AI Studio GenerateContent",
+			DisplayName:        "Gemini GenerateContent (AI Studio / Vertex-compatible)",
 			UserConfigurable:   true,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodHeaderKey},
 		},
 		{
 			ID:                 messages.ProfileID,
 			Version:            "1",
 			DisplayName:        "Anthropic Messages",
-			UserConfigurable:   true,
+			UserConfigurable:   false,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 codex.ProfileID,
 			Version:            "1",
 			DisplayName:        "OpenAI Codex",
-			UserConfigurable:   true,
+			UserConfigurable:   false,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 interactions.ProfileID,
 			Version:            "1",
 			DisplayName:        "Google Interactions",
-			UserConfigurable:   true,
+			UserConfigurable:   false,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 antigravity.ProfileID,
 			Version:            "1",
 			DisplayName:        "Google Antigravity",
-			UserConfigurable:   true,
+			UserConfigurable:   false,
 			RuntimeReady:       true,
 			ModelDiscovery:     providerconfig.SupportUnsupported,
-			AllowedAuthMethods: genericCustomAuthMethods(),
+			AllowedAuthMethods: nil,
 		},
 	}
 	for _, profile := range profiles {
@@ -105,15 +105,4 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 		}
 	}
 	return nil
-}
-
-// genericCustomAuthMethods returns exactly the generic credential mechanisms accepted by custom-definition validation.
-// genericCustomAuthMethods 返回自定义定义校验接受的精确通用凭据机制。
-func genericCustomAuthMethods() []providerconfig.AuthMethodType {
-	return []providerconfig.AuthMethodType{
-		providerconfig.AuthMethodBearer,
-		providerconfig.AuthMethodHeaderKey,
-		providerconfig.AuthMethodQueryKey,
-		providerconfig.AuthMethodNone,
-	}
 }

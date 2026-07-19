@@ -18,9 +18,11 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -42,7 +44,71 @@ var (
 	// ErrUnsupportedAuthentication reports an unregistered credential injection mode.
 	// ErrUnsupportedAuthentication 表示未注册的凭据注入模式。
 	ErrUnsupportedAuthentication = errors.New("unsupported credential injection")
+	// ErrResponseTooLarge reports a successful upstream response that exceeded the bounded non-streaming decode budget.
+	// ErrResponseTooLarge 表示成功的上游响应超过非流式解码的有界预算。
+	ErrResponseTooLarge = errors.New("upstream response exceeds the non-streaming response limit")
 )
+
+const (
+	// MaximumNonStreamingResponseBytes matches CLIProxyAPI's reviewed 50 MiB executor scanner boundary.
+	// MaximumNonStreamingResponseBytes 与 CLIProxyAPI 已审核的 50 MiB Executor 扫描边界一致。
+	MaximumNonStreamingResponseBytes int64 = 52_428_800
+	// maximumResponseDrainBytes permits small connection-reuse cleanup without consuming an unbounded upstream body.
+	// maximumResponseDrainBytes 允许为连接复用清理小型正文，同时避免消费无界上游正文。
+	maximumResponseDrainBytes int64 = 64 * 1024
+)
+
+// boundedResponseReader turns a byte budget into an explicit overflow error instead of a silent truncated EOF.
+// boundedResponseReader 将字节预算转换为显式溢出错误，而不是静默截断的 EOF。
+type boundedResponseReader struct {
+	// source is the exact successful upstream response body.
+	// source 是精确的成功上游响应体。
+	source io.Reader
+	// remaining is the number of bytes still available to the decoder.
+	// remaining 是解码器仍可读取的字节数。
+	remaining int64
+	// overflowed keeps every read after the first excess byte deterministic.
+	// overflowed 使检测到首个超额字节后的每次读取保持确定性。
+	overflowed bool
+}
+
+// NewBoundedResponseReader creates a reader that returns ErrResponseTooLarge after the exact byte budget is exhausted.
+// NewBoundedResponseReader 创建一个在精确字节预算耗尽后返回 ErrResponseTooLarge 的读取器。
+func NewBoundedResponseReader(source io.Reader, maximumBytes int64) (io.Reader, error) {
+	if source == nil || maximumBytes <= 0 {
+		return nil, fmt.Errorf("%w: response reader and positive byte limit are required", ErrInvalidRequest)
+	}
+	return &boundedResponseReader{source: source, remaining: maximumBytes}, nil
+}
+
+// Read implements io.Reader while probing one byte beyond the budget solely to distinguish EOF from overflow.
+// Read 实现 io.Reader，并仅探测预算外一个字节以区分 EOF 与溢出。
+func (r *boundedResponseReader) Read(destination []byte) (int, error) {
+	if len(destination) == 0 {
+		return 0, nil
+	}
+	if r.overflowed {
+		return 0, ErrResponseTooLarge
+	}
+	if r.remaining > 0 {
+		if int64(len(destination)) > r.remaining {
+			destination = destination[:r.remaining]
+		}
+		read, errRead := r.source.Read(destination)
+		r.remaining -= int64(read)
+		return read, errRead
+	}
+	var probe [1]byte
+	read, errRead := r.source.Read(probe[:])
+	if read > 0 {
+		r.overflowed = true
+		return 0, ErrResponseTooLarge
+	}
+	if errRead == nil {
+		return 0, io.ErrNoProgress
+	}
+	return 0, errRead
+}
 
 // HTTPDoer is the minimal standard-library HTTP execution contract used by the transport.
 // HTTPDoer 是传输层使用的最小标准库 HTTP 执行合同。
@@ -173,12 +239,18 @@ func (r Request) Validate() error {
 		return errAuthentication
 	}
 	for _, header := range r.Headers {
-		if strings.TrimSpace(header.Name) == "" {
-			return fmt.Errorf("%w: header name is required", ErrInvalidRequest)
+		if !validHTTPHeaderName(header.Name) {
+			return fmt.Errorf("%w: header name is invalid", ErrInvalidRequest)
 		}
-		if strings.EqualFold(header.Name, "Authorization") || strings.EqualFold(header.Name, "Idempotency-Key") || strings.EqualFold(header.Name, "X-Goog-Api-Key") {
+		if !validHTTPHeaderValue(header.Value) {
+			return fmt.Errorf("%w: header %q contains invalid bytes", ErrInvalidRequest, header.Name)
+		}
+		if strings.EqualFold(header.Name, "Authorization") || strings.EqualFold(header.Name, "Idempotency-Key") || strings.EqualFold(header.Name, "X-Goog-Api-Key") || strings.EqualFold(header.Name, "Host") {
 			return fmt.Errorf("%w: reserved header %q must be owned by transport or driver policy", ErrInvalidRequest, header.Name)
 		}
+	}
+	if r.IdempotencyKey != "" && (strings.TrimSpace(r.IdempotencyKey) == "" || !validHTTPHeaderValue(r.IdempotencyKey)) {
+		return fmt.Errorf("%w: idempotency key contains invalid HTTP header bytes", ErrInvalidRequest)
 	}
 	return nil
 }
@@ -192,13 +264,47 @@ func (a Authentication) validate() error {
 			return fmt.Errorf("%w: header name is not valid for mode %q", ErrUnsupportedAuthentication, a.Mode)
 		}
 	case AuthenticationHeader:
-		if strings.TrimSpace(a.HeaderName) == "" {
-			return fmt.Errorf("%w: header mode requires header name", ErrUnsupportedAuthentication)
+		if !validHTTPHeaderName(a.HeaderName) || strings.EqualFold(a.HeaderName, "Host") {
+			return fmt.Errorf("%w: header mode requires a valid non-Host header name", ErrUnsupportedAuthentication)
 		}
 	default:
 		return fmt.Errorf("%w: mode %q", ErrUnsupportedAuthentication, a.Mode)
 	}
 	return nil
+}
+
+// validHTTPHeaderName reports whether one field name is an RFC token accepted at the immutable transport boundary.
+// validHTTPHeaderName 报告一个字段名是否为不可变传输边界接受的 RFC Token。
+func validHTTPHeaderName(name string) bool {
+	if name == "" {
+		return false
+	}
+	for index := 0; index < len(name); index++ {
+		character := name[index]
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') {
+			continue
+		}
+		switch character {
+		case '!', '#', '$', '%', '&', '\'', '*', '+', '-', '.', '^', '_', '`', '|', '~':
+			continue
+		default:
+			return false
+		}
+	}
+	return true
+}
+
+// validHTTPHeaderValue rejects control bytes that could create another field or alter the HTTP message boundary.
+// validHTTPHeaderValue 拒绝可能创建其他字段或改变 HTTP 消息边界的控制字节。
+func validHTTPHeaderValue(value string) bool {
+	for index := 0; index < len(value); index++ {
+		character := value[index]
+		if character == '\t' || (character >= 0x20 && character != 0x7f) {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // RetryPolicy bounds safe retry attempts for an idempotency-protected immutable target.
@@ -218,14 +324,14 @@ type RetryPolicy struct {
 // attempts returns the validated bounded attempt count.
 // attempts 返回经过校验且有上限的尝试次数。
 func (p RetryPolicy) attempts() (int, error) {
+	if p.InitialBackoff < 0 || p.MaxBackoff < 0 {
+		return 0, fmt.Errorf("%w: retry backoff must not be negative", ErrInvalidRequest)
+	}
 	if p.MaxAttempts == 0 {
 		return 1, nil
 	}
 	if p.MaxAttempts < 1 || p.MaxAttempts > 3 {
 		return 0, fmt.Errorf("%w: max attempts must be between 1 and 3", ErrInvalidRequest)
-	}
-	if p.InitialBackoff < 0 || p.MaxBackoff < 0 {
-		return 0, fmt.Errorf("%w: retry backoff must not be negative", ErrInvalidRequest)
 	}
 	return p.MaxAttempts, nil
 }
@@ -247,10 +353,10 @@ type Client struct {
 // NewClient creates a transport client with explicit dependency and retry boundaries.
 // NewClient 使用明确依赖和重试边界创建传输客户端。
 func NewClient(doer HTTPDoer, secrets secret.Store, retry RetryPolicy) (*Client, error) {
-	if doer == nil {
+	if dependency.IsNil(doer) {
 		return nil, ErrHTTPClientRequired
 	}
-	if secrets == nil {
+	if dependency.IsNil(secrets) {
 		return nil, ErrSecretStoreRequired
 	}
 	if _, errAttempts := retry.attempts(); errAttempts != nil {
@@ -266,7 +372,16 @@ func refuseRedirects(doer HTTPDoer) HTTPDoer {
 	if !isStandardClient {
 		return doer
 	}
-	clonedClient := *standardClient
+	return CloneHTTPClientWithoutRedirects(standardClient)
+}
+
+// CloneHTTPClientWithoutRedirects preserves caller-owned transport settings while refusing credential-bearing redirects.
+// CloneHTTPClientWithoutRedirects 保留调用方拥有的传输设置，同时拒绝携带凭据的重定向。
+func CloneHTTPClientWithoutRedirects(client *http.Client) *http.Client {
+	if client == nil {
+		return nil
+	}
+	clonedClient := *client
 	clonedClient.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
 		return http.ErrUseLastResponse
 	}
@@ -353,6 +468,9 @@ func (c *Client) do(ctx context.Context, request Request, stream bool) (*http.Re
 		if upstreamResponse == nil {
 			return nil, fmt.Errorf("%w: HTTP client returned nil response", ErrInvalidRequest)
 		}
+		if upstreamResponse.Body == nil {
+			return nil, fmt.Errorf("%w: HTTP client returned response without a body", ErrInvalidRequest)
+		}
 		if upstreamResponse.StatusCode >= http.StatusOK && upstreamResponse.StatusCode < http.StatusMultipleChoices {
 			return upstreamResponse, nil
 		}
@@ -390,6 +508,18 @@ func (c *Client) resolveSecret(ctx context.Context, request Request) ([]byte, er
 		return nil, fmt.Errorf("%w: credential secret is empty", ErrInvalidBinding)
 	}
 	return secretValue, nil
+}
+
+// ValidateAbsoluteHTTPURL validates one provider-returned browser or API link and returns its normalized HTTP(S) form.
+// ValidateAbsoluteHTTPURL 校验一个供应商返回的浏览器或 API 链接，并返回其规范化 HTTP(S) 形式。
+// The rawURL parameter may contain surrounding whitespace; credentials, missing hosts, and non-HTTP schemes are rejected.
+// rawURL 参数可以包含首尾空白；携带凭据、缺少 Host 或使用非 HTTP Scheme 的地址会被拒绝。
+func ValidateAbsoluteHTTPURL(rawURL string) (string, error) {
+	parsedURL, errParse := url.Parse(strings.TrimSpace(rawURL))
+	if errParse != nil || !parsedURL.IsAbs() || parsedURL.Host == "" || parsedURL.User != nil || (parsedURL.Scheme != "http" && parsedURL.Scheme != "https") {
+		return "", errors.New("provider link must be an absolute credential-free HTTP URL")
+	}
+	return parsedURL.String(), nil
 }
 
 // buildURL joins a relative protocol path to one selected endpoint without accepting another origin.
@@ -456,9 +586,21 @@ func applyAuthentication(request *http.Request, authentication Authentication, s
 	case AuthenticationNone:
 		return nil
 	case AuthenticationBearer:
-		request.Header.Set("Authorization", "Bearer "+string(secretValue))
+		// credentialValue is the sole string projection required by the standard HTTP header map.
+		// credentialValue 是标准 HTTP Header Map 所需的唯一字符串投影。
+		credentialValue := string(secretValue)
+		if !validHTTPHeaderValue(credentialValue) {
+			return fmt.Errorf("%w: credential contains invalid HTTP header bytes", ErrInvalidBinding)
+		}
+		request.Header.Set("Authorization", "Bearer "+credentialValue)
 	case AuthenticationHeader:
-		request.Header.Set(authentication.HeaderName, string(secretValue))
+		// credentialValue is the sole string projection required by the standard HTTP header map.
+		// credentialValue 是标准 HTTP Header Map 所需的唯一字符串投影。
+		credentialValue := string(secretValue)
+		if !validHTTPHeaderValue(credentialValue) {
+			return fmt.Errorf("%w: credential contains invalid HTTP header bytes", ErrInvalidBinding)
+		}
+		request.Header.Set(authentication.HeaderName, credentialValue)
 	default:
 		return fmt.Errorf("%w: mode %q", ErrUnsupportedAuthentication, authentication.Mode)
 	}
@@ -505,8 +647,11 @@ func parseRetryAfter(value string, now time.Time) *time.Duration {
 		}
 		return &delay
 	}
-	var seconds int64
-	if _, errScan := fmt.Sscan(value, &seconds); errScan != nil || seconds < 0 {
+	seconds, errSeconds := strconv.ParseInt(value, 10, 64)
+	// maximumRetryAfterSeconds prevents the conversion to time.Duration from wrapping into an immediate negative retry.
+	// maximumRetryAfterSeconds 防止转换为 time.Duration 时回绕为立即执行的负重试时间。
+	maximumRetryAfterSeconds := int64((time.Duration(1<<63 - 1)) / time.Second)
+	if errSeconds != nil || seconds < 0 || seconds > maximumRetryAfterSeconds {
 		return nil
 	}
 	delay := time.Duration(seconds) * time.Second
@@ -516,7 +661,19 @@ func parseRetryAfter(value string, now time.Time) *time.Duration {
 // delay calculates a bounded exponential retry wait, preferring a valid provider delay.
 // delay 计算有上限的指数重试等待，优先使用有效的供应商延迟。
 func (p RetryPolicy) delay(attempt int, retryAfter *time.Duration) time.Duration {
+	// maximumBackoff applies the documented InitialBackoff default and bounds provider-authored Retry-After values.
+	// maximumBackoff 应用文档约定的 InitialBackoff 默认值，并限制供应商编写的 Retry-After 值。
+	maximumBackoff := p.MaxBackoff
+	if maximumBackoff <= 0 {
+		maximumBackoff = p.InitialBackoff
+	}
 	if retryAfter != nil {
+		if maximumBackoff <= 0 {
+			return 0
+		}
+		if *retryAfter > maximumBackoff {
+			return maximumBackoff
+		}
 		return *retryAfter
 	}
 	if p.InitialBackoff <= 0 {
@@ -524,10 +681,16 @@ func (p RetryPolicy) delay(attempt int, retryAfter *time.Duration) time.Duration
 	}
 	delay := p.InitialBackoff
 	for index := 1; index < attempt; index++ {
+		if maximumBackoff > 0 && delay >= maximumBackoff {
+			return maximumBackoff
+		}
+		if maximumBackoff > 0 && delay > maximumBackoff/2 {
+			return maximumBackoff
+		}
 		delay *= 2
 	}
-	if p.MaxBackoff > 0 && delay > p.MaxBackoff {
-		return p.MaxBackoff
+	if maximumBackoff > 0 && delay > maximumBackoff {
+		return maximumBackoff
 	}
 	return delay
 }
@@ -576,14 +739,13 @@ func clearBytes(value []byte) {
 	}
 }
 
-// DrainAndClose closes a response after optionally discarding unread bytes without retaining sensitive content.
-// DrainAndClose 在不保留敏感内容的前提下丢弃未读字节并关闭响应。
+// DrainAndClose closes a response after discarding at most a bounded amount of unread sensitive content.
+// DrainAndClose 在最多丢弃有界数量的未读敏感内容后关闭响应。
 func DrainAndClose(response *http.Response) error {
 	if response == nil || response.Body == nil {
 		return nil
 	}
-	if _, errCopy := io.Copy(io.Discard, response.Body); errCopy != nil {
-		return errCopy
-	}
-	return response.Body.Close()
+	_, errDrain := io.Copy(io.Discard, io.LimitReader(response.Body, maximumResponseDrainBytes))
+	errClose := response.Body.Close()
+	return errors.Join(errDrain, errClose)
 }

@@ -301,6 +301,27 @@ func TestProjectRequestReplaysVerifiedReasoningContentForToolCalls(t *testing.T)
 	}
 }
 
+// TestProjectRequestNeverUsesHiddenReasoningForToolReplay verifies audit-only reasoning cannot satisfy or populate a model-visible wire field.
+// TestProjectRequestNeverUsesHiddenReasoningForToolReplay 验证仅审计推理不能满足或填充模型可见 wire 字段。
+func TestProjectRequestNeverUsesHiddenReasoningForToolReplay(t *testing.T) {
+	request := chatTestRequest()
+	request.Context = append(request.Context,
+		vcp.ContextItem{
+			ItemID: "hidden-reasoning", Sequence: 2, Kind: vcp.ContextReasoning, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityAuditOnly,
+			Content: []vcp.ContentBlock{{Type: vcp.ContentText, Text: "must not reach upstream"}}, Reasoning: &vcp.ReasoningItem{},
+		},
+		vcp.ContextItem{
+			ItemID: "tool-call", Sequence: 3, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorPrimaryAssistant,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			ToolCall: &vcp.ToolCallItem{ToolCallID: "call", UpstreamID: "upstream-call", Name: "lookup", Arguments: `{}`, Status: vcp.ToolCallCompleted},
+		},
+	)
+	if _, errProject := ProjectRequest(request, chatTarget(), ProfileCapabilities{Reasoning: true, ReasoningContent: true}, "lin_hidden_reasoning", time.Unix(39, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+	}
+}
+
 // TestProjectRequestRejectsReasoningContentToolReplayWithoutReasoning verifies compatible profiles never fabricate missing provider reasoning.
 // TestProjectRequestRejectsReasoningContentToolReplayWithoutReasoning 验证兼容 Profile 绝不伪造缺失的供应商推理。
 func TestProjectRequestRejectsReasoningContentToolReplayWithoutReasoning(t *testing.T) {

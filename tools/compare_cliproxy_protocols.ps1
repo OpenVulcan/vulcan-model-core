@@ -51,11 +51,12 @@ $testPackagePaths = @(
     "internal/translator/antigravity/openai/responses"
 )
 
-# The embedded asset list contains non-source files required by go:embed.
-# 嵌入资源列表包含 go:embed 所需的非源码文件。
-$embeddedAssetPaths = @(
+# The upstream asset list contains every non-Go file retained in the exact copied subtree.
+# 上游资源列表包含原样复制子树中保留的每个非 Go 文件。
+$upstreamAssetPaths = @(
     "internal/registry/models/codex_client_models.json",
-    "internal/registry/models/models.json"
+    "internal/registry/models/models.json",
+    "LICENSE"
 )
 
 # The upstream prefix is normalized before byte comparison.
@@ -91,11 +92,16 @@ foreach ($packagePath in $packagePaths) {
     }
 }
 
-foreach ($embeddedAssetPath in $embeddedAssetPaths) {
-    # The embedded asset bytes must remain exactly identical.
-    # 嵌入资源字节必须保持完全一致。
-    $expectedFiles[$embeddedAssetPath] = [System.IO.File]::ReadAllBytes((Join-Path $sourceRoot $embeddedAssetPath))
+foreach ($upstreamAssetPath in $upstreamAssetPaths) {
+    # Upstream asset bytes must remain exactly identical.
+    # 上游资源字节必须保持完全一致。
+    $expectedFiles[$upstreamAssetPath] = [System.IO.File]::ReadAllBytes((Join-Path $sourceRoot $upstreamAssetPath))
 }
+
+# The sole local file inside the copied root is an inert registration shim required by Go internal-package visibility.
+# 复制根目录内唯一的本地文件是 Go 内部包可见性所需的无业务逻辑注册垫片。
+$registerTemplate = [System.IO.Path]::GetFullPath((Join-Path $PSScriptRoot "cliproxy_register.go.txt"))
+$expectedFiles["register/register.go"] = [System.IO.File]::ReadAllText($registerTemplate)
 
 # The problems collection accumulates every missing or changed upstream file in one pass.
 # 问题集合在一次检查中累积所有缺失或变化的上游文件。
@@ -124,6 +130,19 @@ foreach ($relativePath in $expectedFiles.Keys) {
     $actualText = [System.IO.File]::ReadAllText($targetFile)
     if ($actualText -cne $expected) {
         $problems.Add("CHANGED $relativePath")
+    }
+}
+
+# The actual file set is closed so an unreviewed local Go file cannot alter copied behavior without failing comparison.
+# 实际文件集合保持封闭，防止未审核的本地 Go 文件改变复制行为而未触发对比失败。
+$actualFiles = @(
+    Get-ChildItem -LiteralPath $targetRoot -Recurse -File |
+        ForEach-Object { Get-ValidatedRelativePath -Root $targetRoot -Child $_.FullName } |
+        Sort-Object
+)
+foreach ($actualFile in $actualFiles) {
+    if (-not $expectedFiles.ContainsKey($actualFile)) {
+        $problems.Add("EXTRA $actualFile")
     }
 }
 

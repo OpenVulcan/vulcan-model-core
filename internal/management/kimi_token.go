@@ -2,14 +2,14 @@ package management
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"fmt"
 	"sync"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
+	coreprovider "github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -63,7 +63,7 @@ type kimiRefreshCall struct {
 // NewKimiTokenService creates one refresh coordinator with explicit persistence boundaries.
 // NewKimiTokenService 创建一个具有显式持久化边界的刷新协调器。
 func NewKimiTokenService(configurations providerconfig.Store, secrets secret.Store, client KimiTokenClient) (*KimiTokenService, error) {
-	if configurations == nil || secrets == nil || client == nil {
+	if dependency.IsNil(configurations) || dependency.IsNil(secrets) || dependency.IsNil(client) {
 		return nil, errors.New("Kimi token configuration, secret store, and client are required")
 	}
 	return &KimiTokenService{configurations: configurations, secrets: secrets, client: client, refreshCalls: make(map[string]*kimiRefreshCall)}, nil
@@ -88,7 +88,9 @@ func (s *KimiTokenService) RefreshCredential(ctx context.Context, instanceID str
 	s.refreshCalls[refreshKey] = call
 	s.refreshMu.Unlock()
 
-	call.credential, call.err = s.refreshCredential(ctx, instanceID, credentialID)
+	// The shared leader outlives the initiating HTTP request so concurrent refresh callers observe one durable result.
+	// 共享主刷新不随发起它的 HTTP 请求结束，使并发刷新调用方观察同一个持久结果。
+	call.credential, call.err = s.refreshCredential(context.WithoutCancel(ctx), instanceID, credentialID)
 	s.refreshMu.Lock()
 	delete(s.refreshCalls, refreshKey)
 	close(call.done)
@@ -139,6 +141,7 @@ func (s *KimiTokenService) refreshCredential(ctx context.Context, instanceID str
 		return providerconfig.Credential{}, errSecret
 	}
 	token, errToken := providerkimi.UnmarshalToken(protectedValue)
+	clear(protectedValue)
 	if errToken != nil {
 		return providerconfig.Credential{}, errToken
 	}
@@ -146,29 +149,17 @@ func (s *KimiTokenService) refreshCredential(ctx context.Context, instanceID str
 	if errRefresh != nil {
 		return providerconfig.Credential{}, errRefresh
 	}
+	if refreshed.DeviceID != token.DeviceID {
+		return providerconfig.Credential{}, fmt.Errorf("%w: Kimi token refresh returned a different device identity", coreprovider.ErrAuthenticationResponseInvalid)
+	}
 	encoded, errEncode := providerkimi.MarshalToken(refreshed)
 	if errEncode != nil {
 		return providerconfig.Credential{}, errEncode
 	}
-	replacementReference, errPut := s.secrets.Put(ctx, encoded)
-	if errPut != nil {
-		return providerconfig.Credential{}, errPut
-	}
-	previousReference := credential.SecretRef
-	fingerprint := sha256.Sum256(encoded)
-	credential.SecretRef = replacementReference
-	credential.Fingerprint = hex.EncodeToString(fingerprint[:])
-	credential.Revision++
+	defer clear(encoded)
 	if refreshed.ExpiresAt > 0 {
 		expiresAt := time.Unix(refreshed.ExpiresAt, 0).UTC()
 		credential.ExpiresAt = &expiresAt
 	}
-	if errSave := s.configurations.SaveCredential(ctx, credential); errSave != nil {
-		_ = s.secrets.Delete(context.WithoutCancel(ctx), replacementReference)
-		return providerconfig.Credential{}, errSave
-	}
-	if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), previousReference); errDelete != nil {
-		return providerconfig.Credential{}, fmt.Errorf("delete superseded Kimi token: %w", errDelete)
-	}
-	return credential, nil
+	return persistCredentialSecretReplacement(ctx, s.configurations, s.secrets, credential, encoded)
 }

@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -11,6 +12,48 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
+
+// TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog verifies provider selection never fails after credential acquisition.
+// TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog 验证凭据获取后选择供应商绝不会因目录缺失而失败。
+func TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	observedAt := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	for index, definition := range systems.List() {
+		if !definition.RuntimeReady {
+			continue
+		}
+		snapshot, errCatalog := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: providerconfig.ProviderInstance{ID: fmt.Sprintf("pvi_catalog_%d", index)}}, definition, observedAt)
+		if errCatalog != nil {
+			t.Errorf("definition %s catalog error = %v", definition.ID, errCatalog)
+			continue
+		}
+		if errValidate := snapshot.Validate(); errValidate != nil {
+			t.Errorf("definition %s catalog validation error = %v", definition.ID, errValidate)
+		}
+	}
+}
+
+// TestOpenAIAPIInitialCatalogDoesNotInventModels verifies the pinned CLIProxyAPI baseline has no static public OpenAI model inventory to copy.
+// TestOpenAIAPIInitialCatalogDoesNotInventModels 验证固定 CLIProxyAPI 基线没有可复制的公开 OpenAI 静态模型清单。
+func TestOpenAIAPIInitialCatalogDoesNotInventModels(t *testing.T) {
+	templates, errTemplates := systemModelTemplates("openai_api")
+	if errTemplates != nil {
+		t.Fatalf("systemModelTemplates() error = %v", errTemplates)
+	}
+	if len(templates) != 0 {
+		t.Fatalf("OpenAI API template count = %d, want 0 without source evidence", len(templates))
+	}
+}
 
 // TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership verifies regional reuse and Coding Plan separation.
 // TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership 验证区域模板复用和 Coding Plan 分离。
@@ -36,7 +79,7 @@ func TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership(t *testin
 	if errCN != nil || errGlobal != nil || errCoding != nil {
 		t.Fatalf("catalog errors CN=%v Global=%v Coding=%v", errCN, errGlobal, errCoding)
 	}
-	if len(cn.Models) != 11 || len(global.Models) != 11 || len(coding.Models) != 3 || len(coding.Offerings) != 3 {
+	if len(cn.Models) != 11 || len(global.Models) != 11 || len(coding.Models) != 7 || len(coding.Offerings) != 7 {
 		t.Fatalf("catalog sizes CN=%d Global=%d Coding models=%d offerings=%d", len(cn.Models), len(global.Models), len(coding.Models), len(coding.Offerings))
 	}
 	for index := range cn.Models {
@@ -56,6 +99,49 @@ func TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership(t *testin
 	for _, restrictedModelID := range []string{"kimi-k2.5", "moonshot-v1-8k", "moonshot-v1-32k", "moonshot-v1-128k"} {
 		if modelByUpstreamID[restrictedModelID].EntitlementMode != catalog.EntitlementExplicit {
 			t.Fatalf("restricted model %q entitlement = %q", restrictedModelID, modelByUpstreamID[restrictedModelID].EntitlementMode)
+		}
+	}
+	// codingModelIDs is CLIProxyAPI's exact Kimi registry order at the pinned source baseline.
+	// codingModelIDs 是 CLIProxyAPI 在固定源码基线上的精确 Kimi 注册顺序。
+	codingModelIDs := []string{"kimi-k2", "kimi-k2-thinking", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k3"}
+	for index, modelID := range codingModelIDs {
+		if coding.Models[index].UpstreamModelID != modelID || coding.Models[index].EntitlementMode != catalog.EntitlementAllBoundCredentials {
+			t.Fatalf("Coding model[%d] = %#v, want upstream %q with all-credential entitlement", index, coding.Models[index], modelID)
+		}
+	}
+}
+
+// TestBuildSystemCatalogSeparatesCodexKeyAndAccountEntitlements verifies one shared model union keeps product-specific authorization semantics.
+// TestBuildSystemCatalogSeparatesCodexKeyAndAccountEntitlements 验证共享模型并集仍保留产品特定授权语义。
+func TestBuildSystemCatalogSeparatesCodexKeyAndAccountEntitlements(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	apiKeyDefinition, _ := systems.Lookup(bootstrap.OpenAICodexAPIKeyDefinitionID)
+	accountDefinition, _ := systems.Lookup(bootstrap.OpenAICodexDefinitionID)
+	observedAt := time.Date(2026, 7, 19, 12, 0, 0, 0, time.UTC)
+	apiKeyCatalog, errAPIKey := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: providerconfig.ProviderInstance{ID: "pvi_codex_key"}}, apiKeyDefinition, observedAt)
+	accountCatalog, errAccount := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: providerconfig.ProviderInstance{ID: "pvi_codex_account"}}, accountDefinition, observedAt)
+	if errAPIKey != nil || errAccount != nil {
+		t.Fatalf("Codex catalog errors API key=%v account=%v", errAPIKey, errAccount)
+	}
+	if len(apiKeyCatalog.Models) != 8 || len(accountCatalog.Models) != 8 {
+		t.Fatalf("Codex catalog sizes API key=%d account=%d", len(apiKeyCatalog.Models), len(accountCatalog.Models))
+	}
+	for index := range apiKeyCatalog.Models {
+		if apiKeyCatalog.Models[index].UpstreamModelID != accountCatalog.Models[index].UpstreamModelID {
+			t.Fatalf("Codex model identity[%d] API key=%#v account=%#v", index, apiKeyCatalog.Models[index], accountCatalog.Models[index])
+		}
+		if apiKeyCatalog.Models[index].EntitlementMode != catalog.EntitlementAllBoundCredentials || accountCatalog.Models[index].EntitlementMode != catalog.EntitlementExplicit {
+			t.Fatalf("Codex entitlement mode[%d] API key=%q account=%q", index, apiKeyCatalog.Models[index].EntitlementMode, accountCatalog.Models[index].EntitlementMode)
 		}
 	}
 }
@@ -148,7 +234,11 @@ func (failingCatalogStore) Get(context.Context, string) (catalog.Snapshot, error
 // ambiguousCatalogStore commits a snapshot and then reports an error to exercise idempotent saga compensation.
 // ambiguousCatalogStore 提交快照后再报告错误，以验证幂等 Saga 补偿。
 type ambiguousCatalogStore struct {
+	// MemoryStore persists the snapshot before the simulated acknowledgement failure.
+	// MemoryStore 在模拟确认失败前持久化快照。
 	*catalog.MemoryStore
+	// deleted records whether saga compensation removed the committed snapshot.
+	// deleted 记录 Saga 补偿是否移除了已提交快照。
 	deleted bool
 }
 

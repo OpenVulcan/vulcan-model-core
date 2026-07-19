@@ -215,7 +215,11 @@ func (d *Driver) executeResponse(ctx context.Context, execution provider.Executi
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
 	}()
-	rawResponse, errRead := io.ReadAll(upstreamResponse.Body)
+	boundedBody, errBound := transport.NewBoundedResponseReader(upstreamResponse.Body, transport.MaximumNonStreamingResponseBytes)
+	if errBound != nil {
+		return provider.ExecutionResult{}, fmt.Errorf("%w: bound upstream response: %v", ErrInvalidDriver, errBound)
+	}
+	rawResponse, errRead := io.ReadAll(boundedBody)
 	if errRead != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: read upstream response: %v", ErrInvalidDriver, errRead)
 	}
@@ -282,8 +286,17 @@ func (d *Driver) executeStream(ctx context.Context, execution provider.Execution
 // readUpstreamStream preserves the copied executor's line, frame, or payload feeding behavior.
 // readUpstreamStream 保留复制执行器逐行、逐帧或逐载荷的传递行为。
 func readUpstreamStream(reader io.Reader, mode StreamInputMode, consume func([]byte) error) error {
+	return readUpstreamStreamBounded(reader, mode, maximumUpstreamStreamLineBytes, consume)
+}
+
+// readUpstreamStreamBounded preserves framing behavior while enforcing one explicit aggregate frame budget.
+// readUpstreamStreamBounded 在保留分帧行为的同时强制执行一个明确的聚合帧预算。
+func readUpstreamStreamBounded(reader io.Reader, mode StreamInputMode, maximumFrameBytes int, consume func([]byte) error) error {
 	if reader == nil || consume == nil {
 		return fmt.Errorf("%w: stream reader and consumer are required", ErrInvalidDriver)
+	}
+	if maximumFrameBytes <= 0 {
+		return fmt.Errorf("%w: positive stream frame limit is required", ErrInvalidDriver)
 	}
 	scanner := bufio.NewScanner(reader)
 	scanner.Buffer(nil, maximumUpstreamStreamLineBytes)
@@ -313,6 +326,9 @@ func readUpstreamStream(reader io.Reader, mode StreamInputMode, consume func([]b
 	}
 	for scanner.Scan() {
 		line := scanner.Bytes()
+		if len(line) > maximumFrameBytes-len(frame)-1 {
+			return fmt.Errorf("%w: upstream SSE frame exceeds the data limit", transport.ErrResponseTooLarge)
+		}
 		frame = append(frame, line...)
 		frame = append(frame, '\n')
 		if len(bytes.TrimSpace(line)) == 0 {

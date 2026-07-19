@@ -17,6 +17,15 @@ const (
 	DefinitionKindCustom DefinitionKind = "custom"
 )
 
+const (
+	// CustomEndpointProfileOpenAICompatibility identifies CLIProxyAPI's base-URL-relative OpenAI Chat compatibility shape.
+	// CustomEndpointProfileOpenAICompatibility 标识 CLIProxyAPI 相对于 Base URL 的 OpenAI Chat 兼容形态。
+	CustomEndpointProfileOpenAICompatibility = "openai_compatibility"
+	// CustomEndpointProfileVertexCompatibility identifies CLIProxyAPI's API-key Vertex publisher-path compatibility shape.
+	// CustomEndpointProfileVertexCompatibility 标识 CLIProxyAPI 使用 API Key 的 Vertex Publisher 路径兼容形态。
+	CustomEndpointProfileVertexCompatibility = "vertex_compatibility"
+)
+
 // LifecycleStatus describes the configuration lifecycle of a provider instance.
 // LifecycleStatus 描述供应商实例的配置生命周期。
 type LifecycleStatus string
@@ -132,6 +141,9 @@ const (
 	// AuthMethodQueryKey identifies a generic API key stored in a configured query parameter.
 	// AuthMethodQueryKey 标识存放在指定 Query 参数中的通用 API Key。
 	AuthMethodQueryKey AuthMethodType = "query_api_key"
+	// AuthMethodServiceAccount identifies a provider service-account document exchanged for short-lived bearer tokens.
+	// AuthMethodServiceAccount 标识用于交换短期 Bearer Token 的供应商服务账号文档。
+	AuthMethodServiceAccount AuthMethodType = "service_account"
 	// AuthMethodNone identifies an explicitly unauthenticated local service.
 	// AuthMethodNone 标识明确无需认证的本地服务。
 	AuthMethodNone AuthMethodType = "none"
@@ -276,6 +288,12 @@ type EndpointPreset struct {
 	// UserEditable reports whether management clients may replace this default address.
 	// UserEditable 表示管理客户端是否可以替换该默认地址。
 	UserEditable bool
+	// RegionalBaseURLTemplate derives a provider-owned origin from a normalized region through one {region} placeholder.
+	// RegionalBaseURLTemplate 通过唯一 {region} 占位符从规范化区域派生供应商所有 Origin。
+	RegionalBaseURLTemplate string
+	// GlobalBaseURL overrides the regional template only for the exact global region.
+	// GlobalBaseURL 仅对精确的 global 区域覆盖区域模板。
+	GlobalBaseURL string
 }
 
 // ProviderDefinition describes either a code-owned system integration or a persisted custom definition.
@@ -509,4 +527,35 @@ type SystemOnboarding struct {
 	// Bindings closes every selected channel path between the credential and its endpoint.
 	// Bindings 在凭据与其端点之间闭合每条所选通道路由。
 	Bindings []AccessBinding
+}
+
+// CustomOnboarding contains one complete new custom-provider definition and executable access graph committed as one unit.
+// CustomOnboarding 包含作为一个单元提交的完整新自定义供应商 Definition 与可执行访问图。
+type CustomOnboarding struct {
+	// Definition is the new user-owned single-protocol provider definition.
+	// Definition 是新的用户拥有单协议供应商 Definition。
+	Definition ProviderDefinition
+	// Instance is the sole initial provider instance owned by the new definition.
+	// Instance 是新 Definition 拥有的唯一初始供应商实例。
+	Instance ProviderInstance
+	// Endpoint is the exact operator-supplied compatibility Base URL.
+	// Endpoint 是操作员提供的精确兼容 Base URL。
+	Endpoint Endpoint
+	// Credential contains the protected-secret reference and one fixed authentication method.
+	// Credential 包含受保护 Secret 引用与一种固定认证方式。
+	Credential Credential
+	// Binding closes the definition's sole protocol channel through the endpoint and credential.
+	// Binding 通过 Endpoint 与 Credential 闭合 Definition 的唯一协议 Channel。
+	Binding AccessBinding
+}
+
+// CustomDefinitionMigration contains one custom definition revision and the complete instance set transitioned with it.
+// CustomDefinitionMigration 包含一个自定义定义修订以及与其一同转换的完整实例集合。
+type CustomDefinitionMigration struct {
+	// Definition is the validated replacement custom provider definition.
+	// Definition 是经过校验的替换自定义供应商定义。
+	Definition ProviderDefinition
+	// Instances contains every existing definition-owned instance in migration-required state.
+	// Instances 包含该定义拥有且处于需要迁移状态的全部既有实例。
+	Instances []ProviderInstance
 }

@@ -7,9 +7,28 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
+	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
+
+// onboardingDeleteFailureStore simulates a secret compensation failure after a successful write.
+// onboardingDeleteFailureStore 模拟秘密写入成功后的补偿删除失败。
+type onboardingDeleteFailureStore struct {
+	// Store delegates successful writes and reads to the in-memory implementation.
+	// Store 将成功写入与读取委托给内存实现。
+	secret.Store
+	// deleteError is returned for every compensation deletion.
+	// deleteError 在每次补偿删除时返回。
+	deleteError error
+}
+
+// Delete returns the configured compensation failure without removing the secret.
+// Delete 返回配置的补偿失败且不删除秘密。
+func (s *onboardingDeleteFailureStore) Delete(context.Context, string) error {
+	return s.deleteError
+}
 
 // managementTestService returns a memory-backed service with one system provider definition.
 // managementTestService 返回一个包含系统供应商定义的内存应用服务。
@@ -17,9 +36,9 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 	t.Helper()
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
-		ID:                 "anthropic.messages.v1",
+		ID:                 protocolchat.ProfileID,
 		Version:            "1",
-		DisplayName:        "Anthropic Messages",
+		DisplayName:        "OpenAI Chat Completions",
 		UserConfigurable:   true,
 		RuntimeReady:       true,
 		ModelDiscovery:     providerconfig.SupportUnsupported,
@@ -38,7 +57,7 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 		DriverID:            "management-test",
 		DriverVersion:       "1.0.0",
 		ConfigSchemaVersion: "1",
-		ProtocolProfileID:   "anthropic.messages.v1",
+		ProtocolProfileID:   protocolchat.ProfileID,
 		EndpointProfileID:   "default",
 		AuthMethodIDs:       []string{"bearer"},
 		RuntimeReady:        true,
@@ -69,21 +88,125 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 	return service, configurations, secrets
 }
 
+// TestSystemOnboardingReportsBuildCompensationFailure verifies a failed graph build never hides an orphaned secret.
+// TestSystemOnboardingReportsBuildCompensationFailure 验证配置图构建失败时绝不隐藏孤立秘密。
+func TestSystemOnboardingReportsBuildCompensationFailure(t *testing.T) {
+	_, configurations, delegate := managementTestService(t)
+	deleteError := errors.New("delete staged secret failed")
+	secrets := &onboardingDeleteFailureStore{Store: delegate, deleteError: deleteError}
+	service, errService := NewService(configurations, secrets, catalog.NewMemoryStore())
+	if errService != nil {
+		t.Fatalf("NewService() error = %v", errService)
+	}
+	_, errOnboard := service.OnboardSystemProvider(context.Background(), OnboardSystemProviderInput{
+		DefinitionID: "system_management_test", DisplayName: "Build Failure", AuthMethodID: "bearer", CredentialLabel: "Primary", Secret: []byte("staged-secret"),
+	})
+	if !errors.Is(errOnboard, deleteError) {
+		t.Fatalf("OnboardSystemProvider() error = %v, want compensation failure", errOnboard)
+	}
+	if delegate.Count() != 1 {
+		t.Fatalf("orphaned secret count = %d, want explicit single orphan", delegate.Count())
+	}
+}
+
 // TestCreateCustomDefinitionConstrainsGenericProvider verifies custom provider ownership defaults.
 // TestCreateCustomDefinitionConstrainsGenericProvider 校验自定义供应商所有权默认值。
 func TestCreateCustomDefinitionConstrainsGenericProvider(t *testing.T) {
 	service, _, _ := managementTestService(t)
 	definition, errDefinition := service.CreateCustomDefinition(context.Background(), CreateCustomDefinitionInput{
-		ID: "custom_private_gateway", DisplayName: "Private Gateway", ProtocolProfileID: "anthropic.messages.v1", AuthMethod: providerconfig.AuthMethodBearer,
+		ID: "custom_private_gateway", DisplayName: "Private Gateway", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
 	})
 	if errDefinition != nil {
 		t.Fatalf("create custom provider definition: %v", errDefinition)
 	}
-	if definition.Kind != providerconfig.DefinitionKindCustom || definition.ProtocolProfileID != "anthropic.messages.v1" || len(definition.AuthMethods) != 1 {
+	if definition.Kind != providerconfig.DefinitionKindCustom || definition.ProtocolProfileID != protocolchat.ProfileID || definition.EndpointProfileID != providerconfig.CustomEndpointProfileOpenAICompatibility || len(definition.AuthMethods) != 1 {
 		t.Fatalf("unexpected custom definition shape: %+v", definition)
 	}
 	if definition.Features.AllowanceReader != providerconfig.SupportUnsupported {
 		t.Fatalf("custom provider allowance support = %s", definition.Features.AllowanceReader)
+	}
+}
+
+// TestCustomEndpointProfileIDWhitelistsExecutableCompatibilityShapes verifies unsupported protocols cannot receive a generic endpoint shape.
+// TestCustomEndpointProfileIDWhitelistsExecutableCompatibilityShapes 验证不受支持的协议不能获得通用 Endpoint 形态。
+func TestCustomEndpointProfileIDWhitelistsExecutableCompatibilityShapes(t *testing.T) {
+	for _, testCase := range []struct {
+		// protocolProfileID is the exact protocol identifier under test.
+		// protocolProfileID 是待测的精确协议标识。
+		protocolProfileID string
+		// expectedEndpointProfileID is the only permitted execution shape.
+		// expectedEndpointProfileID 是唯一允许的执行形态。
+		expectedEndpointProfileID string
+	}{
+		{protocolProfileID: protocolchat.ProfileID, expectedEndpointProfileID: providerconfig.CustomEndpointProfileOpenAICompatibility},
+		{protocolProfileID: protocolaistudio.ProfileID, expectedEndpointProfileID: providerconfig.CustomEndpointProfileVertexCompatibility},
+		{protocolProfileID: "anthropic.messages", expectedEndpointProfileID: ""},
+	} {
+		if actual := customEndpointProfileID(testCase.protocolProfileID); actual != testCase.expectedEndpointProfileID {
+			t.Fatalf("customEndpointProfileID(%q) = %q, want %q", testCase.protocolProfileID, actual, testCase.expectedEndpointProfileID)
+		}
+	}
+}
+
+// TestOnboardCustomProviderCommitsOneNameSecretGraphAndCatalog verifies the complete compatibility onboarding boundary.
+// TestOnboardCustomProviderCommitsOneNameSecretGraphAndCatalog 验证完整兼容供应商录入边界。
+func TestOnboardCustomProviderCommitsOneNameSecretGraphAndCatalog(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, secrets := managementTestService(t)
+	result, errOnboard := service.OnboardCustomProvider(ctx, OnboardCustomProviderInput{
+		DisplayName: "Private Gateway", Handle: "private-gateway", ProtocolProfileID: protocolchat.ProfileID,
+		BaseURL: "https://gateway.example/openai/v1", Secret: []byte("private-key"), UpstreamModelID: "model-upstream", ModelDisplayName: "Private Model",
+	})
+	if errOnboard != nil {
+		t.Fatalf("OnboardCustomProvider() error = %v", errOnboard)
+	}
+	configuration := result.Configuration
+	if configuration.Definition.EndpointProfileID != providerconfig.CustomEndpointProfileOpenAICompatibility || configuration.Definition.AuthMethods[0].Type != providerconfig.AuthMethodBearer {
+		t.Fatalf("unexpected custom definition: %#v", configuration.Definition)
+	}
+	if configuration.Instance.DisplayName != "Private Gateway" || configuration.Credential.Label != "Private Gateway" || configuration.Endpoint.BaseURL != "https://gateway.example/openai/v1" || !configuration.Binding.Enabled {
+		t.Fatalf("unexpected custom access graph: %#v", configuration)
+	}
+	storedSecret, errSecret := secrets.Get(ctx, configuration.Credential.SecretRef)
+	if errSecret != nil || string(storedSecret) != "private-key" {
+		t.Fatalf("stored secret = %q, error = %v", storedSecret, errSecret)
+	}
+	if _, errDefinition := configurations.GetDefinition(ctx, configuration.Definition.ID); errDefinition != nil {
+		t.Fatalf("GetDefinition() error = %v", errDefinition)
+	}
+	if len(result.Catalog.Models) != 1 || result.Catalog.Models[0].UpstreamModelID != "model-upstream" || result.Catalog.Offerings[0].Capabilities.ToolCalling != catalog.CapabilityUnknown || len(result.Catalog.Pools) != 1 || result.Catalog.Pools[0].ReadyCredentials != 1 {
+		t.Fatalf("unexpected initial custom catalog: %#v", result.Catalog)
+	}
+}
+
+// TestOnboardCustomProviderCompensatesCatalogFailure verifies no definition, graph, or secret survives a failed catalog commit.
+// TestOnboardCustomProviderCompensatesCatalogFailure 验证目录提交失败后不会遗留 Definition、访问图或 Secret。
+func TestOnboardCustomProviderCompensatesCatalogFailure(t *testing.T) {
+	ctx := context.Background()
+	_, configurations, secrets := managementTestService(t)
+	service, errService := NewService(configurations, secrets, failingCatalogStore{})
+	if errService != nil {
+		t.Fatalf("NewService() error = %v", errService)
+	}
+	_, errOnboard := service.OnboardCustomProvider(ctx, OnboardCustomProviderInput{
+		DisplayName: "Failed Gateway", Handle: "failed-gateway", ProtocolProfileID: protocolchat.ProfileID,
+		BaseURL: "https://failed.example/v1", Secret: []byte("temporary-key"), UpstreamModelID: "failed-model",
+	})
+	if errOnboard == nil {
+		t.Fatal("OnboardCustomProvider() error = nil, want catalog failure")
+	}
+	definitions, errDefinitions := configurations.ListDefinitions(ctx)
+	if errDefinitions != nil {
+		t.Fatalf("ListDefinitions() error = %v", errDefinitions)
+	}
+	for _, definition := range definitions {
+		if definition.Kind == providerconfig.DefinitionKindCustom {
+			t.Fatalf("custom definition survived compensation: %#v", definition)
+		}
+	}
+	instances, errInstances := configurations.ListInstances(ctx, "")
+	if errInstances != nil || len(instances) != 0 || secrets.Count() != 0 {
+		t.Fatalf("compensation instances=%#v error=%v secrets=%d", instances, errInstances, secrets.Count())
 	}
 }
 
@@ -97,7 +220,7 @@ func TestUpdateCustomDefinitionMarksExistingInstancesForMigration(t *testing.T) 
 	// service 和 configurations 共享同一个内存后端配置状态。
 	service, configurations, _ := managementTestService(t)
 	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
-		ID: "custom_editable", DisplayName: "Before Edit", ProtocolProfileID: "anthropic.messages.v1", AuthMethod: providerconfig.AuthMethodBearer,
+		ID: "custom_editable", DisplayName: "Before Edit", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
 	})
 	if errDefinition != nil {
 		t.Fatalf("create custom provider definition: %v", errDefinition)
@@ -109,7 +232,7 @@ func TestUpdateCustomDefinitionMarksExistingInstancesForMigration(t *testing.T) 
 		t.Fatalf("create custom provider instance: %v", errInstance)
 	}
 	updated, errUpdate := service.UpdateCustomDefinition(ctx, UpdateCustomDefinitionInput{
-		DefinitionID: definition.ID, DisplayName: "After Edit", ProtocolProfileID: "anthropic.messages.v1", AuthMethod: providerconfig.AuthMethodBearer,
+		DefinitionID: definition.ID, DisplayName: "After Edit", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
 	})
 	if errUpdate != nil {
 		t.Fatalf("update custom provider definition: %v", errUpdate)
@@ -125,7 +248,7 @@ func TestUpdateCustomDefinitionMarksExistingInstancesForMigration(t *testing.T) 
 		t.Fatalf("migrated provider instance = %+v", storedInstance)
 	}
 	_, errSystemUpdate := service.UpdateCustomDefinition(ctx, UpdateCustomDefinitionInput{
-		DefinitionID: "system_management_test", DisplayName: "Forbidden", ProtocolProfileID: "anthropic.messages.v1", AuthMethod: providerconfig.AuthMethodBearer,
+		DefinitionID: "system_management_test", DisplayName: "Forbidden", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
 	})
 	if !errors.Is(errSystemUpdate, ErrSystemDefinitionImmutable) {
 		t.Fatalf("system definition update error = %v, want ErrSystemDefinitionImmutable", errSystemUpdate)
@@ -149,19 +272,22 @@ func TestRotateCredentialSecretReplacesProtectedMaterial(t *testing.T) {
 	}
 	credential, errCredential := service.AddCredential(ctx, AddCredentialInput{
 		ID: "cred_rotation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Before Rotation",
-		PrincipalKey: "rotation-account", Fingerprint: "rotation-before", Secret: []byte("before-secret"),
+		PrincipalKey: "rotation-account", Secret: []byte("before-secret"),
 	})
 	if errCredential != nil {
 		t.Fatalf("create credential: %v", errCredential)
 	}
 	previousReference := credential.SecretRef
+	if credential.Fingerprint != credentialFingerprint([]byte("before-secret")) {
+		t.Fatalf("initial credential fingerprint = %q", credential.Fingerprint)
+	}
 	rotated, errRotate := service.RotateCredentialSecret(ctx, RotateCredentialSecretInput{
-		ProviderInstanceID: instance.ID, CredentialID: credential.ID, Fingerprint: "rotation-after", Secret: []byte("after-secret"),
+		ProviderInstanceID: instance.ID, CredentialID: credential.ID, Secret: []byte("after-secret"),
 	})
 	if errRotate != nil {
 		t.Fatalf("rotate credential secret: %v", errRotate)
 	}
-	if rotated.SecretRef == previousReference || rotated.Revision != credential.Revision+1 || rotated.Fingerprint != "rotation-after" {
+	if rotated.SecretRef == previousReference || rotated.Revision != credential.Revision+1 || rotated.Fingerprint != credentialFingerprint([]byte("after-secret")) {
 		t.Fatalf("rotated credential = %+v", rotated)
 	}
 	if _, errOldSecret := secrets.Get(ctx, previousReference); !errors.Is(errOldSecret, secret.ErrNotFound) {
@@ -176,6 +302,53 @@ func TestRotateCredentialSecretReplacesProtectedMaterial(t *testing.T) {
 	}
 }
 
+// TestCredentialFingerprintIsServerOwnedAndStable verifies duplicate detection cannot be bypassed and metadata edits preserve the derived identity.
+// TestCredentialFingerprintIsServerOwnedAndStable 验证重复检测无法被绕过且元数据编辑会保留服务端派生身份。
+func TestCredentialFingerprintIsServerOwnedAndStable(t *testing.T) {
+	// ctx fixes the complete server-owned fingerprint operation scope.
+	// ctx 固定完整的服务端指纹操作范围。
+	ctx := context.Background()
+	service, _, secrets := managementTestService(t)
+	instance, errInstance := service.CreateInstance(ctx, CreateInstanceInput{
+		ID: "pvi_fingerprint", DefinitionID: "system_management_test", Handle: "fingerprint", DisplayName: "Fingerprint",
+	})
+	if errInstance != nil {
+		t.Fatalf("create provider instance: %v", errInstance)
+	}
+	first, errFirst := service.AddCredential(ctx, AddCredentialInput{
+		ID: "cred_fingerprint_first", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "First",
+		PrincipalKey: "account-first", Secret: []byte("shared-secret"),
+	})
+	if errFirst != nil {
+		t.Fatalf("create first credential: %v", errFirst)
+	}
+	// expectedFingerprint proves management derives identity from the exact protected bytes.
+	// expectedFingerprint 证明管理层从精确的受保护字节派生身份。
+	expectedFingerprint := credentialFingerprint([]byte("shared-secret"))
+	if first.Fingerprint != expectedFingerprint {
+		t.Fatalf("first fingerprint = %q, want %q", first.Fingerprint, expectedFingerprint)
+	}
+	updated, errUpdate := service.UpdateCredential(ctx, UpdateCredentialInput{
+		ProviderInstanceID: instance.ID, CredentialID: first.ID, Label: "Renamed", PrincipalKey: "account-renamed",
+	})
+	if errUpdate != nil {
+		t.Fatalf("update credential metadata: %v", errUpdate)
+	}
+	if updated.Fingerprint != expectedFingerprint || updated.SecretRef != first.SecretRef {
+		t.Fatalf("metadata update changed protected identity: %+v", updated)
+	}
+	_, errDuplicate := service.AddCredential(ctx, AddCredentialInput{
+		ID: "cred_fingerprint_second", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Duplicate",
+		PrincipalKey: "account-second", Secret: []byte("shared-secret"),
+	})
+	if !errors.Is(errDuplicate, providerconfig.ErrAlreadyRegistered) {
+		t.Fatalf("duplicate secret error = %v, want ErrAlreadyRegistered", errDuplicate)
+	}
+	if secrets.Count() != 1 {
+		t.Fatalf("protected secret count = %d, want 1", secrets.Count())
+	}
+}
+
 // TestAddCredentialCompensatesSecret verifies failed metadata writes do not orphan secrets.
 // TestAddCredentialCompensatesSecret 校验元数据写入失败不会遗留孤立 Secret。
 func TestAddCredentialCompensatesSecret(t *testing.T) {
@@ -187,7 +360,7 @@ func TestAddCredentialCompensatesSecret(t *testing.T) {
 		t.Fatalf("create provider instance: %v", errInstance)
 	}
 	_, errCredential := service.AddCredential(context.Background(), AddCredentialInput{
-		ID: "cred_compensation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Invalid",
+		ID: "invalid_compensation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Invalid",
 		PrincipalKey: "account-invalid", Secret: []byte("temporary-secret"),
 	})
 	if errCredential == nil {
@@ -220,7 +393,7 @@ func TestActivateInstanceRequiresClosedAccessPath(t *testing.T) {
 	}
 	credential, errCredential := service.AddCredential(ctx, AddCredentialInput{
 		ID: "cred_activation", ProviderInstanceID: instance.ID, AuthMethodID: "bearer", Label: "Account",
-		PrincipalKey: "account-activation", Fingerprint: "fingerprint-activation", Secret: []byte("activation-secret"),
+		PrincipalKey: "account-activation", Secret: []byte("activation-secret"),
 	})
 	if errCredential != nil {
 		t.Fatalf("add credential: %v", errCredential)
@@ -257,7 +430,7 @@ func TestCustomCatalogServicePersistsUserDeclaredModels(t *testing.T) {
 	ctx := context.Background()
 	service, configurations, _ := managementTestService(t)
 	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
-		ID: "custom_catalog", DisplayName: "Custom Catalog", ProtocolProfileID: "anthropic.messages.v1", AuthMethod: providerconfig.AuthMethodBearer,
+		ID: "custom_catalog", DisplayName: "Custom Catalog", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
 	})
 	if errDefinition != nil {
 		t.Fatalf("create custom provider definition: %v", errDefinition)
@@ -276,7 +449,7 @@ func TestCustomCatalogServicePersistsUserDeclaredModels(t *testing.T) {
 	}
 	credential, errCredential := service.AddCredential(ctx, AddCredentialInput{
 		ID: "cred_custom_catalog", ProviderInstanceID: instance.ID, AuthMethodID: "default", Label: "Key",
-		Fingerprint: "fingerprint-custom-catalog", Secret: []byte("custom-secret"),
+		Secret: []byte("custom-secret"),
 	})
 	if errCredential != nil {
 		t.Fatalf("add custom credential: %v", errCredential)

@@ -23,8 +23,14 @@ func TestCodexDriverPreservesAlwaysStreamingExecution(t *testing.T) {
 		if request.URL.Path != "/responses" {
 			t.Errorf("path = %q", request.URL.Path)
 		}
-		if originator := request.Header.Get("Originator"); originator != "codex-tui" {
+		if originator := request.Header.Get("Originator"); originator != "" {
 			t.Errorf("Originator = %q", originator)
+		}
+		if requestID := request.Header.Get("X-Client-Request-Id"); requestID != "" {
+			t.Errorf("X-Client-Request-Id = %q", requestID)
+		}
+		if sessionID := request.Header.Get("Session_id"); sessionID == "" {
+			t.Error("Session_id is empty")
 		}
 		if authorization := request.Header.Get("Authorization"); authorization != "Bearer test-secret" {
 			t.Errorf("Authorization = %q", authorization)
@@ -57,6 +63,42 @@ func TestCodexDriverPreservesAlwaysStreamingExecution(t *testing.T) {
 	}
 	if result.Response.Status != vcp.ResponseCompleted || result.UpstreamResponseID != "resp_1" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestCodexDriverAcceptsDeviceFlowCredential verifies account authorization reaches execution with the required account scope.
+// TestCodexDriverAcceptsDeviceFlowCredential 验证账号设备授权携带必需账号作用域进入执行流程。
+func TestCodexDriverAcceptsDeviceFlowCredential(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer test-secret" {
+			t.Errorf("Authorization = %q", authorization)
+		}
+		if accountID := request.Header.Get("Chatgpt-Account-Id"); accountID != "account-1" {
+			t.Errorf("Chatgpt-Account-Id = %q", accountID)
+		}
+		if originator := request.Header.Get("Originator"); originator != "codex-tui" {
+			t.Errorf("Originator = %q", originator)
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "data: {\"type\":\"response.completed\",\"response\":{\"id\":\"resp_device\",\"status\":\"completed\",\"output\":[]}}\n\n")
+	}))
+	defer server.Close()
+	fixtureDriver, execution := newResponsesDriverExecution(t, server.URL, false)
+	driver, errDriver := NewCodexDriver("definition-1", fixtureDriver.client, openAIResponsesCapabilities())
+	if errDriver != nil {
+		t.Fatalf("NewCodexDriver() error = %v", errDriver)
+	}
+	execution.Binding.Target.ExecutionProfileID = protocolcodex.ProfileID
+	execution.Request.ModelSelection.ExecutionProfileID = protocolcodex.ProfileID
+	execution.Definition.ProtocolProfileID = protocolcodex.ProfileID
+	execution.Definition.AuthMethods[0].Type = providerconfig.AuthMethodDeviceFlow
+	execution.Binding.Credential.ScopeRefs = []providerconfig.ScopeReference{{Kind: "account", ID: "account-1"}}
+	result, errExecute := driver.Execute(context.Background(), execution)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if result.UpstreamResponseID != "resp_device" {
+		t.Fatalf("UpstreamResponseID = %q", result.UpstreamResponseID)
 	}
 }
 
