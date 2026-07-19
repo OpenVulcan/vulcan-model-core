@@ -143,12 +143,26 @@ type TokenLimits struct {
 	MaxReasoningTokens OptionalTokenLimit
 }
 
+// TokenRecommendations describes provider-evidenced defaults that remain subordinate to hard token limits.
+// TokenRecommendations 描述由供应商证据支持且始终服从硬 Token 上限的默认值。
+type TokenRecommendations struct {
+	// OutputTokens is the recommended generated-output budget when the caller omits one.
+	// OutputTokens 是调用方未指定时建议采用的生成输出预算。
+	OutputTokens OptionalTokenLimit
+	// ReasoningTokens is the recommended reasoning budget when the caller omits one.
+	// ReasoningTokens 是调用方未指定时建议采用的推理预算。
+	ReasoningTokens OptionalTokenLimit
+}
+
 // ModelCapabilities describes client-visible capabilities of one offering or profile.
 // ModelCapabilities 描述一个产品或规格的客户端可见能力。
 type ModelCapabilities struct {
 	// Tokens contains independent model token ceilings.
 	// Tokens 包含独立的模型 Token 上限。
 	Tokens TokenLimits
+	// Recommendations contains provider-evidenced defaults and never changes hard ceilings.
+	// Recommendations 包含供应商证据支持的默认值，且绝不改变硬上限。
+	Recommendations TokenRecommendations
 	// ToolCalling describes function or tool call support.
 	// ToolCalling 描述函数或工具调用支持。
 	ToolCalling CapabilityLevel

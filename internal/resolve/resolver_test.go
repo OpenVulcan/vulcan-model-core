@@ -34,7 +34,8 @@ type resolverFixture struct {
 // resolverCapabilities 返回具有已知上下文上限的显式能力。
 func resolverCapabilities(contextWindow int64) catalog.ModelCapabilities {
 	return catalog.ModelCapabilities{
-		Tokens:                 catalog.TokenLimits{ContextWindow: catalog.OptionalTokenLimit{Known: true, Value: contextWindow}},
+		Tokens:                 catalog.TokenLimits{ContextWindow: catalog.OptionalTokenLimit{Known: true, Value: contextWindow}, MaxOutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 16_384}},
+		Recommendations:        catalog.TokenRecommendations{OutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 8_192}},
 		ToolCalling:            catalog.CapabilityNative,
 		ParallelToolCalls:      catalog.CapabilityNative,
 		StreamingToolArguments: catalog.CapabilityNative,
@@ -297,6 +298,9 @@ func TestResolverPreservesHighTierCredential(t *testing.T) {
 	}
 	if target.CredentialID != "cred_kimi_256k" {
 		t.Fatalf("expected smallest sufficient credential, got %s", target.CredentialID)
+	}
+	if !target.TokenLimits.MaxOutputTokens.Known || target.TokenLimits.MaxOutputTokens.Value != 16_384 || !target.TokenRecommendations.OutputTokens.Known || target.TokenRecommendations.OutputTokens.Value != 8_192 {
+		t.Fatalf("resolved token facts = limits %#v recommendations %#v", target.TokenLimits, target.TokenRecommendations)
 	}
 }
 

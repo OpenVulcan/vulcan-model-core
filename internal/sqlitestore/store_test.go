@@ -67,7 +67,8 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 // sqliteTestCapabilities 返回一个显式文本模型能力测试夹具。
 func sqliteTestCapabilities() catalog.ModelCapabilities {
 	return catalog.ModelCapabilities{
-		Tokens:                 catalog.TokenLimits{ContextWindow: catalog.OptionalTokenLimit{Known: true, Value: 262144}},
+		Tokens:                 catalog.TokenLimits{ContextWindow: catalog.OptionalTokenLimit{Known: true, Value: 262144}, MaxOutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 16384}},
+		Recommendations:        catalog.TokenRecommendations{OutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 8192}},
 		ToolCalling:            catalog.CapabilityNative,
 		ParallelToolCalls:      catalog.CapabilityNative,
 		StreamingToolArguments: catalog.CapabilityNative,
@@ -300,5 +301,8 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	}
 	if restoredSnapshot.Allowances[0].Remaining == nil || *restoredSnapshot.Allowances[0].Remaining != "125.5" {
 		t.Fatalf("restored exact remaining amount = %#v", restoredSnapshot.Allowances[0].Remaining)
+	}
+	if len(restoredSnapshot.Offerings) != 1 || !restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Known || restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Value != 8192 {
+		t.Fatalf("restored token recommendations = %#v", restoredSnapshot.Offerings)
 	}
 }

@@ -39,6 +39,9 @@ func RegisterSystemProviders(registry *providerconfig.SystemRegistry) error {
 	if errProviders := registerCLIProxyProviderCatalog(registry); errProviders != nil {
 		return errProviders
 	}
+	if errAlibaba := registerAlibabaProviderCatalog(registry); errAlibaba != nil {
+		return errAlibaba
+	}
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{
 		ID:             KimiGroupID,
 		DisplayName:    "Kimi",

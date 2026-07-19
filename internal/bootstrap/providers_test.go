@@ -36,11 +36,11 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 		t.Fatalf("RegisterSystemProviders() error = %v", errRegister)
 	}
 	groups := systems.ListGroups()
-	if len(groups) != 5 || groups[0].ID != KimiGroupID || groups[0].DisplayName != "Kimi" {
+	if len(groups) != 6 || groups[0].ID != KimiGroupID || groups[0].DisplayName != "Kimi" || groups[5].ID != AlibabaGroupID {
 		t.Fatalf("groups = %#v", groups)
 	}
 	definitions := systems.List()
-	if len(definitions) != 14 {
+	if len(definitions) != 19 {
 		t.Fatalf("definition count = %d", len(definitions))
 	}
 	cn, existsCN := systems.Lookup(KimiCNDefinitionID)
@@ -63,9 +63,60 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 	}
 }
 
-// TestRegisterSystemProvidersIncludesAdaptedCLIProxyProducts verifies every explicitly adapted CLIProxyAPI-backed product has one immutable definition.
-// TestRegisterSystemProvidersIncludesAdaptedCLIProxyProducts 验证每个显式适配、由 CLIProxyAPI 证据支撑的产品都具有一个不可变定义。
-func TestRegisterSystemProvidersIncludesAdaptedCLIProxyProducts(t *testing.T) {
+// TestRegisterSystemProvidersBuildsAlibabaGroup verifies the five immutable plan products, exact endpoints, and sole protocol/authentication boundary.
+// TestRegisterSystemProvidersBuildsAlibabaGroup 验证五个不可变套餐产品、精确端点和唯一协议及认证边界。
+func TestRegisterSystemProvidersBuildsAlibabaGroup(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errRegister := RegisterSystemProviders(systems); errRegister != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errRegister)
+	}
+	// expected closes the product set and endpoint ownership for the Alibaba group.
+	// expected 封闭 Alibaba 分组的产品集合与端点归属。
+	expected := []struct {
+		// definitionID is the immutable product identity.
+		// definitionID 是不可变产品身份。
+		definitionID string
+		// variantName is the concise management label.
+		// variantName 是简洁的管理标签。
+		variantName string
+		// baseURL is the exact fixed regional Messages base address.
+		// baseURL 是精确固定的区域 Messages 基础地址。
+		baseURL string
+	}{
+		{AlibabaCodingPlanCNDefinitionID, "Coding Plan CN", "https://coding.dashscope.aliyuncs.com/apps/anthropic/v1"},
+		{AlibabaCodingPlanGlobalDefinitionID, "Coding Plan Global", "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1"},
+		{AlibabaTokenPlanPersonalCNDefinitionID, "Token Plan Personal CN", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1"},
+		{AlibabaTokenPlanTeamCNDefinitionID, "Token Plan Team CN", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1"},
+		{AlibabaTokenPlanTeamGlobalDefinitionID, "Token Plan Team Global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1"},
+	}
+	for index, want := range expected {
+		definition, exists := systems.Lookup(want.definitionID)
+		if !exists {
+			t.Errorf("definition %q is missing", want.definitionID)
+			continue
+		}
+		if definition.GroupID != AlibabaGroupID || definition.SortOrder != (index+1)*10 || definition.VariantName != want.variantName {
+			t.Errorf("definition identity %q = %#v", want.definitionID, definition)
+		}
+		if definition.ProtocolProfileID != "anthropic.messages" || len(definition.EndpointPresets) != 1 || definition.EndpointPresets[0].BaseURL != want.baseURL || definition.EndpointPresets[0].UserEditable {
+			t.Errorf("definition boundary %q = %#v", want.definitionID, definition)
+		}
+		if len(definition.AuthMethods) != 1 || definition.AuthMethods[0].ID != "api_key" || definition.AuthMethods[0].Type != providerconfig.AuthMethodAPIKey || !definition.RuntimeReady {
+			t.Errorf("definition authentication/runtime %q = %#v", want.definitionID, definition)
+		}
+	}
+}
+
+// TestRegisterSystemProvidersIncludesAdaptedProducts verifies copied CLIProxyAPI products and independently evidenced Alibaba products form one closed system set.
+// TestRegisterSystemProvidersIncludesAdaptedProducts 验证复制的 CLIProxyAPI 产品与独立取证的 Alibaba 产品共同形成封闭系统集合。
+func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 	protocols := providerconfig.NewProtocolRegistry()
 	if errProtocols := RegisterProtocolProfiles(protocols); errProtocols != nil {
 		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
@@ -134,6 +185,8 @@ func TestRegisterSystemProvidersIncludesAdaptedCLIProxyProducts(t *testing.T) {
 		AnthropicAPIDefinitionID: {}, AnthropicClaudeCodeDefinitionID: {},
 		GoogleAIStudioDefinitionID: {}, GoogleInteractionsDefinitionID: {}, GoogleVertexDefinitionID: {}, GoogleAntigravityDefinitionID: {},
 		XAIAPIDefinitionID: {}, XAIOAuthDefinitionID: {},
+		AlibabaCodingPlanCNDefinitionID: {}, AlibabaCodingPlanGlobalDefinitionID: {},
+		AlibabaTokenPlanPersonalCNDefinitionID: {}, AlibabaTokenPlanTeamCNDefinitionID: {}, AlibabaTokenPlanTeamGlobalDefinitionID: {},
 	}
 	definitions := systems.List()
 	if len(definitions) != len(expectedDefinitionIDs) {
@@ -183,6 +236,30 @@ func TestRegisterCLIProxyExecutionDriversIncludesCodexKeyAndAccount(t *testing.T
 	for _, definitionID := range expectedDriverIDs {
 		if _, exists := registered[definitionID]; !exists {
 			t.Errorf("execution driver %s is missing", definitionID)
+		}
+	}
+}
+
+// TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions verifies the Alibaba registrar neither omits a plan nor registers cross-product candidates.
+// TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions 验证 Alibaba 注册器既不遗漏套餐也不注册跨产品候选项。
+func TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions(t *testing.T) {
+	secrets := secret.NewMemoryStore()
+	client, errClient := transport.NewClient(http.DefaultClient, secrets, transport.RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	registry := provider.NewExecutionRegistry()
+	if errRegister := RegisterAlibabaExecutionDrivers(registry, client); errRegister != nil {
+		t.Fatalf("RegisterAlibabaExecutionDrivers() error = %v", errRegister)
+	}
+	expectedDriverIDs := []string{AlibabaCodingPlanCNDefinitionID, AlibabaCodingPlanGlobalDefinitionID, AlibabaTokenPlanPersonalCNDefinitionID, AlibabaTokenPlanTeamCNDefinitionID, AlibabaTokenPlanTeamGlobalDefinitionID}
+	registeredDriverIDs := registry.ProviderIDs()
+	if len(registeredDriverIDs) != len(expectedDriverIDs) {
+		t.Fatalf("registered Driver IDs = %#v", registeredDriverIDs)
+	}
+	for index, definitionID := range expectedDriverIDs {
+		if registeredDriverIDs[index] != definitionID {
+			t.Fatalf("registered Driver[%d] = %q, want %q", index, registeredDriverIDs[index], definitionID)
 		}
 	}
 }

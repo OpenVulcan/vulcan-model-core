@@ -22,12 +22,21 @@ type systemModelTemplate struct {
 	// contextWindow is the verified maximum input and output context size.
 	// contextWindow 是已验证的最大输入输出上下文大小。
 	contextWindow int64
+	// maxInputTokens is the independently verified input ceiling when known.
+	// maxInputTokens 是独立验证且已知时的输入上限。
+	maxInputTokens int64
 	// maxOutputTokens is the provider-declared maximum completion size when known.
 	// maxOutputTokens 是已知时由供应商声明的最大补全大小。
 	maxOutputTokens int64
 	// maxReasoningTokens is the provider-declared reasoning budget ceiling when known.
 	// maxReasoningTokens 是已知时由供应商声明的推理预算上限。
 	maxReasoningTokens int64
+	// recommendedOutputTokens is the provider-evidenced default output budget when known.
+	// recommendedOutputTokens 是供应商证据支持且已知时的默认输出预算。
+	recommendedOutputTokens int64
+	// recommendedReasoningTokens is the provider-evidenced default reasoning budget when known.
+	// recommendedReasoningTokens 是供应商证据支持且已知时的默认推理预算。
+	recommendedReasoningTokens int64
 	// inputModalities lists the exact accepted resource kinds.
 	// inputModalities 列出精确接受的资源类型。
 	inputModalities []string
@@ -83,6 +92,16 @@ func systemModelTemplates(catalogID string) ([]systemModelTemplate, error) {
 		return kimiOpenPlatformModels(), nil
 	case "kimi_coding":
 		return kimiCodingModels(), nil
+	case "alibaba_coding_plan_cn":
+		return alibabaCodingPlanModels(), nil
+	case "alibaba_coding_plan_global":
+		return alibabaCodingPlanModels(), nil
+	case "alibaba_token_plan_personal_cn":
+		return alibabaTokenPlanPersonalCNModels(), nil
+	case "alibaba_token_plan_team_cn":
+		return alibabaTokenPlanTeamCNModels(), nil
+	case "alibaba_token_plan_team_global":
+		return alibabaTokenPlanTeamGlobalModels(), nil
 	case "openai_api":
 		// CLIProxyAPI does not own a static public OpenAI API model list; the empty catalog avoids inventing one.
 		// CLIProxyAPI 不拥有静态公开 OpenAI API 模型列表；空目录避免虚构模型。
@@ -184,6 +203,10 @@ func systemModelCapabilities(template systemModelTemplate) catalog.ModelCapabili
 	if template.contextWindow > 0 {
 		contextWindow = catalog.OptionalTokenLimit{Known: true, Value: template.contextWindow}
 	}
+	maxInputTokens := catalog.OptionalTokenLimit{}
+	if template.maxInputTokens > 0 {
+		maxInputTokens = catalog.OptionalTokenLimit{Known: true, Value: template.maxInputTokens}
+	}
 	maxOutputTokens := catalog.OptionalTokenLimit{}
 	if template.maxOutputTokens > 0 {
 		maxOutputTokens = catalog.OptionalTokenLimit{Known: true, Value: template.maxOutputTokens}
@@ -192,11 +215,29 @@ func systemModelCapabilities(template systemModelTemplate) catalog.ModelCapabili
 	if template.maxReasoningTokens > 0 {
 		maxReasoningTokens = catalog.OptionalTokenLimit{Known: true, Value: template.maxReasoningTokens}
 	}
-	return catalog.ModelCapabilities{Tokens: catalog.TokenLimits{ContextWindow: contextWindow, MaxOutputTokens: maxOutputTokens, MaxReasoningTokens: maxReasoningTokens}, ToolCalling: template.toolCalling, ParallelToolCalls: template.parallelTools, StreamingToolArguments: template.streamingTools, StrictJSONSchema: template.strictSchema, Reasoning: template.reasoning, InputModalities: append([]string(nil), template.inputModalities...), OutputModalities: []string{"text"}}
+	recommendedOutputTokens := catalog.OptionalTokenLimit{}
+	if template.recommendedOutputTokens > 0 {
+		recommendedOutputTokens = catalog.OptionalTokenLimit{Known: true, Value: template.recommendedOutputTokens}
+	}
+	recommendedReasoningTokens := catalog.OptionalTokenLimit{}
+	if template.recommendedReasoningTokens > 0 {
+		recommendedReasoningTokens = catalog.OptionalTokenLimit{Known: true, Value: template.recommendedReasoningTokens}
+	}
+	return catalog.ModelCapabilities{
+		Tokens:                 catalog.TokenLimits{ContextWindow: contextWindow, MaxInputTokens: maxInputTokens, MaxOutputTokens: maxOutputTokens, MaxReasoningTokens: maxReasoningTokens},
+		Recommendations:        catalog.TokenRecommendations{OutputTokens: recommendedOutputTokens, ReasoningTokens: recommendedReasoningTokens},
+		ToolCalling:            template.toolCalling,
+		ParallelToolCalls:      template.parallelTools,
+		StreamingToolArguments: template.streamingTools,
+		StrictJSONSchema:       template.strictSchema,
+		Reasoning:              template.reasoning,
+		InputModalities:        append([]string(nil), template.inputModalities...),
+		OutputModalities:       []string{"text"},
+	}
 }
 
 // catalogIdentifier converts one trusted upstream model identifier to the portable catalog identifier alphabet.
 // catalogIdentifier 将一个受信任上游模型标识转换为可移植目录标识字母表。
 func catalogIdentifier(value string) string {
-	return strings.NewReplacer("-", "_", ".", "_").Replace(value)
+	return strings.ToLower(strings.NewReplacer("-", "_", ".", "_").Replace(value))
 }

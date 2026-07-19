@@ -1899,6 +1899,10 @@ func capabilityFromView(view management.CapabilityView) catalog.ModelCapabilitie
 			MaxOutputTokens:    catalog.OptionalTokenLimit{Known: view.MaxOutputTokens.Known, Value: view.MaxOutputTokens.Value},
 			MaxReasoningTokens: catalog.OptionalTokenLimit{Known: view.MaxReasoningTokens.Known, Value: view.MaxReasoningTokens.Value},
 		},
+		Recommendations: catalog.TokenRecommendations{
+			OutputTokens:    catalog.OptionalTokenLimit{Known: view.RecommendedOutputTokens.Known, Value: view.RecommendedOutputTokens.Value},
+			ReasoningTokens: catalog.OptionalTokenLimit{Known: view.RecommendedReasoningTokens.Known, Value: view.RecommendedReasoningTokens.Value},
+		},
 		ToolCalling:            view.ToolCalling,
 		ParallelToolCalls:      view.ParallelToolCalls,
 		StreamingToolArguments: view.StreamingToolArguments,
@@ -1913,17 +1917,19 @@ func capabilityFromView(view management.CapabilityView) catalog.ModelCapabilitie
 // capabilityView 将目录能力元数据转换为可编辑的显式 HTTP DTO。
 func capabilityView(capabilities catalog.ModelCapabilities) management.CapabilityView {
 	return management.CapabilityView{
-		ContextWindow:          management.TokenLimitView{Known: capabilities.Tokens.ContextWindow.Known, Value: capabilities.Tokens.ContextWindow.Value},
-		MaxInputTokens:         management.TokenLimitView{Known: capabilities.Tokens.MaxInputTokens.Known, Value: capabilities.Tokens.MaxInputTokens.Value},
-		MaxOutputTokens:        management.TokenLimitView{Known: capabilities.Tokens.MaxOutputTokens.Known, Value: capabilities.Tokens.MaxOutputTokens.Value},
-		MaxReasoningTokens:     management.TokenLimitView{Known: capabilities.Tokens.MaxReasoningTokens.Known, Value: capabilities.Tokens.MaxReasoningTokens.Value},
-		ToolCalling:            capabilities.ToolCalling,
-		ParallelToolCalls:      capabilities.ParallelToolCalls,
-		StreamingToolArguments: capabilities.StreamingToolArguments,
-		StrictJSONSchema:       capabilities.StrictJSONSchema,
-		Reasoning:              capabilities.Reasoning,
-		InputModalities:        append([]string{}, capabilities.InputModalities...),
-		OutputModalities:       append([]string{}, capabilities.OutputModalities...),
+		ContextWindow:              management.TokenLimitView{Known: capabilities.Tokens.ContextWindow.Known, Value: capabilities.Tokens.ContextWindow.Value},
+		MaxInputTokens:             management.TokenLimitView{Known: capabilities.Tokens.MaxInputTokens.Known, Value: capabilities.Tokens.MaxInputTokens.Value},
+		MaxOutputTokens:            management.TokenLimitView{Known: capabilities.Tokens.MaxOutputTokens.Known, Value: capabilities.Tokens.MaxOutputTokens.Value},
+		MaxReasoningTokens:         management.TokenLimitView{Known: capabilities.Tokens.MaxReasoningTokens.Known, Value: capabilities.Tokens.MaxReasoningTokens.Value},
+		RecommendedOutputTokens:    management.TokenLimitView{Known: capabilities.Recommendations.OutputTokens.Known, Value: capabilities.Recommendations.OutputTokens.Value},
+		RecommendedReasoningTokens: management.TokenLimitView{Known: capabilities.Recommendations.ReasoningTokens.Known, Value: capabilities.Recommendations.ReasoningTokens.Value},
+		ToolCalling:                capabilities.ToolCalling,
+		ParallelToolCalls:          capabilities.ParallelToolCalls,
+		StreamingToolArguments:     capabilities.StreamingToolArguments,
+		StrictJSONSchema:           capabilities.StrictJSONSchema,
+		Reasoning:                  capabilities.Reasoning,
+		InputModalities:            append([]string{}, capabilities.InputModalities...),
+		OutputModalities:           append([]string{}, capabilities.OutputModalities...),
 	}
 }
 

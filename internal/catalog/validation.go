@@ -381,6 +381,9 @@ func (c ModelCapabilities) Validate() error {
 	if err := c.Tokens.Validate(); err != nil {
 		return err
 	}
+	if err := c.Recommendations.Validate(c.Tokens); err != nil {
+		return err
+	}
 	levels := []CapabilityLevel{c.ToolCalling, c.ParallelToolCalls, c.StreamingToolArguments, c.StrictJSONSchema, c.Reasoning}
 	for _, level := range levels {
 		if !validCapabilityLevel(level) {
@@ -391,6 +394,36 @@ func (c ModelCapabilities) Validate() error {
 		if err := validateID("model modality", modality); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+// Validate verifies token recommendations and their relationship to independently known hard ceilings.
+// Validate 校验 Token 推荐值及其与独立已知硬上限之间的关系。
+func (r TokenRecommendations) Validate(limits TokenLimits) error {
+	recommendations := []OptionalTokenLimit{r.OutputTokens, r.ReasoningTokens}
+	for _, recommendation := range recommendations {
+		if recommendation.Known && recommendation.Value <= 0 {
+			return invalid("known token recommendation must be positive")
+		}
+		if !recommendation.Known && recommendation.Value != 0 {
+			return invalid("unknown token recommendation cannot carry a value")
+		}
+	}
+	if r.OutputTokens.Known && limits.MaxOutputTokens.Known && r.OutputTokens.Value > limits.MaxOutputTokens.Value {
+		return invalid("recommended output tokens exceed the known maximum output")
+	}
+	if r.ReasoningTokens.Known && limits.MaxReasoningTokens.Known && r.ReasoningTokens.Value > limits.MaxReasoningTokens.Value {
+		return invalid("recommended reasoning tokens exceed the known maximum reasoning budget")
+	}
+	if r.OutputTokens.Known && limits.ContextWindow.Known && r.OutputTokens.Value > limits.ContextWindow.Value {
+		return invalid("recommended output tokens exceed the known context window")
+	}
+	if r.ReasoningTokens.Known && limits.ContextWindow.Known && r.ReasoningTokens.Value > limits.ContextWindow.Value {
+		return invalid("recommended reasoning tokens exceed the known context window")
+	}
+	if r.OutputTokens.Known && r.ReasoningTokens.Known && r.ReasoningTokens.Value > r.OutputTokens.Value {
+		return invalid("recommended reasoning tokens exceed the recommended output budget")
 	}
 	return nil
 }

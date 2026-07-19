@@ -91,6 +91,54 @@ const kimiGroupResponse = {
   ],
 };
 
+// alibabaDefinition creates one exact Alibaba test variant from immutable identity and endpoint facts.
+// alibabaDefinition 根据不可变身份与端点事实创建一个精确 Alibaba 测试变体。
+function alibabaDefinition(
+  id: string,
+  variantName: string,
+  catalogID: string,
+  endpointID: string,
+  baseURL: string,
+  region: string,
+  descriptionKey: string,
+) {
+  return {
+    id,
+    display_name: `Alibaba ${variantName}`,
+    group_id: "alibaba",
+    variant_name: variantName,
+    variant_description: `${variantName} subscription.`,
+    variant_description_key: descriptionKey,
+    model_catalog_id: catalogID,
+    auth_methods: [{ id: "api_key", type: "api_key", refreshable: false }],
+    features: unavailableFeatures,
+    protocol_profile_id: "anthropic.messages",
+    endpoint_presets: [
+      { id: endpointID, base_url: baseURL, region, user_editable: false },
+    ],
+  };
+}
+
+// alibabaGroupResponse exposes all five regional commercial products through one grouped card.
+// alibabaGroupResponse 通过一个分组卡片暴露全部五个区域商业产品。
+const alibabaGroupResponse = {
+  provider_groups: [
+    {
+      id: "alibaba",
+      display_name: "Alibaba Cloud Model Studio",
+      description: "Alibaba coding subscriptions.",
+      description_key: "providers.alibaba.description",
+      provider_definitions: [
+        alibabaDefinition("system_alibaba_coding_plan_cn", "Coding Plan CN", "alibaba_coding_plan_cn", "coding_plan_cn", "https://coding.dashscope.aliyuncs.com/apps/anthropic/v1", "CN", "providers.alibaba.codingPlanCNDescription"),
+        alibabaDefinition("system_alibaba_coding_plan_global", "Coding Plan Global", "alibaba_coding_plan_global", "coding_plan_global", "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1", "Global", "providers.alibaba.codingPlanGlobalDescription"),
+        alibabaDefinition("system_alibaba_token_plan_personal_cn", "Token Plan Personal CN", "alibaba_token_plan_personal_cn", "token_plan_personal_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1", "CN", "providers.alibaba.tokenPlanPersonalCNDescription"),
+        alibabaDefinition("system_alibaba_token_plan_team_cn", "Token Plan Team CN", "alibaba_token_plan_team_cn", "token_plan_team_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1", "CN", "providers.alibaba.tokenPlanTeamCNDescription"),
+        alibabaDefinition("system_alibaba_token_plan_team_global", "Token Plan Team Global", "alibaba_token_plan_team_global", "token_plan_team_global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1", "Global", "providers.alibaba.tokenPlanTeamGlobalDescription"),
+      ],
+    },
+  ],
+};
+
 // mixedProviderGroupResponse adds one single-definition provider to exercise direct configuration.
 // mixedProviderGroupResponse 增加一个单定义供应商，用于验证直接配置流程。
 const mixedProviderGroupResponse = {
@@ -494,6 +542,51 @@ describe("ProviderManagementPage", () => {
         headers: { Authorization: "Bearer management-token" },
       }),
     );
+  });
+
+  // This test verifies Alibaba uses concise plan-family badges and keeps all exact variants inside the existing dialog workflow.
+  // 此测试验证 Alibaba 使用简洁套餐系列标签，并在现有 Dialog 流程中保留全部精确变体。
+  it("renders Alibaba plan families and configures one exact variant", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/vulcan/manage/provider-groups")
+          return Promise.resolve(jsonResponse(alibabaGroupResponse));
+        if (url === "/vulcan/manage/provider-instances")
+          return Promise.resolve(jsonResponse(emptyProviderInstancesResponse));
+        return Promise.resolve(new Response(null, { status: 404 }));
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    expect(
+      await screen.findByText("No authorized providers yet."),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
+    expect(screen.getByText("Coding Plan")).toBeInTheDocument();
+    expect(screen.getByText("Token Plan")).toBeInTheDocument();
+    expect(screen.queryByText("Coding Plan CN")).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: /Alibaba Cloud Model Studio/ }),
+    );
+    expect(
+      document.querySelectorAll("[data-provider-variant-row]"),
+    ).toHaveLength(5);
+    expect(screen.getAllByText("anthropic.messages")).toHaveLength(5);
+    expect(
+      screen.getByText(
+        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
+      ),
+    ).toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Select Coding Plan CN" }),
+    );
+    expect(screen.getByText("Configure provider")).toBeInTheDocument();
+    expect(screen.getByLabelText("Name")).toBeInTheDocument();
+    expect(screen.getByLabelText("API key")).toHaveAttribute("type", "password");
   });
 
   // This test verifies an authorized-list failure cannot leave the still-available creation workflow blank.

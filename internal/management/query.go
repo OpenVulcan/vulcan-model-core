@@ -376,6 +376,12 @@ type CapabilityView struct {
 	// MaxReasoningTokens is the independently known reasoning ceiling.
 	// MaxReasoningTokens 是独立已知的推理上限。
 	MaxReasoningTokens TokenLimitView `json:"max_reasoning_tokens"`
+	// RecommendedOutputTokens is the provider-evidenced default output budget.
+	// RecommendedOutputTokens 是供应商证据支持的默认输出预算。
+	RecommendedOutputTokens TokenLimitView `json:"recommended_output_tokens"`
+	// RecommendedReasoningTokens is the provider-evidenced default reasoning budget.
+	// RecommendedReasoningTokens 是供应商证据支持的默认推理预算。
+	RecommendedReasoningTokens TokenLimitView `json:"recommended_reasoning_tokens"`
 	// ToolCalling reports normalized tool call support.
 	// ToolCalling 报告规范化工具调用支持。
 	ToolCalling catalog.CapabilityLevel `json:"tool_calling"`
@@ -895,17 +901,19 @@ func modelDisabled(disabledModelIDs []string, modelID string) bool {
 // capabilityView 将内部能力元数据转换为显式客户端 DTO。
 func capabilityView(capabilities catalog.ModelCapabilities) CapabilityView {
 	return CapabilityView{
-		ContextWindow:          tokenLimitView(capabilities.Tokens.ContextWindow),
-		MaxInputTokens:         tokenLimitView(capabilities.Tokens.MaxInputTokens),
-		MaxOutputTokens:        tokenLimitView(capabilities.Tokens.MaxOutputTokens),
-		MaxReasoningTokens:     tokenLimitView(capabilities.Tokens.MaxReasoningTokens),
-		ToolCalling:            capabilities.ToolCalling,
-		ParallelToolCalls:      capabilities.ParallelToolCalls,
-		StreamingToolArguments: capabilities.StreamingToolArguments,
-		StrictJSONSchema:       capabilities.StrictJSONSchema,
-		Reasoning:              capabilities.Reasoning,
-		InputModalities:        append([]string(nil), capabilities.InputModalities...),
-		OutputModalities:       append([]string(nil), capabilities.OutputModalities...),
+		ContextWindow:              tokenLimitView(capabilities.Tokens.ContextWindow),
+		MaxInputTokens:             tokenLimitView(capabilities.Tokens.MaxInputTokens),
+		MaxOutputTokens:            tokenLimitView(capabilities.Tokens.MaxOutputTokens),
+		MaxReasoningTokens:         tokenLimitView(capabilities.Tokens.MaxReasoningTokens),
+		RecommendedOutputTokens:    tokenLimitView(capabilities.Recommendations.OutputTokens),
+		RecommendedReasoningTokens: tokenLimitView(capabilities.Recommendations.ReasoningTokens),
+		ToolCalling:                capabilities.ToolCalling,
+		ParallelToolCalls:          capabilities.ParallelToolCalls,
+		StreamingToolArguments:     capabilities.StreamingToolArguments,
+		StrictJSONSchema:           capabilities.StrictJSONSchema,
+		Reasoning:                  capabilities.Reasoning,
+		InputModalities:            append([]string(nil), capabilities.InputModalities...),
+		OutputModalities:           append([]string(nil), capabilities.OutputModalities...),
 	}
 }
 

@@ -305,6 +305,44 @@ func TestUnknownTokenLimitCannotCarryValue(t *testing.T) {
 	}
 }
 
+// TestTokenRecommendationsValidateAgainstHardLimits verifies defaults remain positive and cannot exceed independently known ceilings.
+// TestTokenRecommendationsValidateAgainstHardLimits 验证默认值必须为正且不能超过独立已知硬上限。
+func TestTokenRecommendationsValidateAgainstHardLimits(t *testing.T) {
+	limits := TokenLimits{
+		MaxOutputTokens:    OptionalTokenLimit{Known: true, Value: 8_192},
+		MaxReasoningTokens: OptionalTokenLimit{Known: true, Value: 4_096},
+	}
+	valid := TokenRecommendations{
+		OutputTokens:    OptionalTokenLimit{Known: true, Value: 4_096},
+		ReasoningTokens: OptionalTokenLimit{Known: true, Value: 2_048},
+	}
+	if errValidate := valid.Validate(limits); errValidate != nil {
+		t.Fatalf("Validate(valid) error = %v", errValidate)
+	}
+	tooMuchOutput := valid
+	tooMuchOutput.OutputTokens.Value = 16_384
+	if errValidate := tooMuchOutput.Validate(limits); errValidate == nil {
+		t.Fatal("Validate() accepted recommended output above the hard maximum")
+	}
+	unknownWithValue := valid
+	unknownWithValue.ReasoningTokens = OptionalTokenLimit{Known: false, Value: 1}
+	if errValidate := unknownWithValue.Validate(limits); errValidate == nil {
+		t.Fatal("Validate() accepted an unknown recommendation carrying a value")
+	}
+	limits.ContextWindow = OptionalTokenLimit{Known: true, Value: 8_192}
+	reasoningAboveOutput := valid
+	reasoningAboveOutput.OutputTokens.Value = 1_024
+	if errValidate := reasoningAboveOutput.Validate(limits); errValidate == nil {
+		t.Fatal("Validate() accepted a recommended reasoning budget above the recommended output budget")
+	}
+	outputAboveContext := valid
+	outputAboveContext.OutputTokens.Value = 16_384
+	limits.MaxOutputTokens = OptionalTokenLimit{}
+	if errValidate := outputAboveContext.Validate(limits); errValidate == nil {
+		t.Fatal("Validate() accepted recommended output above the known context window")
+	}
+}
+
 // TestCatalogStoreReturnsMutationSafeSnapshots verifies atomic snapshot ownership.
 // TestCatalogStoreReturnsMutationSafeSnapshots 校验原子快照所有权。
 func TestCatalogStoreReturnsMutationSafeSnapshots(t *testing.T) {

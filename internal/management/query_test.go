@@ -119,7 +119,7 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	if errGroups != nil {
 		t.Fatalf("ListProviderGroups() error = %v", errGroups)
 	}
-	if len(groups) != 5 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 {
+	if len(groups) != 6 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.AlibabaGroupID || len(groups[5].ProviderDefinitions) != 5 {
 		t.Fatalf("groups = %#v", groups)
 	}
 	variants := groups[0].ProviderDefinitions
@@ -128,6 +128,25 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	}
 	if variants[0].ModelCatalogID != variants[1].ModelCatalogID || variants[2].ModelCatalogID == variants[0].ModelCatalogID {
 		t.Fatalf("catalog ownership = %#v", variants)
+	}
+}
+
+// TestCapabilityViewPreservesTokenRecommendations verifies management projections distinguish recommended defaults from hard limits.
+// TestCapabilityViewPreservesTokenRecommendations 验证管理投影将推荐默认值与硬上限严格区分。
+func TestCapabilityViewPreservesTokenRecommendations(t *testing.T) {
+	capabilities := catalog.ModelCapabilities{
+		Tokens: catalog.TokenLimits{
+			MaxOutputTokens:    catalog.OptionalTokenLimit{Known: true, Value: 16_384},
+			MaxReasoningTokens: catalog.OptionalTokenLimit{Known: true, Value: 8_192},
+		},
+		Recommendations: catalog.TokenRecommendations{
+			OutputTokens:    catalog.OptionalTokenLimit{Known: true, Value: 4_096},
+			ReasoningTokens: catalog.OptionalTokenLimit{Known: true, Value: 1_024},
+		},
+	}
+	view := capabilityView(capabilities)
+	if !view.MaxOutputTokens.Known || view.MaxOutputTokens.Value != 16_384 || !view.MaxReasoningTokens.Known || view.MaxReasoningTokens.Value != 8_192 || !view.RecommendedOutputTokens.Known || view.RecommendedOutputTokens.Value != 4_096 || !view.RecommendedReasoningTokens.Known || view.RecommendedReasoningTokens.Value != 1_024 {
+		t.Fatalf("capability view = %#v", view)
 	}
 }
 

@@ -112,6 +112,12 @@ type Target struct {
 	// EffectiveContextWindow is the smallest authoritative profile and account ceiling.
 	// EffectiveContextWindow 是规格和账号权威上限中的最小值。
 	EffectiveContextWindow catalog.OptionalTokenLimit
+	// TokenLimits contains the selected profile's independently known hard token ceilings.
+	// TokenLimits 包含所选规格独立已知的硬 Token 上限。
+	TokenLimits catalog.TokenLimits
+	// TokenRecommendations contains the selected profile's provider-evidenced defaults.
+	// TokenRecommendations 包含所选规格由供应商证据支持的默认值。
+	TokenRecommendations catalog.TokenRecommendations
 	// CapabilityRevision records the capability evidence used for resolution.
 	// CapabilityRevision 记录解析使用的能力证据修订号。
 	CapabilityRevision uint64

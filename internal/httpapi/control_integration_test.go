@@ -236,6 +236,32 @@ func TestSystemProviderOnboardingHTTPCommitsFixedKimiCatalog(t *testing.T) {
 	}
 }
 
+// TestAlibabaSystemOnboardingCommitsFixedEndpointAndCatalog verifies the selected plan owns its endpoint, isolated model set, and recommendation metadata.
+// TestAlibabaSystemOnboardingCommitsFixedEndpointAndCatalog 验证所选套餐拥有其端点、隔离模型集合和推荐元数据。
+func TestAlibabaSystemOnboardingCommitsFixedEndpointAndCatalog(t *testing.T) {
+	server := newControlPlaneIntegrationServer(t)
+	forged := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_alibaba_token_plan_team_global","name":"Alibaba Global","auth_method_id":"api_key","secret":"invalid-test-key","base_url":"https://attacker.invalid"}`)
+	if forged.Code != http.StatusBadRequest {
+		t.Fatalf("forged endpoint status=%d body=%s", forged.Code, forged.Body.String())
+	}
+	onboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_alibaba_token_plan_team_global","name":"Alibaba Global","auth_method_id":"api_key","secret":"invalid-test-key"}`)
+	if onboarding.Code != http.StatusCreated || strings.Contains(onboarding.Body.String(), "invalid-test-key") {
+		t.Fatalf("onboarding status=%d body=%s", onboarding.Code, onboarding.Body.String())
+	}
+	var created onboardSystemProviderResponse
+	if errDecode := json.Unmarshal(onboarding.Body.Bytes(), &created); errDecode != nil {
+		t.Fatalf("decode onboarding response: %v", errDecode)
+	}
+	catalogResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/catalog", "admin-control-key", "")
+	if catalogResponse.Code != http.StatusOK || !strings.Contains(catalogResponse.Body.String(), "qwen3.7-max") || !strings.Contains(catalogResponse.Body.String(), "MiniMax-M2.5") || strings.Contains(catalogResponse.Body.String(), "qwen3.8-max-preview") || !strings.Contains(catalogResponse.Body.String(), `"recommended_reasoning_tokens":{"known":true,"value":8192}`) {
+		t.Fatalf("catalog status=%d body=%s", catalogResponse.Code, catalogResponse.Body.String())
+	}
+	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
+	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1") || strings.Contains(endpoints.Body.String(), "invalid-test-key") {
+		t.Fatalf("endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
+	}
+}
+
 // TestCustomProviderOnboardingHTTPCommitsCompleteSecretSafeGraph verifies the one-request custom compatibility workflow end to end.
 // TestCustomProviderOnboardingHTTPCommitsCompleteSecretSafeGraph 端到端验证单请求自定义兼容供应商工作流。
 func TestCustomProviderOnboardingHTTPCommitsCompleteSecretSafeGraph(t *testing.T) {
@@ -516,7 +542,7 @@ func TestXAIDeviceFlowHTTPKeepsTokensServerSideAndOnboardsAccount(t *testing.T) 
 // TestCodexDeviceFlowHTTPKeepsTokensServerSideAndOnboardsAccount 验证完整的已认证 Codex 设备授权路由。
 func TestCodexDeviceFlowHTTPKeepsTokensServerSideAndOnboardsAccount(t *testing.T) {
 	idToken := codexHTTPTestIDToken(t, "account-one", "plus", "codex@example.com")
-	flows := &staticCodexDeviceFlows{token: provideropenai.CodexToken{IDToken: idToken, AccessToken: "codex-access-secret", RefreshToken: "codex-refresh-secret", AccountID: "account-one", Email: "codex@example.com", ExpiresAt: time.Date(2026, 7, 19, 13, 0, 0, 0, time.UTC), Type: "codex"}}
+	flows := &staticCodexDeviceFlows{token: provideropenai.CodexToken{IDToken: idToken, AccessToken: "codex-access-secret", RefreshToken: "codex-refresh-secret", AccountID: "account-one", Email: "codex@example.com", ExpiresAt: time.Now().UTC().Add(time.Hour), Type: "codex"}}
 	server := newControlPlaneIntegrationServerWithProviderFlows(t, nil, nil, flows, nil, nil, nil)
 	started := serveControlRequest(server, http.MethodPost, "/vulcan/manage/codex/device-flows", "admin-control-key", "")
 	if started.Code != http.StatusCreated || strings.Contains(started.Body.String(), "codex-access-secret") {

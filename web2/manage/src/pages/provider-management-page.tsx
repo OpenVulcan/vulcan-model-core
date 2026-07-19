@@ -675,6 +675,9 @@ function ProviderGroupSelectionCard({
       groupIdentityMatches ||
       providerDefinitionMatches(definition, normalizedSearch),
   );
+  // badges condenses commercial-plan families without hiding the exact choices shown after expansion.
+  // badges 在不隐藏展开后精确选项的前提下压缩商业套餐系列标签。
+  const badges = providerGroupBadges(group);
 
   // activateProvider follows the exact definition count instead of inventing a separate provider mode.
   // activateProvider 按精确定义数量执行，不虚构额外供应商模式。
@@ -705,13 +708,13 @@ function ProviderGroupSelectionCard({
           <span className="min-w-0 flex-1">
             <span className="block font-semibold">{group.display_name}</span>
             <span className="mt-1 flex flex-wrap gap-1.5">
-              {group.provider_definitions.map((definition) => (
+              {badges.map((badge) => (
                 <Badge
-                  key={definition.id}
+                  key={badge}
                   variant="default"
                   className="rounded-sm"
                 >
-                  {definition.variant_name}
+                  {badge}
                 </Badge>
               ))}
             </span>
@@ -742,6 +745,13 @@ function ProviderGroupSelectionCard({
       ) : null}
     </Card>
   );
+}
+
+// providerGroupBadges returns concise family badges while preserving generic variant labels for every other provider.
+// providerGroupBadges 为 Alibaba 返回简洁系列标签，并为其他供应商保留通用变体标签。
+function providerGroupBadges(group: ProviderGroup): string[] {
+  if (group.id === "alibaba") return ["Coding Plan", "Token Plan"];
+  return group.provider_definitions.map((definition) => definition.variant_name);
 }
 
 // AuthorizedProviderCardProps defines the data required by one configured-provider card.
@@ -1211,6 +1221,12 @@ function localizedDescription(
     case "providers.kimi.cnDescription":
     case "providers.kimi.globalDescription":
     case "providers.kimi.codingDescription":
+    case "providers.alibaba.description":
+    case "providers.alibaba.codingPlanCNDescription":
+    case "providers.alibaba.codingPlanGlobalDescription":
+    case "providers.alibaba.tokenPlanPersonalCNDescription":
+    case "providers.alibaba.tokenPlanTeamCNDescription":
+    case "providers.alibaba.tokenPlanTeamGlobalDescription":
     case "providers.openai.description":
     case "providers.openai.apiDescription":
     case "providers.openai.codexDescription":

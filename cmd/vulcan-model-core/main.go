@@ -418,6 +418,9 @@ func run(ctx context.Context, args []string) error {
 	if errDrivers := bootstrap.RegisterKimiExecutionDrivers(executionDrivers, openPlatformTransport, codingTransport, secrets); errDrivers != nil {
 		return fmt.Errorf("register Kimi execution drivers: %w", errDrivers)
 	}
+	if errDrivers := bootstrap.RegisterAlibabaExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+		return fmt.Errorf("register Alibaba execution drivers: %w", errDrivers)
+	}
 	if errFactory := bootstrap.RegisterCustomExecutionDriverFactory(executionDrivers, openPlatformTransport); errFactory != nil {
 		return fmt.Errorf("register custom compatibility execution factory: %w", errFactory)
 	}

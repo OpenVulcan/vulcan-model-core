@@ -34,6 +34,9 @@
 | Kimi CN | OpenAI Chat | `https://api.moonshot.cn` | API Key | Kimi Open Platform 代码拥有目录 | 固定基线未发现账号或用量读取 | 已注册独立区域产品与唯一 Chat 协议；账号读取显式不支持 |
 | Kimi Global | OpenAI Chat | `https://api.moonshot.ai` | API Key | 与 CN 共用模型事实，入口不同 | 固定基线未发现账号或用量读取 | 已注册独立区域产品与唯一 Chat 协议；账号读取显式不支持 |
 | Kimi Coding Plan | OpenAI Chat | `https://api.kimi.com/coding` | 设备授权、API Key、Refresh Token、TUI 风格设备头 | `kimi` 静态目录 | 固定基线没有 `/usages`、余额或周期用量读取器 | 已实现设备授权、刷新、设备身份、模型前缀移除与精确七模型目录；协议路径追加 `/v1/chat/completions`，用量显式不支持 |
+| Alibaba Coding Plan CN / Global | Anthropic Messages | 区域固定 `/apps/anthropic/v1` 入口 | 阿里云官方 API Key、`x-api-key` | 区域产品页与 Coding Plan 上下文表 | 未发现稳定公开账号或额度 Reader | 已注册两个区域产品、独立 Driver 与隔离目录；流式工具请求按 Qwen/GLM 白名单自动开启 `tool_stream` |
+| Alibaba Token Plan Personal CN | Anthropic Messages | `https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1` | 阿里云官方 API Key、`x-api-key` | CN Personal 精确模型集合 | 未发现稳定公开账号或额度 Reader | 已注册个人版产品与独立目录；不虚构 Personal Global |
+| Alibaba Token Plan Team CN / Global | Anthropic Messages | CN / Global 区域固定 `/apps/anthropic/v1` 入口 | 阿里云官方 API Key、`x-api-key` | 区域 Team 精确模型集合与上下文差异 | 未发现稳定公开账号或额度 Reader | 已注册两个区域团队版产品与隔离目录；CN/Global 不跨区域合并或回退 |
 | xAI API | xAI Responses | `https://api.x.ai/v1` | `XAIKey` Bearer API Key | `xai` 静态目录 | 仅请求 Token 统计 | 已注册系统配置、Responses/Compact Driver 与静态目录；账号读取显式不支持 |
 | xAI Account | xAI Responses | `https://cli-chat-proxy.grok.com/v1` | OIDC 发现、RFC 8628 设备授权、Refresh Token | ID Token 中的邮箱与 Subject；`xai` 静态目录 | 未发现套餐或实时额度查询 | 已实现发现、设备授权、刷新、身份不变校验与账号专用请求头；账号入口不声明 Compact |
 

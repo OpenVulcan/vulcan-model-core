@@ -259,6 +259,8 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		ExecutionProfileID:     profile.ID,
 		UpstreamModelID:        offering.UpstreamModelID,
 		EffectiveContextWindow: selected.effectiveContext,
+		TokenLimits:            profile.Capabilities.Tokens,
+		TokenRecommendations:   profile.Capabilities.Recommendations,
 		CapabilityRevision:     profile.CapabilityRevision,
 		ProviderConfigRevision: instance.Revision,
 		CatalogRevision:        snapshot.Revision,

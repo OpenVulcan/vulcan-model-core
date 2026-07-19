@@ -84,6 +84,18 @@ const englishMessages = {
     "Kimi Open Platform service hosted at the Global API site.",
   "providers.kimi.codingDescription":
     "Membership-based coding service with dedicated models and credentials.",
+  "providers.alibaba.description":
+    "Alibaba Cloud Model Studio coding subscriptions across CN and Global sites.",
+  "providers.alibaba.codingPlanCNDescription":
+    "Coding Plan subscription hosted at the CN site.",
+  "providers.alibaba.codingPlanGlobalDescription":
+    "Coding Plan subscription hosted at the Global site.",
+  "providers.alibaba.tokenPlanPersonalCNDescription":
+    "Personal Token Plan subscription hosted at the CN site.",
+  "providers.alibaba.tokenPlanTeamCNDescription":
+    "Team Token Plan subscription hosted at the CN site.",
+  "providers.alibaba.tokenPlanTeamGlobalDescription":
+    "Team Token Plan subscription hosted at the Global site.",
   "providers.openai.description":
     "OpenAI API and account-scoped Codex products.",
   "providers.openai.apiDescription":
@@ -285,6 +297,18 @@ const chineseMessages: Messages = {
   "providers.kimi.globalDescription":
     "托管于 Global API 站点的 Kimi 开放平台服务。",
   "providers.kimi.codingDescription": "提供专用模型与凭据的订阅制编程服务。",
+  "providers.alibaba.description":
+    "Alibaba Cloud Model Studio 在 CN 与 Global 站点提供的编程订阅服务。",
+  "providers.alibaba.codingPlanCNDescription":
+    "托管于 CN 站点的 Coding Plan 订阅服务。",
+  "providers.alibaba.codingPlanGlobalDescription":
+    "托管于 Global 站点的 Coding Plan 订阅服务。",
+  "providers.alibaba.tokenPlanPersonalCNDescription":
+    "托管于 CN 站点的 Personal Token Plan 订阅服务。",
+  "providers.alibaba.tokenPlanTeamCNDescription":
+    "托管于 CN 站点的 Team Token Plan 订阅服务。",
+  "providers.alibaba.tokenPlanTeamGlobalDescription":
+    "托管于 Global 站点的 Team Token Plan 订阅服务。",
   "providers.openai.description": "OpenAI API 与账号授权的 Codex 产品。",
   "providers.openai.apiDescription": "使用 Responses 协议的 OpenAI 公共 API。",
   "providers.openai.codexDescription": "通过 ChatGPT 账号授权的 Codex 服务。",
