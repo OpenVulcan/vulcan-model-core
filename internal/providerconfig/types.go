@@ -273,6 +273,41 @@ type AuthMethodDefinition struct {
 	MultipleCredentials bool
 }
 
+// EndpointParameterKind identifies one closed validation rule for a non-secret endpoint parameter.
+// EndpointParameterKind 标识非秘密端点参数的一种封闭校验规则。
+type EndpointParameterKind string
+
+const (
+	// EndpointParameterHostnameLabel accepts one normalized DNS hostname label.
+	// EndpointParameterHostnameLabel 接受一个规范化的 DNS 主机名标签。
+	EndpointParameterHostnameLabel EndpointParameterKind = "hostname_label"
+)
+
+// EndpointParameterDefinition declares one non-secret parameter required to materialize an endpoint preset.
+// EndpointParameterDefinition 声明实例化端点预设所需的一个非秘密参数。
+type EndpointParameterDefinition struct {
+	// ID is the stable placeholder and request-field identifier.
+	// ID 是稳定的占位符与请求字段标识。
+	ID string
+	// Kind selects the exact validation rule for the parameter value.
+	// Kind 选择参数值的精确校验规则。
+	Kind EndpointParameterKind
+	// Required reports whether onboarding must provide the value.
+	// Required 表示录入时是否必须提供该值。
+	Required bool
+}
+
+// EndpointParameterValue stores one validated non-secret endpoint parameter value.
+// EndpointParameterValue 存储一个经过校验的非秘密端点参数值。
+type EndpointParameterValue struct {
+	// ID identifies the matching endpoint parameter definition.
+	// ID 标识匹配的端点参数定义。
+	ID string
+	// Value is the normalized value materialized into the provider-owned template.
+	// Value 是实例化到供应商所有模板中的规范化值。
+	Value string
+}
+
 // EndpointPreset describes one code-owned default network destination offered during system-provider onboarding.
 // EndpointPreset 描述系统供应商录入期间提供的一个由代码拥有的默认网络目标。
 type EndpointPreset struct {
@@ -294,6 +329,12 @@ type EndpointPreset struct {
 	// GlobalBaseURL overrides the regional template only for the exact global region.
 	// GlobalBaseURL 仅对精确的 global 区域覆盖区域模板。
 	GlobalBaseURL string
+	// BaseURLTemplate materializes a provider-owned origin from declared endpoint parameters.
+	// BaseURLTemplate 使用已声明的端点参数实例化供应商所有 Origin。
+	BaseURLTemplate string
+	// Parameters declares the exact non-secret values accepted by BaseURLTemplate.
+	// Parameters 声明 BaseURLTemplate 接受的精确非秘密值。
+	Parameters []EndpointParameterDefinition
 }
 
 // ProviderDefinition describes either a code-owned system integration or a persisted custom definition.
@@ -350,6 +391,9 @@ type ProviderDefinition struct {
 	// RuntimeReady reports whether the selected protocol can participate in execution.
 	// RuntimeReady 表示所选协议是否可以参与执行。
 	RuntimeReady bool
+	// ActionBindings contains code-owned operation-specific runtime bindings for system providers.
+	// ActionBindings 包含系统供应商由代码拥有的操作特定运行时绑定。
+	ActionBindings []ProviderActionBinding
 	// EndpointPresets lists code-owned onboarding destinations without changing runtime endpoint ownership.
 	// EndpointPresets 列出代码拥有的录入目标，且不改变运行时端点归属。
 	EndpointPresets []EndpointPreset
@@ -388,6 +432,9 @@ type ProviderInstance struct {
 	// DisabledModelIDs lists provider-scoped models intentionally hidden from call-plane resolution.
 	// DisabledModelIDs 列出被有意从调用面解析中隐藏的供应商作用域模型。
 	DisabledModelIDs []string
+	// DisabledServiceIDs lists provider-scoped services intentionally hidden from call-plane resolution.
+	// DisabledServiceIDs 列出被有意从调用面解析中隐藏的供应商作用域服务。
+	DisabledServiceIDs []string
 	// Revision is the latest persisted instance revision.
 	// Revision 是最新持久化实例修订号。
 	Revision uint64
@@ -420,6 +467,9 @@ type Endpoint struct {
 	// Region is an optional provider-defined region label.
 	// Region 是可选的供应商定义区域标签。
 	Region string
+	// Parameters stores the exact validated non-secret values used to derive BaseURL.
+	// Parameters 存储用于派生 BaseURL 的精确且经过校验的非秘密值。
+	Parameters []EndpointParameterValue
 	// Status describes endpoint runtime availability.
 	// Status 描述端点运行时可用状态。
 	Status EndpointStatus
@@ -501,6 +551,9 @@ type AccessBinding struct {
 	// AllowedModelIDs restricts the binding to specific provider models when non-empty.
 	// AllowedModelIDs 非空时将该绑定限制到指定供应商模型。
 	AllowedModelIDs []string
+	// AllowedServiceIDs restricts the binding to specific provider services when non-empty.
+	// AllowedServiceIDs 非空时将该绑定限制到指定供应商服务。
+	AllowedServiceIDs []string
 	// Priority is the stable selection order within an eligible pool.
 	// Priority 是合格账号池内的稳定选择顺序。
 	Priority int

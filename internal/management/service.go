@@ -54,6 +54,9 @@ type OnboardSystemProviderInput struct {
 	// ScopeRefs contains only provider-reported scopes established by a server-owned authorization flow.
 	// ScopeRefs 仅包含由服务端拥有授权流程建立的供应商报告作用域。
 	ScopeRefs []providerconfig.ScopeReference
+	// EndpointParameters contains non-secret values declared by the selected system endpoint preset.
+	// EndpointParameters 包含所选系统端点预设声明的非秘密值。
+	EndpointParameters []providerconfig.EndpointParameterValue
 	// endpointBaseURL is set only by a provider-owned onboarding workflow after validating uploaded credentials.
 	// endpointBaseURL 仅由供应商专属录入流程在校验上传凭据后设置。
 	endpointBaseURL string
@@ -413,23 +416,48 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 	preset := definition.EndpointPresets[0]
 	baseURL := preset.BaseURL
 	region := preset.Region
+	endpointParameters := []providerconfig.EndpointParameterValue(nil)
+	if preset.BaseURLTemplate != "" {
+		var errMaterialize error
+		baseURL, errMaterialize = preset.MaterializeBaseURL(input.EndpointParameters)
+		if errMaterialize != nil {
+			return providerconfig.SystemOnboarding{}, errMaterialize
+		}
+		// valuesByID canonicalizes persisted parameters into code-owned schema order.
+		// valuesByID 将持久化参数规范为代码拥有的 Schema 顺序。
+		valuesByID := make(map[string]string, len(input.EndpointParameters))
+		for _, parameter := range input.EndpointParameters {
+			valuesByID[parameter.ID] = parameter.Value
+		}
+		endpointParameters = make([]providerconfig.EndpointParameterValue, 0, len(preset.Parameters))
+		for _, definition := range preset.Parameters {
+			endpointParameters = append(endpointParameters, providerconfig.EndpointParameterValue{ID: definition.ID, Value: valuesByID[definition.ID]})
+		}
+	} else if len(input.EndpointParameters) != 0 {
+		return providerconfig.SystemOnboarding{}, errors.New("selected provider endpoint does not accept parameters")
+	}
 	if input.endpointBaseURL != "" || input.endpointRegion != "" {
+		if len(input.EndpointParameters) != 0 {
+			return providerconfig.SystemOnboarding{}, errors.New("provider-owned endpoint override cannot combine endpoint parameters")
+		}
 		if input.endpointBaseURL == "" || input.endpointRegion == "" {
 			return providerconfig.SystemOnboarding{}, errors.New("provider-owned endpoint override requires both base URL and region")
 		}
 		baseURL = input.endpointBaseURL
 		region = input.endpointRegion
 	}
-	endpointID, errEndpointID := generateID("ep_")
-	if errEndpointID != nil {
-		return providerconfig.SystemOnboarding{}, errEndpointID
+	for _, channelID := range definition.ChannelIDs() {
+		endpointID, errEndpointID := generateID("ep_")
+		if errEndpointID != nil {
+			return providerconfig.SystemOnboarding{}, errEndpointID
+		}
+		bindingID, errBindingID := generateID("bind_")
+		if errBindingID != nil {
+			return providerconfig.SystemOnboarding{}, errBindingID
+		}
+		onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: channelID, BaseURL: baseURL, Region: region, Parameters: append([]providerconfig.EndpointParameterValue(nil), endpointParameters...), Status: providerconfig.EndpointReady, Revision: 1})
+		onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: channelID, EndpointID: endpointID, CredentialID: credentialID, Priority: definition.Priority, Enabled: true, Revision: 1})
 	}
-	bindingID, errBindingID := generateID("bind_")
-	if errBindingID != nil {
-		return providerconfig.SystemOnboarding{}, errBindingID
-	}
-	onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: baseURL, Region: region, Status: providerconfig.EndpointReady, Revision: 1})
-	onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, EndpointID: endpointID, CredentialID: credentialID, Priority: definition.Priority, Enabled: true, Revision: 1})
 	return onboarding, nil
 }
 

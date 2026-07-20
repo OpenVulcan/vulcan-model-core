@@ -14,7 +14,7 @@ func TestParseRunOptionsUsesLocalControlPlaneDefaults(t *testing.T) {
 	if options.listenAddress != "127.0.0.1:13514" {
 		t.Fatalf("default listen address = %q, want %q", options.listenAddress, "127.0.0.1:13514")
 	}
-	if options.databasePath != defaultDatabasePath || options.configurationPath == "" || options.secretDirectory != defaultSecretDirectory {
+	if options.databasePath != defaultDatabasePath || options.configurationPath == "" || options.secretDirectory != defaultSecretDirectory || options.resourceDirectory != defaultResourceDirectory {
 		t.Fatalf("unexpected default options: %+v", options)
 	}
 }
@@ -24,12 +24,12 @@ func TestParseRunOptionsUsesLocalControlPlaneDefaults(t *testing.T) {
 func TestParseRunOptionsAcceptsExplicitLocalOverrides(t *testing.T) {
 	// args supplies an explicit complete override set.
 	// args 提供一组完整的显式覆盖值。
-	args := []string{"--listen-address", "127.0.0.1:14514", "--database-path", "test.db", "--config", "test.yaml", "--secret-directory", "test.secrets"}
+	args := []string{"--listen-address", "127.0.0.1:14514", "--database-path", "test.db", "--config", "test.yaml", "--secret-directory", "test.secrets", "--resource-directory", "test.resources"}
 	options, errOptions := parseRunOptions(args)
 	if errOptions != nil {
 		t.Fatalf("parse explicit run options: %v", errOptions)
 	}
-	if options.listenAddress != "127.0.0.1:14514" || options.databasePath != "test.db" || options.configurationPath != "test.yaml" || options.secretDirectory != "test.secrets" {
+	if options.listenAddress != "127.0.0.1:14514" || options.databasePath != "test.db" || options.configurationPath != "test.yaml" || options.secretDirectory != "test.secrets" || options.resourceDirectory != "test.resources" {
 		t.Fatalf("explicit options = %+v", options)
 	}
 }

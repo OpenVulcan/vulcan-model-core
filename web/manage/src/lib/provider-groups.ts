@@ -18,8 +18,8 @@ export interface ProviderEndpointPreset {
   // id is stable within one provider definition.
   // id 在一个供应商定义内保持稳定。
   id: string;
-  // base_url is the trusted upstream base address.
-  // base_url 是受信任的上游基础地址。
+  // base_url is the trusted fixed upstream address, or empty when parameters materialize the address.
+  // base_url 是受信任的固定上游地址；当地址由参数实例化时为空。
   base_url: string;
   // region is the locale-neutral site label.
   // region 是与区域设置无关的站点标签。
@@ -27,6 +27,23 @@ export interface ProviderEndpointPreset {
   // user_editable reports whether the address may be changed during onboarding.
   // user_editable 表示录入期间是否可以修改地址。
   user_editable: boolean;
+  // parameters declares the exact non-secret values required to materialize this endpoint.
+  // parameters 声明实例化此端点所需的精确非秘密值。
+  parameters: ProviderEndpointParameter[];
+}
+
+// ProviderEndpointParameter describes one closed non-secret endpoint input.
+// ProviderEndpointParameter 描述一个封闭的非秘密端点输入。
+export interface ProviderEndpointParameter {
+  // id is the immutable request field identifier.
+  // id 是不可变的请求字段标识。
+  id: string;
+  // kind identifies the server-owned validation rule.
+  // kind 标识服务端拥有的校验规则。
+  kind: "hostname_label";
+  // required reports whether onboarding must supply the value.
+  // required 表示录入是否必须提供该值。
+  required: boolean;
 }
 
 // ProviderDefinition describes one exact selectable site or commercial product.
@@ -161,6 +178,9 @@ export interface SystemOnboardingInput {
   // secret carries the transient provider credential to the server.
   // secret 将临时供应商凭据传递给服务端。
   secret: string;
+  // endpoint_parameters contains only values declared by the selected endpoint preset.
+  // endpoint_parameters 仅包含所选端点预设声明的值。
+  endpoint_parameters?: Array<{ id: string; value: string }>;
 }
 
 // VertexServiceAccountOnboardingInput contains one transient typed JSON document whose identity is derived server-side.
@@ -527,6 +547,38 @@ export interface ProviderCatalogMetadata {
   observed_at: string;
 }
 
+// endpointParameterDefinitionSchema validates the server's closed endpoint parameter contract.
+// endpointParameterDefinitionSchema 校验服务端封闭的端点参数合同。
+const endpointParameterDefinitionSchema = z.object({
+  id: z.string().min(1),
+  kind: z.literal("hostname_label"),
+  required: z.boolean(),
+});
+
+// providerEndpointPresetSchema accepts either one fixed URL or one explicitly parameterized endpoint.
+// providerEndpointPresetSchema 接受一个固定 URL 或一个显式参数化端点。
+const providerEndpointPresetSchema = z
+  .object({
+    id: z.string().min(1),
+    base_url: z.union([z.literal(""), httpURLSchema]),
+    region: z.string().min(1),
+    user_editable: z.boolean(),
+    parameters: z
+      .array(endpointParameterDefinitionSchema)
+      .optional()
+      .default([]),
+  })
+  .superRefine((preset, context) => {
+    const parameterized = preset.parameters.length > 0;
+    if ((preset.base_url === "") !== parameterized) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "endpoint must provide either one fixed base URL or declared parameters",
+      });
+    }
+  });
+
 // providerGroupListResponseSchema validates the complete untrusted management response before UI state owns it.
 // providerGroupListResponseSchema 在 UI 状态接管前校验完整的不受信任管理响应。
 const providerGroupListResponseSchema = z.object({
@@ -546,14 +598,7 @@ const providerGroupListResponseSchema = z.object({
           variant_description_key: z.string().optional(),
           model_catalog_id: z.string().min(1),
           protocol_profile_id: z.string().min(1),
-          endpoint_presets: z.array(
-            z.object({
-              id: z.string().min(1),
-              base_url: httpURLSchema,
-              region: z.string().min(1),
-              user_editable: z.boolean(),
-            }),
-          ),
+          endpoint_presets: z.array(providerEndpointPresetSchema),
           auth_methods: z.array(
             z.object({
               id: z.string().min(1),
@@ -601,16 +646,61 @@ const providerDefinitionListResponseSchema = z.object({
   provider_definitions: z.array(providerDefinitionSummarySchema),
 });
 
-// customProtocolProfileSchema validates only fields used to select a registered custom execution factory.
-// customProtocolProfileSchema 仅校验选择已注册自定义执行 Factory 所需的字段。
-const customProtocolProfileSchema = z.object({
-  id: z.string().min(1),
-  version: z.string().min(1),
-  display_name: z.string().min(1),
-  user_configurable: z.boolean(),
-  runtime_ready: z.boolean(),
-  allowed_auth_methods: z.array(z.enum(["bearer", "header_api_key"])).length(1),
+// protocolSupportStatusSchema mirrors the backend's closed support-state contract.
+// protocolSupportStatusSchema 镜像后端封闭的支持状态合同。
+const protocolSupportStatusSchema = z.enum([
+  "supported",
+  "unsupported",
+  "temporarily_unavailable",
+]);
+
+// protocolCapabilitySchema validates every process-owned profile-global behavior fact.
+// protocolCapabilitySchema 校验每个由进程拥有的 Profile 全局行为事实。
+const protocolCapabilitySchema = z.object({
+  capability: z.enum([
+    "system_instruction",
+    "structured_tools",
+    "parallel_tools",
+    "streaming_tool_arguments",
+    "strict_json_schema",
+    "reasoning",
+    "reasoning_continuation",
+    "remote_compaction",
+    "native_web_search",
+    "token_counting",
+  ]),
+  status: protocolSupportStatusSchema,
 });
+
+// customProtocolProfileSchema validates the complete registry response before selectable profiles are filtered.
+// customProtocolProfileSchema 在过滤可选择 Profile 前校验完整注册表响应。
+const customProtocolProfileSchema = z
+  .object({
+    id: z.string().min(1),
+    version: z.string().min(1),
+    display_name: z.string().min(1),
+    user_configurable: z.boolean(),
+    runtime_ready: z.boolean(),
+    model_discovery: protocolSupportStatusSchema,
+    capabilities: z.array(protocolCapabilitySchema),
+    allowed_auth_methods: z
+      .array(z.enum(["bearer", "header_api_key"]))
+      .nullable()
+      .transform((methods) => methods ?? []),
+  })
+  .superRefine((profile, context) => {
+    if (
+      profile.user_configurable &&
+      profile.runtime_ready &&
+      profile.allowed_auth_methods.length !== 1
+    ) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message:
+          "selectable custom protocol profile requires one authentication method",
+      });
+    }
+  });
 
 // customProtocolProfileListResponseSchema validates process-owned protocol metadata before rendering it.
 // customProtocolProfileListResponseSchema 在渲染前校验进程拥有的协议元数据。

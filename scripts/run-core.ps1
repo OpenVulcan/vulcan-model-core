@@ -49,16 +49,20 @@ $databasePath = Join-Path -Path $databaseDirectory -ChildPath "data.db"
 # secretDirectory stores OS-protected upstream credentials outside the repository.
 # secretDirectory 将受操作系统保护的上游凭据存储在仓库之外。
 $secretDirectory = Join-Path -Path $userDataRoot -ChildPath "secrets"
+# resourceDirectory stores Router-owned verified objects outside the repository.
+# resourceDirectory 在仓库之外保存 Router 拥有的已验证对象。
+$resourceDirectory = Join-Path -Path $userDataRoot -ChildPath "resources"
 
 $null = New-Item -ItemType Directory -Force -Path $databaseDirectory
 $null = New-Item -ItemType Directory -Force -Path $secretDirectory
+$null = New-Item -ItemType Directory -Force -Path $resourceDirectory
 
 # processExitCode preserves the core process result after returning to the caller's directory.
 # processExitCode 在返回调用方目录后保留核心进程结果。
 $processExitCode = 0
 Push-Location -LiteralPath $binaryDirectory
 try {
-    & $binaryFullPath --config $RelativeConfigurationPath --database-path $databasePath --secret-directory $secretDirectory
+    & $binaryFullPath --config $RelativeConfigurationPath --database-path $databasePath --secret-directory $secretDirectory --resource-directory $resourceDirectory
     $processExitCode = $LASTEXITCODE
 }
 finally {

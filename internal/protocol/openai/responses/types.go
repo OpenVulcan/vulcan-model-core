@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -37,6 +38,12 @@ var (
 // ProfileCapabilities contains verified channel and execution-profile behavior.
 // ProfileCapabilities 包含经过验证的 Channel 与执行 Profile 行为。
 type ProfileCapabilities struct {
+	// MediaInputKinds lists media families represented by this exact provider Profile.
+	// MediaInputKinds 列出此精确供应商 Profile 表示的媒体类别。
+	MediaInputKinds []vcp.MediaKind
+	// MediaMaterializations lists representations that survive this exact wire or copied translation path.
+	// MediaMaterializations 列出能完整通过此精确线路或复制转换路径的表示。
+	MediaMaterializations []catalog.UpstreamMaterializationMode
 	// NativeSystemPreamble reports direct first-position system instruction support.
 	// NativeSystemPreamble 表示直接支持首位 system 指令。
 	NativeSystemPreamble bool
@@ -148,15 +155,41 @@ type InputItem struct {
 	Summary []ReasoningSummary `json:"summary,omitempty"`
 }
 
-// InputContent is one closed input_text part for an EasyInputMessage carrier.
-// InputContent 是 EasyInputMessage 载体的一种封闭 input_text 内容部分。
+// InputContent is one closed text, image, audio, or file input part.
+// InputContent 是一种封闭的文本、图片、音频或文件输入部分。
 type InputContent struct {
-	// Type is fixed to input_text for the input-message carrier.
-	// Type 对输入消息载体固定为 input_text。
+	// Type identifies input_text, input_image, input_audio, or input_file.
+	// Type 标识 input_text、input_image、input_audio 或 input_file。
 	Type string `json:"type"`
 	// Text is the exact text value for the typed content part.
 	// Text 是该类型化内容部分的精确文本值。
-	Text string `json:"text"`
+	Text string `json:"text,omitempty"`
+	// ImageURL carries an imported image data URL.
+	// ImageURL 承载已导入图片的 Data URL。
+	ImageURL string `json:"image_url,omitempty"`
+	// FileID carries one Router-managed provider file identifier.
+	// FileID 承载一个由 Router 管理的供应商文件标识。
+	FileID string `json:"file_id,omitempty"`
+	// FileData carries an imported file as a data URL.
+	// FileData 以 Data URL 承载已导入文件。
+	FileData string `json:"file_data,omitempty"`
+	// Filename gives inline file data a deterministic non-sensitive name.
+	// Filename 为内联文件数据提供确定且不敏感的名称。
+	Filename string `json:"filename,omitempty"`
+	// InputAudio carries supported base64 audio and its closed format.
+	// InputAudio 承载受支持的 Base64 音频及其封闭格式。
+	InputAudio *InputAudio `json:"input_audio,omitempty"`
+}
+
+// InputAudio is the closed OpenAI message audio input object.
+// InputAudio 是封闭的 OpenAI 消息音频输入对象。
+type InputAudio struct {
+	// Data is standard Base64 without a data-URL prefix.
+	// Data 是不含 Data URL 前缀的标准 Base64。
+	Data string `json:"data"`
+	// Format is mp3 or wav as required by the documented input carrier.
+	// Format 是已记录输入载体要求的 mp3 或 wav。
+	Format string `json:"format"`
 }
 
 // ReasoningSummary is one visible reasoning summary part.
@@ -428,6 +461,40 @@ type OutputItem struct {
 	// EncryptedContent is sealed provider state and must never be converted to ordinary text.
 	// EncryptedContent 是密封供应商状态，绝不能转换为普通文本。
 	EncryptedContent string `json:"encrypted_content,omitempty"`
+	// Action contains one typed native web-search action for web_search_call items.
+	// Action 为 web_search_call 项目包含一个类型化原生网页搜索动作。
+	Action *WebSearchAction `json:"action,omitempty"`
+}
+
+// WebSearchAction contains one documented Responses native web-search action.
+// WebSearchAction 包含一个文档记录的 Responses 原生网页搜索动作。
+type WebSearchAction struct {
+	// Type identifies search, open_page, or find_in_page.
+	// Type 标识 search、open_page 或 find_in_page。
+	Type string `json:"type"`
+	// Query is the actual provider query for search actions.
+	// Query 是搜索动作的真实供应商查询。
+	Query string `json:"query,omitempty"`
+	// URL is the provider target for open_page or find_in_page.
+	// URL 是 open_page 或 find_in_page 的供应商目标。
+	URL string `json:"url,omitempty"`
+	// Pattern is the provider search pattern for find_in_page.
+	// Pattern 是 find_in_page 的供应商搜索模式。
+	Pattern string `json:"pattern,omitempty"`
+	// Sources contains the complete consulted-source list when requested.
+	// Sources 包含请求时返回的完整已咨询来源列表。
+	Sources []WebSearchSource `json:"sources,omitempty"`
+}
+
+// WebSearchSource contains one provider-reported consulted source.
+// WebSearchSource 包含一个供应商报告的已咨询来源。
+type WebSearchSource struct {
+	// Type identifies the provider source kind.
+	// Type 标识供应商来源类型。
+	Type string `json:"type"`
+	// URL is the exact source URL.
+	// URL 是精确来源 URL。
+	URL string `json:"url"`
 }
 
 // OutputContent is one typed OpenAI Responses output content part.
@@ -456,6 +523,18 @@ type OutputAnnotation struct {
 	// Type identifies the provider annotation variant without retaining its opaque detail payload.
 	// Type 在不保留其不透明明细载荷的前提下标识 Provider 注释变体。
 	Type string `json:"type,omitempty"`
+	// URL is the provider-returned citation URL.
+	// URL 是供应商返回的引用 URL。
+	URL string `json:"url,omitempty"`
+	// Title is the provider-returned source title.
+	// Title 是供应商返回的来源标题。
+	Title string `json:"title,omitempty"`
+	// StartIndex is the inclusive answer character offset.
+	// StartIndex 是答案字符的包含端点偏移。
+	StartIndex *int `json:"start_index,omitempty"`
+	// EndIndex is the exclusive answer character offset.
+	// EndIndex 是答案字符的不包含端点偏移。
+	EndIndex *int `json:"end_index,omitempty"`
 }
 
 // StreamPart is one closed OpenAI Responses SSE part carrier.
@@ -606,6 +685,12 @@ type StreamEvent struct {
 	// Input contains finalized custom tool input.
 	// Input 包含已完成 custom tool 输入。
 	Input string `json:"input,omitempty"`
+	// AnnotationIndex identifies one output-text annotation position.
+	// AnnotationIndex 标识一个输出文本注释位置。
+	AnnotationIndex *int `json:"annotation_index,omitempty"`
+	// Annotation contains one typed output annotation for annotation-added events.
+	// Annotation 为 annotation-added 事件包含一个类型化输出注释。
+	Annotation *OutputAnnotation `json:"annotation,omitempty"`
 	// Error contains a typed error event payload.
 	// Error 包含类型化错误事件载荷。
 	Error *Error `json:"error,omitempty"`

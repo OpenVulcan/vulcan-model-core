@@ -13,9 +13,47 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestProjectRequestWithInputsPreservesMixedMediaOrder verifies text, inline image, and provider-file video remain in canonical order.
+// TestProjectRequestWithInputsPreservesMixedMediaOrder 验证文本、内联图片和 Provider File 视频保持规范顺序。
+func TestProjectRequestWithInputsPreservesMixedMediaOrder(t *testing.T) {
+	request := aiStudioTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Compare these inputs"},
+		{Type: vcp.ContentImage, ResourceRef: "resource-image", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentVideo, ResourceRef: "resource-video", MediaRole: vcp.MediaRoleUnderstanding},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "image-input", ResourceID: "resource-image", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+		{InputID: "video-input", ResourceID: "resource-video", Kind: vcp.MediaVideo, Role: vcp.MediaRoleUnderstanding, MIMEType: "video/mp4", Mode: catalog.MaterializationProviderFileID, ProviderHandle: "files/video-1"},
+	}
+
+	projected, errProject := ProjectRequestWithInputs(request, aiStudioTarget(), aiStudioCapabilities(), "lineage-media", aiStudioNow(), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	parts := projected.Upstream.Contents[0].Parts
+	if len(parts) != 3 || parts[0].Text != "Compare these inputs" || parts[1].InlineData == nil || parts[1].InlineData.Data != "aW1hZ2U=" || parts[2].FileData == nil || parts[2].FileData.FileURI != "files/video-1" {
+		t.Fatalf("parts = %#v", parts)
+	}
+}
+
+// TestProjectRequestWithInputsRejectsRoleMismatch verifies a materialization cannot be reused under a different semantic role.
+// TestProjectRequestWithInputsRejectsRoleMismatch 验证物化结果不能在不同语义角色下复用。
+func TestProjectRequestWithInputsRejectsRoleMismatch(t *testing.T) {
+	request := aiStudioTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{{Type: vcp.ContentImage, ResourceRef: "resource-image", MediaRole: vcp.MediaRoleUnderstanding}}
+	inputs := []resource.MaterializedInput{{InputID: "image-input", ResourceID: "resource-image", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="}}
+
+	if _, errProject := ProjectRequestWithInputs(request, aiStudioTarget(), aiStudioCapabilities(), "lineage-media", aiStudioNow(), inputs); !errors.Is(errProject, ErrUnsupportedContext) {
+		t.Fatalf("ProjectRequestWithInputs() error = %v, want ErrUnsupportedContext", errProject)
+	}
+}
 
 // TestProjectRequestMapsSystemToolsAndFunctionAffinity verifies native system, tool, strict-schema, and correlated function-response projection.
 // TestProjectRequestMapsSystemToolsAndFunctionAffinity 验证原生系统指令、工具、严格 Schema 与关联函数响应投影。
@@ -227,7 +265,7 @@ func aiStudioTarget() resolve.Target {
 // aiStudioCapabilities 创建一个用于 AI Studio Profile 测试的完全验证能力夹具。
 func aiStudioCapabilities() ProfileCapabilities {
 	return ProfileCapabilities{
-		NativeSystemInstruction: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, NativeReasoning: true,
+		MediaInputKinds: []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaVideo}, NativeSystemInstruction: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, NativeReasoning: true,
 	}
 }
 

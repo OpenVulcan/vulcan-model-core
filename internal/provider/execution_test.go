@@ -29,6 +29,90 @@ func TestExecutionRegistryDispatchesExactDefinitionAndProfile(t *testing.T) {
 	}
 }
 
+// TestExecutionRegistryDispatchesExactDefinitionAndAction verifies service execution uses only the immutable action binding.
+// TestExecutionRegistryDispatchesExactDefinitionAndAction 验证服务执行只使用不可变动作绑定。
+func TestExecutionRegistryDispatchesExactDefinitionAndAction(t *testing.T) {
+	registry := NewExecutionRegistry()
+	driver := &recordingActionExecutionDriver{definitionID: "definition-search", actionBindingID: "search-web"}
+	if errRegister := registry.RegisterAction(driver); errRegister != nil {
+		t.Fatalf("RegisterAction() error = %v", errRegister)
+	}
+	result, errExecute := registry.Execute(context.Background(), validActionExecutionRequest())
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !driver.executed || result.UpstreamResponseID != "action-upstream" {
+		t.Fatalf("driver execution = %v, result = %#v", driver.executed, result)
+	}
+}
+
+// TestExecutionRegistryRejectsActionTargetDrift verifies canonical service selection cannot cross the resolved target.
+// TestExecutionRegistryRejectsActionTargetDrift 验证规范服务选择不能跨越已解析 Target。
+func TestExecutionRegistryRejectsActionTargetDrift(t *testing.T) {
+	registry := NewExecutionRegistry()
+	driver := &recordingActionExecutionDriver{definitionID: "definition-search", actionBindingID: "search-web"}
+	if errRegister := registry.RegisterAction(driver); errRegister != nil {
+		t.Fatalf("RegisterAction() error = %v", errRegister)
+	}
+	request := validActionExecutionRequest()
+	request.Execution.Target.Service.ProviderServiceID = "service-foreign"
+	_, errExecute := registry.Execute(context.Background(), request)
+	if !errors.Is(errExecute, ErrExecutionBinding) || driver.executed {
+		t.Fatalf("Execute() error = %v, driver executed = %v", errExecute, driver.executed)
+	}
+}
+
+// TestExecutionRegistryRejectsDuplicateActionOwnership verifies one action has exactly one registered Driver.
+// TestExecutionRegistryRejectsDuplicateActionOwnership 验证一个动作只有一个已注册 Driver。
+func TestExecutionRegistryRejectsDuplicateActionOwnership(t *testing.T) {
+	registry := NewExecutionRegistry()
+	driver := &recordingActionExecutionDriver{definitionID: "definition-search", actionBindingID: "search-web"}
+	if errRegister := registry.RegisterAction(driver); errRegister != nil {
+		t.Fatalf("first RegisterAction() error = %v", errRegister)
+	}
+	if errRegister := registry.RegisterAction(driver); !errors.Is(errRegister, ErrActionExecutionDriverDuplicate) {
+		t.Fatalf("second RegisterAction() error = %v, want ErrActionExecutionDriverDuplicate", errRegister)
+	}
+}
+
+// TestConversationActionDriverPreservesProvenProfileExecution verifies action migration does not rewrite provider wire ownership.
+// TestConversationActionDriverPreservesProvenProfileExecution 验证动作迁移不会改写供应商 wire 归属。
+func TestConversationActionDriverPreservesProvenProfileExecution(t *testing.T) {
+	registry := NewExecutionRegistry()
+	profileDriver := &recordingExecutionDriver{definitionID: "definition-1", profileID: "openai.responses"}
+	actionDriver, errAction := NewConversationActionDriver("action_conversation_respond", profileDriver)
+	if errAction != nil {
+		t.Fatalf("NewConversationActionDriver() error = %v", errAction)
+	}
+	if errRegister := registry.RegisterAction(actionDriver); errRegister != nil {
+		t.Fatalf("RegisterAction() error = %v", errRegister)
+	}
+	request := validExecutionRequest()
+	request.Binding.Target.SubjectKind = resolve.ExecutionSubjectModel
+	request.Binding.Target.OfferingID = "offering-1"
+	request.Binding.Target.Operation = vcp.OperationConversationRespond
+	request.Binding.Target.ActionBindingID = "action_conversation_respond"
+	request.Definition.ActionBindings = []providerconfig.ProviderActionBinding{{
+		ID: "action_conversation_respond", Operation: vcp.OperationConversationRespond, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: "openai.responses", EndpointProfileID: "responses", AuthMethodIDs: []string{"api-key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true, Streaming: true}, Revision: 1,
+	}}
+	legacy := request.Request
+	request.Request = vcp.VulcanRequest{}
+	request.Execution = &vcp.ExecutionRequest{
+		ProtocolVersion: legacy.ProtocolVersion, RequestID: legacy.RequestID, Target: vcp.TargetSelection{Model: &legacy.ModelSelection}, Operation: vcp.OperationConversationRespond, Stream: legacy.Stream,
+		Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{
+			Context: legacy.Context, Tools: legacy.Tools, ToolPolicy: legacy.ToolPolicy, GenerationPolicy: legacy.GenerationPolicy, ReasoningPolicy: legacy.ReasoningPolicy,
+			CachePolicy: legacy.CachePolicy, ContextManagementPolicy: legacy.ContextManagementPolicy, RemoteCompaction: legacy.RemoteCompaction, CapabilityPolicy: legacy.CapabilityPolicy, RegisteredExtensions: legacy.RegisteredExtensions,
+		}},
+	}
+	result, errExecute := registry.Execute(context.Background(), request)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !profileDriver.executed || result.UpstreamResponseID != "res-upstream" {
+		t.Fatalf("profile driver execution = %v, result = %#v", profileDriver.executed, result)
+	}
+}
+
 // TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition verifies dynamic dispatch uses the exact custom definition snapshot.
 // TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition 验证动态分派使用精确的自定义 Definition 快照。
 func TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition(t *testing.T) {
@@ -211,6 +295,20 @@ type recordingExecutionDriver struct {
 	executed bool
 }
 
+// recordingActionExecutionDriver records exact action dispatches without network traffic.
+// recordingActionExecutionDriver 在不产生网络流量的前提下记录精确动作分派。
+type recordingActionExecutionDriver struct {
+	// definitionID is the exact provider definition accepted by this test Driver.
+	// definitionID 是此测试 Driver 接受的精确供应商 Definition。
+	definitionID string
+	// actionBindingID is the exact provider action accepted by this test Driver.
+	// actionBindingID 是此测试 Driver 接受的精确供应商动作。
+	actionBindingID string
+	// executed reports whether Execute received a validated request.
+	// executed 表示 Execute 是否收到已校验请求。
+	executed bool
+}
+
 // recordingCustomDriverFactory captures immutable custom definition snapshots for registry tests.
 // recordingCustomDriverFactory 捕获不可变的自定义 Definition 快照以供注册表测试。
 type recordingCustomDriverFactory struct {
@@ -260,6 +358,128 @@ func (d *recordingExecutionDriver) Execute(_ context.Context, _ ExecutionRequest
 	return ExecutionResult{UpstreamResponseID: "res-upstream"}, nil
 }
 
+// ProviderDefinitionID returns the test action Driver definition ownership.
+// ProviderDefinitionID 返回测试动作 Driver 的 Definition 归属。
+func (d *recordingActionExecutionDriver) ProviderDefinitionID() string {
+	return d.definitionID
+}
+
+// ActionBindingID returns the test action Driver action ownership.
+// ActionBindingID 返回测试动作 Driver 的动作归属。
+func (d *recordingActionExecutionDriver) ActionBindingID() string {
+	return d.actionBindingID
+}
+
+// Execute records one validated action request and returns safe mock state.
+// Execute 记录一条已校验动作请求并返回安全模拟状态。
+func (d *recordingActionExecutionDriver) Execute(_ context.Context, _ ExecutionRequest) (ExecutionResult, error) {
+	d.executed = true
+	return ExecutionResult{UpstreamResponseID: "action-upstream"}, nil
+}
+
+// recordingTaskExecutionDriver records exact asynchronous lifecycle dispatch.
+// recordingTaskExecutionDriver 记录精确异步生命周期分派。
+type recordingTaskExecutionDriver struct {
+	// definitionID is the sole provider owner.
+	// definitionID 是唯一供应商所有者。
+	definitionID string
+	// actionBindingID is the sole action owner.
+	// actionBindingID 是唯一动作所有者。
+	actionBindingID string
+	// started records start dispatch.
+	// started 记录创建分派。
+	started bool
+	// polled records poll dispatch.
+	// polled 记录轮询分派。
+	polled bool
+	// cancelled records cancel dispatch.
+	// cancelled 记录取消分派。
+	cancelled bool
+}
+
+// ProviderDefinitionID returns the sole provider owner.
+// ProviderDefinitionID 返回唯一供应商所有者。
+func (d *recordingTaskExecutionDriver) ProviderDefinitionID() string { return d.definitionID }
+
+// ActionBindingID returns the sole action owner.
+// ActionBindingID 返回唯一动作所有者。
+func (d *recordingTaskExecutionDriver) ActionBindingID() string { return d.actionBindingID }
+
+// Start returns one provider-confirmed queued task.
+// Start 返回一个供应商确认排队任务。
+func (d *recordingTaskExecutionDriver) Start(_ context.Context, request ExecutionRequest) (TaskResult, error) {
+	d.started = true
+	return TaskResult{ProviderTaskID: "task_test", State: TaskQueued, PollAfter: request.Now.Add(time.Second)}, nil
+}
+
+// Poll returns one provider-confirmed successful task.
+// Poll 返回一个供应商确认成功任务。
+func (d *recordingTaskExecutionDriver) Poll(_ context.Context, _ ExecutionRequest, providerTaskID string) (TaskResult, error) {
+	d.polled = true
+	result := ExecutionResult{Search: &vcp.WebSearchResponse{Query: "Vulcan"}}
+	return TaskResult{ProviderTaskID: providerTaskID, State: TaskSucceeded, Result: &result}, nil
+}
+
+// Cancel returns one provider-confirmed cancelled task.
+// Cancel 返回一个供应商确认取消任务。
+func (d *recordingTaskExecutionDriver) Cancel(_ context.Context, _ ExecutionRequest, providerTaskID string) (TaskResult, error) {
+	d.cancelled = true
+	return TaskResult{ProviderTaskID: providerTaskID, State: TaskCancelled}, nil
+}
+
+// TestExecutionRegistryDispatchesExactAsynchronousTaskLifecycle verifies task affinity and closed state validation.
+// TestExecutionRegistryDispatchesExactAsynchronousTaskLifecycle 验证任务亲和性与封闭状态校验。
+func TestExecutionRegistryDispatchesExactAsynchronousTaskLifecycle(t *testing.T) {
+	registry := NewExecutionRegistry()
+	driver := &recordingTaskExecutionDriver{definitionID: "definition-search", actionBindingID: "search-web"}
+	if errRegister := registry.RegisterTaskAction(driver); errRegister != nil {
+		t.Fatalf("register task driver: %v", errRegister)
+	}
+	request := validActionExecutionRequest()
+	request.Definition.ActionBindings[0].Delivery = providerconfig.ActionDeliveryModes{Asynchronous: true}
+	started, errStart := registry.StartTask(context.Background(), request)
+	if errStart != nil || !driver.started || started.State != TaskQueued {
+		t.Fatalf("start=%+v error=%v called=%t", started, errStart, driver.started)
+	}
+	polled, errPoll := registry.PollTask(context.Background(), request, started.ProviderTaskID)
+	if errPoll != nil || !driver.polled || polled.State != TaskSucceeded {
+		t.Fatalf("poll=%+v error=%v called=%t", polled, errPoll, driver.polled)
+	}
+	cancelled, errCancel := registry.CancelTask(context.Background(), request, started.ProviderTaskID)
+	if errCancel != nil || !driver.cancelled || cancelled.State != TaskCancelled {
+		t.Fatalf("cancel=%+v error=%v called=%t", cancelled, errCancel, driver.cancelled)
+	}
+}
+
+// TestTaskResultRejectsProviderControlledFailureCode verifies that arbitrary upstream text cannot become a public failure code.
+// TestTaskResultRejectsProviderControlledFailureCode 验证任意上游文本不能成为公开失败码。
+func TestTaskResultRejectsProviderControlledFailureCode(t *testing.T) {
+	result := TaskResult{ProviderTaskID: "task_test", State: TaskFailed, ErrorCode: "upstream_secret_or_message"}
+	if errValidate := result.Validate(); errValidate == nil {
+		t.Fatal("TaskResult.Validate() accepted a provider-controlled failure code")
+	}
+
+	result.ErrorCode = "provider_task_expired"
+	if errValidate := result.Validate(); errValidate != nil {
+		t.Fatalf("TaskResult.Validate() safe code error = %v", errValidate)
+	}
+}
+
+// TestTaskResultRejectsCrossStateFields verifies polling and retry facts cannot leak into incompatible task states.
+// TestTaskResultRejectsCrossStateFields 验证轮询与重试事实不能进入不兼容的任务状态。
+func TestTaskResultRejectsCrossStateFields(t *testing.T) {
+	now := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
+	result := TaskResult{ProviderTaskID: "task_test", State: TaskQueued, PollAfter: now, Retryable: true}
+	if errValidate := result.Validate(); errValidate == nil {
+		t.Fatal("TaskResult.Validate() accepted retryability on a queued task")
+	}
+	completed := ExecutionResult{}
+	result = TaskResult{ProviderTaskID: "task_test", State: TaskSucceeded, PollAfter: now, Result: &completed}
+	if errValidate := result.Validate(); errValidate == nil {
+		t.Fatal("TaskResult.Validate() accepted a poll time on a terminal task")
+	}
+}
+
 // validExecutionRequest creates a complete executable fixture with exact channel and credential ownership.
 // validExecutionRequest 创建具有精确 Channel、Credential 归属的完整可执行夹具。
 func validExecutionRequest() ExecutionRequest {
@@ -291,5 +511,44 @@ func validExecutionRequest() ExecutionRequest {
 			CapabilityPolicy:        vcp.CapabilityPolicy{ExecutionMode: vcp.CapabilityMaximize, OptionalOnUnsupported: vcp.OptionalOmit},
 		},
 		LineageID: "lineage-1", Now: now,
+	}
+}
+
+// validActionExecutionRequest creates a complete service action fixture with exact ownership.
+// validActionExecutionRequest 创建具有精确归属的完整服务动作夹具。
+func validActionExecutionRequest() ExecutionRequest {
+	now := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
+	action := providerconfig.ProviderActionBinding{
+		ID: "search-web", Operation: vcp.OperationSearchWeb, DriverID: "search-driver", DriverVersion: "1",
+		ProtocolProfileID: "search.direct.v1", EndpointProfileID: "search-endpoint", AuthMethodIDs: []string{"api-key"},
+		Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendDirectAPI}, Revision: 1,
+	}
+	execution := &vcp.ExecutionRequest{
+		ProtocolVersion: vcp.ProtocolVersion,
+		RequestID:       "request-search",
+		Target: vcp.TargetSelection{Service: &vcp.ServiceSelection{
+			ProviderInstanceID: "instance-search", ProviderServiceID: "service-search", ServiceOfferingID: "offering-search", ExecutionProfileID: "profile-search",
+		}},
+		Operation: vcp.OperationSearchWeb,
+		Payload: vcp.OperationPayload{SearchWeb: &vcp.WebSearchOperation{
+			Query: "Vulcan", OutputMode: vcp.WebSearchOutputResults, EvidenceRequirement: vcp.SearchEvidenceVerified,
+		}},
+	}
+	return ExecutionRequest{
+		Binding: transport.Binding{
+			Target: resolve.Target{
+				ProviderDefinitionID: "definition-search", ProviderInstanceID: "instance-search", ChannelID: "channel-search", EndpointID: "endpoint-search", CredentialID: "credential-search",
+				SubjectKind: resolve.ExecutionSubjectService, ProviderServiceID: "service-search", ServiceOfferingID: "offering-search", Operation: vcp.OperationSearchWeb,
+				ActionBindingID: "search-web", ExecutionProfileID: "profile-search", UpstreamServiceID: "search-api",
+			},
+			Endpoint:   providerconfig.Endpoint{ID: "endpoint-search", ProviderInstanceID: "instance-search", ChannelID: "channel-search", BaseURL: "https://search.example", Status: providerconfig.EndpointReady},
+			Credential: providerconfig.Credential{ID: "credential-search", ProviderInstanceID: "instance-search", AuthMethodID: "api-key", SecretRef: "secret-search", Status: providerconfig.CredentialActive},
+		},
+		Definition: providerconfig.ProviderDefinition{
+			ID: "definition-search", Kind: providerconfig.DefinitionKindSystem, RuntimeReady: true,
+			AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "api-key", Type: providerconfig.AuthMethodAPIKey}}, ActionBindings: []providerconfig.ProviderActionBinding{action},
+		},
+		Execution: execution,
+		LineageID: "lineage-search", Now: now,
 	}
 }

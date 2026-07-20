@@ -10,9 +10,12 @@
 package chat
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -37,6 +40,12 @@ var (
 // ProfileCapabilities contains verified Channel/Profile behavior.
 // ProfileCapabilities 包含经过验证的 Channel/Profile 行为。
 type ProfileCapabilities struct {
+	// MediaInputKinds lists media families represented by this exact provider Profile.
+	// MediaInputKinds 列出此精确供应商 Profile 表示的媒体类别。
+	MediaInputKinds []vcp.MediaKind
+	// MediaMaterializations lists resource representations preserved by this exact provider Profile.
+	// MediaMaterializations 列出此精确供应商 Profile 可保真的资源表示方式。
+	MediaMaterializations []catalog.UpstreamMaterializationMode
 	// NativeSystemPreamble reports verified system message support at the first position.
 	// NativeSystemPreamble 表示经过验证的首位 system 消息支持。
 	NativeSystemPreamble bool
@@ -129,7 +138,10 @@ type Message struct {
 	Role string `json:"role"`
 	// Content contains text when applicable.
 	// Content 在适用时包含文本。
-	Content string `json:"content,omitempty"`
+	Content string `json:"-"`
+	// ContentParts contains an ordered typed user multimodal payload when present.
+	// ContentParts 在存在时包含有序的类型化用户多模态载荷。
+	ContentParts []ContentPart `json:"-"`
 	// ReasoningContent preserves provider-visible reasoning only for profiles with an explicit carrier contract.
 	// ReasoningContent 仅为具有显式载体契约的 Profile 保留供应商可见推理。
 	ReasoningContent string `json:"reasoning_content,omitempty"`
@@ -139,6 +151,93 @@ type Message struct {
 	// ToolCallID binds a tool result to its call.
 	// ToolCallID 将工具结果绑定到其调用。
 	ToolCallID string `json:"tool_call_id,omitempty"`
+}
+
+// MarshalJSON emits the closed Chat content union as either text or typed parts.
+// MarshalJSON 将封闭的 Chat 内容联合编码为文本或类型化内容块。
+func (m Message) MarshalJSON() ([]byte, error) {
+	if len(m.ContentParts) > 0 {
+		return json.Marshal(struct {
+			Role             string        `json:"role"`
+			Content          []ContentPart `json:"content"`
+			ReasoningContent string        `json:"reasoning_content,omitempty"`
+			ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
+			ToolCallID       string        `json:"tool_call_id,omitempty"`
+		}{Role: m.Role, Content: m.ContentParts, ReasoningContent: m.ReasoningContent, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID})
+	}
+	return json.Marshal(struct {
+		Role             string     `json:"role"`
+		Content          string     `json:"content,omitempty"`
+		ReasoningContent string     `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
+		ToolCallID       string     `json:"tool_call_id,omitempty"`
+	}{Role: m.Role, Content: m.Content, ReasoningContent: m.ReasoningContent, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID})
+}
+
+// UnmarshalJSON decodes the closed Chat text-or-parts union for exact request fixture inspection.
+// UnmarshalJSON 解码封闭的 Chat 文本或内容块联合，以便精确检查请求夹具。
+func (m *Message) UnmarshalJSON(data []byte) error {
+	if m == nil {
+		return errors.New("cannot unmarshal OpenAI Chat message into nil receiver")
+	}
+	var wire struct {
+		Role             string          `json:"role"`
+		Content          json.RawMessage `json:"content"`
+		ReasoningContent string          `json:"reasoning_content,omitempty"`
+		ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
+		ToolCallID       string          `json:"tool_call_id,omitempty"`
+	}
+	if errDecode := json.Unmarshal(data, &wire); errDecode != nil {
+		return errDecode
+	}
+	*m = Message{Role: wire.Role, ReasoningContent: wire.ReasoningContent, ToolCalls: wire.ToolCalls, ToolCallID: wire.ToolCallID}
+	trimmed := bytes.TrimSpace(wire.Content)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
+		return nil
+	}
+	if trimmed[0] == '"' {
+		return json.Unmarshal(trimmed, &m.Content)
+	}
+	if trimmed[0] == '[' {
+		return json.Unmarshal(trimmed, &m.ContentParts)
+	}
+	return fmt.Errorf("invalid OpenAI Chat message content union")
+}
+
+// ContentPart is one evidence-closed OpenAI Chat user content block.
+// ContentPart 是一个证据封闭的 OpenAI Chat 用户内容块。
+type ContentPart struct {
+	// Type selects text, image_url, or input_audio.
+	// Type 选择 text、image_url 或 input_audio。
+	Type string `json:"type"`
+	// Text contains a text block.
+	// Text 包含文本块。
+	Text string `json:"text,omitempty"`
+	// ImageURL contains an image URL or inline data URL.
+	// ImageURL 包含图片 URL 或内联 Data URL。
+	ImageURL *ImageURL `json:"image_url,omitempty"`
+	// InputAudio contains inline audio bytes and their documented encoding.
+	// InputAudio 包含内联音频字节及其已记录编码。
+	InputAudio *InputAudio `json:"input_audio,omitempty"`
+}
+
+// ImageURL is the typed OpenAI Chat image_url payload.
+// ImageURL 是类型化 OpenAI Chat image_url 载荷。
+type ImageURL struct {
+	// URL is a remote or base64 data URL accepted by Chat.
+	// URL 是 Chat 接受的远程 URL 或 Base64 Data URL。
+	URL string `json:"url"`
+}
+
+// InputAudio is the typed OpenAI Chat input_audio payload.
+// InputAudio 是类型化 OpenAI Chat input_audio 载荷。
+type InputAudio struct {
+	// Data contains base64 audio bytes without a data URL prefix.
+	// Data 包含不带 Data URL 前缀的 Base64 音频字节。
+	Data string `json:"data"`
+	// Format is the documented mp3 or wav encoding name.
+	// Format 是已记录的 mp3 或 wav 编码名称。
+	Format string `json:"format"`
 }
 
 // Tool is one OpenAI function tool declaration.

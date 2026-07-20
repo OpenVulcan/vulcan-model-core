@@ -12,11 +12,14 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
+	executioncore "github.com/OpenVulcan/vulcan-model-core/internal/execution"
 	"github.com/OpenVulcan/vulcan-model-core/internal/httpapi"
+	"github.com/OpenVulcan/vulcan-model-core/internal/inputplan"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
@@ -27,6 +30,8 @@ import (
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/refresh"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/sqlitestore"
@@ -42,6 +47,15 @@ const (
 	// defaultSecretDirectory is the conventional local OS-protected secret directory.
 	// defaultSecretDirectory 是约定的本地操作系统保护 Secret 目录。
 	defaultSecretDirectory = "vulcan-model-core.secrets"
+	// defaultResourceDirectory is the local fallback overridden by the prescribed user-level launcher path.
+	// defaultResourceDirectory 是由规定用户级启动路径覆盖的本地回退目录。
+	defaultResourceDirectory = "vulcan-model-core.resources"
+	// defaultMaximumResourceBytes is the per-object ingestion ceiling.
+	// defaultMaximumResourceBytes 是单对象接收上限。
+	defaultMaximumResourceBytes int64 = 512 << 20
+	// defaultMaximumReadyResourceBytes is the aggregate ready-object quota.
+	// defaultMaximumReadyResourceBytes 是全部就绪对象总配额。
+	defaultMaximumReadyResourceBytes int64 = 20 << 30
 )
 
 // runOptions contains the complete process-local startup configuration after command-line parsing.
@@ -59,6 +73,9 @@ type runOptions struct {
 	// secretDirectory is the local directory for OS-protected provider credential files.
 	// secretDirectory 是保存操作系统保护供应商凭据文件的本地目录。
 	secretDirectory string
+	// resourceDirectory is the user-level Router resource root.
+	// resourceDirectory 是用户级 Router 资源根目录。
+	resourceDirectory string
 }
 
 // main starts the process and reports terminal startup or shutdown failures.
@@ -87,6 +104,7 @@ func parseRunOptions(args []string) (runOptions, error) {
 	flags.StringVar(&options.databasePath, "database-path", defaultDatabasePath, "SQLite configuration and catalog path")
 	flags.StringVar(&options.configurationPath, "config", runtimeconfig.DefaultPath, "Local control-plane YAML configuration path")
 	flags.StringVar(&options.secretDirectory, "secret-directory", defaultSecretDirectory, "Local protected secret directory")
+	flags.StringVar(&options.resourceDirectory, "resource-directory", defaultResourceDirectory, "Local Router resource directory")
 	if errParse := flags.Parse(args); errParse != nil {
 		return runOptions{}, fmt.Errorf("parse command flags: %w", errParse)
 	}
@@ -155,6 +173,75 @@ func run(ctx context.Context, args []string) error {
 	catalogs, errCatalogs := sqlitestore.NewCatalogStore(database)
 	if errCatalogs != nil {
 		return fmt.Errorf("create provider catalog store: %w", errCatalogs)
+	}
+	// reconciledKimiCatalogs upgrades historical multi-protocol Kimi snapshots to the current single Chat contract before any resolver reads them.
+	// reconciledKimiCatalogs 在任何 Resolver 读取历史多协议 Kimi 快照前，将其升级到当前唯一 Chat 合同。
+	reconciledKimiCatalogs, errReconcileKimiCatalogs := management.ReconcileKimiSystemCatalogs(ctx, configurations, catalogs)
+	if errReconcileKimiCatalogs != nil {
+		return fmt.Errorf("reconcile persisted Kimi system catalogs: %w", errReconcileKimiCatalogs)
+	}
+	if reconciledKimiCatalogs > 0 {
+		log.Printf("reconciled %d persisted Kimi catalog(s) to the single Chat protocol", reconciledKimiCatalogs)
+	}
+	// resourceMetadata persists non-binary lifecycle records in the shared SQLite database.
+	// resourceMetadata 在共享 SQLite 数据库中持久化非二进制生命周期记录。
+	resourceMetadata, errResourceMetadata := sqlitestore.NewResourceStore(database)
+	if errResourceMetadata != nil {
+		return fmt.Errorf("create resource metadata store: %w", errResourceMetadata)
+	}
+	// assetBindings persists exact-target provider handles and participates in resource cleanup.
+	// assetBindings 持久化精确 Target 供应商句柄并参与资源清理。
+	assetBindings, errAssetBindings := sqlitestore.NewAssetBindingStore(database)
+	if errAssetBindings != nil {
+		return fmt.Errorf("create provider asset binding store: %w", errAssetBindings)
+	}
+	// resourceService owns verified filesystem objects under the explicit user-level root.
+	// resourceService 在明确用户级根目录下管理已验证文件系统对象。
+	resourceService, errResourceService := resource.NewService(resourceMetadata, resource.ServiceOptions{Root: filepath.Clean(options.resourceDirectory), MaxObjectBytes: defaultMaximumResourceBytes, MaxReadyBytes: defaultMaximumReadyResourceBytes, DefaultTTL: 24 * time.Hour, MaxTTL: 30 * 24 * time.Hour, BindingCleaner: assetBindings})
+	if errResourceService != nil {
+		return fmt.Errorf("create Router resource service: %w", errResourceService)
+	}
+	// resourceImporter owns proxy-free URL acquisition and bounded Base64 decoding.
+	// resourceImporter 拥有无代理 URL 获取与受限 Base64 解码。
+	resourceImporter, errResourceImporter := resource.NewImporter(resourceService, resource.ImporterOptions{RequestTimeout: 2 * time.Minute, ResponseHeaderTimeout: 30 * time.Second, MaxRedirects: 5})
+	if errResourceImporter != nil {
+		return fmt.Errorf("create Router resource importer: %w", errResourceImporter)
+	}
+	// resourceGateway exposes the complete owner-scoped call-plane resource boundary.
+	// resourceGateway 暴露完整所有者作用域调用面资源边界。
+	resourceGateway, errResourceGateway := resource.NewGateway(resourceService, resourceImporter)
+	if errResourceGateway != nil {
+		return fmt.Errorf("create Router resource gateway: %w", errResourceGateway)
+	}
+	// targetResolver combines exact provider configuration and catalog snapshots for planning and execution.
+	// targetResolver 为规划与执行组合精确供应商配置及目录快照。
+	targetResolver, errTargetResolver := resolve.New(configurations, catalogs)
+	if errTargetResolver != nil {
+		return fmt.Errorf("create provider target resolver: %w", errTargetResolver)
+	}
+	// inputPlanStore persists conditional media decisions across process restarts.
+	// inputPlanStore 跨进程重启持久化条件媒体决策。
+	inputPlanStore, errInputPlanStore := sqlitestore.NewInputPlanStore(database)
+	if errInputPlanStore != nil {
+		return fmt.Errorf("create input plan store: %w", errInputPlanStore)
+	}
+	// inputPlans freezes one legal media path and rejects capability drift before execution.
+	// inputPlans 冻结一条合法媒体路径并在执行前拒绝能力漂移。
+	inputPlans, errInputPlans := inputplan.NewService(targetResolver, resourceService, inputPlanStore, inputplan.ServiceOptions{TTL: 10 * time.Minute})
+	if errInputPlans != nil {
+		return fmt.Errorf("create input plan service: %w", errInputPlans)
+	}
+	// executionStore persists lifecycle, idempotency, event replay, and recovery snapshots.
+	// executionStore 持久化生命周期、幂等、事件回放与恢复快照。
+	executionStore, errExecutionStore := sqlitestore.NewExecutionStore(database, secrets)
+	if errExecutionStore != nil {
+		return fmt.Errorf("create execution store: %w", errExecutionStore)
+	}
+	// inputMaterializer realizes inline and direct URL plans immediately and rejects unregistered provider asset uploads.
+	// inputMaterializer 立即实现内联与直接 URL 方案，并拒绝未注册的供应商资产上传。
+	inputMaterializer, errInputMaterializer := resource.NewMaterializer(resourceService, assetBindings, secrets, nil, resource.MaterializerOptions{})
+	if errInputMaterializer != nil {
+		return fmt.Errorf("create input materializer: %w", errInputMaterializer)
 	}
 	// metadataDrivers owns trusted provider-native plan and allowance readers independently from execution adapters.
 	// metadataDrivers 独立于执行 Adapter 管理受信任的供应商原生套餐与额度读取器。
@@ -418,11 +505,26 @@ func run(ctx context.Context, args []string) error {
 	if errDrivers := bootstrap.RegisterKimiExecutionDrivers(executionDrivers, openPlatformTransport, codingTransport, secrets); errDrivers != nil {
 		return fmt.Errorf("register Kimi execution drivers: %w", errDrivers)
 	}
-	if errDrivers := bootstrap.RegisterAlibabaExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+	if errDrivers := bootstrap.RegisterAlibabaExecutionDrivers(executionDrivers, openPlatformTransport, resourceImporter); errDrivers != nil {
 		return fmt.Errorf("register Alibaba execution drivers: %w", errDrivers)
+	}
+	if errDrivers := bootstrap.RegisterOpenRouterExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+		return fmt.Errorf("register OpenRouter execution drivers: %w", errDrivers)
+	}
+	if errDrivers := bootstrap.RegisterMiniMaxExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+		return fmt.Errorf("register MiniMax execution drivers: %w", errDrivers)
+	}
+	if errDrivers := bootstrap.RegisterTavilyExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+		return fmt.Errorf("register Tavily execution drivers: %w", errDrivers)
 	}
 	if errFactory := bootstrap.RegisterCustomExecutionDriverFactory(executionDrivers, openPlatformTransport); errFactory != nil {
 		return fmt.Errorf("register custom compatibility execution factory: %w", errFactory)
+	}
+	// executions owns the durable public execution lifecycle and exact provider dispatch.
+	// executions 拥有持久化公共执行生命周期与精确供应商分派。
+	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway})
+	if errExecutions != nil {
+		return fmt.Errorf("create execution service: %w", errExecutions)
 	}
 	// api exposes separated authenticated Vulcan management and call-plane routes.
 	// api 暴露相互隔离且经认证的 Vulcan 管理面和调用面路由。
@@ -435,6 +537,12 @@ func run(ctx context.Context, args []string) error {
 		Protocols:             protocols,
 		APIKeys:               controlConfiguration,
 		Auth:                  controlConfiguration,
+		Resources:             resourceGateway,
+		InputPlans:            inputPlans,
+		Executions:            executions,
+		ResourceDiagnostics:   resourceService,
+		ExecutionDiagnostics:  executions,
+		Targets:               targetResolver,
 		KimiDeviceFlows:       kimiDeviceFlows,
 		KimiTokens:            kimiTokens,
 		XAIDeviceFlows:        xaiDeviceFlows,
@@ -468,8 +576,14 @@ func run(ctx context.Context, args []string) error {
 	// serveErrors receives the terminal serve result exactly once.
 	// serveErrors 只接收一次最终服务结果。
 	serveErrors := make(chan error, 1)
+	// recoveryErrors receives a terminal durable task-recovery failure without logging task affinity.
+	// recoveryErrors 接收持久化任务恢复终止错误且不记录任务亲和性。
+	recoveryErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- server.Serve(listener)
+	}()
+	go func() {
+		recoveryErrors <- executions.RunRecovery(ctx, time.Second)
 	}()
 	log.Printf("vulcan-model-core listening on %s", listener.Addr())
 
@@ -477,6 +591,11 @@ func run(ctx context.Context, args []string) error {
 	case errServe := <-serveErrors:
 		if errServe != nil && !errors.Is(errServe, http.ErrServerClosed) {
 			return fmt.Errorf("serve HTTP API: %w", errServe)
+		}
+		return nil
+	case errRecovery := <-recoveryErrors:
+		if errRecovery != nil && !errors.Is(errRecovery, context.Canceled) {
+			return fmt.Errorf("run durable execution recovery: %w", errRecovery)
 		}
 		return nil
 	case <-ctx.Done():

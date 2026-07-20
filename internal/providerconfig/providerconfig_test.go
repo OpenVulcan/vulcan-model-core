@@ -60,6 +60,48 @@ func TestDerivedEndpointPresetValidatesAndLocksRegionalOrigins(t *testing.T) {
 	}
 }
 
+// TestParameterizedEndpointPresetMaterializesOnlyDeclaredHostnameLabels verifies exact workspace host derivation and immutable parameter ownership.
+// TestParameterizedEndpointPresetMaterializesOnlyDeclaredHostnameLabels 校验精确的工作空间主机派生与不可变参数归属。
+func TestParameterizedEndpointPresetMaterializesOnlyDeclaredHostnameLabels(t *testing.T) {
+	preset := EndpointPreset{
+		ID: "singapore_workspace", Region: "Global",
+		BaseURLTemplate: "https://{workspace_id}.ap-southeast-1.maas.aliyuncs.com/api/v1",
+		Parameters:      []EndpointParameterDefinition{{ID: "workspace_id", Kind: EndpointParameterHostnameLabel, Required: true}},
+	}
+	if errValidate := preset.Validate(); errValidate != nil {
+		t.Fatalf("parameterized preset Validate() error = %v", errValidate)
+	}
+	parameters := []EndpointParameterValue{{ID: "workspace_id", Value: "llm-example123"}}
+	baseURL, errMaterialize := preset.MaterializeBaseURL(parameters)
+	if errMaterialize != nil || baseURL != "https://llm-example123.ap-southeast-1.maas.aliyuncs.com/api/v1" {
+		t.Fatalf("MaterializeBaseURL() = %q, %v", baseURL, errMaterialize)
+	}
+	definition := ProviderDefinition{Kind: DefinitionKindSystem, EndpointPresets: []EndpointPreset{preset}}
+	endpoint := Endpoint{ID: "ep_alibaba", BaseURL: baseURL, Region: "Global", Parameters: parameters}
+	if errMatch := definition.ValidateEndpointPreset(endpoint); errMatch != nil {
+		t.Fatalf("parameterized endpoint validation error = %v", errMatch)
+	}
+	changed := endpoint
+	changed.Parameters = []EndpointParameterValue{{ID: "workspace_id", Value: "llm-other456"}}
+	changed.BaseURL = "https://llm-other456.ap-southeast-1.maas.aliyuncs.com/api/v1"
+	if errMutation := definition.ValidateEndpointMutation(endpoint, changed); errMutation == nil {
+		t.Fatal("parameterized endpoint mutation was accepted")
+	}
+	for _, invalidValue := range []string{"LLM-example", "-llm-example", "llm-example-", "llm.example", "llm_example"} {
+		if _, errInvalid := preset.MaterializeBaseURL([]EndpointParameterValue{{ID: "workspace_id", Value: invalidValue}}); errInvalid == nil {
+			t.Fatalf("unsafe workspace value %q was accepted", invalidValue)
+		}
+	}
+	if _, errUnknown := preset.MaterializeBaseURL([]EndpointParameterValue{{ID: "unknown", Value: "llm-example"}}); errUnknown == nil {
+		t.Fatal("undeclared endpoint parameter was accepted")
+	}
+	malformed := preset
+	malformed.BaseURLTemplate = "https://{workspace_id}.{unknown}.example.com"
+	if errMalformed := malformed.Validate(); errMalformed == nil {
+		t.Fatal("undeclared endpoint placeholder was accepted")
+	}
+}
+
 // TestProtocolProfileCapabilityFactsRejectInvalidAndRemainIsolated verifies closed capability facts are validated and registry snapshots cannot be mutated externally.
 // TestProtocolProfileCapabilityFactsRejectInvalidAndRemainIsolated 验证封闭能力事实会被校验，且注册表快照不能被外部修改。
 func TestProtocolProfileCapabilityFactsRejectInvalidAndRemainIsolated(t *testing.T) {

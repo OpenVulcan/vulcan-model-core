@@ -17,11 +17,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	chatprofile "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 var (
@@ -119,6 +121,8 @@ func newBearerChatDriver(definitionID string, profileID string, client *transpor
 			return nil, fmt.Errorf("%w: authentication type %q cannot use a Bearer header", ErrInvalidChatDriver, authMethod)
 		}
 	}
+	capabilities.MediaInputKinds = append([]vcp.MediaKind(nil), capabilities.MediaInputKinds...)
+	capabilities.MediaMaterializations = append([]catalog.UpstreamMaterializationMode(nil), capabilities.MediaMaterializations...)
 	return &ChatDriver{definitionID: definitionID, profileID: profileID, client: client, capabilities: capabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...), endpointPath: endpointPath, requestAdapter: requestAdapter}, nil
 }
 
@@ -152,7 +156,7 @@ func (d *ChatDriver) Execute(ctx context.Context, execution provider.ExecutionRe
 	if _, errValidate := execution.ValidateForProfile(d.profileID, d.allowedAuthMethods...); errValidate != nil {
 		return provider.ExecutionResult{}, errValidate
 	}
-	projected, errProject := chatprofile.ProjectRequest(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, execution.Now)
+	projected, errProject := chatprofile.ProjectRequestWithInputs(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, execution.Now, execution.MaterializedInputs)
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}

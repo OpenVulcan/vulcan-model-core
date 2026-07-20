@@ -21,6 +21,7 @@ import (
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 )
 
@@ -39,6 +40,9 @@ type KeyAuthenticator interface {
 	// AuthenticateAPIKey verifies one call-plane bearer value.
 	// AuthenticateAPIKey 校验一个调用面 Bearer 值。
 	AuthenticateAPIKey(string) bool
+	// AuthenticateAPIKeyID verifies one call-plane bearer and returns its non-secret identifier.
+	// AuthenticateAPIKeyID 校验一个调用面 Bearer 并返回其非秘密标识。
+	AuthenticateAPIKeyID(string) (string, bool)
 }
 
 // APIKeyManager exposes management-only call-plane API key lifecycle operations.
@@ -333,6 +337,24 @@ type ControlPlane struct {
 	// Auth verifies route-scoped bearer values.
 	// Auth 校验路由作用域 Bearer 值。
 	Auth KeyAuthenticator
+	// Resources owns authenticated Router resource ingestion and lifecycle operations.
+	// Resources 拥有已认证 Router 资源接收与生命周期操作。
+	Resources ResourceGateway
+	// InputPlans owns authenticated conditional media planning.
+	// InputPlans 拥有已认证条件媒体规划。
+	InputPlans InputPlanService
+	// Executions owns authenticated durable execution lifecycle operations.
+	// Executions 拥有已认证持久化执行生命周期操作。
+	Executions ExecutionService
+	// ResourceDiagnostics optionally exposes management-safe resource metadata without call-plane owner secrets.
+	// ResourceDiagnostics 可选暴露不含调用面所有者秘密的管理安全资源元数据。
+	ResourceDiagnostics ResourceDiagnostics
+	// ExecutionDiagnostics optionally exposes management-safe execution lifecycle snapshots.
+	// ExecutionDiagnostics 可选暴露管理安全执行生命周期快照。
+	ExecutionDiagnostics ExecutionDiagnostics
+	// Targets verifies that discovery profiles are currently executable.
+	// Targets 校验发现规格当前可执行。
+	Targets TargetAvailability
 	// KimiDeviceFlows optionally enables server-owned Coding Plan device authorization routes.
 	// KimiDeviceFlows 可选启用服务端拥有的 Coding Plan 设备授权路由。
 	KimiDeviceFlows KimiDeviceFlows
@@ -373,7 +395,7 @@ type ControlPlane struct {
 func (c ControlPlane) validate() error {
 	// requiredDependencies contains every interface called unconditionally by registered control-plane routes.
 	// requiredDependencies 包含注册控制面路由会无条件调用的全部接口。
-	requiredDependencies := []any{c.Query, c.Commands, c.ModelAccess, c.CustomCatalogs, c.Protocols, c.APIKeys, c.Auth}
+	requiredDependencies := []any{c.Query, c.Commands, c.ModelAccess, c.CustomCatalogs, c.Protocols, c.APIKeys, c.Auth, c.Resources, c.InputPlans, c.Executions, c.Targets}
 	for _, dependency := range requiredDependencies {
 		if isNilHTTPDependency(dependency) {
 			return errors.New("complete authenticated control plane is required")
@@ -525,6 +547,31 @@ type callModelView struct {
 	// Model contains the exact non-fused model, offering, and capability shape.
 	// Model 包含精确未融合的模型、产品和能力形态。
 	Model management.ModelView `json:"model"`
+}
+
+// callServiceListResponse returns provider-scoped special services usable by the call plane.
+// callServiceListResponse 返回调用面可使用的供应商作用域特殊服务。
+type callServiceListResponse struct {
+	// Services contains non-fused exact service offerings.
+	// Services 包含未融合精确服务产品。
+	Services []callServiceView `json:"services"`
+}
+
+// callServiceView identifies one provider instance and one special service.
+// callServiceView 标识一个供应商实例与一个特殊服务。
+type callServiceView struct {
+	// ProviderInstanceID fixes every later service execution.
+	// ProviderInstanceID 固定每次后续服务执行。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// ProviderHandle is the stable workspace-visible instance alias.
+	// ProviderHandle 是稳定工作区可见实例别名。
+	ProviderHandle string `json:"provider_handle"`
+	// ProviderDefinitionID identifies the underlying provider definition.
+	// ProviderDefinitionID 标识底层供应商定义。
+	ProviderDefinitionID string `json:"provider_definition_id"`
+	// Service contains the exact non-fused service capability view.
+	// Service 包含精确未融合服务能力视图。
+	Service management.ServiceView `json:"service"`
 }
 
 // customCatalogDocument is the complete management-facing configuration for one custom-provider model catalog.
@@ -698,6 +745,17 @@ type createInstanceRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
+// endpointParameterValueRequest decodes one declared non-secret system endpoint parameter.
+// endpointParameterValueRequest 解码一个已声明的非秘密系统端点参数。
+type endpointParameterValueRequest struct {
+	// ID identifies the exact parameter declared by the selected endpoint preset.
+	// ID 标识所选端点预设声明的精确参数。
+	ID string `json:"id"`
+	// Value contains the operator-supplied non-secret parameter value.
+	// Value 包含操作员提供的非秘密参数值。
+	Value string `json:"value"`
+}
+
 // onboardSystemProviderRequest decodes one complete API-key onboarding request with a single operator-visible name.
 // onboardSystemProviderRequest 解码一次仅包含一个操作员可见名称的完整 API Key 录入请求。
 type onboardSystemProviderRequest struct {
@@ -713,6 +771,9 @@ type onboardSystemProviderRequest struct {
 	// Secret contains transient credential material and is never returned.
 	// Secret 包含临时凭据材料且绝不返回。
 	Secret string `json:"secret"`
+	// EndpointParameters contains only values declared by the selected system endpoint preset.
+	// EndpointParameters 仅包含所选系统端点预设声明的值。
+	EndpointParameters []endpointParameterValueRequest `json:"endpoint_parameters,omitempty"`
 }
 
 // onboardVertexServiceAccountRequest decodes one server-validated Vertex service-account upload.
@@ -963,12 +1024,28 @@ func (s *Server) requireManagement(next http.Handler) http.Handler {
 // requireAPIKey 仅针对启用的调用面 API 密钥认证一个请求。
 func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if s.control == nil || !s.control.Auth.AuthenticateAPIKey(bearerToken(request)) {
+		if s.control == nil {
 			writeUnauthorized(writer)
 			return
 		}
-		next.ServeHTTP(writer, request)
+		apiKeyID, authenticated := s.control.Auth.AuthenticateAPIKeyID(bearerToken(request))
+		if !authenticated || strings.TrimSpace(apiKeyID) == "" {
+			writeUnauthorized(writer)
+			return
+		}
+		next.ServeHTTP(writer, request.WithContext(context.WithValue(request.Context(), callAPIKeyIDContextKey{}, apiKeyID)))
 	})
+}
+
+// callAPIKeyIDContextKey isolates the non-secret authenticated owner identifier from caller context values.
+// callAPIKeyIDContextKey 将非秘密已认证所有者标识与调用方 Context 值隔离。
+type callAPIKeyIDContextKey struct{}
+
+// authenticatedAPIKeyID returns the identifier installed only by call-plane authentication middleware.
+// authenticatedAPIKeyID 返回仅由调用面认证中间件写入的标识。
+func authenticatedAPIKeyID(ctx context.Context) (string, bool) {
+	identifier, ok := ctx.Value(callAPIKeyIDContextKey{}).(string)
+	return identifier, ok && strings.TrimSpace(identifier) != ""
 }
 
 // bearerToken extracts exactly one standard Bearer value without accepting duplicate or alternate credential headers.
@@ -1238,9 +1315,13 @@ func (s *Server) handleOnboardSystemProvider(writer http.ResponseWriter, request
 		writeControlError(writer, errDecode)
 		return
 	}
+	endpointParameters := make([]providerconfig.EndpointParameterValue, 0, len(body.EndpointParameters))
+	for _, parameter := range body.EndpointParameters {
+		endpointParameters = append(endpointParameters, providerconfig.EndpointParameterValue{ID: parameter.ID, Value: parameter.Value})
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardSystemProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: body.AuthMethodID,
-		CredentialLabel: body.Name, Secret: []byte(body.Secret),
+		CredentialLabel: body.Name, Secret: []byte(body.Secret), EndpointParameters: endpointParameters,
 	})
 	if errOnboard != nil {
 		writeControlError(writer, errOnboard)
@@ -1910,6 +1991,14 @@ func capabilityFromView(view management.CapabilityView) catalog.ModelCapabilitie
 		Reasoning:              view.Reasoning,
 		InputModalities:        append([]string{}, view.InputModalities...),
 		OutputModalities:       append([]string{}, view.OutputModalities...),
+		MediaInputs:            append([]catalog.MediaInputCapability(nil), view.MediaInputs...),
+		Delivery:               view.Delivery,
+		Embedding:              view.Embedding,
+		Rerank:                 view.Rerank,
+		MediaOutputs:           append([]catalog.MediaOutputCapability(nil), view.MediaOutputs...),
+		Parameters:             append([]catalog.ParameterDescriptor(nil), view.Parameters...),
+		ParameterRules:         append([]catalog.ParameterRule(nil), view.ParameterRules...),
+		UsageMetrics:           append([]catalog.UsageMetricCapability(nil), view.UsageMetrics...),
 	}
 }
 
@@ -1930,6 +2019,14 @@ func capabilityView(capabilities catalog.ModelCapabilities) management.Capabilit
 		Reasoning:                  capabilities.Reasoning,
 		InputModalities:            append([]string{}, capabilities.InputModalities...),
 		OutputModalities:           append([]string{}, capabilities.OutputModalities...),
+		MediaInputs:                append([]catalog.MediaInputCapability(nil), capabilities.MediaInputs...),
+		Delivery:                   capabilities.Delivery,
+		Embedding:                  capabilities.Embedding,
+		Rerank:                     capabilities.Rerank,
+		MediaOutputs:               append([]catalog.MediaOutputCapability(nil), capabilities.MediaOutputs...),
+		Parameters:                 append([]catalog.ParameterDescriptor(nil), capabilities.Parameters...),
+		ParameterRules:             append([]catalog.ParameterRule(nil), capabilities.ParameterRules...),
+		UsageMetrics:               append([]catalog.UsageMetricCapability(nil), capabilities.UsageMetrics...),
 	}
 }
 
@@ -2190,6 +2287,9 @@ func (s *Server) handleCallModels(writer http.ResponseWriter, request *http.Requ
 		return
 	}
 	models := make([]callModelView, 0)
+	// discoveryTime freezes one availability instant across the complete response.
+	// discoveryTime 为完整响应冻结同一个可用性判断时刻。
+	discoveryTime := time.Now().UTC()
 	for _, instance := range instances {
 		if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
 			continue
@@ -2203,16 +2303,124 @@ func (s *Server) handleCallModels(writer http.ResponseWriter, request *http.Requ
 			return
 		}
 		for _, model := range providerCatalog.Models {
-			if !model.Enabled {
+			if !model.Enabled || !model.ProviderAuthorized {
+				continue
+			}
+			filteredModel, executable, errFilter := s.executableModelView(request.Context(), instance.ID, model, discoveryTime)
+			if errFilter != nil {
+				writeControlError(writer, errFilter)
+				return
+			}
+			if !executable {
 				continue
 			}
 			models = append(models, callModelView{
 				ProviderInstanceID:   instance.ID,
 				ProviderHandle:       instance.Handle,
 				ProviderDefinitionID: instance.DefinitionID,
-				Model:                model,
+				Model:                filteredModel,
 			})
 		}
 	}
 	writeJSON(writer, http.StatusOK, callModelListResponse{Models: models})
+}
+
+// handleCallServices returns executable provider-scoped special services without entering the model list.
+// handleCallServices 返回可执行供应商作用域特殊服务且不进入模型列表。
+func (s *Server) handleCallServices(writer http.ResponseWriter, request *http.Request) {
+	instances, errInstances := s.control.Query.ListInstances(request.Context())
+	if errInstances != nil {
+		writeControlError(writer, errInstances)
+		return
+	}
+	services := make([]callServiceView, 0)
+	// discoveryTime freezes one availability instant across the complete response.
+	// discoveryTime 为完整响应冻结同一个可用性判断时刻。
+	discoveryTime := time.Now().UTC()
+	for _, instance := range instances {
+		if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
+			continue
+		}
+		providerCatalog, errCatalog := s.control.Query.GetCatalog(request.Context(), instance.ID)
+		if errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
+			continue
+		}
+		if errCatalog != nil {
+			writeControlError(writer, errCatalog)
+			return
+		}
+		for _, service := range providerCatalog.Services {
+			if !service.Enabled || !service.ProviderAuthorized {
+				continue
+			}
+			filteredService, executable, errFilter := s.executableServiceView(request.Context(), instance.ID, service, discoveryTime)
+			if errFilter != nil {
+				writeControlError(writer, errFilter)
+				return
+			}
+			if !executable {
+				continue
+			}
+			services = append(services, callServiceView{ProviderInstanceID: instance.ID, ProviderHandle: instance.Handle, ProviderDefinitionID: instance.DefinitionID, Service: filteredService})
+		}
+	}
+	writeJSON(writer, http.StatusOK, callServiceListResponse{Services: services})
+}
+
+// executableModelView retains only offerings and profiles whose exact target currently resolves.
+// executableModelView 仅保留当前能够解析精确 Target 的产品与规格。
+func (s *Server) executableModelView(ctx context.Context, providerInstanceID string, model management.ModelView, discoveryTime time.Time) (management.ModelView, bool, error) {
+	filteredOfferings := make([]management.OfferingView, 0, len(model.Offerings))
+	for _, offering := range model.Offerings {
+		filteredProfiles := make([]management.ExecutionProfileView, 0, len(offering.Profiles))
+		for _, profile := range offering.Profiles {
+			if _, _, errResolve := s.control.Targets.Resolve(ctx, resolve.Request{ProviderInstanceID: providerInstanceID, ProviderModelID: model.ID, Operation: profile.Operation, ExecutionProfileID: profile.ID, Now: discoveryTime}); errResolve == nil {
+				filteredProfiles = append(filteredProfiles, profile)
+			} else if !targetIneligible(errResolve) {
+				return management.ModelView{}, false, errResolve
+			}
+		}
+		if len(filteredProfiles) == 0 {
+			continue
+		}
+		offering.Profiles = filteredProfiles
+		filteredOfferings = append(filteredOfferings, offering)
+	}
+	model.Offerings = filteredOfferings
+	return model, len(filteredOfferings) > 0, nil
+}
+
+// executableServiceView retains only offerings and profiles whose exact service target currently resolves.
+// executableServiceView 仅保留当前能够解析精确服务 Target 的产品与规格。
+func (s *Server) executableServiceView(ctx context.Context, providerInstanceID string, service management.ServiceView, discoveryTime time.Time) (management.ServiceView, bool, error) {
+	filteredOfferings := make([]management.ServiceOfferingView, 0, len(service.Offerings))
+	for _, offering := range service.Offerings {
+		filteredProfiles := make([]management.ServiceExecutionProfileView, 0, len(offering.Profiles))
+		for _, profile := range offering.Profiles {
+			if _, _, errResolve := s.control.Targets.Resolve(ctx, resolve.Request{ProviderInstanceID: providerInstanceID, ProviderServiceID: service.ID, ServiceOfferingID: offering.ID, Operation: profile.Operation, ExecutionProfileID: profile.ID, Now: discoveryTime}); errResolve == nil {
+				filteredProfiles = append(filteredProfiles, profile)
+			} else if !targetIneligible(errResolve) {
+				return management.ServiceView{}, false, errResolve
+			}
+		}
+		if len(filteredProfiles) == 0 {
+			continue
+		}
+		offering.Profiles = filteredProfiles
+		filteredOfferings = append(filteredOfferings, offering)
+	}
+	service.Offerings = filteredOfferings
+	return service, len(filteredOfferings) > 0, nil
+}
+
+// targetIneligible reports only resolver classifications that safely mean one discovery profile is currently unavailable.
+// targetIneligible 仅报告可安全表示某个发现规格当前不可用的解析器分类。
+func targetIneligible(errValue error) bool {
+	return errors.Is(errValue, resolve.ErrInstanceNotExecutable) ||
+		errors.Is(errValue, resolve.ErrModelNotFound) ||
+		errors.Is(errValue, resolve.ErrModelDisabled) ||
+		errors.Is(errValue, resolve.ErrServiceNotFound) ||
+		errors.Is(errValue, resolve.ErrServiceDisabled) ||
+		errors.Is(errValue, resolve.ErrProfileNotFound) ||
+		errors.Is(errValue, resolve.ErrNoEligibleTarget)
 }

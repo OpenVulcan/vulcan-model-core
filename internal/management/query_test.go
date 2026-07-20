@@ -10,6 +10,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // TestQueryServiceRedactsCredentialSecretMetadata verifies every management query view excludes secret references and identity correlation fields.
@@ -119,7 +120,7 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	if errGroups != nil {
 		t.Fatalf("ListProviderGroups() error = %v", errGroups)
 	}
-	if len(groups) != 6 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.AlibabaGroupID || len(groups[5].ProviderDefinitions) != 5 {
+	if len(groups) != 9 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.AlibabaGroupID || len(groups[5].ProviderDefinitions) != 8 || groups[6].ID != bootstrap.OpenRouterGroupID || groups[7].ID != bootstrap.MiniMaxGroupID || groups[8].ID != bootstrap.TavilyGroupID {
 		t.Fatalf("groups = %#v", groups)
 	}
 	variants := groups[0].ProviderDefinitions
@@ -143,9 +144,14 @@ func TestCapabilityViewPreservesTokenRecommendations(t *testing.T) {
 			OutputTokens:    catalog.OptionalTokenLimit{Known: true, Value: 4_096},
 			ReasoningTokens: catalog.OptionalTokenLimit{Known: true, Value: 1_024},
 		},
+		Delivery: catalog.DeliveryCapabilities{Synchronous: true},
+		Embedding: &catalog.EmbeddingCapabilities{
+			InputTasks: []vcp.EmbeddingInputTask{vcp.EmbeddingTaskQuery}, OutputKinds: []vcp.EmbeddingVectorKind{vcp.EmbeddingVectorDense}, Encodings: []vcp.EmbeddingEncoding{vcp.EmbeddingEncodingFloat}, Dimensions: []int{1024},
+		},
+		UsageMetrics: []catalog.UsageMetricCapability{{Unit: catalog.UsageUnitEmbeddingInputs, Accuracy: catalog.UsageExact}},
 	}
 	view := capabilityView(capabilities)
-	if !view.MaxOutputTokens.Known || view.MaxOutputTokens.Value != 16_384 || !view.MaxReasoningTokens.Known || view.MaxReasoningTokens.Value != 8_192 || !view.RecommendedOutputTokens.Known || view.RecommendedOutputTokens.Value != 4_096 || !view.RecommendedReasoningTokens.Known || view.RecommendedReasoningTokens.Value != 1_024 {
+	if !view.MaxOutputTokens.Known || view.MaxOutputTokens.Value != 16_384 || !view.MaxReasoningTokens.Known || view.MaxReasoningTokens.Value != 8_192 || !view.RecommendedOutputTokens.Known || view.RecommendedOutputTokens.Value != 4_096 || !view.RecommendedReasoningTokens.Known || view.RecommendedReasoningTokens.Value != 1_024 || view.Embedding == nil || len(view.Embedding.Dimensions) != 1 || view.Embedding.Dimensions[0] != 1024 || len(view.UsageMetrics) != 1 {
 		t.Fatalf("capability view = %#v", view)
 	}
 }
@@ -188,7 +194,7 @@ func TestCatalogViewPreservesAllowanceWindowSemantics(t *testing.T) {
 	}
 	// view is the exact DTO returned by management catalog endpoints.
 	// view 是管理目录端点返回的精确 DTO。
-	view := catalogView(snapshot, nil)
+	view := catalogView(snapshot, nil, nil)
 	if len(view.Allowances) != 2 || view.Allowances[0].Window == nil || view.Allowances[1].Window == nil {
 		t.Fatalf("allowance projection = %#v", view.Allowances)
 	}
@@ -224,7 +230,7 @@ func TestCatalogViewReportsProviderAuthorizedModels(t *testing.T) {
 	}
 	// view disables the explicitly allowed model locally to prove the two states remain independent.
 	// view 在本地停用显式允许模型，以证明两种状态保持独立。
-	view := catalogView(snapshot, []string{"model_explicit_allowed"})
+	view := catalogView(snapshot, []string{"model_explicit_allowed"}, nil)
 	if len(view.Models) != 3 {
 		t.Fatalf("model view count = %d, want 3", len(view.Models))
 	}
@@ -254,7 +260,7 @@ func TestCatalogViewSortsPlansByEveryIdentityField(t *testing.T) {
 	}}
 	// plans is the redacted and aggregated management projection under test.
 	// plans 是待测的脱敏聚合管理投影。
-	plans := catalogView(snapshot, nil).Plans
+	plans := catalogView(snapshot, nil, nil).Plans
 	if len(plans) != 3 {
 		t.Fatalf("plan view count = %d, want 3", len(plans))
 	}

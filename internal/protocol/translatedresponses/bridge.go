@@ -12,6 +12,7 @@ import (
 
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	_ "github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/register"
 	sdktranslator "github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/sdk/translator"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
@@ -68,13 +69,25 @@ type ProjectedRequest struct {
 // ProjectRequest projects VCP to typed Responses and then invokes the copied upstream request transformer unchanged.
 // ProjectRequest 将 VCP 投影为类型化 Responses，随后原样调用复制的上游请求转换器。
 func ProjectRequest(profile Profile, request vcp.VulcanRequest, target resolve.Target, capabilities openairesponses.ProfileCapabilities, lineageID string, previousResponseID string, translationStream bool, now time.Time) (ProjectedRequest, error) {
+	return projectRequest(profile, request, target, capabilities, lineageID, previousResponseID, translationStream, now, nil)
+}
+
+// ProjectRequestWithInputs projects exact materialized media before invoking the copied translator unchanged.
+// ProjectRequestWithInputs 在原样调用复制转换器前投影精确物化媒体。
+func ProjectRequestWithInputs(profile Profile, request vcp.VulcanRequest, target resolve.Target, capabilities openairesponses.ProfileCapabilities, lineageID string, previousResponseID string, translationStream bool, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
+	return projectRequest(profile, request, target, capabilities, lineageID, previousResponseID, translationStream, now, inputs)
+}
+
+// projectRequest shares profile validation and copied translation for text-only and media-aware calls.
+// projectRequest 为纯文本与媒体调用共享 Profile 校验和复制转换。
+func projectRequest(profile Profile, request vcp.VulcanRequest, target resolve.Target, capabilities openairesponses.ProfileCapabilities, lineageID string, previousResponseID string, translationStream bool, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
 	if errProfile := profile.Validate(); errProfile != nil {
 		return ProjectedRequest{}, errProfile
 	}
 	if !sdktranslator.HasRequestTransformer(sdktranslator.FormatOpenAIResponse, profile.Format) {
 		return ProjectedRequest{}, fmt.Errorf("%w: request transformer %q -> %q is not registered", ErrInvalidTranslation, sdktranslator.FormatOpenAIResponse, profile.Format)
 	}
-	base, errProject := openairesponses.ProjectRequest(request, target, capabilities, lineageID, previousResponseID, now)
+	base, errProject := openairesponses.ProjectRequestWithInputs(request, target, capabilities, lineageID, previousResponseID, now, inputs)
 	if errProject != nil {
 		return ProjectedRequest{}, errProject
 	}

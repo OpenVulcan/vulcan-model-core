@@ -42,6 +42,15 @@ func RegisterSystemProviders(registry *providerconfig.SystemRegistry) error {
 	if errAlibaba := registerAlibabaProviderCatalog(registry); errAlibaba != nil {
 		return errAlibaba
 	}
+	if errOpenRouter := registerOpenRouterProviderCatalog(registry); errOpenRouter != nil {
+		return errOpenRouter
+	}
+	if errMiniMax := registerMiniMaxProviderCatalog(registry); errMiniMax != nil {
+		return errMiniMax
+	}
+	if errTavily := registerTavilyProviderCatalog(registry); errTavily != nil {
+		return errTavily
+	}
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{
 		ID:             KimiGroupID,
 		DisplayName:    "Kimi",
@@ -53,7 +62,11 @@ func RegisterSystemProviders(registry *providerconfig.SystemRegistry) error {
 		return fmt.Errorf("register Kimi provider group: %w", errGroup)
 	}
 	for _, definition := range kimiProviderDefinitions() {
-		if errRegister := registry.Register(definition); errRegister != nil {
+		definitionWithAction, errAction := withConversationAction(definition)
+		if errAction != nil {
+			return errAction
+		}
+		if errRegister := registry.Register(definitionWithAction); errRegister != nil {
 			return fmt.Errorf("register Kimi provider definition %s: %w", definition.ID, errRegister)
 		}
 	}
@@ -71,7 +84,7 @@ func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlat
 		if errDriver != nil {
 			return fmt.Errorf("create Kimi Chat driver %s: %w", definitionID, errDriver)
 		}
-		if errRegister := registry.Register(driver); errRegister != nil {
+		if errRegister := registerConversationDriver(registry, driver); errRegister != nil {
 			return fmt.Errorf("register Kimi Chat driver %s: %w", definitionID, errRegister)
 		}
 	}
@@ -85,7 +98,7 @@ func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlat
 	if errCodingChat != nil {
 		return fmt.Errorf("create Kimi Coding Chat driver: %w", errCodingChat)
 	}
-	if errRegister := registry.Register(codingChat); errRegister != nil {
+	if errRegister := registerConversationDriver(registry, codingChat); errRegister != nil {
 		return fmt.Errorf("register Kimi Coding Chat driver: %w", errRegister)
 	}
 	return nil

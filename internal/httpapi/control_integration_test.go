@@ -27,6 +27,7 @@ import (
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
@@ -136,6 +137,10 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 		t.Fatalf("create configuration store: %v", errConfigurations)
 	}
 	catalogs := catalog.NewMemoryStore()
+	targets, errTargets := resolve.New(configurations, catalogs)
+	if errTargets != nil {
+		t.Fatalf("create target resolver: %v", errTargets)
+	}
 	queries, errQueries := management.NewQueryService(configurations, catalogs)
 	if errQueries != nil {
 		t.Fatalf("create management query service: %v", errQueries)
@@ -174,6 +179,10 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 		Protocols:             protocols,
 		APIKeys:               configuration,
 		Auth:                  configuration,
+		Resources:             staticControlAccess{},
+		InputPlans:            staticControlAccess{},
+		Executions:            staticExecutionAccess{},
+		Targets:               targets,
 		KimiDeviceFlows:       kimiFlows,
 		XAIDeviceFlows:        xaiFlows,
 		CodexDeviceFlows:      codexDeviceFlows,
@@ -259,6 +268,32 @@ func TestAlibabaSystemOnboardingCommitsFixedEndpointAndCatalog(t *testing.T) {
 	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
 	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1") || strings.Contains(endpoints.Body.String(), "invalid-test-key") {
 		t.Fatalf("endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
+	}
+}
+
+// TestAlibabaWorkspaceOnboardingDerivesExactSingaporeEndpoint verifies declared workspace input is validated, persisted, and exposed without credential material.
+// TestAlibabaWorkspaceOnboardingDerivesExactSingaporeEndpoint 验证声明的工作空间输入会被校验、持久化并在不包含凭据材料的情况下公开。
+func TestAlibabaWorkspaceOnboardingDerivesExactSingaporeEndpoint(t *testing.T) {
+	server := newControlPlaneIntegrationServer(t)
+	unsafe := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_alibaba_model_studio_workspace_global","name":"Alibaba Workspace","auth_method_id":"api_key","secret":"private-workspace-key","endpoint_parameters":[{"id":"workspace_id","value":"workspace.attacker"}]}`)
+	if unsafe.Code != http.StatusBadRequest || strings.Contains(unsafe.Body.String(), "private-workspace-key") {
+		t.Fatalf("unsafe workspace status=%d body=%s", unsafe.Code, unsafe.Body.String())
+	}
+	onboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_alibaba_model_studio_workspace_global","name":"Alibaba Workspace","auth_method_id":"api_key","secret":"private-workspace-key","endpoint_parameters":[{"id":"workspace_id","value":"llm-example123"}]}`)
+	if onboarding.Code != http.StatusCreated || strings.Contains(onboarding.Body.String(), "private-workspace-key") {
+		t.Fatalf("workspace onboarding status=%d body=%s", onboarding.Code, onboarding.Body.String())
+	}
+	var created onboardSystemProviderResponse
+	if errDecode := json.Unmarshal(onboarding.Body.Bytes(), &created); errDecode != nil {
+		t.Fatalf("decode workspace onboarding response: %v", errDecode)
+	}
+	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
+	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://llm-example123.ap-southeast-1.maas.aliyuncs.com") || !strings.Contains(endpoints.Body.String(), `"id":"workspace_id","value":"llm-example123"`) || strings.Contains(endpoints.Body.String(), "private-workspace-key") {
+		t.Fatalf("workspace endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
+	}
+	groups := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-groups", "admin-control-key", "")
+	if groups.Code != http.StatusOK || !strings.Contains(groups.Body.String(), `"id":"workspace_id","kind":"hostname_label","required":true`) || strings.Contains(groups.Body.String(), "{workspace_id}") {
+		t.Fatalf("workspace definition status=%d body=%s", groups.Code, groups.Body.String())
 	}
 }
 

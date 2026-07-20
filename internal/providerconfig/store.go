@@ -472,7 +472,7 @@ func (s *MemoryStore) SaveEndpoint(ctx context.Context, endpoint Endpoint) error
 			return errMutation
 		}
 	}
-	s.endpoints[endpoint.ID] = endpoint
+	s.endpoints[endpoint.ID] = cloneEndpoint(endpoint)
 	return nil
 }
 
@@ -487,7 +487,7 @@ func (s *MemoryStore) ListEndpoints(ctx context.Context, instanceID string) ([]E
 	endpoints := make([]Endpoint, 0)
 	for _, endpoint := range s.endpoints {
 		if endpoint.ProviderInstanceID == instanceID {
-			endpoints = append(endpoints, endpoint)
+			endpoints = append(endpoints, cloneEndpoint(endpoint))
 		}
 	}
 	sort.Slice(endpoints, func(left int, right int) bool {
@@ -642,13 +642,22 @@ func cloneCredential(credential Credential) Credential {
 // cloneProviderInstance 返回一个防止外部修改的供应商实例值。
 func cloneProviderInstance(instance ProviderInstance) ProviderInstance {
 	instance.DisabledModelIDs = append([]string(nil), instance.DisabledModelIDs...)
+	instance.DisabledServiceIDs = append([]string(nil), instance.DisabledServiceIDs...)
 	return instance
+}
+
+// cloneEndpoint returns a mutation-safe endpoint value.
+// cloneEndpoint 返回一个防止外部修改的端点值。
+func cloneEndpoint(endpoint Endpoint) Endpoint {
+	endpoint.Parameters = append([]EndpointParameterValue(nil), endpoint.Parameters...)
+	return endpoint
 }
 
 // cloneAccessBinding returns a mutation-safe access binding value.
 // cloneAccessBinding 返回一个防止外部修改的访问绑定值。
 func cloneAccessBinding(binding AccessBinding) AccessBinding {
 	binding.AllowedModelIDs = append([]string(nil), binding.AllowedModelIDs...)
+	binding.AllowedServiceIDs = append([]string(nil), binding.AllowedServiceIDs...)
 	return binding
 }
 

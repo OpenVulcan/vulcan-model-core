@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -13,7 +14,9 @@ import (
 
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	provideralibaba "github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
@@ -36,12 +39,77 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 		t.Fatalf("RegisterSystemProviders() error = %v", errRegister)
 	}
 	groups := systems.ListGroups()
-	if len(groups) != 6 || groups[0].ID != KimiGroupID || groups[0].DisplayName != "Kimi" || groups[5].ID != AlibabaGroupID {
+	if len(groups) != 9 || groups[0].ID != KimiGroupID || groups[0].DisplayName != "Kimi" || groups[5].ID != AlibabaGroupID || groups[6].ID != OpenRouterGroupID || groups[7].ID != MiniMaxGroupID || groups[8].ID != TavilyGroupID {
 		t.Fatalf("groups = %#v", groups)
 	}
 	definitions := systems.List()
-	if len(definitions) != 19 {
+	if len(definitions) != 25 {
 		t.Fatalf("definition count = %d", len(definitions))
+	}
+	for _, definition := range definitions {
+		if definition.ID == TavilySearchDefinitionID {
+			if len(definition.ActionBindings) != 1 || definition.ActionBindings[0].Operation != vcp.OperationSearchWeb || definition.ActionBindings[0].Search == nil || definition.ActionBindings[0].Search.BackendKind != vcp.SearchBackendDirectAPI {
+				t.Fatalf("definition %q Tavily actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == AlibabaModelStudioWorkspaceGlobalDefinitionID {
+			if len(definition.ActionBindings) != 9 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].ID != provideralibaba.SpeechSynthesizeActionBindingID || definition.ActionBindings[2].ID != provideralibaba.SpeechTranscribeActionBindingID || definition.ActionBindings[3].ID != provideralibaba.SpeechTranscribeAsyncActionBindingID || definition.ActionBindings[4].Operation != vcp.OperationImageGenerate || definition.ActionBindings[5].Operation != vcp.OperationImageEdit || definition.ActionBindings[6].Operation != vcp.OperationImageGenerate || definition.ActionBindings[7].Operation != vcp.OperationImageEdit || definition.ActionBindings[8].Operation != vcp.OperationVideoGenerate {
+				t.Fatalf("definition %q Alibaba workspace Model Studio actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == AlibabaModelStudioCNDefinitionID || definition.ID == AlibabaModelStudioGlobalDefinitionID {
+			if len(definition.ActionBindings) != 6 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].ID != provideralibaba.SpeechSynthesizeActionBindingID || definition.ActionBindings[2].ID != provideralibaba.SpeechTranscribeActionBindingID || definition.ActionBindings[3].ID != provideralibaba.SpeechTranscribeAsyncActionBindingID || definition.ActionBindings[4].Operation != vcp.OperationImageGenerate || definition.ActionBindings[5].Operation != vcp.OperationImageEdit {
+				t.Fatalf("definition %q Alibaba Model Studio actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == OpenRouterAPIDefinitionID {
+			if len(definition.ActionBindings) != 6 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].Operation != vcp.OperationRerankDocuments || definition.ActionBindings[2].Operation != vcp.OperationImageGenerate || definition.ActionBindings[3].Operation != vcp.OperationVideoGenerate || definition.ActionBindings[4].Operation != vcp.OperationSpeechSynthesize || definition.ActionBindings[5].Operation != vcp.OperationSpeechTranscribe {
+				t.Fatalf("definition %q native actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == MiniMaxAPIDefinitionID {
+			if len(definition.ActionBindings) != 7 || definition.ActionBindings[0].Operation != vcp.OperationImageGenerate || definition.ActionBindings[1].Operation != vcp.OperationVideoGenerate || definition.ActionBindings[2].ID != providerminimax.SpeechSynthesizeActionBindingID || definition.ActionBindings[3].ID != providerminimax.SpeechSynthesizeAsyncActionBindingID || definition.ActionBindings[4].ID != providerminimax.MusicGenerateActionBindingID || definition.ActionBindings[5].ID != providerminimax.MusicCoverPrepareActionBindingID || definition.ActionBindings[6].ID != providerminimax.MusicCoverActionBindingID {
+				t.Fatalf("definition %q MiniMax actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == OpenAIAPIDefinitionID {
+			if len(definition.ActionBindings) != 7 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].Operation != vcp.OperationSearchWeb || definition.ActionBindings[1].Search == nil || definition.ActionBindings[1].Search.BackendKind != vcp.SearchBackendGroundedModel || definition.ActionBindings[2].Operation != vcp.OperationImageGenerate || definition.ActionBindings[3].Operation != vcp.OperationImageEdit || definition.ActionBindings[4].Operation != vcp.OperationSpeechSynthesize || definition.ActionBindings[5].Operation != vcp.OperationSpeechTranscribe || definition.ActionBindings[6].ID != ConversationActionBindingID || definition.ActionBindings[6].Operation != vcp.OperationConversationRespond {
+				t.Fatalf("definition %q OpenAI actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == AnthropicAPIDefinitionID {
+			if len(definition.ActionBindings) != 2 || definition.ActionBindings[0].Operation != vcp.OperationSearchWeb || definition.ActionBindings[0].Search == nil || definition.ActionBindings[1].Operation != vcp.OperationConversationRespond {
+				t.Fatalf("definition %q Anthropic API actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == GoogleAIStudioDefinitionID {
+			if len(definition.ActionBindings) != 5 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].Operation != vcp.OperationMediaAnalyze || definition.ActionBindings[2].Operation != vcp.OperationVideoGenerate || definition.ActionBindings[3].Operation != vcp.OperationVideoExtend || definition.ActionBindings[4].ID != ConversationActionBindingID || definition.ActionBindings[4].Operation != vcp.OperationConversationRespond {
+				t.Fatalf("definition %q Google AI Studio actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == GoogleInteractionsDefinitionID {
+			if len(definition.ActionBindings) != 5 || definition.ActionBindings[0].Operation != vcp.OperationSearchWeb || definition.ActionBindings[0].Search == nil || definition.ActionBindings[1].Operation != vcp.OperationImageGenerate || definition.ActionBindings[2].Operation != vcp.OperationImageEdit || definition.ActionBindings[3].Operation != vcp.OperationSpeechSynthesize || definition.ActionBindings[4].Operation != vcp.OperationConversationRespond {
+				t.Fatalf("definition %q Google Interactions actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == XAIAPIDefinitionID {
+			if len(definition.ActionBindings) != 7 || definition.ActionBindings[0].Operation != vcp.OperationSearchWeb || definition.ActionBindings[0].Search == nil || definition.ActionBindings[1].Operation != vcp.OperationImageGenerate || definition.ActionBindings[2].Operation != vcp.OperationImageEdit || definition.ActionBindings[3].Operation != vcp.OperationVideoGenerate || definition.ActionBindings[4].Operation != vcp.OperationVideoEdit || definition.ActionBindings[5].Operation != vcp.OperationVideoExtend || definition.ActionBindings[6].Operation != vcp.OperationConversationRespond {
+				t.Fatalf("definition %q xAI API actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if len(definition.ActionBindings) != 1 || definition.ActionBindings[0].ID != ConversationActionBindingID || definition.ActionBindings[0].Operation != vcp.OperationConversationRespond || definition.ActionBindings[0].ProtocolProfileID != definition.ProtocolProfileID || definition.ActionBindings[0].EndpointProfileID != definition.EndpointProfileID {
+			t.Fatalf("definition %q conversation action = %#v", definition.ID, definition.ActionBindings)
+		}
 	}
 	cn, existsCN := systems.Lookup(KimiCNDefinitionID)
 	global, existsGlobal := systems.Lookup(KimiGlobalDefinitionID)
@@ -152,6 +220,8 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		GoogleAntigravityDefinitionID:   {groupID: GoogleGroupID, baseURL: "https://cloudcode-pa.googleapis.com", runtimeReady: true},
 		XAIAPIDefinitionID:              {groupID: XAIGroupID, baseURL: "https://api.x.ai/v1", runtimeReady: true},
 		XAIOAuthDefinitionID:            {groupID: XAIGroupID, baseURL: "https://cli-chat-proxy.grok.com/v1", runtimeReady: true},
+		OpenRouterAPIDefinitionID:       {groupID: OpenRouterGroupID, baseURL: "https://openrouter.ai/api", runtimeReady: true},
+		MiniMaxAPIDefinitionID:          {groupID: MiniMaxGroupID, baseURL: "https://api.minimax.io", runtimeReady: true},
 	}
 	for definitionID, want := range expected {
 		definition, exists := systems.Lookup(definitionID)
@@ -187,6 +257,11 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		XAIAPIDefinitionID: {}, XAIOAuthDefinitionID: {},
 		AlibabaCodingPlanCNDefinitionID: {}, AlibabaCodingPlanGlobalDefinitionID: {},
 		AlibabaTokenPlanPersonalCNDefinitionID: {}, AlibabaTokenPlanTeamCNDefinitionID: {}, AlibabaTokenPlanTeamGlobalDefinitionID: {},
+		AlibabaModelStudioCNDefinitionID: {}, AlibabaModelStudioGlobalDefinitionID: {},
+		AlibabaModelStudioWorkspaceGlobalDefinitionID: {},
+		OpenRouterAPIDefinitionID:                     {},
+		MiniMaxAPIDefinitionID:                        {},
+		TavilySearchDefinitionID:                      {},
 	}
 	definitions := systems.List()
 	if len(definitions) != len(expectedDefinitionIDs) {
@@ -240,19 +315,19 @@ func TestRegisterCLIProxyExecutionDriversIncludesCodexKeyAndAccount(t *testing.T
 	}
 }
 
-// TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions verifies the Alibaba registrar neither omits a plan nor registers cross-product candidates.
-// TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions 验证 Alibaba 注册器既不遗漏套餐也不注册跨产品候选项。
-func TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions(t *testing.T) {
+// TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions verifies the Alibaba registrar owns every plan and fixed API product.
+// TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions 验证 Alibaba 注册器拥有每个套餐和固定 API 产品。
+func TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions(t *testing.T) {
 	secrets := secret.NewMemoryStore()
 	client, errClient := transport.NewClient(http.DefaultClient, secrets, transport.RetryPolicy{})
 	if errClient != nil {
 		t.Fatalf("NewClient() error = %v", errClient)
 	}
 	registry := provider.NewExecutionRegistry()
-	if errRegister := RegisterAlibabaExecutionDrivers(registry, client); errRegister != nil {
+	if errRegister := RegisterAlibabaExecutionDrivers(registry, client, bootstrapDocumentFetcher{}); errRegister != nil {
 		t.Fatalf("RegisterAlibabaExecutionDrivers() error = %v", errRegister)
 	}
-	expectedDriverIDs := []string{AlibabaCodingPlanCNDefinitionID, AlibabaCodingPlanGlobalDefinitionID, AlibabaTokenPlanPersonalCNDefinitionID, AlibabaTokenPlanTeamCNDefinitionID, AlibabaTokenPlanTeamGlobalDefinitionID}
+	expectedDriverIDs := []string{AlibabaCodingPlanCNDefinitionID, AlibabaCodingPlanGlobalDefinitionID, AlibabaModelStudioCNDefinitionID, AlibabaModelStudioGlobalDefinitionID, AlibabaModelStudioWorkspaceGlobalDefinitionID, AlibabaTokenPlanPersonalCNDefinitionID, AlibabaTokenPlanTeamCNDefinitionID, AlibabaTokenPlanTeamGlobalDefinitionID}
 	registeredDriverIDs := registry.ProviderIDs()
 	if len(registeredDriverIDs) != len(expectedDriverIDs) {
 		t.Fatalf("registered Driver IDs = %#v", registeredDriverIDs)
@@ -262,6 +337,16 @@ func TestRegisterAlibabaExecutionDriversOwnsExactFiveDefinitions(t *testing.T) {
 			t.Fatalf("registered Driver[%d] = %q, want %q", index, registeredDriverIDs[index], definitionID)
 		}
 	}
+}
+
+// bootstrapDocumentFetcher is a registration-only public document fetcher fixture.
+// bootstrapDocumentFetcher 是仅用于注册测试的公网文档获取夹具。
+type bootstrapDocumentFetcher struct{}
+
+// FetchPublicDocument reports an unexpected execution from registration-only tests.
+// FetchPublicDocument 报告仅注册测试中的意外执行。
+func (bootstrapDocumentFetcher) FetchPublicDocument(context.Context, string, int64) ([]byte, error) {
+	return nil, fmt.Errorf("registration-only document fetcher was executed")
 }
 
 // TestXAIProviderCapabilitiesKeepCompactOnOfficialAPI verifies endpoint-specific compact support is not overclaimed.

@@ -1199,7 +1199,12 @@ function ProviderVariantRow({ definition, onSelect }: ProviderVariantRowProps) {
               data-provider-endpoint={endpoint.id}
             >
               <Globe2Icon className="size-3.5 shrink-0" aria-hidden="true" />
-              <span className="truncate">{endpoint.base_url}</span>
+              <span className="truncate">
+                {endpoint.base_url ||
+                  endpoint.parameters
+                    .map((parameter) => `{${parameter.id}}`)
+                    .join(" · ")}
+              </span>
             </span>
           ))}
         </div>
@@ -1222,6 +1227,9 @@ function localizedDescription(
     case "providers.kimi.globalDescription":
     case "providers.kimi.codingDescription":
     case "providers.alibaba.description":
+    case "providers.alibaba.modelStudioCNDescription":
+    case "providers.alibaba.modelStudioGlobalDescription":
+    case "providers.alibaba.modelStudioWorkspaceGlobalDescription":
     case "providers.alibaba.codingPlanCNDescription":
     case "providers.alibaba.codingPlanGlobalDescription":
     case "providers.alibaba.tokenPlanPersonalCNDescription":
@@ -1517,6 +1525,18 @@ function ProviderOnboardingPanel({
   // name 是唯一由操作员填写的标签，并由服务端同时用于实例与凭据。
   const [name, setName] = useState(definition.display_name);
   const [secret, setSecret] = useState("");
+  // endpointPreset is the exact code-owned destination selected by this definition.
+  // endpointPreset 是此 Definition 选择的精确代码拥有目标。
+  const endpointPreset = definition.endpoint_presets[0];
+  // endpointParameterValues stores only declared non-secret values keyed by their immutable identifiers.
+  // endpointParameterValues 仅按不可变标识存储已声明的非秘密值。
+  const [endpointParameterValues, setEndpointParameterValues] = useState<
+    Record<string, string>
+  >(() =>
+    Object.fromEntries(
+      (endpointPreset?.parameters ?? []).map((parameter) => [parameter.id, ""]),
+    ),
+  );
   // vertexLocation starts from the code-owned default and remains a normalized provider location string.
   // vertexLocation 从代码拥有的默认值开始，并始终表示规范化供应商区域字符串。
   const [vertexLocation, setVertexLocation] = useState(
@@ -1689,11 +1709,22 @@ function ProviderOnboardingPanel({
     setPending(true);
     setMessageKey(null);
     try {
+      // endpointParameters serializes only the exact fields declared by the selected code-owned preset.
+      // endpointParameters 仅序列化所选代码拥有预设声明的精确字段。
+      const endpointParameters = (endpointPreset?.parameters ?? []).map(
+        (parameter) => ({
+          id: parameter.id,
+          value: endpointParameterValues[parameter.id].trim(),
+        }),
+      );
       await onboardSystemProvider(managementAuthToken, {
         provider_definition_id: definition.id,
         name: name.trim(),
         auth_method_id: authMethodID,
         secret,
+        ...(endpointParameters.length > 0
+          ? { endpoint_parameters: endpointParameters }
+          : {}),
       });
       setSecret("");
       onComplete();
@@ -1876,6 +1907,14 @@ function ProviderOnboardingPanel({
     setOAuthFlow(null);
     setOAuthCallbackURL("");
     setSecret("");
+    setEndpointParameterValues(
+      Object.fromEntries(
+        (endpointPreset?.parameters ?? []).map((parameter) => [
+          parameter.id,
+          "",
+        ]),
+      ),
+    );
     setVertexLocation(definition.endpoint_presets[0]?.region ?? "us-central1");
     setMessageKey(null);
   }
@@ -1995,6 +2034,36 @@ function ProviderOnboardingPanel({
               />
             </div>
           ) : null}
+          {authMethod?.type === "api_key"
+            ? (endpointPreset?.parameters ?? []).map((parameter) => (
+                <div className="space-y-2" key={parameter.id}>
+                  <Label htmlFor={`endpoint-parameter-${parameter.id}`}>
+                    {parameter.id === "workspace_id"
+                      ? t("providers.workspaceID")
+                      : parameter.id}
+                  </Label>
+                  <Input
+                    id={`endpoint-parameter-${parameter.id}`}
+                    value={endpointParameterValues[parameter.id]}
+                    onChange={(event) =>
+                      setEndpointParameterValues((current) => ({
+                        ...current,
+                        [parameter.id]: event.target.value,
+                      }))
+                    }
+                    required={parameter.required}
+                    maxLength={63}
+                    pattern="[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?"
+                    title={t("providers.workspaceIDHelp")}
+                    autoComplete="off"
+                    spellCheck={false}
+                  />
+                  <p className="text-muted-foreground text-xs">
+                    {t("providers.workspaceIDHelp")}
+                  </p>
+                </div>
+              ))
+            : null}
           <div className="md:col-span-2">
             {!isDeviceFlow && !isBrowserOAuth ? (
               <Button type="submit" disabled={pending}>

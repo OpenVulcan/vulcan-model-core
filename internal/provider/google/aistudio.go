@@ -57,6 +57,7 @@ func NewAIStudioDriver(definitionID string, client *transport.Client, capabiliti
 	// copiedCapabilities 防止调用方持有的切片在构造后修改已验证的 Driver 能力事实。
 	copiedCapabilities := capabilities
 	copiedCapabilities.ThinkingLevels = append([]string(nil), capabilities.ThinkingLevels...)
+	copiedCapabilities.MediaInputKinds = append([]vcp.MediaKind(nil), capabilities.MediaInputKinds...)
 	return &AIStudioDriver{definitionID: definitionID, client: client, capabilities: copiedCapabilities}, nil
 }
 
@@ -87,7 +88,7 @@ func (d *AIStudioDriver) Execute(ctx context.Context, execution provider.Executi
 	if _, errValidate := execution.ValidateForProfile(aistudio.ProfileID, providerconfig.AuthMethodAPIKey); errValidate != nil {
 		return provider.ExecutionResult{}, errValidate
 	}
-	projected, errProject := aistudio.ProjectRequest(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, execution.Now)
+	projected, errProject := aistudio.ProjectRequestWithInputs(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, execution.Now, execution.MaterializedInputs)
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}
@@ -178,7 +179,13 @@ func (d *AIStudioDriver) CountTokens(ctx context.Context, execution provider.Exe
 // executeResponse executes one non-streaming AI Studio request and rejects trailing untyped payload data.
 // executeResponse 执行一条非流式 AI Studio 请求并拒绝尾随的未类型化载荷数据。
 func (d *AIStudioDriver) executeResponse(ctx context.Context, outbound transport.Request, projected aistudio.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
-	upstreamResponse, errRequest := d.client.Do(ctx, outbound)
+	return executeAIStudioResponse(ctx, d.client, outbound, projected, now)
+}
+
+// executeAIStudioResponse performs the shared bounded decode for conversation and action-bound generateContent calls.
+// executeAIStudioResponse 为会话与动作绑定的 generateContent 调用执行共享的有界解码。
+func executeAIStudioResponse(ctx context.Context, client *transport.Client, outbound transport.Request, projected aistudio.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
+	upstreamResponse, errRequest := client.Do(ctx, outbound)
 	if errRequest != nil {
 		return provider.ExecutionResult{}, errRequest
 	}

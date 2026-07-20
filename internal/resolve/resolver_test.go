@@ -8,7 +8,99 @@ import (
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestResolveSelectsExactModelGroundedSearchService verifies service target immutability.
+// TestResolveSelectsExactModelGroundedSearchService 校验服务目标不可变性。
+func TestResolveSelectsExactModelGroundedSearchService(t *testing.T) {
+	fixture := newResolverFixture(t)
+	capabilities := resolverSearchCapabilities()
+	fixture.snapshot.Services = []catalog.ProviderService{{
+		ID:                 "service_web_search",
+		ProviderInstanceID: "pvi_kimi",
+		DisplayName:        "Web Search",
+		Operation:          vcp.OperationSearchWeb,
+		Source:             catalog.ModelSourceSystem,
+		EntitlementMode:    catalog.EntitlementAllBoundCredentials,
+		Revision:           1,
+	}}
+	fixture.snapshot.ServiceOfferings = []catalog.ServiceOffering{{
+		ID:                 "service_offer_web_search",
+		ProviderInstanceID: "pvi_kimi",
+		ProviderServiceID:  "service_web_search",
+		ChannelID:          "openai.chat",
+		UpstreamServiceID:  "kimi-k3-search",
+		Capabilities:       capabilities,
+		CapabilityRevision: 1,
+		Revision:           1,
+	}}
+	fixture.snapshot.Profiles = append(fixture.snapshot.Profiles, catalog.ExecutionProfile{
+		ID:                  "profile_web_search",
+		ProviderInstanceID:  "pvi_kimi",
+		ServiceOfferingID:   "service_offer_web_search",
+		Operation:           vcp.OperationSearchWeb,
+		ActionBindingID:     "action_web_search",
+		DisplayName:         "Web Search",
+		Default:             true,
+		ServiceCapabilities: &capabilities,
+		SwitchPolicy:        catalog.ProfileSwitchUnsupported,
+		PoolPolicy:          catalog.PoolStrictProfile,
+		CapabilityRevision:  1,
+		Revision:            1,
+	})
+	fixture.snapshot.Revision++
+	fixture.snapshot.ObservedAt = fixture.snapshot.ObservedAt.Add(time.Second)
+	if errSave := fixture.catalogs.Save(context.Background(), fixture.snapshot); errSave != nil {
+		t.Fatalf("save search service snapshot: %v", errSave)
+	}
+
+	target, diagnostics, errResolve := fixture.resolver.Resolve(context.Background(), Request{
+		ProviderInstanceID: "pvi_kimi",
+		ProviderServiceID:  "service_web_search",
+		ServiceOfferingID:  "service_offer_web_search",
+		ExecutionProfileID: "profile_web_search",
+		Operation:          vcp.OperationSearchWeb,
+		Now:                fixture.now,
+	})
+	if errResolve != nil {
+		t.Fatalf("resolve search service: %v", errResolve)
+	}
+	if target.ProviderServiceID != "service_web_search" || target.ServiceOfferingID != "service_offer_web_search" || target.ActionBindingID != "action_web_search" {
+		t.Fatalf("unexpected search target: %+v", target)
+	}
+	if target.ProviderModelID != "" || target.OfferingID != "" || target.ServiceCapabilities == nil {
+		t.Fatalf("service target leaked model subject fields: %+v", target)
+	}
+	if diagnostics.ReadyCandidates != 2 || target.CredentialID != "cred_kimi_1m" {
+		t.Fatalf("search service selection diagnostics=%+v target=%+v", diagnostics, target)
+	}
+}
+
+// resolverSearchCapabilities returns one model-grounded unified-search contract.
+// resolverSearchCapabilities 返回一个模型型统一搜索契约。
+func resolverSearchCapabilities() catalog.ServiceCapabilities {
+	return catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{
+		BackendKind:            vcp.SearchBackendGroundedModel,
+		InvocationMode:         catalog.SearchInvocationPrompt,
+		BackingModelOfferingID: "offer_kimi_k3",
+		PromptTemplateID:       "search_prompt",
+		PromptTemplateRevision: 1,
+		OutputModes:            []vcp.WebSearchOutputMode{vcp.WebSearchOutputAnswerWithCitations},
+		EvidenceKinds:          []vcp.SearchEvidenceKind{vcp.SearchEvidenceCitation},
+		EvidenceRequirements:   []vcp.SearchEvidenceRequirement{vcp.SearchEvidenceBestEffort, vcp.SearchEvidenceVerified},
+		Filters: catalog.SearchFilterCapabilities{
+			DomainAllow:     catalog.CapabilityUnsupported,
+			DomainBlock:     catalog.CapabilityUnsupported,
+			PublicationTime: catalog.CapabilityUnsupported,
+			Language:        catalog.CapabilityUnsupported,
+			Region:          catalog.CapabilityUnsupported,
+			Location:        catalog.CapabilityUnsupported,
+			SafeSearch:      catalog.CapabilityUnsupported,
+		},
+		MaxResults: catalog.OptionalCountLimit{},
+	}}
+}
 
 // resolverFixture contains one K3-style provider instance with two account tiers.
 // resolverFixture 包含一个具有两个账号等级的 K3 风格供应商实例。
@@ -43,6 +135,7 @@ func resolverCapabilities(contextWindow int64) catalog.ModelCapabilities {
 		Reasoning:              catalog.CapabilityNative,
 		InputModalities:        []string{"text"},
 		OutputModalities:       []string{"text"},
+		Delivery:               catalog.DeliveryCapabilities{Synchronous: true, Streaming: true},
 	}
 }
 
@@ -84,6 +177,10 @@ func newResolverFixture(t *testing.T) resolverFixture {
 			Refreshable:         true,
 			MultipleCredentials: true,
 		}},
+		ActionBindings: []providerconfig.ProviderActionBinding{
+			{ID: "action_conversation", Operation: vcp.OperationConversationRespond, DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ProtocolProfileID: "openai.chat", EndpointProfileID: "kimi-coding", AuthMethodIDs: []string{"oauth"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true, Streaming: true}, Revision: 1},
+			{ID: "action_web_search", Operation: vcp.OperationSearchWeb, DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ProtocolProfileID: "openai.chat", EndpointProfileID: "kimi-coding", AuthMethodIDs: []string{"oauth"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true, Streaming: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendGroundedModel, BackingModelOfferingID: "offer_kimi_k3", PromptTemplateID: "search_prompt", PromptTemplateRevision: 1}, Revision: 1},
+		},
 		Features: providerconfig.ProviderFeatureSet{
 			ModelDiscovery:    providerconfig.SupportSupported,
 			PlanReader:        providerconfig.SupportSupported,
@@ -190,6 +287,8 @@ func newResolverFixture(t *testing.T) resolverFixture {
 				ID:                         "profile_kimi_k3_256k",
 				ProviderInstanceID:         instance.ID,
 				OfferingID:                 "offer_kimi_k3",
+				Operation:                  vcp.OperationConversationRespond,
+				ActionBindingID:            "action_conversation",
 				DisplayName:                "256K",
 				Default:                    true,
 				Capabilities:               resolverCapabilities(262144),
@@ -203,6 +302,8 @@ func newResolverFixture(t *testing.T) resolverFixture {
 				ID:                         "profile_kimi_k3_1m",
 				ProviderInstanceID:         instance.ID,
 				OfferingID:                 "offer_kimi_k3",
+				Operation:                  vcp.OperationConversationRespond,
+				ActionBindingID:            "action_conversation",
 				DisplayName:                "1M",
 				Capabilities:               resolverCapabilities(1048576),
 				RequiredEntitlementClasses: []string{"kimi_1m"},
@@ -275,7 +376,7 @@ func TestResolverRejectsLocallyDisabledModel(t *testing.T) {
 		t.Fatalf("save disabled-model policy: %v", errSave)
 	}
 	_, _, errResolve := fixture.resolver.Resolve(ctx, Request{
-		ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Now: fixture.now,
+		ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Operation: vcp.OperationConversationRespond, Now: fixture.now,
 	})
 	if !errors.Is(errResolve, ErrModelDisabled) {
 		t.Fatalf("disabled model resolution error = %v, want ErrModelDisabled", errResolve)
@@ -290,6 +391,7 @@ func TestResolverPreservesHighTierCredential(t *testing.T) {
 		ProviderInstanceID:    "pvi_kimi",
 		ProviderModelID:       "model_kimi_k3",
 		ExecutionProfileID:    "profile_kimi_k3_256k",
+		Operation:             vcp.OperationConversationRespond,
 		RequiredContextTokens: 200000,
 		Now:                   fixture.now,
 	})
@@ -298,6 +400,9 @@ func TestResolverPreservesHighTierCredential(t *testing.T) {
 	}
 	if target.CredentialID != "cred_kimi_256k" {
 		t.Fatalf("expected smallest sufficient credential, got %s", target.CredentialID)
+	}
+	if target.SubjectKind != ExecutionSubjectModel || target.Operation != vcp.OperationConversationRespond || target.ActionBindingID != "action_conversation" {
+		t.Fatalf("resolved typed model target = %#v", target)
 	}
 	if !target.TokenLimits.MaxOutputTokens.Known || target.TokenLimits.MaxOutputTokens.Value != 16_384 || !target.TokenRecommendations.OutputTokens.Known || target.TokenRecommendations.OutputTokens.Value != 8_192 {
 		t.Fatalf("resolved token facts = limits %#v recommendations %#v", target.TokenLimits, target.TokenRecommendations)
@@ -312,6 +417,7 @@ func TestResolverRequiresHighTierEntitlement(t *testing.T) {
 		ProviderInstanceID:    "pvi_kimi",
 		ProviderModelID:       "model_kimi_k3",
 		ExecutionProfileID:    "profile_kimi_k3_1m",
+		Operation:             vcp.OperationConversationRespond,
 		RequiredContextTokens: 800000,
 		Now:                   fixture.now,
 	})
@@ -353,6 +459,7 @@ func TestResolverBlocksSharedExhaustedBalance(t *testing.T) {
 		ProviderInstanceID:    "pvi_kimi",
 		ProviderModelID:       "model_kimi_k3",
 		ExecutionProfileID:    "profile_kimi_k3_1m",
+		Operation:             vcp.OperationConversationRespond,
 		RequiredContextTokens: 800000,
 		Now:                   fixture.now,
 	})

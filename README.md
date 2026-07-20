@@ -14,8 +14,7 @@ It exposes only Vulcan-owned APIs and translates them to provider-native protoco
 
 ## Current milestone
 
-The current framework intentionally contains no production provider adapter and no incomplete Responses or media schema.
-It establishes:
+The current core implements the first provider-scoped unified capability milestone. It establishes:
 
 - an immutable provider-scoped execution target;
 - a thread-safe provider adapter registry;
@@ -35,6 +34,11 @@ It establishes:
 - a React + Vite local management page that keeps its management key in browser memory only;
 - graceful process shutdown;
 - tests that keep legacy protocol endpoints absent.
+- typed conversation, media analysis, image, video, non-realtime speech, music, Embedding, Rerank, and Web Search operations;
+- Router-owned resources, deterministic input plans, synchronous/streaming/asynchronous execution, event replay, idempotency, polling, cancellation, and restart recovery;
+- code-owned provider action bindings for OpenAI, Anthropic, Google, xAI, Alibaba Model Studio, OpenRouter, MiniMax, and Tavily where current evidence exists;
+- protected-at-rest provider task IDs, prepared-workflow handles, provider asset handles, and credentials;
+- separate model and special-service discovery with exact provider-instance ownership and runtime availability.
 
 The service is expected to report `503` from `/readyz` until a production provider adapter is registered.
 
@@ -51,6 +55,12 @@ The service is expected to report `503` from `/readyz` until a production provid
 | `GET`, `PUT` | `/vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog` | Management-only complete user-declared model catalog for a custom provider instance; system provider catalogs remain read-only |
 | `GET`, `POST`, `PUT`, `DELETE` | `/vulcan/manage/api-keys/...` | Management-only plaintext call-plane API key lifecycle |
 | `GET` | `/vulcan/v1/models` | Call-plane provider-scoped enabled models and capabilities |
+| `GET` | `/vulcan/v1/services` | Call-plane provider-scoped special services, including unified `search.web` offerings |
+| `POST`, `GET`, `DELETE` | `/vulcan/v1/resources...` | Call-plane resource upload/import, safe metadata, content retrieval, and deletion |
+| `POST` | `/vulcan/v1/input-plans` | Resolve and freeze one deterministic media materialization plan |
+| `POST`, `GET` | `/vulcan/v1/executions...` | Create, inspect, cancel, and replay typed execution events |
+| `GET` | `/vulcan/manage/diagnostics/resources` | Management-only metadata-safe resource diagnostics |
+| `GET` | `/vulcan/manage/diagnostics/executions` | Management-only content-free execution diagnostics |
 
 Claude Messages, OpenAI Chat Completions, OpenAI Responses compatibility aliases, Gemini GenerateContent, and Codex client routes are intentionally absent.
 
@@ -74,7 +84,8 @@ make config
 | `output/bin/vulcan-model-core.exe` | 每次 `make run` 重新编译的核心程序 |
 | `output/configs/vulcan-model-core.yaml` | 启动 YAML 配置 |
 | `~/.vulcan/router/database/data.db` | 持久化 SQLite 数据库 |
-| `~/.vulcan/router/secrets/` | DPAPI 保护的上游供应商凭据 |
+| `~/.vulcan/router/secrets/` | DPAPI 保护的上游供应商凭据、任务 ID 与准备句柄 |
+| `~/.vulcan/router/resources/` | Router 管理的二进制资源对象 |
 
 The process defaults to the loopback-only listener `127.0.0.1:13514`. On Windows, upstream provider secrets are persisted using DPAPI; an unsupported operating system returns an explicit startup error rather than falling back to plaintext.
 
@@ -94,7 +105,7 @@ make vite start
 make vite stop
 ```
 
-`make vite start` installs locked frontend dependencies with `npm ci` only when the package-local Vite entry is missing. It starts Vite as a hidden process and records its PID plus start time in ignored `output/vite-state.json`; `make vite stop` stops only that exact recorded process. The browser does not write the management key to local storage, session storage, cookies, or the URL. It retains the key only while the page is open.
+`make vite start` installs locked frontend dependencies with `npm ci` only when the package-local Vite entry is missing. It starts Vite as a hidden process and records its PID plus start time in ignored `output/vite-state.json`; `make vite stop` stops only that exact recorded process. The management key remains in memory by default. If the administrator explicitly enables “Remember credential”, the page shows a plaintext-localStorage warning and stores the key only after successful validation; an authentication rejection clears the saved value while a network failure does not.
 
 ## Development
 
@@ -117,6 +128,8 @@ go run ./cmd/vulcan-model-core --listen-address 127.0.0.1:8080 --config ./output
 ```
 
 The business database stores only opaque secret references. The in-memory `SecretStore` exists only for tests and explicit ephemeral use; the production local process uses the platform-protected SecretStore described above.
+
+The complete VCP operation examples, discovery flow, resource/input-plan lifecycle, execution states, and safe error contract are documented in [Unified capability execution](docs/architecture/0010-unified-capability-execution.md). The frozen provider evidence and regression mapping are recorded in [Provider capability evidence matrix](docs/evidence/20260720-provider-capability-matrix.md).
 
 ## Migration strategy
 

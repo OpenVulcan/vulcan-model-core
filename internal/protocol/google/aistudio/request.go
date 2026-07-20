@@ -13,13 +13,34 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // ProjectRequest compiles one VCP request for an exact resolved Google AI Studio target.
 // ProjectRequest 为一个精确解析的 Google AI Studio Target 编译一条 VCP 请求。
 func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time) (ProjectedRequest, error) {
+	return projectRequest(request, target, capabilities, lineageID, now, nil)
+}
+
+// ProjectRequestWithInputs compiles one VCP request with exact input-plan materializations.
+// ProjectRequestWithInputs 使用精确输入方案物化结果编译一条 VCP 请求。
+func ProjectRequestWithInputs(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
+	materialized := make(map[string]resource.MaterializedInput, len(inputs))
+	for _, input := range inputs {
+		if _, exists := materialized[input.ResourceID]; exists {
+			return ProjectedRequest{}, fmt.Errorf("%w: duplicate materialized resource %q", ErrUnsupportedContext, input.ResourceID)
+		}
+		materialized[input.ResourceID] = input
+	}
+	return projectRequest(request, target, capabilities, lineageID, now, materialized)
+}
+
+// projectRequest compiles text and optional materialized media through one deterministic path.
+// projectRequest 通过一条确定性路径编译文本和可选物化媒体。
+func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, materialized map[string]resource.MaterializedInput) (ProjectedRequest, error) {
 	if errRequest := request.Validate(); errRequest != nil {
 		return ProjectedRequest{}, errRequest
 	}
@@ -69,7 +90,7 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 	lastContentEntryIndex := -1
 	for _, item := range request.Context {
 		position := len(upstream.Contents)
-		content, carrier, mode, equivalence, ruleID, frameID, digest, include, errItem := projectItem(item, request, plan, capabilities, lineageID, position, referenceSet, callNames)
+		content, carrier, mode, equivalence, ruleID, frameID, digest, include, errItem := projectItem(item, request, plan, capabilities, lineageID, position, referenceSet, callNames, materialized)
 		if errItem != nil {
 			return ProjectedRequest{}, errItem
 		}
@@ -207,13 +228,24 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 		{Feature: vcp.FeatureExplicitPromptCache, Native: false},
 		{Feature: vcp.FeatureRemoteCompaction, Native: false},
 		{Feature: vcp.FeatureNativeWebSearch, Native: false},
-		{Feature: vcp.FeatureImageInput, Native: false}, {Feature: vcp.FeatureAudioInput, Native: false},
-		{Feature: vcp.FeatureVideoInput, Native: false}, {Feature: vcp.FeatureFileInput, Native: false},
+		{Feature: vcp.FeatureImageInput, Native: capabilities.supportsMediaInput(vcp.MediaImage)}, {Feature: vcp.FeatureAudioInput, Native: capabilities.supportsMediaInput(vcp.MediaAudio)},
+		{Feature: vcp.FeatureVideoInput, Native: capabilities.supportsMediaInput(vcp.MediaVideo)}, {Feature: vcp.FeatureFileInput, Native: capabilities.supportsMediaInput(vcp.MediaFile)},
 	}
 	if projectionTriggered {
 		availability = append(availability, vcp.CapabilityAvailability{Feature: vcp.FeatureOrderedContextProjection, Native: projectionNative, Projected: request.CapabilityPolicy.AllowAdvisoryInstructionProjection})
 	}
 	return availability
+}
+
+// supportsMediaInput reports whether the wire profile explicitly accepts one media family.
+// supportsMediaInput 报告线路 Profile 是否明确接受一种媒体类别。
+func (c ProfileCapabilities) supportsMediaInput(kind vcp.MediaKind) bool {
+	for _, supported := range c.MediaInputKinds {
+		if supported == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // capabilitySelected reports whether a frozen plan selected one exact capability mode.
@@ -379,7 +411,7 @@ func matchingToolReferences(tools []vcp.ToolDefinition, name string, references 
 
 // projectItem maps one canonical item to one exact AI Studio carrier and ledger decision.
 // projectItem 将一个规范项目映射到一个精确 AI Studio 载体和账本决策。
-func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.CapabilityPlan, capabilities ProfileCapabilities, lineageID string, position int, references *toolReferenceSet, calls map[string]toolCallReference) (Content, string, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.CapabilityPlan, capabilities ProfileCapabilities, lineageID string, position int, references *toolReferenceSet, calls map[string]toolCallReference, materialized map[string]resource.MaterializedInput) (Content, string, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
 	// Client and audit scopes are Router-local, so sending them upstream would violate the VCP visibility boundary.
 	// 客户端和审计作用域仅限 Router 本地，因此将其发送上游会违反 VCP 可见性边界。
 	if item.Visibility != vcp.VisibilityModel {
@@ -389,7 +421,8 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.Capab
 		return Content{}, "", "", "", "", "", "", false, fmt.Errorf("%w: opaque provider state has no AI Studio request carrier", ErrUnsupportedContext)
 	}
 	text, errText := vcp.TextContent(item.Content)
-	if errText != nil && item.Kind != vcp.ContextToolCall {
+	userMediaMessage := item.Kind == vcp.ContextMessage && item.Authority == vcp.AuthorityUser && hasResourceContent(item.Content)
+	if errText != nil && item.Kind != vcp.ContextToolCall && !userMediaMessage {
 		return Content{}, "", "", "", "", "", "", false, fmt.Errorf("%w: item %q: %v", ErrUnsupportedContext, item.ItemID, errText)
 	}
 	switch item.Kind {
@@ -402,7 +435,11 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.Capab
 		return projectFrame(item, request, lineageID, position)
 	case vcp.ContextMessage:
 		if item.Authority == vcp.AuthorityUser {
-			return Content{Role: "user", Parts: []Part{{Text: vcp.EscapeReservedFrameText(text)}}}, "contents:user", vcp.CapabilityNative, vcp.EquivalenceEquivalent, "google_aistudio.user.native.v1", "", "", true, nil
+			parts, errParts := projectUserParts(item.Content, materialized)
+			if errParts != nil {
+				return Content{}, "", "", "", "", "", "", false, errParts
+			}
+			return Content{Role: "user", Parts: parts}, "contents:user", vcp.CapabilityNative, vcp.EquivalenceEquivalent, "google_aistudio.user.media.native.v1", "", "", true, nil
 		}
 		return Content{Role: "model", Parts: []Part{{Text: text}}}, "contents:model", vcp.CapabilityNative, vcp.EquivalenceEquivalent, "google_aistudio.model.native.v1", "", "", true, nil
 	case vcp.ContextToolCall:
@@ -452,6 +489,74 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.Capab
 		return Content{Role: "model", Parts: []Part{{Text: text}}}, "contents:model.refusal_text", vcp.CapabilityProjected, vcp.EquivalenceAdvisory, "google_aistudio.refusal.projected_text.v1", "", "", true, nil
 	default:
 		return Content{}, "", "", "", "", "", "", false, fmt.Errorf("%w: context kind %q", ErrUnsupportedContext, item.Kind)
+	}
+}
+
+// hasResourceContent reports whether one ordered VCP block list contains media.
+// hasResourceContent 报告一个有序 VCP 内容块列表是否包含媒体。
+func hasResourceContent(blocks []vcp.ContentBlock) bool {
+	for _, block := range blocks {
+		if block.ResourceRef != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// projectUserParts preserves mixed text and media order using only accepted materializations.
+// projectUserParts 仅使用已接受物化结果保留混合文本与媒体顺序。
+func projectUserParts(blocks []vcp.ContentBlock, materialized map[string]resource.MaterializedInput) ([]Part, error) {
+	parts := make([]Part, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type == vcp.ContentText {
+			parts = append(parts, Part{Text: vcp.EscapeReservedFrameText(block.Text)})
+			continue
+		}
+		input, exists := materialized[block.ResourceRef]
+		if !exists {
+			return nil, fmt.Errorf("%w: resource %q has no accepted materialization", ErrUnsupportedContext, block.ResourceRef)
+		}
+		if !contentTypeMatchesMedia(block.Type, input.Kind) {
+			return nil, fmt.Errorf("%w: resource %q media kind differs from its content block", ErrUnsupportedContext, block.ResourceRef)
+		}
+		if block.MediaRole != input.Role {
+			return nil, fmt.Errorf("%w: resource %q media role differs from its accepted input plan", ErrUnsupportedContext, block.ResourceRef)
+		}
+		switch input.Mode {
+		case catalog.MaterializationInlineBase64:
+			if input.InlineBase64 == "" {
+				return nil, fmt.Errorf("%w: inline materialization is empty", ErrUnsupportedContext)
+			}
+			parts = append(parts, Part{InlineData: &InlineData{MIMEType: input.MIMEType, Data: input.InlineBase64}})
+		case catalog.MaterializationProviderFileID, catalog.MaterializationProviderAssetID, catalog.MaterializationProviderObjectURI:
+			if input.ProviderHandle == "" {
+				return nil, fmt.Errorf("%w: provider materialization handle is empty", ErrUnsupportedContext)
+			}
+			parts = append(parts, Part{FileData: &FileData{MIMEType: input.MIMEType, FileURI: input.ProviderHandle}})
+		default:
+			return nil, fmt.Errorf("%w: materialization mode %q has no Gemini content carrier", ErrUnsupportedContext, input.Mode)
+		}
+	}
+	if len(parts) == 0 {
+		return nil, fmt.Errorf("%w: user content is empty", ErrUnsupportedContext)
+	}
+	return parts, nil
+}
+
+// contentTypeMatchesMedia verifies the VCP block and planned media kind agree exactly.
+// contentTypeMatchesMedia 校验 VCP 内容块与规划媒体类型精确一致。
+func contentTypeMatchesMedia(contentType vcp.ContentType, kind vcp.MediaKind) bool {
+	switch contentType {
+	case vcp.ContentImage:
+		return kind == vcp.MediaImage
+	case vcp.ContentAudio:
+		return kind == vcp.MediaAudio
+	case vcp.ContentVideo:
+		return kind == vcp.MediaVideo
+	case vcp.ContentFile:
+		return kind == vcp.MediaFile
+	default:
+		return false
 	}
 }
 

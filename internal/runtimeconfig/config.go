@@ -192,20 +192,27 @@ func (s *Store) AuthenticateManagementKey(provided string) bool {
 // AuthenticateAPIKey verifies one enabled call-plane API key without exposing the configured list.
 // AuthenticateAPIKey 校验一个启用的调用面 API 密钥且不暴露已配置列表。
 func (s *Store) AuthenticateAPIKey(provided string) bool {
+	_, authenticated := s.AuthenticateAPIKeyID(provided)
+	return authenticated
+}
+
+// AuthenticateAPIKeyID verifies one enabled call-plane API key and returns only its non-secret identifier.
+// AuthenticateAPIKeyID 校验一个启用的调用面 API 密钥并仅返回其非秘密标识。
+func (s *Store) AuthenticateAPIKeyID(provided string) (string, bool) {
 	// candidate is trimmed because transport syntax treats outer whitespace as non-credential data.
 	// candidate 被裁剪，因为传输语法将外围空白视为非凭据数据。
 	candidate := strings.TrimSpace(provided)
 	if candidate == "" {
-		return false
+		return "", false
 	}
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	for _, configuredKey := range s.config.API.Keys {
 		if configuredKey.Enabled && subtle.ConstantTimeCompare([]byte(configuredKey.Key), []byte(candidate)) == 1 {
-			return true
+			return configuredKey.ID, true
 		}
 	}
-	return false
+	return "", false
 }
 
 // ListAPIKeys returns an isolated management-plane snapshot of plaintext API keys.

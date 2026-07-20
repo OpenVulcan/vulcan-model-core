@@ -18,7 +18,7 @@ import (
 const (
 	// currentSchemaVersion is the latest schema migration understood by this binary.
 	// currentSchemaVersion 是当前程序理解的最新 Schema 迁移版本。
-	currentSchemaVersion = 1
+	currentSchemaVersion = 6
 )
 
 var (
@@ -150,16 +150,18 @@ func migrate(ctx context.Context, database *sql.DB) error {
 // applyMigration executes one exact schema migration version.
 // applyMigration 执行一个精确版本的 Schema 迁移。
 func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error {
-	if version != 1 {
-		return fmt.Errorf("unknown sqlite migration version %d", version)
-	}
-	statements := []string{
-		`CREATE TABLE custom_provider_definitions (
+	// statements contains the exact append-only DDL for one schema version.
+	// statements 包含一个 Schema 版本的精确追加式 DDL。
+	var statements []string
+	switch version {
+	case 1:
+		statements = []string{
+			`CREATE TABLE custom_provider_definitions (
 			id TEXT PRIMARY KEY,
 			revision INTEGER NOT NULL CHECK (revision > 0),
 			payload BLOB NOT NULL
 		)`,
-		`CREATE TABLE provider_instances (
+			`CREATE TABLE provider_instances (
 			id TEXT PRIMARY KEY,
 			definition_id TEXT NOT NULL,
 			handle TEXT NOT NULL UNIQUE,
@@ -167,8 +169,8 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 			revision INTEGER NOT NULL CHECK (revision > 0),
 			payload BLOB NOT NULL
 		)`,
-		`CREATE INDEX provider_instances_definition_idx ON provider_instances(definition_id)`,
-		`CREATE TABLE provider_endpoints (
+			`CREATE INDEX provider_instances_definition_idx ON provider_instances(definition_id)`,
+			`CREATE TABLE provider_endpoints (
 			id TEXT PRIMARY KEY,
 			provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
 			channel_id TEXT NOT NULL,
@@ -176,8 +178,8 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 			revision INTEGER NOT NULL CHECK (revision > 0),
 			payload BLOB NOT NULL
 		)`,
-		`CREATE INDEX provider_endpoints_instance_idx ON provider_endpoints(provider_instance_id)`,
-		`CREATE TABLE provider_credentials (
+			`CREATE INDEX provider_endpoints_instance_idx ON provider_endpoints(provider_instance_id)`,
+			`CREATE TABLE provider_credentials (
 			id TEXT PRIMARY KEY,
 			provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
 			auth_method_id TEXT NOT NULL,
@@ -188,9 +190,9 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 			payload BLOB NOT NULL,
 			UNIQUE(provider_instance_id, fingerprint)
 		)`,
-		`CREATE UNIQUE INDEX provider_credentials_principal_idx ON provider_credentials(provider_instance_id, principal_key) WHERE principal_key <> ''`,
-		`CREATE INDEX provider_credentials_instance_idx ON provider_credentials(provider_instance_id)`,
-		`CREATE TABLE access_bindings (
+			`CREATE UNIQUE INDEX provider_credentials_principal_idx ON provider_credentials(provider_instance_id, principal_key) WHERE principal_key <> ''`,
+			`CREATE INDEX provider_credentials_instance_idx ON provider_credentials(provider_instance_id)`,
+			`CREATE TABLE access_bindings (
 			id TEXT PRIMARY KEY,
 			provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
 			channel_id TEXT NOT NULL,
@@ -201,13 +203,106 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 			revision INTEGER NOT NULL CHECK (revision > 0),
 			payload BLOB NOT NULL
 		)`,
-		`CREATE INDEX access_bindings_instance_idx ON access_bindings(provider_instance_id, priority, id)`,
-		`CREATE TABLE catalog_snapshots (
+			`CREATE INDEX access_bindings_instance_idx ON access_bindings(provider_instance_id, priority, id)`,
+			`CREATE TABLE catalog_snapshots (
 			provider_instance_id TEXT PRIMARY KEY REFERENCES provider_instances(id) ON DELETE RESTRICT,
 			revision INTEGER NOT NULL CHECK (revision > 0),
 			observed_at TEXT NOT NULL,
 			payload BLOB NOT NULL
 		)`,
+		}
+	case 2:
+		statements = []string{
+			`CREATE TABLE resource_quota_lock (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				revision INTEGER NOT NULL CHECK (revision >= 0)
+			)`,
+			`INSERT INTO resource_quota_lock(id, revision) VALUES (1, 0)`,
+			`CREATE TABLE router_resources (
+				id TEXT PRIMARY KEY,
+				owner_api_key_id TEXT NOT NULL,
+				kind TEXT NOT NULL,
+				state TEXT NOT NULL,
+				size_bytes INTEGER NOT NULL CHECK (size_bytes >= 0),
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				expires_at TEXT,
+				object_key TEXT NOT NULL,
+				source_url TEXT NOT NULL,
+				payload BLOB NOT NULL
+			)`,
+			`CREATE INDEX router_resources_owner_idx ON router_resources(owner_api_key_id, id)`,
+			`CREATE INDEX router_resources_expiry_idx ON router_resources(state, expires_at, id)`,
+		}
+	case 3:
+		statements = []string{
+			`CREATE TABLE input_plans (
+				id TEXT PRIMARY KEY,
+				owner_api_key_id TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				target_payload BLOB NOT NULL,
+				payload BLOB NOT NULL
+			)`,
+			`CREATE INDEX input_plans_owner_expiry_idx ON input_plans(owner_api_key_id, expires_at, id)`,
+			`CREATE TABLE provider_asset_bindings (
+				id TEXT PRIMARY KEY,
+				resource_id TEXT NOT NULL REFERENCES router_resources(id) ON DELETE RESTRICT,
+				resource_sha256 TEXT NOT NULL,
+				provider_definition_id TEXT NOT NULL,
+				provider_instance_id TEXT NOT NULL,
+				endpoint_id TEXT NOT NULL,
+				region TEXT NOT NULL,
+				credential_id TEXT NOT NULL,
+				action_binding_id TEXT NOT NULL,
+				provider_model_id TEXT NOT NULL,
+				upstream_model_id TEXT NOT NULL,
+				materialization TEXT NOT NULL,
+				expires_at TEXT,
+				payload BLOB NOT NULL
+			)`,
+			`CREATE INDEX provider_asset_bindings_resource_idx ON provider_asset_bindings(resource_id, id)`,
+			`CREATE INDEX provider_asset_bindings_exact_idx ON provider_asset_bindings(resource_id, resource_sha256, provider_instance_id, endpoint_id, credential_id, action_binding_id, provider_model_id, upstream_model_id, materialization, expires_at)`,
+		}
+	case 4:
+		statements = []string{
+			`CREATE TABLE executions (
+				id TEXT PRIMARY KEY,
+				owner_api_key_id TEXT NOT NULL,
+				request_hash TEXT NOT NULL,
+				idempotency_key TEXT NOT NULL,
+				status TEXT NOT NULL,
+				operation TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				created_at TEXT NOT NULL,
+				updated_at TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				request_payload BLOB NOT NULL,
+				target_payload BLOB NOT NULL,
+				result_payload BLOB,
+				failure_payload BLOB,
+				provider_task_payload BLOB
+			)`,
+			`CREATE UNIQUE INDEX executions_idempotency_idx ON executions(owner_api_key_id, idempotency_key) WHERE idempotency_key <> ''`,
+			`CREATE INDEX executions_owner_idx ON executions(owner_api_key_id, created_at, id)`,
+			`CREATE INDEX executions_recovery_idx ON executions(status, updated_at, id)`,
+			`CREATE TABLE execution_events (
+				execution_id TEXT NOT NULL REFERENCES executions(id) ON DELETE CASCADE,
+				sequence INTEGER NOT NULL CHECK (sequence > 0),
+				event_id TEXT NOT NULL UNIQUE,
+				payload BLOB NOT NULL,
+				PRIMARY KEY(execution_id, sequence)
+			)`,
+		}
+	case 5:
+		statements = []string{
+			`ALTER TABLE executions ADD COLUMN provider_preparation_payload BLOB`,
+		}
+	case 6:
+		statements = []string{
+			`ALTER TABLE executions ADD COLUMN provider_task_secret_ref TEXT`,
+			`ALTER TABLE executions ADD COLUMN provider_preparation_secret_ref TEXT`,
+		}
+	default:
+		return fmt.Errorf("unknown sqlite migration version %d", version)
 	}
 	for _, statement := range statements {
 		if _, errExec := transaction.ExecContext(ctx, statement); errExec != nil {

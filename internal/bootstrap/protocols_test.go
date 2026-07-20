@@ -12,6 +12,14 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/codex"
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	xairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/xai/responses"
+	provideralibaba "github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba"
+	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
+	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
+	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
+	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
+	provideropenrouter "github.com/OpenVulcan/vulcan-model-core/internal/provider/openrouter"
+	providertavily "github.com/OpenVulcan/vulcan-model-core/internal/provider/tavily"
+	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
@@ -27,12 +35,12 @@ func TestRegisterProtocolProfilesRegistersOnlySupportedCustomProfiles(t *testing
 	// profiles records the stable sorted registration snapshot.
 	// profiles 记录稳定排序后的注册快照。
 	profiles := registry.List()
-	if len(profiles) != 8 {
-		t.Fatalf("registered profile count = %d, want 8", len(profiles))
+	if len(profiles) != 52 {
+		t.Fatalf("registered profile count = %d, want 52", len(profiles))
 	}
 	// expectedIDs preserves the public management identifiers without exposing upstream compatibility endpoints.
 	// expectedIDs 保留公开管理标识而不暴露上游兼容端点。
-	expectedIDs := []string{messages.ProfileID, aistudio.ProfileID, antigravity.ProfileID, interactions.ProfileID, chat.ProfileID, codex.ProfileID, openairesponses.ProfileID, xairesponses.ProfileID}
+	expectedIDs := []string{provideralibaba.SpeechTranscribeAsyncProtocolProfileID, provideralibaba.EmbeddingProtocolProfileID, provideralibaba.ImageEditProtocolProfileID, provideralibaba.ImageGenerateProtocolProfileID, provideralibaba.SpeechTranscribeProtocolProfileID, provideralibaba.SpeechSynthesizeProtocolProfileID, provideralibaba.WanImageEditProtocolProfileID, provideralibaba.WanImageGenerateProtocolProfileID, provideralibaba.WanVideoGenerateProtocolProfileID, messages.ProfileID, provideranthropic.SearchProtocolProfileID, aistudio.ProfileID, providergoogle.EmbeddingProtocolProfileID, providergoogle.MediaAnalyzeProtocolProfileID, antigravity.ProfileID, interactions.ProfileID, providergoogle.SearchProtocolProfileID, providergoogle.ImageEditProtocolProfileID, providergoogle.ImageGenerateProtocolProfileID, providergoogle.SpeechSynthesizeProtocolProfileID, providergoogle.VideoExtendProtocolProfileID, providergoogle.VideoGenerateProtocolProfileID, providerminimax.ImageGenerateProtocolProfileID, providerminimax.MusicCoverPrepareProtocolProfileID, providerminimax.MusicCoverProtocolProfileID, providerminimax.MusicGenerateProtocolProfileID, providerminimax.SpeechSynthesizeProtocolProfileID, providerminimax.SpeechSynthesizeAsyncProtocolProfileID, providerminimax.VideoGenerateProtocolProfileID, provideropenai.SpeechSynthesizeProtocolProfileID, provideropenai.SpeechTranscribeProtocolProfileID, chat.ProfileID, codex.ProfileID, provideropenai.EmbeddingProtocolProfileID, provideropenai.ImageEditProtocolProfileID, provideropenai.ImageGenerateProtocolProfileID, openairesponses.ProfileID, provideropenai.SearchProtocolProfileID, provideropenrouter.SpeechSynthesizeProtocolProfileID, provideropenrouter.SpeechTranscribeProtocolProfileID, provideropenrouter.EmbeddingProtocolProfileID, provideropenrouter.ImageGenerateProtocolProfileID, provideropenrouter.RerankProtocolProfileID, provideropenrouter.VideoGenerateProtocolProfileID, providertavily.ProtocolProfileID, providerxai.ImageEditProtocolProfileID, providerxai.ImageGenerateProtocolProfileID, xairesponses.ProfileID, providerxai.SearchProtocolProfileID, providerxai.VideoEditProtocolProfileID, providerxai.VideoExtendProtocolProfileID, providerxai.VideoGenerateProtocolProfileID}
 	for index, expectedID := range expectedIDs {
 		if profiles[index].ID != expectedID {
 			t.Fatalf("profile[%d].ID = %q, want %q", index, profiles[index].ID, expectedID)

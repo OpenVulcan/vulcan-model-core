@@ -12,9 +12,47 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestProjectRequestWithInputsPreservesImageAudioAndFile verifies each supported resource receives its distinct typed carrier.
+// TestProjectRequestWithInputsPreservesImageAudioAndFile 验证每种受支持资源获得各自独立的类型化载体。
+func TestProjectRequestWithInputsPreservesImageAudioAndFile(t *testing.T) {
+	request := responsesTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Analyze these"},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentAudio, ResourceRef: "audio-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentFile, ResourceRef: "file-resource", MediaRole: vcp.MediaRoleUnderstanding},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "image", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+		{InputID: "audio", ResourceID: "audio-resource", Kind: vcp.MediaAudio, Role: vcp.MediaRoleUnderstanding, MIMEType: "audio/wav", Mode: catalog.MaterializationInlineBase64, InlineBase64: "YXVkaW8="},
+		{InputID: "file", ResourceID: "file-resource", Kind: vcp.MediaFile, Role: vcp.MediaRoleUnderstanding, MIMEType: "application/pdf", Mode: catalog.MaterializationProviderFileID, ProviderHandle: "file_123"},
+	}
+	projected, errProject := ProjectRequestWithInputs(request, responsesTarget(), responsesCapabilities(), "lineage-media", "", responsesNow(), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	content := projected.Upstream.Input[0].Content
+	if len(content) != 4 || content[1].Type != "input_image" || content[1].ImageURL != "data:image/png;base64,aW1hZ2U=" || content[2].InputAudio == nil || content[2].InputAudio.Format != "wav" || content[3].Type != "input_file" || content[3].FileID != "file_123" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
+// TestProjectRequestWithInputsRejectsUnverifiedVideo verifies no generic URL field masks absent video support.
+// TestProjectRequestWithInputsRejectsUnverifiedVideo 验证通用 URL 字段不会掩盖缺失的视频支持。
+func TestProjectRequestWithInputsRejectsUnverifiedVideo(t *testing.T) {
+	request := responsesTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{{Type: vcp.ContentText, Text: "Analyze"}, {Type: vcp.ContentVideo, ResourceRef: "video-resource", MediaRole: vcp.MediaRoleUnderstanding}}
+	inputs := []resource.MaterializedInput{{InputID: "video", ResourceID: "video-resource", Kind: vcp.MediaVideo, Role: vcp.MediaRoleUnderstanding, MIMEType: "video/mp4", Mode: catalog.MaterializationProviderFileID, ProviderHandle: "file_video"}}
+	if _, errProject := ProjectRequestWithInputs(request, responsesTarget(), responsesCapabilities(), "lineage-media", "", responsesNow(), inputs); !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
+		t.Fatalf("ProjectRequestWithInputs() error = %v, want ErrCapabilityUnavailable", errProject)
+	}
+}
 
 // TestProjectRequestUsesUpstreamToolCallID verifies that replayed tool output retains its actual provider call relation.
 // TestProjectRequestUsesUpstreamToolCallID 验证回放工具输出会保留实际 Provider 调用关联。
@@ -241,6 +279,7 @@ func responsesTarget() resolve.Target {
 // responsesCapabilities 创建一个用于纯 Profile 测试的完全验证能力夹具。
 func responsesCapabilities() ProfileCapabilities {
 	return ProfileCapabilities{
+		MediaInputKinds: []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaFile}, MediaMaterializations: []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64, catalog.MaterializationProviderFileID},
 		NativeSystemPreamble: true, NativeDeveloper: true, NativeInlineSystem: true, StructuredTools: true, NativeCustomTools: true,
 		NativeToolNamespaces: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, Reasoning: true,
 		ReasoningContinuation: true, NativeWebSearch: true,

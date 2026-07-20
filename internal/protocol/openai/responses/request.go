@@ -11,13 +11,34 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // ProjectRequest compiles one VCP request for an exact resolved OpenAI Responses target.
 // ProjectRequest 为一个精确解析的 OpenAI Responses Target 编译一条 VCP 请求。
 func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, previousResponseID string, now time.Time) (ProjectedRequest, error) {
+	return projectRequest(request, target, capabilities, lineageID, previousResponseID, now, nil)
+}
+
+// ProjectRequestWithInputs compiles one Responses request with exact accepted resource materializations.
+// ProjectRequestWithInputs 使用精确已接受资源物化结果编译一条 Responses 请求。
+func ProjectRequestWithInputs(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, previousResponseID string, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
+	materialized := make(map[string]resource.MaterializedInput, len(inputs))
+	for _, input := range inputs {
+		if _, exists := materialized[input.ResourceID]; exists {
+			return ProjectedRequest{}, fmt.Errorf("%w: duplicate materialized resource %q", ErrUnsupportedContext, input.ResourceID)
+		}
+		materialized[input.ResourceID] = input
+	}
+	return projectRequest(request, target, capabilities, lineageID, previousResponseID, now, materialized)
+}
+
+// projectRequest compiles text and optional typed media through one deterministic Responses path.
+// projectRequest 通过一条确定性 Responses 路径编译文本和可选类型化媒体。
+func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, previousResponseID string, now time.Time, materialized map[string]resource.MaterializedInput) (ProjectedRequest, error) {
 	if errRequest := request.Validate(); errRequest != nil {
 		return ProjectedRequest{}, errRequest
 	}
@@ -83,7 +104,7 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 	}
 	for _, item := range request.Context {
 		position := len(upstream.Input)
-		input, mode, equivalence, ruleID, frameID, digest, include, errItem := projectItem(item, request, capabilities, lineageID, position, toolKinds, callProjections)
+		input, mode, equivalence, ruleID, frameID, digest, include, errItem := projectItem(item, request, capabilities, lineageID, position, toolKinds, callProjections, materialized)
 		if errItem != nil {
 			return ProjectedRequest{}, errItem
 		}
@@ -166,13 +187,35 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 		{Feature: vcp.FeatureExplicitPromptCache, Native: false},
 		{Feature: vcp.FeatureRemoteCompaction, Native: false},
 		{Feature: vcp.FeatureNativeWebSearch, Native: capabilities.NativeWebSearch},
-		{Feature: vcp.FeatureImageInput, Native: false}, {Feature: vcp.FeatureAudioInput, Native: false},
-		{Feature: vcp.FeatureVideoInput, Native: false}, {Feature: vcp.FeatureFileInput, Native: false},
+		{Feature: vcp.FeatureImageInput, Native: capabilities.supportsMediaInput(vcp.MediaImage)}, {Feature: vcp.FeatureAudioInput, Native: capabilities.supportsMediaInput(vcp.MediaAudio)},
+		{Feature: vcp.FeatureVideoInput, Native: capabilities.supportsMediaInput(vcp.MediaVideo)}, {Feature: vcp.FeatureFileInput, Native: capabilities.supportsMediaInput(vcp.MediaFile)},
 	}
 	if projectionTriggered {
 		availability = append(availability, vcp.CapabilityAvailability{Feature: vcp.FeatureOrderedContextProjection, Native: projectionNative, Projected: request.CapabilityPolicy.AllowAdvisoryInstructionProjection})
 	}
 	return availability
+}
+
+// supportsMediaInput reports whether this exact Responses projection profile accepts one media family.
+// supportsMediaInput 报告此精确 Responses 投影 Profile 是否接受一种媒体类别。
+func (c ProfileCapabilities) supportsMediaInput(kind vcp.MediaKind) bool {
+	for _, supported := range c.MediaInputKinds {
+		if supported == kind {
+			return true
+		}
+	}
+	return false
+}
+
+// supportsMaterialization reports whether one representation survives the selected provider path.
+// supportsMaterialization 报告一种表示是否能完整通过选定供应商路径。
+func (c ProfileCapabilities) supportsMaterialization(mode catalog.UpstreamMaterializationMode) bool {
+	for _, supported := range c.MediaMaterializations {
+		if supported == mode {
+			return true
+		}
+	}
+	return false
 }
 
 // capabilitySelected reports whether a frozen plan selected one exact capability mode.
@@ -266,7 +309,7 @@ func findNamedTool(tools []vcp.ToolDefinition, name string) (vcp.ToolDefinition,
 
 // projectItem maps one canonical item to one exact Responses input carrier and ledger decision.
 // projectItem 将一个规范项目映射到一个精确 Responses 输入载体和账本决策。
-func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, lineageID string, position int, toolKinds map[string]vcp.ToolKind, callProjections map[string]toolCallProjection) (InputItem, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, lineageID string, position int, toolKinds map[string]vcp.ToolKind, callProjections map[string]toolCallProjection, materialized map[string]resource.MaterializedInput) (InputItem, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
 	// Client and audit scopes are Router-local, so sending them upstream would violate the VCP visibility boundary.
 	// 客户端和审计作用域仅限 Router 本地，因此将其发送上游会违反 VCP 可见性边界。
 	if item.Visibility != vcp.VisibilityModel {
@@ -275,7 +318,12 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 	if item.ProviderStateRef != "" {
 		return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: opaque provider state requires a Router-resolved previous_response_id continuation", ErrUnsupportedContext)
 	}
-	text, errText := vcp.TextContent(item.Content)
+	userMediaMessage := item.Kind == vcp.ContextMessage && item.Authority == vcp.AuthorityUser && hasResourceContent(item.Content)
+	text := ""
+	var errText error
+	if !userMediaMessage {
+		text, errText = vcp.TextContent(item.Content)
+	}
 	if errText != nil && item.Kind != vcp.ContextToolCall {
 		return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: item %q: %v", ErrUnsupportedContext, item.ItemID, errText)
 	}
@@ -295,6 +343,13 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 		return projectFrame(item, request, lineageID, position)
 	case vcp.ContextMessage:
 		if item.Authority == vcp.AuthorityUser {
+			if userMediaMessage {
+				input, errMedia := responsesMediaMessage(item.Content, capabilities, materialized)
+				if errMedia != nil {
+					return InputItem{}, "", "", "", "", "", false, errMedia
+				}
+				return input, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.user_media.native.v1", "", "", true, nil
+			}
 			return messageInput("user", vcp.EscapeReservedFrameText(text)), vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.user.native.v1", "", "", true, nil
 		}
 		return messageInput("assistant", text), vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.assistant.native.v1", "", "", true, nil
@@ -354,6 +409,115 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 // messageInput 构建一条类型化文本消息，不使用字符串或数组 wire 联合。
 func messageInput(role string, text string) InputItem {
 	return InputItem{Type: "message", Role: role, Content: []InputContent{{Type: "input_text", Text: text}}}
+}
+
+// hasResourceContent reports whether an ordered block list contains a Router resource reference.
+// hasResourceContent 报告有序内容块是否包含 Router 资源引用。
+func hasResourceContent(blocks []vcp.ContentBlock) bool {
+	for _, block := range blocks {
+		if block.ResourceRef != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// responsesMediaMessage preserves mixed content order using only evidence-closed media carriers.
+// responsesMediaMessage 仅使用证据封闭的媒体载体保留混合内容顺序。
+func responsesMediaMessage(blocks []vcp.ContentBlock, capabilities ProfileCapabilities, materialized map[string]resource.MaterializedInput) (InputItem, error) {
+	content := make([]InputContent, 0, len(blocks))
+	for _, block := range blocks {
+		if block.Type == vcp.ContentText {
+			content = append(content, InputContent{Type: "input_text", Text: vcp.EscapeReservedFrameText(block.Text)})
+			continue
+		}
+		input, exists := materialized[block.ResourceRef]
+		if !exists || block.MediaRole != input.Role {
+			return InputItem{}, fmt.Errorf("%w: resource %q has no matching accepted materialization", ErrUnsupportedContext, block.ResourceRef)
+		}
+		kind, matches := responsesContentMediaKind(block.Type)
+		if !matches || kind != input.Kind || !capabilities.supportsMediaInput(kind) || !capabilities.supportsMaterialization(input.Mode) {
+			return InputItem{}, fmt.Errorf("%w: resource %q has no supported Responses media carrier", ErrUnsupportedContext, block.ResourceRef)
+		}
+		projected, errProject := responsesMediaContent(input)
+		if errProject != nil {
+			return InputItem{}, errProject
+		}
+		content = append(content, projected)
+	}
+	return InputItem{Type: "message", Role: "user", Content: content}, nil
+}
+
+// responsesMediaContent projects one exact materialization without silently changing its media family.
+// responsesMediaContent 投影一个精确物化结果且不静默改变其媒体类别。
+func responsesMediaContent(input resource.MaterializedInput) (InputContent, error) {
+	switch input.Kind {
+	case vcp.MediaImage:
+		switch input.Mode {
+		case catalog.MaterializationInlineBase64:
+			if strings.TrimSpace(input.InlineBase64) == "" {
+				break
+			}
+			return InputContent{Type: "input_image", ImageURL: "data:" + input.MIMEType + ";base64," + input.InlineBase64}, nil
+		case catalog.MaterializationProviderFileID:
+			if strings.TrimSpace(input.ProviderHandle) == "" {
+				break
+			}
+			return InputContent{Type: "input_image", FileID: input.ProviderHandle}, nil
+		}
+	case vcp.MediaAudio:
+		if input.Mode == catalog.MaterializationInlineBase64 && strings.TrimSpace(input.InlineBase64) != "" {
+			format, errFormat := openAIInputAudioFormat(input.MIMEType)
+			if errFormat != nil {
+				return InputContent{}, errFormat
+			}
+			return InputContent{Type: "input_audio", InputAudio: &InputAudio{Data: input.InlineBase64, Format: format}}, nil
+		}
+	case vcp.MediaFile:
+		switch input.Mode {
+		case catalog.MaterializationInlineBase64:
+			if strings.TrimSpace(input.InlineBase64) == "" {
+				break
+			}
+			return InputContent{Type: "input_file", FileData: "data:" + input.MIMEType + ";base64," + input.InlineBase64, Filename: "resource"}, nil
+		case catalog.MaterializationProviderFileID:
+			if strings.TrimSpace(input.ProviderHandle) == "" {
+				break
+			}
+			return InputContent{Type: "input_file", FileID: input.ProviderHandle}, nil
+		}
+	}
+	return InputContent{}, fmt.Errorf("%w: media kind %q and materialization %q are not representable", ErrUnsupportedContext, input.Kind, input.Mode)
+}
+
+// openAIInputAudioFormat maps only the two documented Chat/Responses audio input encodings.
+// openAIInputAudioFormat 仅映射 Chat/Responses 已记录的两种音频输入编码。
+func openAIInputAudioFormat(mimeType string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(mimeType)) {
+	case "audio/mpeg", "audio/mp3":
+		return "mp3", nil
+	case "audio/wav", "audio/x-wav":
+		return "wav", nil
+	default:
+		return "", fmt.Errorf("%w: audio MIME type %q has no OpenAI input_audio format", ErrUnsupportedContext, mimeType)
+	}
+}
+
+// responsesContentMediaKind maps only registered resource-bearing VCP blocks.
+// responsesContentMediaKind 仅映射已注册的资源型 VCP 内容块。
+func responsesContentMediaKind(contentType vcp.ContentType) (vcp.MediaKind, bool) {
+	switch contentType {
+	case vcp.ContentImage:
+		return vcp.MediaImage, true
+	case vcp.ContentAudio:
+		return vcp.MediaAudio, true
+	case vcp.ContentVideo:
+		return vcp.MediaVideo, true
+	case vcp.ContentFile:
+		return vcp.MediaFile, true
+	default:
+		return "", false
+	}
 }
 
 // projectFrame creates an independent advisory user carrier or an explicit omission.

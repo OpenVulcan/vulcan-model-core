@@ -114,6 +114,9 @@ func (d ProviderDefinition) Validate() error {
 		if d.GroupID != "" || d.VariantName != "" || d.VariantDescription != "" || d.VariantDescriptionKey != "" || d.ModelCatalogID != "" || d.SortOrder != 0 || len(d.EndpointPresets) != 0 {
 			return invalid("custom provider definition cannot register system grouping or endpoint preset metadata")
 		}
+		if len(d.ActionBindings) != 0 {
+			return invalid("custom provider definition cannot register system action bindings")
+		}
 	default:
 		return invalid("provider definition kind %q is invalid", d.Kind)
 	}
@@ -164,6 +167,21 @@ func (d ProviderDefinition) Validate() error {
 		protocolAuthMethods[authMethodID] = struct{}{}
 		if _, exists := authMethods[authMethodID]; !exists {
 			return invalid("provider protocol references unknown auth method %q", authMethodID)
+		}
+	}
+	actionBindings := make(map[string]struct{}, len(d.ActionBindings))
+	for _, binding := range d.ActionBindings {
+		if errBinding := binding.Validate(); errBinding != nil {
+			return errBinding
+		}
+		if _, exists := actionBindings[binding.ID]; exists {
+			return invalid("provider action binding %q is duplicated", binding.ID)
+		}
+		actionBindings[binding.ID] = struct{}{}
+		for _, authMethodID := range binding.AuthMethodIDs {
+			if _, exists := authMethods[authMethodID]; !exists {
+				return invalid("provider action binding %q references unknown auth method %q", binding.ID, authMethodID)
+			}
 		}
 	}
 	presets := make(map[string]struct{}, len(d.EndpointPresets))
@@ -227,6 +245,39 @@ func (p EndpointPreset) Validate() error {
 	if err := validateIdentifier("endpoint preset id", p.ID); err != nil {
 		return err
 	}
+	if p.BaseURLTemplate != "" || len(p.Parameters) != 0 {
+		if p.BaseURLTemplate == "" || len(p.Parameters) == 0 {
+			return invalid("parameterized endpoint preset requires a base url template and parameter definitions")
+		}
+		if p.BaseURL != "" || p.RegionalBaseURLTemplate != "" || p.GlobalBaseURL != "" || p.UserEditable {
+			return invalid("parameterized endpoint preset cannot combine fixed, regional, global, or editable endpoint fields")
+		}
+		if strings.TrimSpace(p.Region) == "" {
+			return invalid("endpoint preset region is required")
+		}
+		// materializedTemplate validates the template structure with safe representative labels.
+		// materializedTemplate 使用安全的代表性标签校验模板结构。
+		materializedTemplate := p.BaseURLTemplate
+		seenParameterIDs := make(map[string]struct{}, len(p.Parameters))
+		for _, parameter := range p.Parameters {
+			if errParameter := parameter.Validate(); errParameter != nil {
+				return errParameter
+			}
+			if _, exists := seenParameterIDs[parameter.ID]; exists {
+				return invalid("duplicate endpoint parameter definition %q", parameter.ID)
+			}
+			seenParameterIDs[parameter.ID] = struct{}{}
+			placeholder := "{" + parameter.ID + "}"
+			if strings.Count(materializedTemplate, placeholder) != 1 {
+				return invalid("endpoint parameter %q must occur exactly once in the base url template", parameter.ID)
+			}
+			materializedTemplate = strings.Replace(materializedTemplate, placeholder, "example", 1)
+		}
+		if strings.ContainsAny(materializedTemplate, "{}") {
+			return invalid("endpoint base url template contains an undeclared or malformed placeholder")
+		}
+		return validateDerivedHTTPSBaseURL("parameterized endpoint base url template", materializedTemplate)
+	}
 	if errBaseURL := validateBaseURL("endpoint preset base url", p.BaseURL); errBaseURL != nil {
 		return errBaseURL
 	}
@@ -288,6 +339,16 @@ func (i ProviderInstance) Validate() error {
 		}
 		disabledModels[modelID] = struct{}{}
 	}
+	disabledServices := make(map[string]struct{}, len(i.DisabledServiceIDs))
+	for _, serviceID := range i.DisabledServiceIDs {
+		if errService := validateIdentifier("provider instance disabled service id", serviceID); errService != nil {
+			return errService
+		}
+		if _, exists := disabledServices[serviceID]; exists {
+			return invalid("provider instance disabled service id %q is duplicated", serviceID)
+		}
+		disabledServices[serviceID] = struct{}{}
+	}
 	return nil
 }
 
@@ -320,6 +381,19 @@ func (e Endpoint) Validate() error {
 	}
 	if errBaseURL := validateBaseURL("endpoint base url", e.BaseURL); errBaseURL != nil {
 		return errBaseURL
+	}
+	seenParameterIDs := make(map[string]struct{}, len(e.Parameters))
+	for _, parameter := range e.Parameters {
+		if errParameterID := validateIdentifier("endpoint parameter id", parameter.ID); errParameterID != nil {
+			return errParameterID
+		}
+		if parameter.Value == "" || parameter.Value != strings.TrimSpace(parameter.Value) {
+			return invalid("endpoint parameter %q value must be non-empty and normalized", parameter.ID)
+		}
+		if _, exists := seenParameterIDs[parameter.ID]; exists {
+			return invalid("duplicate endpoint parameter value %q", parameter.ID)
+		}
+		seenParameterIDs[parameter.ID] = struct{}{}
 	}
 	if !validEndpointStatus(e.Status) || e.Revision == 0 {
 		return invalid("endpoint status or revision is invalid")
@@ -435,6 +509,16 @@ func (b AccessBinding) Validate() error {
 		}
 		allowedModels[modelID] = struct{}{}
 	}
+	allowedServices := make(map[string]struct{}, len(b.AllowedServiceIDs))
+	for _, serviceID := range b.AllowedServiceIDs {
+		if errService := validateIdentifier("access binding service id", serviceID); errService != nil {
+			return errService
+		}
+		if _, exists := allowedServices[serviceID]; exists {
+			return invalid("access binding service id %q is duplicated", serviceID)
+		}
+		allowedServices[serviceID] = struct{}{}
+	}
 	return nil
 }
 
@@ -466,7 +550,31 @@ func validateBaseURL(field string, value string) error {
 // HasChannel reports whether a provider definition owns one channel identifier.
 // HasChannel 返回供应商定义是否拥有指定通道标识。
 func (d ProviderDefinition) HasChannel(channelID string) bool {
-	return channelID == d.ProtocolProfileID
+	for _, ownedChannelID := range d.ChannelIDs() {
+		if ownedChannelID == channelID {
+			return true
+		}
+	}
+	return false
+}
+
+// ChannelIDs returns the primary protocol and every action-specific protocol exactly once in stable declaration order.
+// ChannelIDs 以稳定声明顺序返回主协议及每个动作专属协议且不重复。
+func (d ProviderDefinition) ChannelIDs() []string {
+	seen := make(map[string]struct{}, len(d.ActionBindings)+1)
+	channels := make([]string, 0, len(d.ActionBindings)+1)
+	appendChannel := func(channelID string) {
+		if _, exists := seen[channelID]; exists {
+			return
+		}
+		seen[channelID] = struct{}{}
+		channels = append(channels, channelID)
+	}
+	appendChannel(d.ProtocolProfileID)
+	for _, action := range d.ActionBindings {
+		appendChannel(action.ProtocolProfileID)
+	}
+	return channels
 }
 
 // HasAuthMethod reports whether a provider definition owns one authentication method.
@@ -490,12 +598,21 @@ func (d ProviderDefinition) AuthMethod(authMethodID string) (AuthMethodDefinitio
 // ChannelAllowsAuth reports whether a channel accepts one provider authentication method.
 // ChannelAllowsAuth 返回通道是否接受指定供应商认证方式。
 func (d ProviderDefinition) ChannelAllowsAuth(channelID string, authMethodID string) bool {
-	if channelID != d.ProtocolProfileID {
-		return false
+	if channelID == d.ProtocolProfileID {
+		for _, allowedAuthMethodID := range d.AuthMethodIDs {
+			if allowedAuthMethodID == authMethodID {
+				return true
+			}
+		}
 	}
-	for _, allowedAuthMethodID := range d.AuthMethodIDs {
-		if allowedAuthMethodID == authMethodID {
-			return true
+	for _, action := range d.ActionBindings {
+		if action.ProtocolProfileID != channelID {
+			continue
+		}
+		for _, allowedAuthMethodID := range action.AuthMethodIDs {
+			if allowedAuthMethodID == authMethodID {
+				return true
+			}
 		}
 	}
 	return false
@@ -511,11 +628,17 @@ func (d ProviderDefinition) ValidateEndpointPreset(endpoint Endpoint) error {
 	// hasEditablePreset 记录允许管理端提供地址的显式例外。
 	hasEditablePreset := false
 	for _, preset := range d.EndpointPresets {
-		if preset.BaseURL == endpoint.BaseURL && preset.Region == endpoint.Region {
+		if preset.BaseURL == endpoint.BaseURL && preset.Region == endpoint.Region && len(endpoint.Parameters) == 0 {
 			return nil
 		}
-		if preset.RegionalBaseURLTemplate != "" {
+		if preset.RegionalBaseURLTemplate != "" && len(endpoint.Parameters) == 0 {
 			derivedBaseURL, errDerived := preset.derivedBaseURL(endpoint.Region)
+			if errDerived == nil && derivedBaseURL == endpoint.BaseURL {
+				return nil
+			}
+		}
+		if preset.BaseURLTemplate != "" && preset.Region == endpoint.Region {
+			derivedBaseURL, errDerived := preset.MaterializeBaseURL(endpoint.Parameters)
 			if errDerived == nil && derivedBaseURL == endpoint.BaseURL {
 				return nil
 			}
@@ -543,12 +666,17 @@ func (d ProviderDefinition) ValidateEndpointMutation(current Endpoint, next Endp
 		return nil
 	}
 	for _, preset := range d.EndpointPresets {
-		if preset.RegionalBaseURLTemplate == "" {
-			continue
+		if preset.RegionalBaseURLTemplate != "" {
+			currentBaseURL, errCurrent := preset.derivedBaseURL(current.Region)
+			if errCurrent == nil && currentBaseURL == current.BaseURL && (current.BaseURL != next.BaseURL || current.Region != next.Region || !slices.Equal(current.Parameters, next.Parameters)) {
+				return invalid("provider-derived system endpoint origin, region, and parameters are immutable after onboarding")
+			}
 		}
-		currentBaseURL, errCurrent := preset.derivedBaseURL(current.Region)
-		if errCurrent == nil && currentBaseURL == current.BaseURL && (current.BaseURL != next.BaseURL || current.Region != next.Region) {
-			return invalid("provider-derived system endpoint origin and region are immutable after onboarding")
+		if preset.BaseURLTemplate != "" && preset.Region == current.Region {
+			currentBaseURL, errCurrent := preset.MaterializeBaseURL(current.Parameters)
+			if errCurrent == nil && currentBaseURL == current.BaseURL && (current.BaseURL != next.BaseURL || current.Region != next.Region || !slices.Equal(current.Parameters, next.Parameters)) {
+				return invalid("provider-derived system endpoint origin, region, and parameters are immutable after onboarding")
+			}
 		}
 	}
 	return nil
@@ -564,11 +692,85 @@ func (p EndpointPreset) derivedBaseURL(region string) (string, error) {
 	if region == "global" && p.GlobalBaseURL != "" {
 		baseURL = p.GlobalBaseURL
 	}
-	parsedURL, errParse := url.ParseRequestURI(baseURL)
-	if errParse != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
-		return "", invalid("derived endpoint base url must be an absolute credential-free HTTPS origin")
+	if errBaseURL := validateDerivedHTTPSBaseURL("derived endpoint base url", baseURL); errBaseURL != nil {
+		return "", errBaseURL
 	}
 	return baseURL, nil
+}
+
+// Validate verifies one closed endpoint parameter definition.
+// Validate 校验一个封闭的端点参数定义。
+func (p EndpointParameterDefinition) Validate() error {
+	if errID := validateIdentifier("endpoint parameter definition id", p.ID); errID != nil {
+		return errID
+	}
+	if p.Kind != EndpointParameterHostnameLabel {
+		return invalid("endpoint parameter %q has unsupported kind %q", p.ID, p.Kind)
+	}
+	if !p.Required {
+		return invalid("endpoint template parameter %q must be required", p.ID)
+	}
+	return nil
+}
+
+// MaterializeBaseURL derives one exact HTTPS base URL from declared non-secret parameter values.
+// MaterializeBaseURL 根据已声明的非秘密参数值派生一个精确的 HTTPS 基础 URL。
+func (p EndpointPreset) MaterializeBaseURL(values []EndpointParameterValue) (string, error) {
+	if p.BaseURLTemplate == "" || len(values) != len(p.Parameters) {
+		return "", invalid("endpoint parameter values must exactly match the preset schema")
+	}
+	valuesByID := make(map[string]string, len(values))
+	for _, value := range values {
+		if _, exists := valuesByID[value.ID]; exists {
+			return "", invalid("duplicate endpoint parameter value %q", value.ID)
+		}
+		valuesByID[value.ID] = value.Value
+	}
+	baseURL := p.BaseURLTemplate
+	for _, definition := range p.Parameters {
+		value, exists := valuesByID[definition.ID]
+		if !exists {
+			return "", invalid("endpoint parameter %q is required", definition.ID)
+		}
+		if errValue := validateEndpointParameterValue(definition, value); errValue != nil {
+			return "", errValue
+		}
+		baseURL = strings.Replace(baseURL, "{"+definition.ID+"}", value, 1)
+	}
+	if errBaseURL := validateDerivedHTTPSBaseURL("parameterized endpoint base url", baseURL); errBaseURL != nil {
+		return "", errBaseURL
+	}
+	return baseURL, nil
+}
+
+// validateEndpointParameterValue applies the exact closed validation rule declared by one endpoint parameter.
+// validateEndpointParameterValue 应用一个端点参数声明的精确封闭校验规则。
+func validateEndpointParameterValue(definition EndpointParameterDefinition, value string) error {
+	switch definition.Kind {
+	case EndpointParameterHostnameLabel:
+		if len(value) == 0 || len(value) > 63 || value != strings.ToLower(strings.TrimSpace(value)) || strings.HasPrefix(value, "-") || strings.HasSuffix(value, "-") {
+			return invalid("endpoint parameter %q must be a normalized DNS hostname label", definition.ID)
+		}
+		for _, character := range value {
+			if (character >= 'a' && character <= 'z') || (character >= '0' && character <= '9') || character == '-' {
+				continue
+			}
+			return invalid("endpoint parameter %q must be a normalized DNS hostname label", definition.ID)
+		}
+		return nil
+	default:
+		return invalid("endpoint parameter %q has unsupported kind %q", definition.ID, definition.Kind)
+	}
+}
+
+// validateDerivedHTTPSBaseURL verifies a provider-owned materialized HTTPS URL without request components.
+// validateDerivedHTTPSBaseURL 校验不含请求组件的供应商所有已实例化 HTTPS URL。
+func validateDerivedHTTPSBaseURL(field string, value string) error {
+	parsedURL, errParse := url.ParseRequestURI(value)
+	if errParse != nil || parsedURL.Scheme != "https" || parsedURL.Host == "" || parsedURL.User != nil || parsedURL.RawQuery != "" || parsedURL.Fragment != "" {
+		return invalid("%s must be an absolute credential-free HTTPS url", field)
+	}
+	return nil
 }
 
 // validateEndpointRegion accepts only normalized host- and path-safe provider region identifiers.
@@ -643,6 +845,11 @@ func ValidateSystemOnboarding(onboarding SystemOnboarding, definition ProviderDe
 	}
 	if len(onboarding.Endpoints) == 0 || len(onboarding.Bindings) == 0 {
 		return invalid("system onboarding requires endpoints and bindings")
+	}
+	for _, channelID := range definition.ChannelIDs() {
+		if _, exists := boundChannels[channelID]; !exists {
+			return invalid("system onboarding is missing provider channel binding %q", channelID)
+		}
 	}
 	return nil
 }
@@ -742,7 +949,7 @@ func ValidateCustomDefinitionMigration(migration CustomDefinitionMigration, curr
 		if next.DefinitionRevision != migration.Definition.Revision || next.Status != LifecycleMigrationRequired || next.Revision != current.Revision+1 {
 			return invalid("custom definition migration instance state or revision is invalid")
 		}
-		if next.Handle != current.Handle || next.DisplayName != current.DisplayName || next.ProxyRef != current.ProxyRef || !slices.Equal(next.DisabledModelIDs, current.DisabledModelIDs) {
+		if next.Handle != current.Handle || next.DisplayName != current.DisplayName || next.ProxyRef != current.ProxyRef || !slices.Equal(next.DisabledModelIDs, current.DisabledModelIDs) || !slices.Equal(next.DisabledServiceIDs, current.DisabledServiceIDs) {
 			return invalid("custom definition migration may only change migration state and revisions")
 		}
 		delete(currentByID, next.ID)

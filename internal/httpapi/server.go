@@ -10,6 +10,7 @@ import (
 
 	dependencycheck "github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 )
 
 var (
@@ -53,6 +54,14 @@ type ManagementQuery interface {
 	// ListBindings returns management-safe access binding records.
 	// ListBindings 返回管理安全访问绑定记录。
 	ListBindings(context.Context, string) ([]management.BindingView, error)
+}
+
+// TargetAvailability resolves one exact current execution destination for discovery filtering.
+// TargetAvailability 为发现过滤解析一个精确当前执行目的地。
+type TargetAvailability interface {
+	// Resolve returns one same-provider target or an explicit ineligibility error.
+	// Resolve 返回一个同供应商 Target 或明确不合格错误。
+	Resolve(context.Context, resolve.Request) (resolve.Target, resolve.Diagnostics, error)
 }
 
 // Server owns the minimal Vulcan Model Core HTTP surface.
@@ -180,9 +189,26 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("POST /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleCreateAPIKey)))
 		mux.Handle("PUT /vulcan/manage/api-keys/{api_key_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateAPIKey)))
 		mux.Handle("DELETE /vulcan/manage/api-keys/{api_key_id}", server.requireManagement(http.HandlerFunc(server.handleDeleteAPIKey)))
+		if control.ResourceDiagnostics != nil {
+			mux.Handle("GET /vulcan/manage/diagnostics/resources", server.requireManagement(http.HandlerFunc(server.handleResourceDiagnostics)))
+		}
+		if control.ExecutionDiagnostics != nil {
+			mux.Handle("GET /vulcan/manage/diagnostics/executions", server.requireManagement(http.HandlerFunc(server.handleExecutionDiagnostics)))
+		}
 		// call routes are protected exclusively by enabled call-plane API keys.
 		// call 路由仅受启用的调用面 API 密钥保护。
 		mux.Handle("GET /vulcan/v1/models", server.requireAPIKey(http.HandlerFunc(server.handleCallModels)))
+		mux.Handle("GET /vulcan/v1/services", server.requireAPIKey(http.HandlerFunc(server.handleCallServices)))
+		mux.Handle("POST /vulcan/v1/resources", server.requireAPIKey(http.HandlerFunc(server.handleCreateResource)))
+		mux.Handle("POST /vulcan/v1/resources/import", server.requireAPIKey(http.HandlerFunc(server.handleImportResource)))
+		mux.Handle("GET /vulcan/v1/resources/{resource_id}", server.requireAPIKey(http.HandlerFunc(server.handleGetResource)))
+		mux.Handle("GET /vulcan/v1/resources/{resource_id}/content", server.requireAPIKey(http.HandlerFunc(server.handleGetResourceContent)))
+		mux.Handle("DELETE /vulcan/v1/resources/{resource_id}", server.requireAPIKey(http.HandlerFunc(server.handleDeleteResource)))
+		mux.Handle("POST /vulcan/v1/input-plans", server.requireAPIKey(http.HandlerFunc(server.handleCreateInputPlan)))
+		mux.Handle("POST /vulcan/v1/executions", server.requireAPIKey(http.HandlerFunc(server.handleCreateExecution)))
+		mux.Handle("GET /vulcan/v1/executions/{execution_id}", server.requireAPIKey(http.HandlerFunc(server.handleGetExecution)))
+		mux.Handle("GET /vulcan/v1/executions/{execution_id}/events", server.requireAPIKey(http.HandlerFunc(server.handleExecutionEvents)))
+		mux.Handle("POST /vulcan/v1/executions/{execution_id}/cancel", server.requireAPIKey(http.HandlerFunc(server.handleCancelExecution)))
 	}
 	server.handler = mux
 	return server, nil

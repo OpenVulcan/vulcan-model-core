@@ -14,9 +14,50 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestProjectRequestWithInputsPreservesImageAndAudio verifies ordered typed Chat media carriers.
+// TestProjectRequestWithInputsPreservesImageAndAudio 验证有序的类型化 Chat 媒体载体。
+func TestProjectRequestWithInputsPreservesImageAndAudio(t *testing.T) {
+	request := chatTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Analyze these"},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentAudio, ResourceRef: "audio-resource", MediaRole: vcp.MediaRoleUnderstanding},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "image", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+		{InputID: "audio", ResourceID: "audio-resource", Kind: vcp.MediaAudio, Role: vcp.MediaRoleUnderstanding, MIMEType: "audio/wav", Mode: catalog.MaterializationInlineBase64, InlineBase64: "YXVkaW8="},
+	}
+	capabilities := ProfileCapabilities{MediaInputKinds: []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio}, MediaMaterializations: []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64}}
+	projected, errProject := ProjectRequestWithInputs(request, chatTarget(), capabilities, "lin_media", time.Unix(40, 0), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	content := projected.Upstream.Messages[0].ContentParts
+	if len(content) != 3 || content[0].Text != "Analyze these" || content[1].ImageURL == nil || content[1].ImageURL.URL != "data:image/png;base64,aW1hZ2U=" || content[2].InputAudio == nil || content[2].InputAudio.Format != "wav" {
+		t.Fatalf("content = %#v", content)
+	}
+	encoded, errMarshal := json.Marshal(projected.Upstream.Messages[0])
+	if errMarshal != nil || !strings.Contains(string(encoded), `"content":[{"type":"text"`) {
+		t.Fatalf("encoded message = %s, error = %v", encoded, errMarshal)
+	}
+}
+
+// TestProjectRequestWithInputsRejectsUnverifiedVideo verifies Chat never invents a video carrier.
+// TestProjectRequestWithInputsRejectsUnverifiedVideo 验证 Chat 永不虚构视频载体。
+func TestProjectRequestWithInputsRejectsUnverifiedVideo(t *testing.T) {
+	request := chatTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{{Type: vcp.ContentText, Text: "Analyze"}, {Type: vcp.ContentVideo, ResourceRef: "video-resource", MediaRole: vcp.MediaRoleUnderstanding}}
+	inputs := []resource.MaterializedInput{{InputID: "video", ResourceID: "video-resource", Kind: vcp.MediaVideo, Role: vcp.MediaRoleUnderstanding, MIMEType: "video/mp4", Mode: catalog.MaterializationInlineBase64, InlineBase64: "dmlkZW8="}}
+	if _, errProject := ProjectRequestWithInputs(request, chatTarget(), ProfileCapabilities{}, "lin_media", time.Unix(40, 0), inputs); !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
+		t.Fatalf("ProjectRequestWithInputs() error = %v, want ErrCapabilityUnavailable", errProject)
+	}
+}
 
 // TestProjectRequestNativeAndFramedContext verifies ordered native and advisory carriers.
 // TestProjectRequestNativeAndFramedContext 校验有序原生与建议性载体。

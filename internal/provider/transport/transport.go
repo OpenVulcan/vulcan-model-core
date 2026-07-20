@@ -173,8 +173,22 @@ type Binding struct {
 // Validate verifies that all endpoint and credential facts belong to the immutable target.
 // Validate 校验所有 Endpoint 与 Credential 事实都属于不可变 Target。
 func (b Binding) Validate() error {
-	if strings.TrimSpace(b.Target.ProviderDefinitionID) == "" || strings.TrimSpace(b.Target.ProviderInstanceID) == "" || strings.TrimSpace(b.Target.ChannelID) == "" || strings.TrimSpace(b.Target.EndpointID) == "" || strings.TrimSpace(b.Target.CredentialID) == "" || strings.TrimSpace(b.Target.ProviderModelID) == "" || strings.TrimSpace(b.Target.ExecutionProfileID) == "" || strings.TrimSpace(b.Target.UpstreamModelID) == "" {
-		return fmt.Errorf("%w: target must contain exact provider, channel, endpoint, credential, model, and profile identifiers", ErrInvalidBinding)
+	if strings.TrimSpace(b.Target.ProviderDefinitionID) == "" || strings.TrimSpace(b.Target.ProviderInstanceID) == "" || strings.TrimSpace(b.Target.ChannelID) == "" || strings.TrimSpace(b.Target.EndpointID) == "" || strings.TrimSpace(b.Target.CredentialID) == "" || strings.TrimSpace(b.Target.ExecutionProfileID) == "" {
+		return fmt.Errorf("%w: target must contain exact provider, channel, endpoint, credential, and profile identifiers", ErrInvalidBinding)
+	}
+	modelTarget := b.Target.SubjectKind == resolve.ExecutionSubjectModel && strings.TrimSpace(b.Target.ProviderModelID) != "" && strings.TrimSpace(b.Target.OfferingID) != "" && strings.TrimSpace(b.Target.UpstreamModelID) != "" && ((b.Target.Operation == "") == (b.Target.ActionBindingID == ""))
+	// legacyModelTarget preserves the current conversation-driver boundary until every system model profile is migrated to an ActionBinding.
+	// legacyModelTarget 在所有系统模型 Profile 迁移到 ActionBinding 前保留当前会话 Driver 边界。
+	legacyModelTarget := b.Target.SubjectKind == "" && strings.TrimSpace(b.Target.ProviderModelID) != "" && strings.TrimSpace(b.Target.UpstreamModelID) != ""
+	serviceTarget := b.Target.SubjectKind == resolve.ExecutionSubjectService && strings.TrimSpace(b.Target.ProviderServiceID) != "" && strings.TrimSpace(b.Target.ServiceOfferingID) != "" && strings.TrimSpace(string(b.Target.Operation)) != "" && strings.TrimSpace(b.Target.ActionBindingID) != "" && strings.TrimSpace(b.Target.UpstreamServiceID) != ""
+	if (modelTarget || legacyModelTarget) == serviceTarget {
+		return fmt.Errorf("%w: target must contain exactly one complete model or service subject", ErrInvalidBinding)
+	}
+	if (modelTarget || legacyModelTarget) && (b.Target.ProviderServiceID != "" || b.Target.ServiceOfferingID != "" || b.Target.UpstreamServiceID != "" || b.Target.ServiceCapabilities != nil) {
+		return fmt.Errorf("%w: model target cannot contain service facts", ErrInvalidBinding)
+	}
+	if serviceTarget && (b.Target.ProviderModelID != "" || b.Target.OfferingID != "" || b.Target.UpstreamModelID != "") {
+		return fmt.Errorf("%w: service target cannot contain model facts", ErrInvalidBinding)
 	}
 	if b.Endpoint.ID != b.Target.EndpointID || b.Endpoint.ProviderInstanceID != b.Target.ProviderInstanceID || b.Endpoint.ChannelID != b.Target.ChannelID {
 		return fmt.Errorf("%w: endpoint does not match target", ErrInvalidBinding)

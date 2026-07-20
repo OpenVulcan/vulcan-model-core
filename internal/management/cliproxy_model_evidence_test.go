@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // copiedModelsDocument is the typed subset of the verbatim CLIProxyAPI models.json used by catalog parity tests.
@@ -58,6 +59,12 @@ type copiedCatalogParityCase struct {
 	// excludedModelIDs lists media-output products that VCP cannot yet persist safely.
 	// excludedModelIDs 列出 VCP 当前尚不能安全持久化的媒体输出产品。
 	excludedModelIDs []string
+	// additionalModelIDs lists models added from newer provider-official evidence rather than the pinned CLIProxyAPI snapshot.
+	// additionalModelIDs 列出来自更新供应商官方证据而非固定 CLIProxyAPI 快照的模型。
+	additionalModelIDs []string
+	// additionalOperationCount counts action-specific templates that reuse an already verified provider model.
+	// additionalOperationCount 统计复用已验证供应商模型的动作专属模板。
+	additionalOperationCount int
 }
 
 // TestSystemModelTemplatesMatchCopiedCLIProxyModels verifies every adapted record directly against the verbatim pinned JSON file.
@@ -69,11 +76,11 @@ func TestSystemModelTemplatesMatchCopiedCLIProxyModels(t *testing.T) {
 		{modelCatalogID: "openai_codex_account", sourceCatalogID: "codex-pro"},
 		{modelCatalogID: "anthropic_api", sourceCatalogID: "claude"},
 		{modelCatalogID: "anthropic_claude_code", sourceCatalogID: "claude"},
-		{modelCatalogID: "google_ai_studio", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}},
-		{modelCatalogID: "google_interactions", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}},
+		{modelCatalogID: "google_ai_studio", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}, additionalModelIDs: []string{"gemini-embedding-2"}, additionalOperationCount: 6},
+		{modelCatalogID: "google_interactions", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}, additionalModelIDs: []string{"gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"}, additionalOperationCount: 2},
 		{modelCatalogID: "google_vertex", sourceCatalogID: "vertex", excludedModelIDs: []string{"gemini-2.5-flash-image", "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001", "imagen-3.0-generate-002", "imagen-3.0-fast-generate-001", "imagen-4.0-fast-generate-001"}},
 		{modelCatalogID: "google_antigravity", sourceCatalogID: "antigravity", excludedModelIDs: []string{"gemini-3.1-flash-image"}},
-		{modelCatalogID: "xai_api", sourceCatalogID: "xai"},
+		{modelCatalogID: "xai_api", sourceCatalogID: "xai", additionalOperationCount: 7},
 		{modelCatalogID: "xai_account", sourceCatalogID: "xai"},
 		{modelCatalogID: "kimi_coding", sourceCatalogID: "kimi"},
 	}
@@ -84,11 +91,35 @@ func TestSystemModelTemplatesMatchCopiedCLIProxyModels(t *testing.T) {
 				t.Fatalf("systemModelTemplates() error = %v", errTemplates)
 			}
 			expected := includedCopiedModels(document[testCase.sourceCatalogID], testCase.excludedModelIDs)
-			if len(templates) != len(expected) {
-				t.Fatalf("template count = %d, want %d", len(templates), len(expected))
+			if len(templates) != len(expected)+len(testCase.additionalModelIDs)+testCase.additionalOperationCount {
+				t.Fatalf("template count = %d, want %d", len(templates), len(expected)+len(testCase.additionalModelIDs)+testCase.additionalOperationCount)
 			}
 			for index, record := range expected {
-				assertCopiedModelTemplate(t, index, templates[index], record)
+				assertCopiedModelTemplate(t, testCase.modelCatalogID, index, templates[index], record)
+			}
+			for index, modelID := range testCase.additionalModelIDs {
+				if templates[len(expected)+index].upstreamID != modelID {
+					t.Fatalf("additional template[%d] = %q, want %q", index, templates[len(expected)+index].upstreamID, modelID)
+				}
+			}
+			if testCase.modelCatalogID == "google_ai_studio" {
+				operationTemplate := templates[len(expected)+len(testCase.additionalModelIDs)]
+				if operationTemplate.upstreamID != "gemini-2.5-flash" || operationTemplate.operation != vcp.OperationMediaAnalyze {
+					t.Fatalf("media analysis template = %#v", operationTemplate)
+				}
+			}
+			if testCase.additionalOperationCount == 2 {
+				generateTemplate := templates[len(templates)-2]
+				editTemplate := templates[len(templates)-1]
+				if generateTemplate.upstreamID != "gemini-3.1-flash-image" || generateTemplate.operation != vcp.OperationImageGenerate || editTemplate.upstreamID != "gemini-3.1-flash-image" || editTemplate.operation != vcp.OperationImageEdit {
+					t.Fatalf("image operation templates = generate:%#v edit:%#v", generateTemplate, editTemplate)
+				}
+			}
+			if testCase.additionalOperationCount == 4 {
+				operations := templates[len(templates)-4:]
+				if operations[0].upstreamID != "grok-imagine-image" || operations[0].operation != vcp.OperationImageGenerate || operations[1].operation != vcp.OperationImageEdit || operations[2].upstreamID != "grok-imagine-image-quality" || operations[2].operation != vcp.OperationImageGenerate || operations[3].operation != vcp.OperationImageEdit {
+					t.Fatalf("xAI image operation templates = %#v", operations)
+				}
 			}
 		})
 	}
@@ -129,7 +160,7 @@ func includedCopiedModels(records []copiedModelRecord, excludedModelIDs []string
 
 // assertCopiedModelTemplate compares one adapted template with every structured fact owned by the source record.
 // assertCopiedModelTemplate 将一条适配模板与源码记录拥有的每个结构化事实进行比较。
-func assertCopiedModelTemplate(t *testing.T, index int, template systemModelTemplate, record copiedModelRecord) {
+func assertCopiedModelTemplate(t *testing.T, modelCatalogID string, index int, template systemModelTemplate, record copiedModelRecord) {
 	t.Helper()
 	expectedReasoning := catalog.CapabilityUnknown
 	if record.Thinking != nil {
@@ -145,7 +176,13 @@ func assertCopiedModelTemplate(t *testing.T, index int, template systemModelTemp
 	if slices.Contains(record.SupportedParameters, "tools") {
 		expectedToolCalling = catalog.CapabilityNative
 	}
-	if template.upstreamID != record.ID || template.displayName != record.DisplayName || template.contextWindow != record.ContextLength || template.maxOutputTokens != record.MaxCompletionTokens || template.maxReasoningTokens != expectedMaxReasoningTokens || template.reasoning != expectedReasoning || template.toolCalling != expectedToolCalling {
+	expectedContextWindow := record.ContextLength
+	expectedMaxOutputTokens := record.MaxCompletionTokens
+	if modelCatalogID == "google_ai_studio" && record.ID == "gemini-2.5-flash" {
+		expectedContextWindow = 1048576
+		expectedMaxOutputTokens = 65536
+	}
+	if template.upstreamID != record.ID || template.displayName != record.DisplayName || template.contextWindow != expectedContextWindow || template.maxOutputTokens != expectedMaxOutputTokens || template.maxReasoningTokens != expectedMaxReasoningTokens || template.reasoning != expectedReasoning || template.toolCalling != expectedToolCalling {
 		t.Fatalf("template[%d] = %#v, source = %#v", index, template, record)
 	}
 }

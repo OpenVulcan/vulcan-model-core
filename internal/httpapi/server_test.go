@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -11,9 +12,14 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/execution"
+	"github.com/OpenVulcan/vulcan-model-core/internal/inputplan"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // staticCatalog provides immutable provider identifiers for HTTP tests.
@@ -83,11 +89,22 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 	return management.CatalogView{
 		ProviderInstanceID: "pvi_test",
 		Models: []management.ModelView{{
-			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit, Enabled: true,
+			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit, Enabled: true, ProviderAuthorized: true,
 			Offerings: []management.OfferingView{{ID: "offer_test", UpstreamModelID: "test", Profiles: []management.ExecutionProfileView{
-				{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 262144}}},
-				{ID: "profile_test_1m", DisplayName: "1M", Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 1048576}}},
+				{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{
+					ContextWindow: management.TokenLimitView{Known: true, Value: 262144},
+					MediaInputs:   []catalog.MediaInputCapability{{Kind: vcp.MediaImage, Common: catalog.CommonMediaLimits{MaxItemBytes: catalog.OptionalLimit{Known: true, Value: 1024}}}},
+				}, Pool: &management.PoolView{ReadyCredentials: 1}},
+				{ID: "profile_test_1m", DisplayName: "1M", Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 1048576}}, Pool: &management.PoolView{ReadyCredentials: 1}},
 			}}},
+		}},
+		Services: []management.ServiceView{{
+			ID: "service_search", DisplayName: "Search", Operation: vcp.OperationSearchWeb, EntitlementMode: catalog.EntitlementAllBoundCredentials, Enabled: true, ProviderAuthorized: true,
+			Offerings: []management.ServiceOfferingView{{
+				ID: "service_offer_search", UpstreamServiceID: "search",
+				Capabilities: catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest, OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}}},
+				Profiles:     []management.ServiceExecutionProfileView{{ID: "profile_search", DisplayName: "Search", Default: true, Operation: vcp.OperationSearchWeb, ActionBindingID: "action_search", Pool: &management.PoolView{ReadyCredentials: 1}}},
+			}},
 		}},
 		Allowances: []management.AllowanceView{{
 			Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, Metric: "monthly_requests", Unit: catalog.UnitRequests, Status: catalog.AllowanceAvailable, Mandatory: true,
@@ -297,6 +314,34 @@ func (staticCustomCatalogOperations) SaveCustomCatalog(context.Context, manageme
 // staticControlAccess 提供确定性的独立管理和调用面凭据。
 type staticControlAccess struct{}
 
+// staticExecutionAccess provides an inert durable execution dependency for unrelated route tests.
+// staticExecutionAccess 为无关路由测试提供一个惰性持久化执行依赖。
+type staticExecutionAccess struct{}
+
+// Create reports that the inert fixture does not execute provider calls.
+// Create 报告惰性夹具不执行供应商调用。
+func (staticExecutionAccess) Create(context.Context, string, vcp.ExecutionRequest) (execution.Record, bool, error) {
+	return execution.Record{}, false, execution.ErrInvalidExecution
+}
+
+// Get reports no owner-scoped execution.
+// Get 报告不存在所有者作用域执行。
+func (staticExecutionAccess) Get(context.Context, string, string) (execution.Record, error) {
+	return execution.Record{}, execution.ErrExecutionNotFound
+}
+
+// Events reports no owner-scoped execution event log.
+// Events 报告不存在所有者作用域执行事件日志。
+func (staticExecutionAccess) Events(context.Context, string, string, uint64) ([]execution.Event, error) {
+	return nil, execution.ErrExecutionNotFound
+}
+
+// Cancel reports no owner-scoped execution.
+// Cancel 报告不存在所有者作用域执行。
+func (staticExecutionAccess) Cancel(context.Context, string, string) (execution.Record, error) {
+	return execution.Record{}, execution.ErrExecutionNotFound
+}
+
 // AuthenticateManagementKey accepts only the management fixture key.
 // AuthenticateManagementKey 仅接受管理夹具密钥。
 func (staticControlAccess) AuthenticateManagementKey(value string) bool {
@@ -307,6 +352,67 @@ func (staticControlAccess) AuthenticateManagementKey(value string) bool {
 // AuthenticateAPIKey 仅接受调用面夹具密钥。
 func (staticControlAccess) AuthenticateAPIKey(value string) bool {
 	return value == "call-key"
+}
+
+// AuthenticateAPIKeyID returns the deterministic non-secret owner identifier for the call fixture.
+// AuthenticateAPIKeyID 为调用夹具返回确定性的非秘密所有者标识。
+func (staticControlAccess) AuthenticateAPIKeyID(value string) (string, bool) {
+	if value != "call-key" {
+		return "", false
+	}
+	return "api_test", true
+}
+
+// MaximumObjectBytes returns a deterministic resource request ceiling.
+// MaximumObjectBytes 返回确定性资源请求上限。
+func (staticControlAccess) MaximumObjectBytes() int64 { return 1 << 20 }
+
+// Create reports that static route fixtures do not ingest content.
+// Create 报告静态路由夹具不接收内容。
+func (staticControlAccess) Create(context.Context, resource.CreateInput) (resource.Resource, error) {
+	return resource.Resource{}, errors.New("static resource fixture")
+}
+
+// ImportURL reports that static route fixtures do not perform network imports.
+// ImportURL 报告静态路由夹具不执行网络导入。
+func (staticControlAccess) ImportURL(context.Context, resource.URLImportInput) (resource.Resource, error) {
+	return resource.Resource{}, errors.New("static resource fixture")
+}
+
+// ImportBase64 reports that static route fixtures do not perform Base64 imports.
+// ImportBase64 报告静态路由夹具不执行 Base64 导入。
+func (staticControlAccess) ImportBase64(context.Context, resource.Base64ImportInput) (resource.Resource, error) {
+	return resource.Resource{}, errors.New("static resource fixture")
+}
+
+// Get reports that static route fixtures contain no resources.
+// Get 报告静态路由夹具不包含资源。
+func (staticControlAccess) Get(context.Context, string, string) (resource.Resource, error) {
+	return resource.Resource{}, resource.ErrResourceNotFound
+}
+
+// OpenContent reports that static route fixtures contain no resource content.
+// OpenContent 报告静态路由夹具不包含资源正文。
+func (staticControlAccess) OpenContent(context.Context, string, string) (resource.Resource, io.ReadCloser, error) {
+	return resource.Resource{}, nil, resource.ErrResourceNotFound
+}
+
+// Delete reports that static route fixtures contain no resources.
+// Delete 报告静态路由夹具不包含资源。
+func (staticControlAccess) Delete(context.Context, string, string) error {
+	return resource.ErrResourceNotFound
+}
+
+// Create reports that static route fixtures do not resolve input plans.
+// Create 报告静态路由夹具不解析输入方案。
+func (staticControlAccess) CreateInputPlan(context.Context, inputplan.Request) (inputplan.Plan, error) {
+	return inputplan.Plan{}, errors.New("static input plan fixture")
+}
+
+// Resolve returns one deterministic exact target for discovery route fixtures.
+// Resolve 为发现路由夹具返回一个确定性精确 Target。
+func (staticControlAccess) Resolve(_ context.Context, request resolve.Request) (resolve.Target, resolve.Diagnostics, error) {
+	return resolve.Target{ProviderInstanceID: request.ProviderInstanceID, ProviderModelID: request.ProviderModelID, ProviderServiceID: request.ProviderServiceID, ServiceOfferingID: request.ServiceOfferingID, ExecutionProfileID: request.ExecutionProfileID, Operation: request.Operation}, resolve.Diagnostics{ReadyCandidates: 1}, nil
 }
 
 // ListAPIKeys returns one management-visible fixture API key.
@@ -420,7 +526,7 @@ func TestServerConstructionRejectsTypedNilDependencies(t *testing.T) {
 	// nilQuery 证明必需接口不能隐藏一个带类型 nil 指针。
 	var nilQuery *staticManagementQuery
 	_, errRequired := NewWithControlPlane(staticCatalog{}, ControlPlane{
-		Query: nilQuery, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+		Query: nilQuery, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access, Resources: access, InputPlans: access, Executions: staticExecutionAccess{}, Targets: access,
 	})
 	if errRequired == nil {
 		t.Fatal("typed nil required control dependency was accepted")
@@ -429,7 +535,7 @@ func TestServerConstructionRejectsTypedNilDependencies(t *testing.T) {
 	// nilMetadataRefresh 证明可选的带类型 nil 会被拒绝，而不是注册一个可能 panic 的路由。
 	var nilMetadataRefresh *staticMetadataRefresh
 	_, errOptional := NewWithControlPlane(staticCatalog{}, ControlPlane{
-		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: nilMetadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: nilMetadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access, Resources: access, InputPlans: access, Executions: staticExecutionAccess{}, Targets: access,
 	})
 	if errOptional == nil {
 		t.Fatal("typed nil optional control dependency was accepted")
@@ -479,7 +585,7 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	// metadataRefresh 仅记录经过认证的显式账号数据刷新。
 	metadataRefresh := &staticMetadataRefresh{}
 	server, errServer := NewWithControlPlane(staticCatalog{}, ControlPlane{
-		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: metadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access,
+		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: metadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access, Resources: access, InputPlans: access, Executions: staticExecutionAccess{}, Targets: access,
 	})
 	if errServer != nil {
 		t.Fatalf("create control-plane server: %v", errServer)
@@ -564,6 +670,16 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	server.Handler().ServeHTTP(callRecorder, callRequest)
 	if callRecorder.Code != http.StatusOK {
 		t.Fatalf("call-plane status=%d body=%s", callRecorder.Code, callRecorder.Body.String())
+	}
+	if !strings.Contains(callRecorder.Body.String(), `"max_item_bytes":{"known":true,"value":1024}`) || strings.Contains(callRecorder.Body.String(), `"MaxItemBytes"`) {
+		t.Fatalf("model discovery did not preserve the snake-case capability contract: %s", callRecorder.Body.String())
+	}
+	serviceRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/services", nil)
+	serviceRequest.Header.Set("Authorization", "Bearer call-key")
+	serviceRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(serviceRecorder, serviceRequest)
+	if serviceRecorder.Code != http.StatusOK || !strings.Contains(serviceRecorder.Body.String(), `"backend_kind":"direct_search_api"`) || strings.Contains(serviceRecorder.Body.String(), `"Models"`) || strings.Contains(serviceRecorder.Body.String(), `"BackendKind"`) {
+		t.Fatalf("service discovery status=%d body=%s", serviceRecorder.Code, serviceRecorder.Body.String())
 	}
 	// ambiguousCallRequest proves the same duplicate-header rejection protects the call plane.
 	// ambiguousCallRequest 证明相同的重复请求头拒绝规则也保护调用面。

@@ -36,34 +36,43 @@ func TestDecodeResponseConvertsTerminalSnapshot(t *testing.T) {
 	}
 }
 
-// TestDecodeResponseReportsOmittedOutputAnnotations verifies annotation presence is explicit in both VCP events and the execution report.
-// TestDecodeResponseReportsOmittedOutputAnnotations 验证注释存在会在 VCP 事件和执行报告中显式体现。
-func TestDecodeResponseReportsOmittedOutputAnnotations(t *testing.T) {
+// TestDecodeResponsePreservesURLCitations verifies annotations become typed VCP citations without omission warnings.
+// TestDecodeResponsePreservesURLCitations 验证注释成为类型化 VCP 引用且不产生省略告警。
+func TestDecodeResponsePreservesURLCitations(t *testing.T) {
+	start := 0
+	end := 6
 	upstream := Response{
 		ID: "upstream-response-annotation", Status: "completed",
 		Output: []OutputItem{{
 			ID: "message-item-annotation", Type: "message",
-			Content: []OutputContent{{Type: "output_text", Text: "Answer", Annotations: []OutputAnnotation{{Type: "url_citation"}}}},
+			Content: []OutputContent{{Type: "output_text", Text: "Answer", Annotations: []OutputAnnotation{{Type: "url_citation", URL: "https://example.com/source", Title: "Source", StartIndex: &start, EndIndex: &end}}}},
 		}},
 	}
-	_, events, report, errDecode := DecodeResponse("response-vcp-annotation", upstream, responsesNow())
+	response, events, report, errDecode := DecodeResponse("response-vcp-annotation", upstream, responsesNow())
 	if errDecode != nil {
 		t.Fatalf("DecodeResponse() error = %v", errDecode)
 	}
-	warningFound := false
+	citationFound := false
 	for _, event := range events {
-		if event.Type == vcp.EventWarningRaised && event.WarningCode == "openai_responses.output_annotation_omitted" {
-			warningFound = true
+		if event.Type == vcp.EventCitationCompleted && event.Citation != nil && event.Citation.URL == "https://example.com/source" {
+			citationFound = true
 		}
 	}
-	reportFound := false
-	for _, code := range report.ConversionSummary {
-		if code == "openai_responses.output_annotation_omitted" {
-			reportFound = true
-		}
-	}
-	if !warningFound || !reportFound {
+	if !citationFound || len(response.Citations) != 1 || response.Citations[0].Title != "Source" || slices.Contains(report.ConversionSummary, "openai_responses.output_annotation_omitted") {
 		t.Fatalf("events = %#v report = %#v", events, report)
+	}
+}
+
+// TestDecodeResponsePreservesNativeWebSearchCall verifies non-streaming search actions remain typed output items.
+// TestDecodeResponsePreservesNativeWebSearchCall 验证非流式搜索动作保持为类型化输出项目。
+func TestDecodeResponsePreservesNativeWebSearchCall(t *testing.T) {
+	upstream := Response{ID: "upstream-search", Status: "completed", Output: []OutputItem{{ID: "search-call-1", Type: "web_search_call", Status: "completed", Action: &WebSearchAction{Type: "search", Query: "Vulcan Router", Sources: []WebSearchSource{{Type: "url", URL: "https://example.com/source"}}}}}}
+	response, events, report, errDecode := DecodeResponse("response-vcp-search", upstream, responsesNow())
+	if errDecode != nil {
+		t.Fatalf("DecodeResponse() error = %v", errDecode)
+	}
+	if len(response.Items) != 1 || response.Items[0].Kind != vcp.ContextSearchCall || response.Items[0].SearchCall == nil || response.Items[0].SearchCall.Query != "Vulcan Router" || len(response.Items[0].SearchCall.Sources) != 1 || len(events) < 3 || slices.Contains(report.ConversionSummary, "openai_responses.native_web_search_event_not_exposed") {
+		t.Fatalf("response = %#v events = %#v report = %#v", response, events, report)
 	}
 }
 
@@ -72,7 +81,7 @@ func TestDecodeResponseReportsOmittedOutputAnnotations(t *testing.T) {
 func TestDecodeResponseAuditsDocumentedResponseMetadata(t *testing.T) {
 	// upstreamJSON includes documented response metadata while keeping private values out of canonical output and execution reports.
 	// upstreamJSON 包含文档化响应元数据，同时要求私有值不进入规范输出和执行报告。
-	upstreamJSON := []byte(`{"id":"resp-metadata","object":"response","created_at":1,"completed_at":2,"status":"completed","input":[{"role":"user","content":"private input"}],"instructions":"private instructions","max_output_tokens":128,"model":"actual-model","output":[{"id":"message-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Safe output","annotations":[{"type":"url_citation","url":"https://example.invalid/private"}],"logprobs":[]}]}],"previous_response_id":"resp-previous","reasoning_effort":"high","store":false,"temperature":0.2,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":0.9,"truncation":"disabled","user":"private-user","metadata":{"private":"value"},"service_tier":"priority","parallel_tool_calls":true,"background":false,"frequency_penalty":0.1,"presence_penalty":0.2,"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cost_in_usd_ticks":17}}`)
+	upstreamJSON := []byte(`{"id":"resp-metadata","object":"response","created_at":1,"completed_at":2,"status":"completed","input":[{"role":"user","content":"private input"}],"instructions":"private instructions","max_output_tokens":128,"model":"actual-model","output":[{"id":"message-1","type":"message","role":"assistant","content":[{"type":"output_text","text":"Safe output","annotations":[{"type":"url_citation","url":"https://example.invalid/private","start_index":0,"end_index":4}],"logprobs":[]}]}],"previous_response_id":"resp-previous","reasoning_effort":"high","store":false,"temperature":0.2,"text":{"format":{"type":"text"}},"tool_choice":"auto","tools":[],"top_p":0.9,"truncation":"disabled","user":"private-user","metadata":{"private":"value"},"service_tier":"priority","parallel_tool_calls":true,"background":false,"frequency_penalty":0.1,"presence_penalty":0.2,"usage":{"input_tokens":1,"output_tokens":2,"total_tokens":3,"cost_in_usd_ticks":17}}`)
 	var upstream Response
 	if errUnmarshal := json.Unmarshal(upstreamJSON, &upstream); errUnmarshal != nil {
 		t.Fatalf("json.Unmarshal() error = %v", errUnmarshal)
@@ -105,7 +114,6 @@ func TestDecodeResponseAuditsDocumentedResponseMetadata(t *testing.T) {
 		"openai_responses.response.background.omitted",
 		"openai_responses.response.penalties.omitted",
 		"openai_responses.usage.cost.omitted",
-		"openai_responses.output_annotation_omitted",
 		"openai_responses.output_logprobs_omitted",
 	}
 	for _, summaryCode := range summaryCodes {

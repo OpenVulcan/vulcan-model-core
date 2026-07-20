@@ -39,6 +39,9 @@ const (
 	// EventItemCompleted completes one output item.
 	// EventItemCompleted 完成一个输出项目。
 	EventItemCompleted EventType = "item.completed"
+	// EventCitationCompleted preserves one provider-returned answer citation.
+	// EventCitationCompleted 保留一个供应商返回的答案引用。
+	EventCitationCompleted EventType = "citation.completed"
 	// EventUsageUpdated reports a usage observation.
 	// EventUsageUpdated 报告一个用量观测。
 	EventUsageUpdated EventType = "usage.updated"
@@ -90,6 +93,9 @@ type OutputItem struct {
 	// ToolCall contains structured invocation state.
 	// ToolCall 包含结构化调用状态。
 	ToolCall *ToolCallItem `json:"tool_call,omitempty"`
+	// SearchCall contains provider-observed native search state.
+	// SearchCall 包含供应商观测到的原生搜索状态。
+	SearchCall *SearchCall `json:"search_call,omitempty"`
 	// Status records in-progress, completed, or incomplete state.
 	// Status 记录进行中、已完成或不完整状态。
 	Status OutputItemStatus `json:"status"`
@@ -174,6 +180,12 @@ type Event struct {
 	// WarningCode records a safe conversion warning.
 	// WarningCode 记录安全的转换警告。
 	WarningCode string `json:"warning_code,omitempty"`
+	// SearchCall hydrates completed provider search-call state on item completion.
+	// SearchCall 在项目完成时水合完成的供应商搜索调用状态。
+	SearchCall *SearchCall `json:"search_call,omitempty"`
+	// Citation contains one provider-returned URL citation.
+	// Citation 包含一个供应商返回的 URL 引用。
+	Citation *Citation `json:"citation,omitempty"`
 }
 
 // Response is the deterministic reduction of one legal event sequence.
@@ -188,6 +200,9 @@ type Response struct {
 	// Items contains output in first-seen causal order.
 	// Items 按首次出现的因果顺序包含输出。
 	Items []OutputItem `json:"items,omitempty"`
+	// Citations contains provider-returned answer citations in event order.
+	// Citations 按事件顺序包含供应商返回的答案引用。
+	Citations []Citation `json:"citations,omitempty"`
 	// Usage contains the latest valid observation.
 	// Usage 包含最新有效观测。
 	Usage *UsageObservation `json:"usage,omitempty"`
@@ -294,6 +309,16 @@ func (r *Reducer) Apply(event Event) error {
 		if item.Status != OutputItemCompleted {
 			item.Status = OutputItemCompleted
 		}
+		if event.SearchCall != nil {
+			searchCall := *event.SearchCall
+			searchCall.Sources = append([]SearchSource(nil), event.SearchCall.Sources...)
+			item.SearchCall = &searchCall
+		}
+	case EventCitationCompleted:
+		if event.Citation == nil {
+			return errors.New("citation.completed requires citation")
+		}
+		r.response.Citations = append(r.response.Citations, cloneCitation(*event.Citation))
 	case EventUsageUpdated:
 		if event.Usage == nil {
 			return errors.New("usage.updated requires usage")
@@ -335,6 +360,10 @@ func (r *Reducer) Snapshot() Response {
 		response.Items[index] = cloneOutputItem(r.response.Items[index])
 	}
 	response.Warnings = append([]string(nil), r.response.Warnings...)
+	response.Citations = make([]Citation, len(r.response.Citations))
+	for index := range r.response.Citations {
+		response.Citations[index] = cloneCitation(r.response.Citations[index])
+	}
 	response.Usage = cloneUsageObservation(r.response.Usage)
 	return response
 }
@@ -351,6 +380,20 @@ func cloneOutputItem(source OutputItem) OutputItem {
 		toolCall := *source.ToolCall
 		cloned.ToolCall = &toolCall
 	}
+	if source.SearchCall != nil {
+		searchCall := *source.SearchCall
+		searchCall.Sources = append([]SearchSource(nil), source.SearchCall.Sources...)
+		cloned.SearchCall = &searchCall
+	}
+	return cloned
+}
+
+// cloneCitation returns an independent provider citation.
+// cloneCitation 返回独立的供应商引用。
+func cloneCitation(source Citation) Citation {
+	cloned := source
+	cloned.Location.Start = cloneIntPointer(source.Location.Start)
+	cloned.Location.End = cloneIntPointer(source.Location.End)
 	return cloned
 }
 
@@ -367,6 +410,27 @@ func cloneUsageObservation(source *UsageObservation) *UsageObservation {
 	cloned.CacheReadTokens = cloneInt64Pointer(source.CacheReadTokens)
 	cloned.CacheCreationTokens = cloneInt64Pointer(source.CacheCreationTokens)
 	cloned.TotalTokens = cloneInt64Pointer(source.TotalTokens)
+	cloned.ServiceUnits = cloneFloat64Pointer(source.ServiceUnits)
+	return &cloned
+}
+
+// cloneIntPointer returns an independent optional integer.
+// cloneIntPointer 返回独立的可选整数。
+func cloneIntPointer(source *int) *int {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	return &cloned
+}
+
+// cloneFloat64Pointer returns an independent optional floating-point value.
+// cloneFloat64Pointer 返回独立的可选浮点数。
+func cloneFloat64Pointer(source *float64) *float64 {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
 	return &cloned
 }
 

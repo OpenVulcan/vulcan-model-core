@@ -20,6 +20,7 @@ import (
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
+	provideropenrouter "github.com/OpenVulcan/vulcan-model-core/internal/provider/openrouter"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -63,6 +64,35 @@ func TestOnboardSystemProviderCommitsClosedKimiConfiguration(t *testing.T) {
 	}
 	if secrets.Count() != 1 {
 		t.Fatalf("secret count = %d, want compensated count 1", secrets.Count())
+	}
+}
+
+// TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel verifies that native actions receive independently resolvable endpoint bindings.
+// TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel 验证原生动作分别获得可解析的 Endpoint 绑定。
+func TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newKimiOnboardingService(t)
+	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{
+		DefinitionID: bootstrap.OpenRouterAPIDefinitionID, Handle: "openrouter-native", DisplayName: "OpenRouter Native",
+		AuthMethodID: "api_key", CredentialLabel: "Primary", Secret: []byte("openrouter-secret"),
+	})
+	if errOnboard != nil {
+		t.Fatalf("OnboardSystemProvider() error = %v", errOnboard)
+	}
+	if len(onboarding.Endpoints) != 6 || len(onboarding.Bindings) != 6 {
+		t.Fatalf("OpenRouter endpoint/binding counts = %d/%d, want 6/6", len(onboarding.Endpoints), len(onboarding.Bindings))
+	}
+	channels := make(map[string]struct{}, len(onboarding.Endpoints))
+	for _, endpoint := range onboarding.Endpoints {
+		if endpoint.BaseURL != "https://openrouter.ai/api" {
+			t.Fatalf("OpenRouter endpoint base URL = %q", endpoint.BaseURL)
+		}
+		channels[endpoint.ChannelID] = struct{}{}
+	}
+	for _, channelID := range []string{"openrouter.embeddings.v1", provideropenrouter.ImageGenerateProtocolProfileID, "openrouter.rerank.v1", provideropenrouter.SpeechSynthesizeProtocolProfileID, provideropenrouter.SpeechTranscribeProtocolProfileID} {
+		if _, exists := channels[channelID]; !exists {
+			t.Fatalf("OpenRouter channel %q is missing from %#v", channelID, channels)
+		}
 	}
 }
 

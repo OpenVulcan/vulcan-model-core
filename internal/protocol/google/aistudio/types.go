@@ -37,6 +37,9 @@ var (
 // ProfileCapabilities contains verified channel and execution-profile behavior.
 // ProfileCapabilities 包含经过验证的 Channel 与执行 Profile 行为。
 type ProfileCapabilities struct {
+	// MediaInputKinds lists exact media families accepted by this GenerateContent wire implementation.
+	// MediaInputKinds 列出此 GenerateContent 线路实现接受的精确媒体类别。
+	MediaInputKinds []vcp.MediaKind
 	// NativeSystemInstruction reports direct Gemini systemInstruction support.
 	// NativeSystemInstruction 表示直接支持 Gemini systemInstruction。
 	NativeSystemInstruction bool
@@ -112,12 +115,12 @@ type Part struct {
 	// FunctionResponse contains one caller-returned function result.
 	// FunctionResponse 包含一次调用方返回的函数结果。
 	FunctionResponse *FunctionResponse `json:"functionResponse,omitempty"`
-	// InlineData detects a media payload that this text-and-function first-phase profile cannot represent.
-	// InlineData 检测到本第一阶段文本和函数 Profile 无法表示的媒体载荷。
-	InlineData *UnsupportedPartPayload `json:"inlineData,omitempty"`
-	// FileData detects a file reference that this text-and-function first-phase profile cannot represent.
-	// FileData 检测到本第一阶段文本和函数 Profile 无法表示的文件引用。
-	FileData *UnsupportedPartPayload `json:"fileData,omitempty"`
+	// InlineData carries bounded media bytes selected by the immutable input plan.
+	// InlineData 承载不可变输入方案选定的受限媒体字节。
+	InlineData *InlineData `json:"inlineData,omitempty"`
+	// FileData carries one Router-managed provider file or object URI.
+	// FileData 承载一个 Router 管理的供应商文件或对象 URI。
+	FileData *FileData `json:"fileData,omitempty"`
 	// ExecutableCode detects a code-execution payload that this first-phase profile cannot represent.
 	// ExecutableCode 检测到本第一阶段 Profile 无法表示的代码执行载荷。
 	ExecutableCode *UnsupportedPartPayload `json:"executableCode,omitempty"`
@@ -138,6 +141,28 @@ type Part struct {
 // UnsupportedPartPayload detects one known unsupported Gemini part variant without retaining potentially sensitive media or execution data.
 // UnsupportedPartPayload 在不保留潜在敏感媒体或执行数据的前提下检测一种已知不支持的 Gemini Part 变体。
 type UnsupportedPartPayload struct{}
+
+// InlineData contains one exact MIME type and standard Base64 payload.
+// InlineData 包含一个精确 MIME 类型和标准 Base64 载荷。
+type InlineData struct {
+	// MIMEType is the authoritative Router-probed media type.
+	// MIMEType 是 Router 探测出的权威媒体类型。
+	MIMEType string `json:"mimeType"`
+	// Data is standard Base64 without a data-URL prefix.
+	// Data 是不含 Data URL 前缀的标准 Base64。
+	Data string `json:"data"`
+}
+
+// FileData contains one provider-authorized URI.
+// FileData 包含一个供应商授权 URI。
+type FileData struct {
+	// MIMEType is the authoritative media type.
+	// MIMEType 是权威媒体类型。
+	MIMEType string `json:"mimeType"`
+	// FileURI is the exact provider file or object URI.
+	// FileURI 是精确供应商文件或对象 URI。
+	FileURI string `json:"fileUri"`
+}
 
 // UnmarshalJSON decodes the closed part fields and marks any future provider field for explicit rejection before VCP reduction.
 // UnmarshalJSON 解码封闭 Part 字段，并在 VCP 归并前标记任何未来 Provider 字段以显式拒绝。

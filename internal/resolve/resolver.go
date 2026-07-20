@@ -10,6 +10,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // Resolver combines persisted configuration with one atomic provider catalog snapshot.
@@ -149,8 +150,14 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 	if err := ctx.Err(); err != nil {
 		return Target{}, Diagnostics{}, err
 	}
-	if request.ProviderInstanceID == "" || request.ProviderModelID == "" || request.RequiredContextTokens < 0 || request.Now.IsZero() {
-		return Target{}, Diagnostics{}, errors.New("provider instance, model, non-negative context requirement, and evaluation time are required")
+	if request.ProviderInstanceID == "" || request.RequiredContextTokens < 0 || request.Now.IsZero() {
+		return Target{}, Diagnostics{}, errors.New("provider instance, non-negative context requirement, and evaluation time are required")
+	}
+	if (request.ProviderModelID == "") == (request.ProviderServiceID == "") {
+		return Target{}, Diagnostics{}, errors.New("exactly one provider model or service is required")
+	}
+	if request.ProviderServiceID != "" {
+		return r.resolveService(ctx, request)
 	}
 	instance, errInstance := r.configurations.GetInstance(ctx, request.ProviderInstanceID)
 	if errInstance != nil {
@@ -173,6 +180,20 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 	profile, offering, errProfile := selectProfile(snapshot, model.ID, request.ExecutionProfileID)
 	if errProfile != nil {
 		return Target{}, Diagnostics{}, errProfile
+	}
+	if profile.Operation != "" && request.Operation != profile.Operation {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: model operation does not match execution profile", ErrNoEligibleTarget)
+	}
+	if profile.Operation == "" && request.Operation != "" {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: legacy execution profile does not declare operation", ErrNoEligibleTarget)
+	}
+	actionAuthMethodIDs := []string(nil)
+	if profile.ActionBindingID != "" {
+		action, errAction := r.resolveDefinitionAction(ctx, instance.DefinitionID, profile.ActionBindingID, profile.Operation, offering.ChannelID)
+		if errAction != nil {
+			return Target{}, Diagnostics{}, errAction
+		}
+		actionAuthMethodIDs = action.AuthMethodIDs
 	}
 	if !capabilitiesSatisfy(profile.Capabilities, request.RequiredCapabilities) {
 		return Target{}, Diagnostics{}, fmt.Errorf("%w: execution profile lacks required capabilities", ErrNoEligibleTarget)
@@ -207,7 +228,7 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		}
 		endpoint, endpointExists := endpointByID[binding.EndpointID]
 		credential, credentialExists := credentialByID[binding.CredentialID]
-		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID {
+		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID || (len(actionAuthMethodIDs) > 0 && !containsString(actionAuthMethodIDs, credential.AuthMethodID)) {
 			continue
 		}
 		diagnostics.BoundCandidates++
@@ -253,18 +274,179 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		ProviderInstanceID:     instance.ID,
 		ChannelID:              offering.ChannelID,
 		EndpointID:             selected.endpoint.ID,
+		EndpointRegion:         selected.endpoint.Region,
 		CredentialID:           selected.credential.ID,
+		SubjectKind:            ExecutionSubjectModel,
 		ProviderModelID:        model.ID,
 		OfferingID:             offering.ID,
+		Operation:              profile.Operation,
+		ActionBindingID:        profile.ActionBindingID,
 		ExecutionProfileID:     profile.ID,
 		UpstreamModelID:        offering.UpstreamModelID,
 		EffectiveContextWindow: selected.effectiveContext,
 		TokenLimits:            profile.Capabilities.Tokens,
 		TokenRecommendations:   profile.Capabilities.Recommendations,
+		ModelCapabilities:      catalog.CloneModelCapabilities(profile.Capabilities),
 		CapabilityRevision:     profile.CapabilityRevision,
 		ProviderConfigRevision: instance.Revision,
 		CatalogRevision:        snapshot.Revision,
 	}, diagnostics, nil
+}
+
+// resolveService selects one exact same-provider service target without fallback.
+// resolveService 选择一个不含降级的精确同供应商服务目标。
+func (r *Resolver) resolveService(ctx context.Context, request Request) (Target, Diagnostics, error) {
+	if request.ServiceOfferingID == "" || request.ExecutionProfileID == "" || request.Operation == "" {
+		return Target{}, Diagnostics{}, errors.New("service offering, execution profile, and operation are required")
+	}
+	if request.RequiredContextTokens != 0 || len(request.RequiredCapabilities) != 0 {
+		return Target{}, Diagnostics{}, errors.New("service resolution does not accept model context or string capability requirements")
+	}
+	instance, errInstance := r.configurations.GetInstance(ctx, request.ProviderInstanceID)
+	if errInstance != nil {
+		return Target{}, Diagnostics{}, errInstance
+	}
+	if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: %s", ErrInstanceNotExecutable, instance.Status)
+	}
+	if serviceDisabled(instance.DisabledServiceIDs, request.ProviderServiceID) {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: %s", ErrServiceDisabled, request.ProviderServiceID)
+	}
+	snapshot, errCatalog := r.catalogs.Get(ctx, request.ProviderInstanceID)
+	if errCatalog != nil {
+		return Target{}, Diagnostics{}, errCatalog
+	}
+	service, exists := findService(snapshot.Services, request.ProviderServiceID)
+	if !exists {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: %s", ErrServiceNotFound, request.ProviderServiceID)
+	}
+	if service.Operation != request.Operation {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: service operation mismatch", ErrNoEligibleTarget)
+	}
+	profile, offering, errProfile := selectServiceProfile(snapshot, service.ID, request.ServiceOfferingID, request.ExecutionProfileID)
+	if errProfile != nil {
+		return Target{}, Diagnostics{}, errProfile
+	}
+	action, errAction := r.resolveDefinitionAction(ctx, instance.DefinitionID, profile.ActionBindingID, profile.Operation, offering.ChannelID)
+	if errAction != nil {
+		return Target{}, Diagnostics{}, errAction
+	}
+	endpoints, errEndpoints := r.configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return Target{}, Diagnostics{}, errEndpoints
+	}
+	credentials, errCredentials := r.configurations.ListCredentials(ctx, instance.ID)
+	if errCredentials != nil {
+		return Target{}, Diagnostics{}, errCredentials
+	}
+	bindings, errBindings := r.configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return Target{}, Diagnostics{}, errBindings
+	}
+	diagnostics := Diagnostics{ConfiguredCredentials: len(credentials)}
+	endpointByID := make(map[string]providerconfig.Endpoint, len(endpoints))
+	for _, endpoint := range endpoints {
+		endpointByID[endpoint.ID] = endpoint
+	}
+	credentialByID := make(map[string]providerconfig.Credential, len(credentials))
+	for _, credential := range credentials {
+		credentialByID[credential.ID] = credential
+	}
+	entitlements := serviceEntitlementsByCredential(snapshot.ServiceEntitlements, service.ID)
+	blockingKinds := make(map[catalog.AllowanceKind]struct{})
+	candidates := make([]candidate, 0, len(bindings))
+	for _, binding := range bindings {
+		if !binding.Enabled || binding.ChannelID != offering.ChannelID || !allowsService(binding.AllowedServiceIDs, service.ID) {
+			continue
+		}
+		endpoint, endpointExists := endpointByID[binding.EndpointID]
+		credential, credentialExists := credentialByID[binding.CredentialID]
+		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID || (len(action.AuthMethodIDs) > 0 && !containsString(action.AuthMethodIDs, credential.AuthMethodID)) {
+			continue
+		}
+		diagnostics.BoundCandidates++
+		if !serviceEntitled(service, profile, entitlements[credential.ID], request.Now) {
+			continue
+		}
+		diagnostics.EntitledCandidates++
+		diagnostics.CapabilityCandidates++
+		blocked, earliestResetAt := blockedByAllowance(snapshot.Allowances, credential, service.ID, profile.ID, nil)
+		if len(blocked) > 0 {
+			for _, allowanceKind := range blocked {
+				blockingKinds[allowanceKind] = struct{}{}
+			}
+			diagnostics.EarliestResetAt = earlierTime(diagnostics.EarliestResetAt, earliestResetAt)
+			continue
+		}
+		diagnostics.AllowanceCandidates++
+		if endpoint.Status != providerconfig.EndpointReady || !credential.RuntimeEligibleAt(request.Now) {
+			continue
+		}
+		diagnostics.ReadyCandidates++
+		candidates = append(candidates, candidate{binding: binding, endpoint: endpoint, credential: credential})
+	}
+	diagnostics.BlockingAllowanceKinds = sortedAllowanceKinds(blockingKinds)
+	if len(candidates) == 0 {
+		return Target{}, diagnostics, ErrNoEligibleTarget
+	}
+	sortCandidates(candidates, profile.PoolPolicy)
+	selected := candidates[0]
+	capabilities := cloneServiceCapabilities(*profile.ServiceCapabilities)
+	return Target{
+		ProviderDefinitionID:   instance.DefinitionID,
+		ProviderInstanceID:     instance.ID,
+		ChannelID:              offering.ChannelID,
+		EndpointID:             selected.endpoint.ID,
+		EndpointRegion:         selected.endpoint.Region,
+		CredentialID:           selected.credential.ID,
+		SubjectKind:            ExecutionSubjectService,
+		ProviderServiceID:      service.ID,
+		ServiceOfferingID:      offering.ID,
+		Operation:              profile.Operation,
+		ActionBindingID:        profile.ActionBindingID,
+		ExecutionProfileID:     profile.ID,
+		UpstreamServiceID:      offering.UpstreamServiceID,
+		ServiceCapabilities:    &capabilities,
+		CapabilityRevision:     profile.CapabilityRevision,
+		ProviderConfigRevision: instance.Revision,
+		CatalogRevision:        snapshot.Revision,
+	}, diagnostics, nil
+}
+
+// resolveDefinitionAction verifies one catalog profile against its exact code-owned provider action.
+// resolveDefinitionAction 校验一个目录 Profile 对应其精确代码拥有供应商动作。
+func (r *Resolver) resolveDefinitionAction(ctx context.Context, definitionID string, actionBindingID string, operation vcp.OperationKind, channelID string) (providerconfig.ProviderActionBinding, error) {
+	definition, errDefinition := r.configurations.GetDefinition(ctx, definitionID)
+	if errDefinition != nil {
+		return providerconfig.ProviderActionBinding{}, errDefinition
+	}
+	var resolved providerconfig.ProviderActionBinding
+	found := false
+	for _, action := range definition.ActionBindings {
+		if action.ID != actionBindingID {
+			continue
+		}
+		if found {
+			return providerconfig.ProviderActionBinding{}, fmt.Errorf("%w: duplicate provider action binding %q", ErrNoEligibleTarget, actionBindingID)
+		}
+		resolved = action
+		found = true
+	}
+	if !found || resolved.Operation != operation || resolved.ProtocolProfileID != channelID {
+		return providerconfig.ProviderActionBinding{}, fmt.Errorf("%w: profile action does not match provider definition and channel", ErrNoEligibleTarget)
+	}
+	return resolved, nil
+}
+
+// containsString reports whether one exact identifier belongs to a closed configured list.
+// containsString 报告一个精确标识是否属于封闭配置列表。
+func containsString(values []string, target string) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // candidate is one fully eligible same-provider access target before deterministic ordering.
@@ -296,6 +478,78 @@ func findModel(models []catalog.ProviderModel, modelID string) (catalog.Provider
 		}
 	}
 	return catalog.ProviderModel{}, false
+}
+
+// findService returns one exact provider service from an atomic snapshot.
+// findService 从原子快照返回一个精确供应商服务。
+func findService(services []catalog.ProviderService, serviceID string) (catalog.ProviderService, bool) {
+	for _, service := range services {
+		if service.ID == serviceID {
+			return service, true
+		}
+	}
+	return catalog.ProviderService{}, false
+}
+
+// selectServiceProfile resolves one exact service offering and profile.
+// selectServiceProfile 解析一个精确服务产品和规格。
+func selectServiceProfile(snapshot catalog.Snapshot, serviceID string, offeringID string, profileID string) (catalog.ExecutionProfile, catalog.ServiceOffering, error) {
+	var selectedOffering catalog.ServiceOffering
+	offeringFound := false
+	for _, offering := range snapshot.ServiceOfferings {
+		if offering.ID == offeringID && offering.ProviderServiceID == serviceID {
+			selectedOffering = offering
+			offeringFound = true
+			break
+		}
+	}
+	if !offeringFound {
+		return catalog.ExecutionProfile{}, catalog.ServiceOffering{}, fmt.Errorf("%w: service offering %q", ErrProfileNotFound, offeringID)
+	}
+	for _, profile := range snapshot.Profiles {
+		if profile.ID == profileID && profile.ServiceOfferingID == selectedOffering.ID {
+			return profile, selectedOffering, nil
+		}
+	}
+	return catalog.ExecutionProfile{}, catalog.ServiceOffering{}, fmt.Errorf("%w: service profile %q", ErrProfileNotFound, profileID)
+}
+
+// serviceEntitlementsByCredential indexes service-specific entitlements by credential identifier.
+// serviceEntitlementsByCredential 按凭据标识索引服务特定授权。
+func serviceEntitlementsByCredential(entitlements []catalog.ServiceEntitlement, serviceID string) map[string]catalog.ServiceEntitlement {
+	indexed := make(map[string]catalog.ServiceEntitlement)
+	for _, entitlement := range entitlements {
+		if entitlement.ProviderServiceID == serviceID {
+			indexed[entitlement.CredentialID] = entitlement
+		}
+	}
+	return indexed
+}
+
+// serviceEntitled reports whether one credential may execute the exact service profile.
+// serviceEntitled 报告一个凭据是否可以执行精确服务规格。
+func serviceEntitled(service catalog.ProviderService, profile catalog.ExecutionProfile, entitlement catalog.ServiceEntitlement, now time.Time) bool {
+	if service.EntitlementMode == catalog.EntitlementAllBoundCredentials {
+		return true
+	}
+	if entitlement.ProviderServiceID != service.ID || entitlement.Availability != catalog.AvailabilityAllowed || now.Before(entitlement.ObservedAt) || now.After(entitlement.ExpiresAt) {
+		return false
+	}
+	return len(entitlement.AllowedProfileIDs) == 0 || contains(entitlement.AllowedProfileIDs, profile.ID)
+}
+
+// cloneServiceCapabilities returns a target-owned service capability snapshot.
+// cloneServiceCapabilities 返回一个目标拥有的服务能力快照。
+func cloneServiceCapabilities(capabilities catalog.ServiceCapabilities) catalog.ServiceCapabilities {
+	if capabilities.WebSearch == nil {
+		return capabilities
+	}
+	search := *capabilities.WebSearch
+	search.OutputModes = append([]vcp.WebSearchOutputMode(nil), search.OutputModes...)
+	search.EvidenceKinds = append([]vcp.SearchEvidenceKind(nil), search.EvidenceKinds...)
+	search.EvidenceRequirements = append([]vcp.SearchEvidenceRequirement(nil), search.EvidenceRequirements...)
+	capabilities.WebSearch = &search
+	return capabilities
 }
 
 // selectProfile resolves an explicit profile or one unambiguous default profile for a model.
@@ -456,10 +710,22 @@ func allowsModel(allowedModelIDs []string, modelID string) bool {
 	return len(allowedModelIDs) == 0 || contains(allowedModelIDs, modelID)
 }
 
+// allowsService reports whether an access binding permits one provider service.
+// allowsService 报告访问绑定是否允许一个供应商服务。
+func allowsService(allowedServiceIDs []string, serviceID string) bool {
+	return len(allowedServiceIDs) == 0 || contains(allowedServiceIDs, serviceID)
+}
+
 // modelDisabled reports whether local management policy explicitly disables one provider model.
 // modelDisabled 返回本地管理策略是否显式禁用一个供应商模型。
 func modelDisabled(disabledModelIDs []string, modelID string) bool {
 	return contains(disabledModelIDs, modelID)
+}
+
+// serviceDisabled reports whether local management policy disables one provider service.
+// serviceDisabled 报告本地管理策略是否禁用一个供应商服务。
+func serviceDisabled(disabledServiceIDs []string, serviceID string) bool {
+	return contains(disabledServiceIDs, serviceID)
 }
 
 // contains reports whether a string slice contains one exact value.

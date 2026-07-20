@@ -169,6 +169,15 @@ func (r *SystemRegistry) Register(definition ProviderDefinition) error {
 	if !profile.RuntimeReady {
 		return invalid("system provider references a protocol profile that is not runtime ready")
 	}
+	for _, binding := range definition.ActionBindings {
+		bindingProfile, bindingExists := r.protocols.Lookup(binding.ProtocolProfileID)
+		if !bindingExists {
+			return invalid("system provider action binding %q references unknown protocol profile %q", binding.ID, binding.ProtocolProfileID)
+		}
+		if !bindingProfile.RuntimeReady {
+			return invalid("system provider action binding %q references a protocol profile that is not runtime ready", binding.ID)
+		}
+	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if definition.GroupID != "" {
@@ -263,6 +272,18 @@ func cloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
 	definition.AuthMethodIDs = append([]string(nil), definition.AuthMethodIDs...)
 	definition.AuthMethods = append([]AuthMethodDefinition(nil), definition.AuthMethods...)
 	definition.EndpointPresets = append([]EndpointPreset(nil), definition.EndpointPresets...)
+	for index := range definition.EndpointPresets {
+		definition.EndpointPresets[index].Parameters = append([]EndpointParameterDefinition(nil), definition.EndpointPresets[index].Parameters...)
+	}
+	definition.ActionBindings = append([]ProviderActionBinding(nil), definition.ActionBindings...)
+	for index := range definition.ActionBindings {
+		definition.ActionBindings[index].AuthMethodIDs = append([]string(nil), definition.ActionBindings[index].AuthMethodIDs...)
+		definition.ActionBindings[index].ResourceMaterialization = append([]ResourceMaterializationMode(nil), definition.ActionBindings[index].ResourceMaterialization...)
+		if definition.ActionBindings[index].Search != nil {
+			search := *definition.ActionBindings[index].Search
+			definition.ActionBindings[index].Search = &search
+		}
+	}
 	return definition
 }
 

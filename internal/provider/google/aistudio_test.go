@@ -231,5 +231,5 @@ func newAIStudioDriverExecution(t *testing.T, baseURL string, stream bool) (*AIS
 // aiStudioDriverCapabilities returns the verified profile facts used by isolated local driver tests.
 // aiStudioDriverCapabilities 返回隔离本地 Driver 测试使用的已验证 Profile 事实。
 func aiStudioDriverCapabilities() aistudio.ProfileCapabilities {
-	return aistudio.ProfileCapabilities{NativeSystemInstruction: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, NativeReasoning: true}
+	return aistudio.ProfileCapabilities{MediaInputKinds: []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaVideo}, NativeSystemInstruction: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, NativeReasoning: true}
 }

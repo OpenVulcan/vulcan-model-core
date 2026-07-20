@@ -56,6 +56,7 @@ func NewVertexDriver(definitionID string, client *transport.Client, capabilities
 	}
 	copiedCapabilities := capabilities
 	copiedCapabilities.ThinkingLevels = append([]string(nil), capabilities.ThinkingLevels...)
+	copiedCapabilities.MediaInputKinds = append([]vcp.MediaKind(nil), capabilities.MediaInputKinds...)
 	return &VertexDriver{definitionID: strings.TrimSpace(definitionID), client: client, capabilities: copiedCapabilities, decoder: decoder}, nil
 }
 

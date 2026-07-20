@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 var (
@@ -19,6 +20,12 @@ var (
 	// ErrModelDisabled reports a provider model explicitly disabled by local management policy.
 	// ErrModelDisabled 表示供应商模型被本地管理策略显式禁用。
 	ErrModelDisabled = errors.New("provider model is disabled")
+	// ErrServiceNotFound reports a provider service outside the selected instance catalog.
+	// ErrServiceNotFound 表示所选实例目录中不存在供应商服务。
+	ErrServiceNotFound = errors.New("provider service not found")
+	// ErrServiceDisabled reports a provider service explicitly disabled by local management policy.
+	// ErrServiceDisabled 表示供应商服务被本地管理策略显式禁用。
+	ErrServiceDisabled = errors.New("provider service is disabled")
 	// ErrProfileNotFound reports an absent or ambiguous execution profile.
 	// ErrProfileNotFound 表示执行规格不存在或存在歧义。
 	ErrProfileNotFound = errors.New("execution profile not found")
@@ -36,6 +43,15 @@ type Request struct {
 	// ProviderModelID identifies one model inside the selected provider instance.
 	// ProviderModelID 标识所选供应商实例内的一个模型。
 	ProviderModelID string
+	// ProviderServiceID identifies one service inside the selected provider instance.
+	// ProviderServiceID 标识所选供应商实例内的一个服务。
+	ProviderServiceID string
+	// ServiceOfferingID selects one exact service implementation.
+	// ServiceOfferingID 选择一个精确服务实现。
+	ServiceOfferingID string
+	// Operation identifies the exact requested VCP operation.
+	// Operation 标识精确请求的 VCP 操作。
+	Operation vcp.OperationKind
 	// ExecutionProfileID optionally selects one client-visible capability shape.
 	// ExecutionProfileID 可选地选择一个客户端可见能力形态。
 	ExecutionProfileID string
@@ -94,21 +110,45 @@ type Target struct {
 	// EndpointID identifies the selected endpoint.
 	// EndpointID 标识所选端点。
 	EndpointID string
+	// EndpointRegion is the provider-defined region that constrains asset validity.
+	// EndpointRegion 是约束资产有效性的供应商定义区域。
+	EndpointRegion string
 	// CredentialID identifies the selected credential.
 	// CredentialID 标识所选凭据。
 	CredentialID string
+	// SubjectKind identifies whether this target owns a model or a special service.
+	// SubjectKind 标识此 Target 拥有模型还是特殊服务。
+	SubjectKind ExecutionSubjectKind
 	// ProviderModelID identifies the selected logical model.
 	// ProviderModelID 标识所选逻辑模型。
 	ProviderModelID string
+	// ProviderServiceID identifies the selected logical service.
+	// ProviderServiceID 标识所选逻辑服务。
+	ProviderServiceID string
 	// OfferingID identifies the selected channel-specific model offering.
 	// OfferingID 标识所选通道特定模型产品。
 	OfferingID string
+	// ServiceOfferingID identifies the selected channel-specific service offering.
+	// ServiceOfferingID 标识所选通道特定服务产品。
+	ServiceOfferingID string
+	// Operation identifies the exact VCP operation.
+	// Operation 标识精确 VCP 操作。
+	Operation vcp.OperationKind
+	// ActionBindingID identifies the exact code-owned provider action.
+	// ActionBindingID 标识精确代码拥有供应商动作。
+	ActionBindingID string
 	// ExecutionProfileID identifies the selected client-visible capability shape.
 	// ExecutionProfileID 标识所选客户端可见能力形态。
 	ExecutionProfileID string
 	// UpstreamModelID is the exact model identifier sent by a future protocol adapter.
 	// UpstreamModelID 是未来协议 Adapter 发送的精确模型标识。
 	UpstreamModelID string
+	// UpstreamServiceID is the exact safe service, engine, or model handle sent by the adapter.
+	// UpstreamServiceID 是 Adapter 发送的精确安全服务、引擎或模型句柄。
+	UpstreamServiceID string
+	// ServiceCapabilities contains the selected special-service capability ceiling.
+	// ServiceCapabilities 包含所选特殊服务能力上限。
+	ServiceCapabilities *catalog.ServiceCapabilities
 	// EffectiveContextWindow is the smallest authoritative profile and account ceiling.
 	// EffectiveContextWindow 是规格和账号权威上限中的最小值。
 	EffectiveContextWindow catalog.OptionalTokenLimit
@@ -118,6 +158,9 @@ type Target struct {
 	// TokenRecommendations contains the selected profile's provider-evidenced defaults.
 	// TokenRecommendations 包含所选规格由供应商证据支持的默认值。
 	TokenRecommendations catalog.TokenRecommendations
+	// ModelCapabilities contains the exact selected execution profile contract.
+	// ModelCapabilities 包含精确选定执行规格契约。
+	ModelCapabilities catalog.ModelCapabilities
 	// CapabilityRevision records the capability evidence used for resolution.
 	// CapabilityRevision 记录解析使用的能力证据修订号。
 	CapabilityRevision uint64
@@ -128,3 +171,16 @@ type Target struct {
 	// CatalogRevision 记录原子目录修订号。
 	CatalogRevision uint64
 }
+
+// ExecutionSubjectKind identifies the sole catalog subject selected for execution.
+// ExecutionSubjectKind 标识为执行选定的唯一目录主体。
+type ExecutionSubjectKind string
+
+const (
+	// ExecutionSubjectModel selects a provider model and model offering.
+	// ExecutionSubjectModel 选择供应商模型及模型产品。
+	ExecutionSubjectModel ExecutionSubjectKind = "model"
+	// ExecutionSubjectService selects a provider service and service offering.
+	// ExecutionSubjectService 选择供应商服务及服务产品。
+	ExecutionSubjectService ExecutionSubjectKind = "service"
+)

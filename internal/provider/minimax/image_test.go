@@ -1,0 +1,75 @@
+package minimax
+
+import (
+	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"testing"
+	"time"
+
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
+	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
+	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
+)
+
+// TestMiniMaxImageGenerationPreservesExactReferenceAndBase64Contract verifies official request and response fields.
+// TestMiniMaxImageGenerationPreservesExactReferenceAndBase64Contract 验证官方请求与响应字段。
+func TestMiniMaxImageGenerationPreservesExactReferenceAndBase64Contract(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != "/v1/image_generation" || request.Header.Get("Authorization") != "Bearer test-secret" {
+			t.Errorf("request path=%q authorization=%q", request.URL.Path, request.Header.Get("Authorization"))
+		}
+		var upstream imageRequest
+		if errDecode := json.NewDecoder(request.Body).Decode(&upstream); errDecode != nil {
+			t.Errorf("decode request: %v", errDecode)
+		}
+		if upstream.Model != "image-01" || upstream.Prompt != "A character in a library" || upstream.AspectRatio != "16:9" || upstream.Count != 2 || upstream.ResponseFormat != "base64" || len(upstream.SubjectReference) != 1 || upstream.SubjectReference[0].Type != "character" || upstream.SubjectReference[0].ImageFile != "https://inputs.example/character.jpg" {
+			t.Errorf("upstream = %#v", upstream)
+		}
+		_, _ = io.WriteString(writer, `{"id":"minimax-trace","data":{"image_base64":["aW1hZ2U="]},"base_resp":{"status_code":0,"status_msg":"success"}}`)
+	}))
+	defer server.Close()
+
+	driver, execution := newMiniMaxImageExecution(t, server.URL)
+	execution.Execution.Payload.ImageGenerate = &vcp.ImageGenerateOperation{Prompt: "A character in a library", Count: 2, AspectRatio: "16:9", OutputFormat: "jpeg", References: []vcp.MediaInput{{ID: "character", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, Resource: vcp.ResourceReference{ResourceID: "resource-character"}}}}
+	execution.MaterializedInputs = []resource.MaterializedInput{{InputID: "character", ResourceID: "resource-character", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, MIMEType: "image/jpeg", Mode: catalog.MaterializationDirectRemoteURL, RemoteURL: "https://inputs.example/character.jpg"}}
+	result, errExecute := driver.Execute(context.Background(), execution)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if result.UpstreamResponseID != "minimax-trace" || len(result.GeneratedResources) != 1 || string(result.GeneratedResources[0].Data) != "image" || result.GeneratedResources[0].MIMEType != "image/jpeg" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// newMiniMaxImageExecution builds one exact MiniMax generation fixture.
+// newMiniMaxImageExecution 构建一个精确 MiniMax 生成夹具。
+func newMiniMaxImageExecution(t *testing.T, baseURL string) (*ImageActionDriver, provider.ExecutionRequest) {
+	t.Helper()
+	secretStore := secret.NewMemoryStore()
+	secretReference, errPut := secretStore.Put(context.Background(), []byte("test-secret"))
+	if errPut != nil {
+		t.Fatalf("Put() error = %v", errPut)
+	}
+	client, errClient := transport.NewClient(http.DefaultClient, secretStore, transport.RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	driver, errDriver := NewImageActionDriver("definition-minimax", client)
+	if errDriver != nil {
+		t.Fatalf("NewImageActionDriver() error = %v", errDriver)
+	}
+	action := providerconfig.ProviderActionBinding{ID: ImageGenerateActionBindingID, Operation: vcp.OperationImageGenerate, DriverID: "minimax", DriverVersion: "1", ProtocolProfileID: ImageGenerateProtocolProfileID, EndpointProfileID: "minimax_image", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationDirectURL}, Revision: 1}
+	definition := providerconfig.ProviderDefinition{ID: "definition-minimax", Kind: providerconfig.DefinitionKindSystem, ProtocolProfileID: ImageGenerateProtocolProfileID, AuthMethodIDs: []string{"api_key"}, RuntimeReady: true, AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "api_key", Type: providerconfig.AuthMethodAPIKey}}, ActionBindings: []providerconfig.ProviderActionBinding{action}, Revision: 1}
+	target := resolve.Target{SubjectKind: resolve.ExecutionSubjectModel, ProviderDefinitionID: definition.ID, ProviderInstanceID: "instance-minimax", ChannelID: ImageGenerateProtocolProfileID, EndpointID: "endpoint-minimax", CredentialID: "credential-minimax", ProviderModelID: "model-image-01", OfferingID: "offering-image-01", ExecutionProfileID: "profile-image-01", UpstreamModelID: "image-01", Operation: vcp.OperationImageGenerate, ActionBindingID: ImageGenerateActionBindingID, CatalogRevision: 1}
+	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request-image", Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationImageGenerate}
+	execution := provider.ExecutionRequest{Binding: transport.Binding{Target: target, Endpoint: providerconfig.Endpoint{ID: target.EndpointID, ProviderInstanceID: target.ProviderInstanceID, ChannelID: target.ChannelID, BaseURL: baseURL, Status: providerconfig.EndpointReady}, Credential: providerconfig.Credential{ID: target.CredentialID, ProviderInstanceID: target.ProviderInstanceID, AuthMethodID: "api_key", SecretRef: secretReference, Status: providerconfig.CredentialActive}}, Definition: definition, Execution: &request, LineageID: "lineage-image", Now: time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)}
+	return driver, execution
+}

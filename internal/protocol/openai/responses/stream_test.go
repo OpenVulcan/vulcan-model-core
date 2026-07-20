@@ -125,24 +125,51 @@ func TestStreamDecoderDeduplicatesTerminalToolLifecycle(t *testing.T) {
 	}
 }
 
-// TestStreamDecoderRecordsAnnotationWarningsInReport verifies streaming annotation omissions remain auditable after the warning event.
-// TestStreamDecoderRecordsAnnotationWarningsInReport 验证流式注释省略在警告事件之后仍可在审计报告中追踪。
-func TestStreamDecoderRecordsAnnotationWarningsInReport(t *testing.T) {
+// TestStreamDecoderPreservesStreamingCitation verifies annotation-added events become typed citations.
+// TestStreamDecoderPreservesStreamingCitation 验证 annotation-added 事件成为类型化引用。
+func TestStreamDecoderPreservesStreamingCitation(t *testing.T) {
 	decoder, errNew := NewStreamDecoder("response-vcp-annotation-warning", responsesNow())
 	if errNew != nil {
 		t.Fatalf("NewStreamDecoder() error = %v", errNew)
 	}
-	if _, errPush := decoder.Push(StreamEvent{Type: "response.output_text.annotation.added"}); errPush != nil {
+	contentIndex := 0
+	annotationIndex := 0
+	start := 0
+	end := 4
+	annotation := OutputAnnotation{Type: "url_citation", URL: "https://example.com/source", StartIndex: &start, EndIndex: &end}
+	if _, errPush := decoder.Push(StreamEvent{Type: "response.output_text.annotation.added", ItemID: "message-citation", ContentIndex: &contentIndex, AnnotationIndex: &annotationIndex, Annotation: &annotation}); errPush != nil {
 		t.Fatalf("Push(annotation) error = %v", errPush)
 	}
-	reportFound := false
-	for _, code := range decoder.Report().ConversionSummary {
-		if code == "openai_responses.output_annotation_omitted" {
-			reportFound = true
-		}
+	if len(decoder.Response().Citations) != 1 || decoder.Response().Citations[0].URL != "https://example.com/source" || slices.Contains(decoder.Report().ConversionSummary, "openai_responses.output_annotation_omitted") {
+		t.Fatalf("response = %#v report = %#v", decoder.Response(), decoder.Report())
 	}
-	if !reportFound {
-		t.Fatalf("report = %#v", decoder.Report())
+}
+
+// TestStreamDecoderPreservesNativeWebSearchCall verifies lifecycle frames and completed action yield one typed item.
+// TestStreamDecoderPreservesNativeWebSearchCall 验证生命周期帧与完成动作生成一个类型化项目。
+func TestStreamDecoderPreservesNativeWebSearchCall(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("response-vcp-search-stream", responsesNow())
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	outputIndex := 0
+	added := OutputItem{ID: "search-call-stream", Type: "web_search_call", Status: "in_progress"}
+	if _, errPush := decoder.Push(StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &added}); errPush != nil {
+		t.Fatalf("Push(added) error = %v", errPush)
+	}
+	if _, errPush := decoder.Push(StreamEvent{Type: "response.web_search_call.searching", OutputIndex: &outputIndex, ItemID: added.ID}); errPush != nil {
+		t.Fatalf("Push(searching) error = %v", errPush)
+	}
+	done := OutputItem{ID: added.ID, Type: "web_search_call", Status: "completed", Action: &WebSearchAction{Type: "search", Query: "Vulcan", Sources: []WebSearchSource{{Type: "url", URL: "https://example.com/source"}}}}
+	if _, errPush := decoder.Push(StreamEvent{Type: "response.output_item.done", OutputIndex: &outputIndex, Item: &done}); errPush != nil {
+		t.Fatalf("Push(done) error = %v", errPush)
+	}
+	if _, errPush := decoder.Push(StreamEvent{Type: "response.completed", Response: &Response{ID: "upstream-search-stream", Status: "completed"}}); errPush != nil {
+		t.Fatalf("Push(completed) error = %v", errPush)
+	}
+	response := decoder.Response()
+	if len(response.Items) != 1 || response.Items[0].SearchCall == nil || response.Items[0].SearchCall.Query != "Vulcan" || response.Items[0].Status != vcp.OutputItemCompleted || slices.Contains(decoder.Report().ConversionSummary, "openai_responses.native_web_search_event_not_exposed") {
+		t.Fatalf("response = %#v report = %#v", response, decoder.Report())
 	}
 }
 
@@ -186,7 +213,9 @@ func TestStreamDecoderAuditsPartLogprobsAndAnnotations(t *testing.T) {
 	if _, errAdded := decoder.Push(StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "message-metadata", Type: "message"}}); errAdded != nil {
 		t.Fatalf("Push(output item added) error = %v", errAdded)
 	}
-	part := StreamPart{Type: "output_text", Annotations: []OutputAnnotation{{Type: "url_citation"}}, Logprobs: &UnsupportedResponsePayload{}}
+	start := 0
+	end := 4
+	part := StreamPart{Type: "output_text", Annotations: []OutputAnnotation{{Type: "url_citation", URL: "https://example.com/source", StartIndex: &start, EndIndex: &end}}, Logprobs: &UnsupportedResponsePayload{}}
 	contentIndex := 0
 	if _, errPart := decoder.Push(StreamEvent{Type: "response.content_part.added", ItemID: "message-metadata", OutputIndex: &outputIndex, ContentIndex: &contentIndex, Part: &part}); errPart != nil {
 		t.Fatalf("Push(content part added) error = %v", errPart)
@@ -194,7 +223,10 @@ func TestStreamDecoderAuditsPartLogprobsAndAnnotations(t *testing.T) {
 	if _, errCompleted := decoder.Push(StreamEvent{Type: "response.completed", Response: &Response{ID: "resp-part-metadata", Status: "completed"}}); errCompleted != nil {
 		t.Fatalf("Push(completed) error = %v", errCompleted)
 	}
-	for _, summaryCode := range []string{"openai_responses.output_annotation_omitted", "openai_responses.output_logprobs_omitted"} {
+	if len(decoder.Response().Citations) != 1 {
+		t.Fatalf("response = %#v", decoder.Response())
+	}
+	for _, summaryCode := range []string{"openai_responses.output_logprobs_omitted"} {
 		if !slices.Contains(decoder.Report().ConversionSummary, summaryCode) {
 			t.Fatalf("report = %#v, missing summary %q", decoder.Report(), summaryCode)
 		}

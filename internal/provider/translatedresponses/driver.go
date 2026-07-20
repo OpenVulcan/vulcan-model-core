@@ -12,6 +12,7 @@ import (
 	"net/http"
 	"strings"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	protocolbridge "github.com/OpenVulcan/vulcan-model-core/internal/protocol/translatedresponses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
@@ -131,6 +132,8 @@ func NewDriver(configuration Configuration) (*Driver, error) {
 	default:
 		return nil, fmt.Errorf("%w: unsupported stream input mode %q", ErrInvalidDriver, configuration.StreamInputMode)
 	}
+	configuration.Capabilities.MediaInputKinds = append([]vcp.MediaKind(nil), configuration.Capabilities.MediaInputKinds...)
+	configuration.Capabilities.MediaMaterializations = append([]catalog.UpstreamMaterializationMode(nil), configuration.Capabilities.MediaMaterializations...)
 	return &Driver{configuration: configuration}, nil
 }
 
@@ -169,7 +172,7 @@ func (d *Driver) Execute(ctx context.Context, execution provider.ExecutionReques
 		previousResponseID = execution.Continuation.UpstreamResponseID
 	}
 	translationStream := execution.Request.Stream || d.configuration.ForceTranslationStream
-	projected, errProject := protocolbridge.ProjectRequest(d.configuration.Profile, execution.Request, execution.Binding.Target, d.configuration.Capabilities, execution.LineageID, previousResponseID, translationStream, execution.Now)
+	projected, errProject := protocolbridge.ProjectRequestWithInputs(d.configuration.Profile, execution.Request, execution.Binding.Target, d.configuration.Capabilities, execution.LineageID, previousResponseID, translationStream, execution.Now, execution.MaterializedInputs)
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}

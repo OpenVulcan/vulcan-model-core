@@ -70,6 +70,9 @@ const (
 	// ContextRefusal represents an assistant or provider refusal.
 	// ContextRefusal 表示助手或供应商拒绝。
 	ContextRefusal ContextKind = "refusal"
+	// ContextSearchCall represents one provider-observed native web-search call.
+	// ContextSearchCall 表示一次供应商观测到的原生网页搜索调用。
+	ContextSearchCall ContextKind = "search_call"
 )
 
 // Authority identifies the original instruction authority independently from the actor.
@@ -224,6 +227,9 @@ type ContentBlock struct {
 	// MediaType records the authoritative MIME type when known.
 	// MediaType 记录已知的权威 MIME 类型。
 	MediaType string `json:"media_type,omitempty"`
+	// MediaRole identifies how a media resource is consumed by the operation.
+	// MediaRole 标识操作如何消费媒体资源。
+	MediaRole MediaInputRole `json:"media_role,omitempty"`
 	// ExtensionID identifies a registered extension schema.
 	// ExtensionID 标识已注册扩展 Schema。
 	ExtensionID string `json:"extension_id,omitempty"`
@@ -970,6 +976,12 @@ type ExecutionReport struct {
 // UsageObservation preserves unknown token values as nil.
 // UsageObservation 将未知 Token 数值保留为 nil。
 type UsageObservation struct {
+	// ServiceUnits is nil when a non-token provider unit is unknown.
+	// ServiceUnits 在非 Token 供应商单位未知时为 nil。
+	ServiceUnits *float64 `json:"service_units,omitempty"`
+	// ServiceUnit identifies the provider-reported non-token unit such as credits.
+	// ServiceUnit 标识供应商报告的非 Token 单位，例如 credits。
+	ServiceUnit string `json:"service_unit,omitempty"`
 	// InputTokens is nil when unknown.
 	// InputTokens 在未知时为 nil。
 	InputTokens *int64 `json:"input_tokens,omitempty"`

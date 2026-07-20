@@ -12,6 +12,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // sqliteTestRegistries returns executable protocol metadata and one system definition.
@@ -66,6 +67,12 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 // sqliteTestCapabilities returns one explicit text model capability fixture.
 // sqliteTestCapabilities 返回一个显式文本模型能力测试夹具。
 func sqliteTestCapabilities() catalog.ModelCapabilities {
+	// minimum and maximum freeze one persisted integer parameter range.
+	// minimum 和 maximum 固定一个持久化整数参数范围。
+	minimum, maximum := int64(1), int64(4096)
+	// dimensionsDefault freezes one evidenced selectable vector dimension.
+	// dimensionsDefault 固定一个具有证据的可选向量维度。
+	dimensionsDefault := int64(1024)
 	return catalog.ModelCapabilities{
 		Tokens:                 catalog.TokenLimits{ContextWindow: catalog.OptionalTokenLimit{Known: true, Value: 262144}, MaxOutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 16384}},
 		Recommendations:        catalog.TokenRecommendations{OutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 8192}},
@@ -76,6 +83,12 @@ func sqliteTestCapabilities() catalog.ModelCapabilities {
 		Reasoning:              catalog.CapabilityNative,
 		InputModalities:        []string{"text"},
 		OutputModalities:       []string{"text"},
+		Embedding: &catalog.EmbeddingCapabilities{
+			InputTasks: []vcp.EmbeddingInputTask{vcp.EmbeddingTaskDocument}, OutputKinds: []vcp.EmbeddingVectorKind{vcp.EmbeddingVectorDense}, Encodings: []vcp.EmbeddingEncoding{vcp.EmbeddingEncodingFloat},
+			Dimensions: []int{1024}, DefaultDimensions: catalog.OptionalLimit{Known: true, Value: dimensionsDefault}, MaxBatchItems: catalog.OptionalLimit{Known: true, Value: 32},
+		},
+		Parameters:   []catalog.ParameterDescriptor{{ID: "dimensions", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimum, Maximum: &maximum}}},
+		UsageMetrics: []catalog.UsageMetricCapability{{Unit: catalog.UsageUnitEmbeddingInputs, Accuracy: catalog.UsageExact}},
 	}
 }
 
@@ -301,6 +314,9 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	}
 	if restoredSnapshot.Allowances[0].Remaining == nil || *restoredSnapshot.Allowances[0].Remaining != "125.5" {
 		t.Fatalf("restored exact remaining amount = %#v", restoredSnapshot.Allowances[0].Remaining)
+	}
+	if len(restoredSnapshot.Profiles) != 1 || restoredSnapshot.Profiles[0].Capabilities.Embedding == nil || restoredSnapshot.Profiles[0].Capabilities.Embedding.DefaultDimensions.Value != 1024 || len(restoredSnapshot.Profiles[0].Capabilities.Parameters) != 1 || restoredSnapshot.Profiles[0].Capabilities.Parameters[0].IntegerRange == nil || *restoredSnapshot.Profiles[0].Capabilities.Parameters[0].IntegerRange.Maximum != 4096 || len(restoredSnapshot.Profiles[0].Capabilities.UsageMetrics) != 1 {
+		t.Fatalf("restored extended capabilities = %#v", restoredSnapshot.Profiles)
 	}
 	if len(restoredSnapshot.Offerings) != 1 || !restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Known || restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Value != 8192 {
 		t.Fatalf("restored token recommendations = %#v", restoredSnapshot.Offerings)

@@ -58,7 +58,7 @@ func TestDecodeResponseReportsOmittedOutputAnnotations(t *testing.T) {
 		ID: "upstream-xai-annotation", Status: "completed",
 		Output: []OutputItem{{
 			ID: "message-xai-annotation", Type: "message",
-			Content: []OutputContent{{Type: "output_text", Text: "Answer", Annotations: []openairesponses.OutputAnnotation{{Type: "url_citation"}}}},
+			Content: []OutputContent{{Type: "output_text", Text: "Answer", Annotations: []openairesponses.OutputAnnotation{{Type: "file_citation"}}}},
 		}},
 	}
 	_, events, report, errDecode := DecodeResponse("response-xai-annotation", upstream, xaiNow(), StreamOptions{})

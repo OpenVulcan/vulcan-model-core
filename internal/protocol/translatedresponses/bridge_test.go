@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/antigravity"
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/interactions"
@@ -12,9 +13,29 @@ import (
 	openairesponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	translatedresponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/translatedresponses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 	"github.com/tidwall/gjson"
 )
+
+// TestProjectRequestWithInputsPreservesClaudeImageAndPDF verifies copied translation retains both media types instead of dropping unknown blocks.
+// TestProjectRequestWithInputsPreservesClaudeImageAndPDF 验证复制转换会保留两种媒体类型而不是丢弃未知内容块。
+func TestProjectRequestWithInputsPreservesClaudeImageAndPDF(t *testing.T) {
+	request := bridgeRequest(false)
+	request.Context[0].Content = []vcp.ContentBlock{{Type: vcp.ContentText, Text: "Analyze"}, {Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleUnderstanding}, {Type: vcp.ContentFile, ResourceRef: "pdf-resource", MediaRole: vcp.MediaRoleUnderstanding}}
+	capabilities := bridgeCapabilities()
+	capabilities.MediaInputKinds = []vcp.MediaKind{vcp.MediaImage, vcp.MediaFile}
+	capabilities.MediaMaterializations = []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64}
+	inputs := []resource.MaterializedInput{{InputID: "image", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="}, {InputID: "pdf", ResourceID: "pdf-resource", Kind: vcp.MediaFile, Role: vcp.MediaRoleUnderstanding, MIMEType: "application/pdf", Mode: catalog.MaterializationInlineBase64, InlineBase64: "cGRm"}}
+
+	projected, errProject := translatedresponses.ProjectRequestWithInputs(messages.Profile(), request, bridgeTarget(messages.ProfileID), capabilities, "lineage-media", "", true, bridgeNow(), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	if gjson.GetBytes(projected.UpstreamJSON, "messages.0.content.1.type").String() != "image" || gjson.GetBytes(projected.UpstreamJSON, "messages.0.content.1.source.media_type").String() != "image/png" || gjson.GetBytes(projected.UpstreamJSON, "messages.0.content.2.type").String() != "document" || gjson.GetBytes(projected.UpstreamJSON, "messages.0.content.2.source.media_type").String() != "application/pdf" {
+		t.Fatalf("translated request = %s", projected.UpstreamJSON)
+	}
+}
 
 // TestProjectRequestUsesCopiedProtocolTransformers verifies every missing profile crosses the copied request implementation.
 // TestProjectRequestUsesCopiedProtocolTransformers 验证每个缺失 Profile 都经过复制的请求实现。

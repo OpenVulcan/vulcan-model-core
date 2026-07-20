@@ -2,7 +2,11 @@
 // Package catalog 定义供应商作用域的模型、执行规格、授权和可消费资源。
 package catalog
 
-import "time"
+import (
+	"time"
+
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
+)
 
 // CapabilityLevel describes how one model capability is supported.
 // CapabilityLevel 描述一项模型能力的支持方式。
@@ -184,6 +188,30 @@ type ModelCapabilities struct {
 	// OutputModalities lists normalized produced output modality identifiers.
 	// OutputModalities 列出规范化的输出模态标识。
 	OutputModalities []string
+	// MediaInputs contains typed per-media input contracts.
+	// MediaInputs 包含按媒体类型定义的类型化输入合同。
+	MediaInputs []MediaInputCapability
+	// Delivery declares real synchronous, streaming, asynchronous, and partial delivery.
+	// Delivery 声明真实同步、流式、异步和部分结果交付。
+	Delivery DeliveryCapabilities
+	// Embedding contains vectorization constraints only for embedding profiles.
+	// Embedding 仅为 Embedding Profile 包含向量化约束。
+	Embedding *EmbeddingCapabilities
+	// Rerank contains ranking constraints only for rerank profiles.
+	// Rerank 仅为 Rerank Profile 包含排序约束。
+	Rerank *RerankCapabilities
+	// MediaOutputs contains typed generated-media contracts.
+	// MediaOutputs 包含类型化生成媒体合同。
+	MediaOutputs []MediaOutputCapability
+	// Parameters contains closed operation parameter descriptors.
+	// Parameters 包含封闭操作参数描述。
+	Parameters []ParameterDescriptor
+	// ParameterRules contains typed cross-parameter conditions.
+	// ParameterRules 包含类型化跨参数条件。
+	ParameterRules []ParameterRule
+	// UsageMetrics lists independently observable usage dimensions.
+	// UsageMetrics 列出可独立观察的用量维度。
+	UsageMetrics []UsageMetricCapability
 }
 
 // ProviderModel describes one logical model within one provider instance.
@@ -253,6 +281,15 @@ type ExecutionProfile struct {
 	// OfferingID references one offering in the same provider instance.
 	// OfferingID 引用同一供应商实例中的一个产品。
 	OfferingID string
+	// ServiceOfferingID references one service offering in the same provider instance.
+	// ServiceOfferingID 引用同一供应商实例中的一个服务产品。
+	ServiceOfferingID string
+	// Operation identifies the exact executable VCP operation.
+	// Operation 标识精确可执行 VCP 操作。
+	Operation vcp.OperationKind
+	// ActionBindingID identifies one code-owned provider action binding.
+	// ActionBindingID 标识一个代码拥有的供应商动作绑定。
+	ActionBindingID string
 	// DisplayName is the client-visible profile name.
 	// DisplayName 是客户端可见的规格名称。
 	DisplayName string
@@ -262,6 +299,9 @@ type ExecutionProfile struct {
 	// Capabilities contains the effective profile capability ceiling.
 	// Capabilities 包含该规格的有效能力上限。
 	Capabilities ModelCapabilities
+	// ServiceCapabilities contains the effective special-service capability ceiling.
+	// ServiceCapabilities 包含特殊服务的有效能力上限。
+	ServiceCapabilities *ServiceCapabilities
 	// RequiredEntitlementClasses lists account classes permitted to use the profile.
 	// RequiredEntitlementClasses 列出允许使用该规格的账号授权类别。
 	RequiredEntitlementClasses []string
@@ -603,12 +643,21 @@ type Snapshot struct {
 	// Offerings contains channel-specific model products.
 	// Offerings 包含通道特定的模型产品。
 	Offerings []ModelOffering
+	// Services contains provider-scoped logical special services.
+	// Services 包含供应商作用域的逻辑特殊服务。
+	Services []ProviderService
+	// ServiceOfferings contains channel-specific special-service products.
+	// ServiceOfferings 包含通道特定的特殊服务产品。
+	ServiceOfferings []ServiceOffering
 	// Profiles contains client-selectable capability shapes.
 	// Profiles 包含客户端可选择的能力形态。
 	Profiles []ExecutionProfile
 	// Entitlements contains credential-specific model authorization.
 	// Entitlements 包含凭据特定的模型授权。
 	Entitlements []ModelEntitlement
+	// ServiceEntitlements contains credential-specific special-service authorization.
+	// ServiceEntitlements 包含凭据特定的特殊服务授权。
+	ServiceEntitlements []ServiceEntitlement
 	// Plans contains provider-reported commercial plan snapshots.
 	// Plans 包含供应商报告的商业套餐快照。
 	Plans []PlanSnapshot

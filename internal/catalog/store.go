@@ -5,6 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 var (
@@ -109,14 +111,27 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	for index := range snapshot.Offerings {
 		snapshot.Offerings[index].Capabilities = cloneCapabilities(snapshot.Offerings[index].Capabilities)
 	}
+	snapshot.Services = append([]ProviderService(nil), snapshot.Services...)
+	snapshot.ServiceOfferings = append([]ServiceOffering(nil), snapshot.ServiceOfferings...)
+	for index := range snapshot.ServiceOfferings {
+		snapshot.ServiceOfferings[index].Capabilities = cloneServiceCapabilities(snapshot.ServiceOfferings[index].Capabilities)
+	}
 	snapshot.Profiles = append([]ExecutionProfile(nil), snapshot.Profiles...)
 	for index := range snapshot.Profiles {
 		snapshot.Profiles[index].Capabilities = cloneCapabilities(snapshot.Profiles[index].Capabilities)
+		if snapshot.Profiles[index].ServiceCapabilities != nil {
+			capabilities := cloneServiceCapabilities(*snapshot.Profiles[index].ServiceCapabilities)
+			snapshot.Profiles[index].ServiceCapabilities = &capabilities
+		}
 		snapshot.Profiles[index].RequiredEntitlementClasses = append([]string(nil), snapshot.Profiles[index].RequiredEntitlementClasses...)
 	}
 	snapshot.Entitlements = append([]ModelEntitlement(nil), snapshot.Entitlements...)
 	for index := range snapshot.Entitlements {
 		snapshot.Entitlements[index].AllowedProfileIDs = append([]string(nil), snapshot.Entitlements[index].AllowedProfileIDs...)
+	}
+	snapshot.ServiceEntitlements = append([]ServiceEntitlement(nil), snapshot.ServiceEntitlements...)
+	for index := range snapshot.ServiceEntitlements {
+		snapshot.ServiceEntitlements[index].AllowedProfileIDs = append([]string(nil), snapshot.ServiceEntitlements[index].AllowedProfileIDs...)
 	}
 	snapshot.Plans = append([]PlanSnapshot(nil), snapshot.Plans...)
 	snapshot.Allowances = append([]AllowanceSnapshot(nil), snapshot.Allowances...)
@@ -139,6 +154,180 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 func cloneCapabilities(capabilities ModelCapabilities) ModelCapabilities {
 	capabilities.InputModalities = append([]string(nil), capabilities.InputModalities...)
 	capabilities.OutputModalities = append([]string(nil), capabilities.OutputModalities...)
+	capabilities.MediaInputs = append([]MediaInputCapability(nil), capabilities.MediaInputs...)
+	for index := range capabilities.MediaInputs {
+		capabilities.MediaInputs[index] = cloneMediaInputCapability(capabilities.MediaInputs[index])
+	}
+	if capabilities.Embedding != nil {
+		embedding := *capabilities.Embedding
+		embedding.InputTasks = append([]vcp.EmbeddingInputTask(nil), embedding.InputTasks...)
+		embedding.OutputKinds = append([]vcp.EmbeddingVectorKind(nil), embedding.OutputKinds...)
+		embedding.Encodings = append([]vcp.EmbeddingEncoding(nil), embedding.Encodings...)
+		embedding.Dimensions = append([]int(nil), embedding.Dimensions...)
+		embedding.ResourceKinds = append([]vcp.MediaKind(nil), embedding.ResourceKinds...)
+		capabilities.Embedding = &embedding
+	}
+	if capabilities.Rerank != nil {
+		rerank := *capabilities.Rerank
+		rerank.TruncationPolicies = append([]vcp.RerankTruncation(nil), rerank.TruncationPolicies...)
+		rerank.QueryResourceKinds = append([]vcp.MediaKind(nil), rerank.QueryResourceKinds...)
+		rerank.CandidateResourceKinds = append([]vcp.MediaKind(nil), rerank.CandidateResourceKinds...)
+		capabilities.Rerank = &rerank
+	}
+	capabilities.MediaOutputs = append([]MediaOutputCapability(nil), capabilities.MediaOutputs...)
+	for index := range capabilities.MediaOutputs {
+		capabilities.MediaOutputs[index] = cloneMediaOutputCapability(capabilities.MediaOutputs[index])
+	}
+	capabilities.Parameters = append([]ParameterDescriptor(nil), capabilities.Parameters...)
+	for index := range capabilities.Parameters {
+		capabilities.Parameters[index] = cloneParameterDescriptor(capabilities.Parameters[index])
+	}
+	capabilities.ParameterRules = append([]ParameterRule(nil), capabilities.ParameterRules...)
+	for index := range capabilities.ParameterRules {
+		capabilities.ParameterRules[index].RelatedParameterIDs = append([]string(nil), capabilities.ParameterRules[index].RelatedParameterIDs...)
+	}
+	capabilities.UsageMetrics = append([]UsageMetricCapability(nil), capabilities.UsageMetrics...)
+	return capabilities
+}
+
+// CloneModelCapabilities returns one mutation-safe public capability value.
+// CloneModelCapabilities 返回一个防止外部修改的公开能力值。
+func CloneModelCapabilities(capabilities ModelCapabilities) ModelCapabilities {
+	return cloneCapabilities(capabilities)
+}
+
+// cloneMediaOutputCapability returns one mutation-safe generated-media capability.
+// cloneMediaOutputCapability 返回一个防止外部修改的生成媒体能力。
+func cloneMediaOutputCapability(capability MediaOutputCapability) MediaOutputCapability {
+	capability.Formats = append([]string(nil), capability.Formats...)
+	capability.Common.MIMETypes = append([]string(nil), capability.Common.MIMETypes...)
+	if capability.Image != nil {
+		image := *capability.Image
+		image.AllowedDimensions = append([]ImageDimensions(nil), image.AllowedDimensions...)
+		capability.Image = &image
+	}
+	if capability.Audio != nil {
+		audio := *capability.Audio
+		audio.Encodings = append([]string(nil), audio.Encodings...)
+		capability.Audio = &audio
+	}
+	if capability.Video != nil {
+		video := *capability.Video
+		video.Codecs = append([]string(nil), video.Codecs...)
+		video.Containers = append([]string(nil), video.Containers...)
+		capability.Video = &video
+	}
+	capability.Evidence = append([]CapabilityEvidence(nil), capability.Evidence...)
+	for index := range capability.Evidence {
+		if capability.Evidence[index].ExpiresAt != nil {
+			expiresAt := *capability.Evidence[index].ExpiresAt
+			capability.Evidence[index].ExpiresAt = &expiresAt
+		}
+	}
+	return capability
+}
+
+// cloneParameterDescriptor returns one mutation-safe parameter contract.
+// cloneParameterDescriptor 返回一个防止外部修改的参数合同。
+func cloneParameterDescriptor(parameter ParameterDescriptor) ParameterDescriptor {
+	parameter.AllowedValues = append([]string(nil), parameter.AllowedValues...)
+	parameter.AllowedResourceRoles = append([]vcp.MediaInputRole(nil), parameter.AllowedResourceRoles...)
+	if parameter.IntegerRange != nil {
+		value := *parameter.IntegerRange
+		value.Minimum = cloneInt64Pointer(value.Minimum)
+		value.Maximum = cloneInt64Pointer(value.Maximum)
+		parameter.IntegerRange = &value
+	}
+	if parameter.FloatRange != nil {
+		value := *parameter.FloatRange
+		if value.Minimum != nil {
+			minimum := *value.Minimum
+			value.Minimum = &minimum
+		}
+		if value.Maximum != nil {
+			maximum := *value.Maximum
+			value.Maximum = &maximum
+		}
+		parameter.FloatRange = &value
+	}
+	if parameter.Default != nil {
+		value := *parameter.Default
+		if value.Boolean != nil {
+			boolean := *value.Boolean
+			value.Boolean = &boolean
+		}
+		value.Integer = cloneInt64Pointer(value.Integer)
+		if value.Float != nil {
+			floatValue := *value.Float
+			value.Float = &floatValue
+		}
+		value.String = cloneStringPointer(value.String)
+		if value.ResourceRole != nil {
+			role := *value.ResourceRole
+			value.ResourceRole = &role
+		}
+		parameter.Default = &value
+	}
+	return parameter
+}
+
+// cloneInt64Pointer returns one independent integer pointer.
+// cloneInt64Pointer 返回一个独立整数指针。
+func cloneInt64Pointer(value *int64) *int64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// cloneMediaInputCapability returns one mutation-safe media capability value.
+// cloneMediaInputCapability 返回一个防止外部修改的媒体能力值。
+func cloneMediaInputCapability(capability MediaInputCapability) MediaInputCapability {
+	capability.Roles = append([]vcp.MediaInputRole(nil), capability.Roles...)
+	capability.InteractionModes = append([]MediaInteractionMode(nil), capability.InteractionModes...)
+	capability.AllowedAuthorities = append([]vcp.Authority(nil), capability.AllowedAuthorities...)
+	capability.AllowedPlacements = append([]vcp.Placement(nil), capability.AllowedPlacements...)
+	capability.ClientWorkflows = append([]ClientResourceWorkflow(nil), capability.ClientWorkflows...)
+	capability.MaterializationModes = append([]UpstreamMaterializationMode(nil), capability.MaterializationModes...)
+	capability.Common.MIMETypes = append([]string(nil), capability.Common.MIMETypes...)
+	if capability.Image != nil {
+		image := *capability.Image
+		image.AllowedDimensions = append([]ImageDimensions(nil), image.AllowedDimensions...)
+		capability.Image = &image
+	}
+	if capability.Audio != nil {
+		audio := *capability.Audio
+		audio.Encodings = append([]string(nil), audio.Encodings...)
+		capability.Audio = &audio
+	}
+	if capability.Video != nil {
+		video := *capability.Video
+		video.Codecs = append([]string(nil), video.Codecs...)
+		video.Containers = append([]string(nil), video.Containers...)
+		capability.Video = &video
+	}
+	capability.Evidence = append([]CapabilityEvidence(nil), capability.Evidence...)
+	for index := range capability.Evidence {
+		if capability.Evidence[index].ExpiresAt != nil {
+			expiresAt := *capability.Evidence[index].ExpiresAt
+			capability.Evidence[index].ExpiresAt = &expiresAt
+		}
+	}
+	return capability
+}
+
+// cloneServiceCapabilities returns one mutation-safe special-service capability value.
+// cloneServiceCapabilities 返回一个防止外部修改的特殊服务能力值。
+func cloneServiceCapabilities(capabilities ServiceCapabilities) ServiceCapabilities {
+	if capabilities.WebSearch == nil {
+		return capabilities
+	}
+	webSearch := *capabilities.WebSearch
+	webSearch.OutputModes = append([]vcp.WebSearchOutputMode(nil), webSearch.OutputModes...)
+	webSearch.EvidenceKinds = append([]vcp.SearchEvidenceKind(nil), webSearch.EvidenceKinds...)
+	webSearch.EvidenceRequirements = append([]vcp.SearchEvidenceRequirement(nil), webSearch.EvidenceRequirements...)
+	capabilities.WebSearch = &webSearch
 	return capabilities
 }
 

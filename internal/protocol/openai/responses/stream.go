@@ -14,7 +14,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -45,6 +47,9 @@ type StreamDecoder struct {
 	// sourcesByOutputIndex tracks each upstream output item when its numeric index is available.
 	// sourcesByOutputIndex 在可用时追踪每个上游输出项目索引。
 	sourcesByOutputIndex map[int]*streamSource
+	// citationIDs deduplicates annotations repeated by delta, part, item, and terminal snapshots.
+	// citationIDs 对增量、部分、项目和终态快照重复的注释去重。
+	citationIDs map[string]struct{}
 	// report stores safe conversion observations accumulated during decoding.
 	// report 存储解码期间累积的安全转换观测。
 	report vcp.ExecutionReport
@@ -77,6 +82,9 @@ type streamSource struct {
 	// tool holds the single function or custom tool-call semantic item.
 	// tool 保存唯一 function 或 custom tool 调用语义项目。
 	tool *streamSemanticItem
+	// search holds the single native web-search semantic item.
+	// search 保存唯一的原生网页搜索语义项目。
+	search *streamSemanticItem
 	// reasoningSummaries maps each provider visible reasoning-summary index to its VCP semantic item.
 	// reasoningSummaries 将每个 Provider 可见推理摘要索引映射到其 VCP 语义项目。
 	reasoningSummaries map[int]*streamSemanticItem
@@ -146,7 +154,8 @@ func NewStreamDecoder(responseID string, now time.Time) (*StreamDecoder, error) 
 	decoder := &StreamDecoder{
 		emitter: eventEmitterFor(responseID, now), reducer: vcp.NewReducer(responseID),
 		sourcesByUpstreamID: make(map[string]*streamSource), sourcesByOutputIndex: make(map[int]*streamSource),
-		report: vcp.ExecutionReport{ResponseID: responseID, ExecutionID: vcp.DeriveID("exec", responseID)},
+		citationIDs: make(map[string]struct{}),
+		report:      vcp.ExecutionReport{ResponseID: responseID, ExecutionID: vcp.DeriveID("exec", responseID)},
 	}
 	if errEmit := decoder.emit(decoder.emitter.event(vcp.EventResponseStarted), nil); errEmit != nil {
 		return nil, errEmit
@@ -305,13 +314,15 @@ func (d *StreamDecoder) Push(event StreamEvent) ([]vcp.Event, error) {
 			return nil, errDone
 		}
 	case "response.output_text.annotation.added":
-		if errWarning := d.emitWarning("openai_responses.output_annotation_omitted", &newEvents); errWarning != nil {
-			return nil, errWarning
+		if event.Annotation == nil || event.AnnotationIndex == nil || event.ContentIndex == nil || event.ItemID == "" {
+			return nil, fmt.Errorf("%w: annotation added requires item, content, annotation indexes and payload", ErrInvalidUpstreamResponse)
+		}
+		if errCitation := d.emitOutputAnnotation(event.ItemID, *event.ContentIndex, *event.AnnotationIndex, *event.Annotation, &newEvents); errCitation != nil {
+			return nil, errCitation
 		}
 	case "response.web_search_call.in_progress", "response.web_search_call.searching", "response.web_search_call.completed":
-		if errWarning := d.emitWarning("openai_responses.native_web_search_event_not_exposed", &newEvents); errWarning != nil {
-			return nil, errWarning
-		}
+		// The authoritative action payload is emitted from output_item.added/done; lifecycle-only frames add no facts.
+		// 权威动作载荷由 output_item.added/done 发出；仅生命周期帧不增加事实。
 	case "response.completed":
 		if errTerminal := d.terminate(event.Response, vcp.EventResponseCompleted, &newEvents); errTerminal != nil {
 			return nil, errTerminal
@@ -569,7 +580,10 @@ func (d *StreamDecoder) observeOutputItemAdded(item OutputItem, outputIndex *int
 		return d.recordToolFields(semantic, item.CallID, item.Name)
 	case "reasoning":
 		return nil
-	case "message", "web_search_call":
+	case "web_search_call":
+		_, errSearch := d.ensureSearch(source, item, output)
+		return errSearch
+	case "message":
 		return nil
 	default:
 		return fmt.Errorf("%w: unsupported output item type %q", ErrInvalidUpstreamResponse, item.Type)
@@ -579,9 +593,9 @@ func (d *StreamDecoder) observeOutputItemAdded(item OutputItem, outputIndex *int
 // observeContentPart starts the exact VCP semantic item declared by one content-part-added event.
 // observeContentPart 为一个 content-part-added 事件启动其声明的精确 VCP 语义项目。
 func (d *StreamDecoder) observeContentPart(itemID string, outputIndex *int, contentIndex int, part StreamPart, output *[]vcp.Event) error {
-	if len(part.Annotations) > 0 {
-		if errWarning := d.emitWarning("openai_responses.output_annotation_omitted", output); errWarning != nil {
-			return errWarning
+	for annotationIndex, annotation := range part.Annotations {
+		if errCitation := d.emitOutputAnnotation(itemID, contentIndex, annotationIndex, annotation, output); errCitation != nil {
+			return errCitation
 		}
 	}
 	if part.Logprobs != nil {
@@ -615,9 +629,9 @@ func (d *StreamDecoder) completeContentPart(event StreamEvent, output *[]vcp.Eve
 	if event.ItemID == "" || event.OutputIndex == nil || event.ContentIndex == nil || event.Part == nil {
 		return fmt.Errorf("%w: content part done requires item_id, output_index, content_index, and part", ErrInvalidUpstreamResponse)
 	}
-	if len(event.Part.Annotations) > 0 {
-		if errWarning := d.emitWarning("openai_responses.output_annotation_omitted", output); errWarning != nil {
-			return errWarning
+	for annotationIndex, annotation := range event.Part.Annotations {
+		if errCitation := d.emitOutputAnnotation(event.ItemID, *event.ContentIndex, annotationIndex, annotation, output); errCitation != nil {
+			return errCitation
 		}
 	}
 	if event.Part.Logprobs != nil {
@@ -696,9 +710,9 @@ func (d *StreamDecoder) emitOutputItem(item OutputItem, outputIndex *int, output
 	case "message":
 		for index := range item.Content {
 			part := item.Content[index]
-			if len(part.Annotations) > 0 {
-				if errWarning := d.emitWarning("openai_responses.output_annotation_omitted", output); errWarning != nil {
-					return errWarning
+			for annotationIndex, annotation := range part.Annotations {
+				if errCitation := d.emitOutputAnnotation(item.ID, index, annotationIndex, annotation, output); errCitation != nil {
+					return errCitation
 				}
 			}
 			if part.Logprobs != nil {
@@ -755,8 +769,12 @@ func (d *StreamDecoder) emitOutputItem(item OutputItem, outputIndex *int, output
 			}
 		}
 	case "web_search_call":
-		if errWarning := d.emitWarning("openai_responses.native_web_search_event_not_exposed", output); errWarning != nil {
-			return errWarning
+		semantic, errSearch := d.ensureSearch(source, item, output)
+		if errSearch != nil {
+			return errSearch
+		}
+		if errComplete := d.completeSearch(semantic, item, output); errComplete != nil {
+			return errComplete
 		}
 	default:
 		return fmt.Errorf("%w: unsupported output item type %q", ErrInvalidUpstreamResponse, item.Type)
@@ -1220,6 +1238,94 @@ func (d *StreamDecoder) ensureTool(source *streamSource, upstreamCallID string, 
 	}
 	source.tool = semantic
 	return semantic, nil
+}
+
+// ensureSearch starts or returns one provider-observed native web-search item.
+// ensureSearch 启动或返回一个供应商观测到的原生网页搜索项目。
+func (d *StreamDecoder) ensureSearch(source *streamSource, item OutputItem, output *[]vcp.Event) (*streamSemanticItem, error) {
+	if source == nil || source.itemType != "web_search_call" {
+		return nil, fmt.Errorf("%w: web search source is required", ErrInvalidUpstreamResponse)
+	}
+	if source.search != nil {
+		return source.search, nil
+	}
+	searchID := item.ID
+	if searchID == "" {
+		searchID = vcp.DeriveID("search", d.emitter.responseID, sourceIdentity(source))
+		d.appendSummary("openai_responses.web_search_call.id_synthesized")
+	}
+	semantic := &streamSemanticItem{itemID: d.semanticItemID(source, vcp.ContextSearchCall, 0), kind: vcp.ContextSearchCall, contentIndex: 0}
+	searchCall := &vcp.SearchCall{ID: searchID, Status: item.Status}
+	started := d.emitter.itemEvent(vcp.EventItemStarted, semantic.itemID)
+	started.Item = &vcp.OutputItem{ItemID: semantic.itemID, Kind: vcp.ContextSearchCall, Status: vcp.OutputItemInProgress, SearchCall: searchCall}
+	if errEmit := d.emit(started, output); errEmit != nil {
+		return nil, errEmit
+	}
+	source.search = semantic
+	return semantic, nil
+}
+
+// completeSearch hydrates one completed provider search action without fabricating ranked results.
+// completeSearch 水合一个已完成的供应商搜索动作且不虚构排序结果。
+func (d *StreamDecoder) completeSearch(semantic *streamSemanticItem, item OutputItem, output *[]vcp.Event) error {
+	if semantic == nil || semantic.kind != vcp.ContextSearchCall || item.Action == nil || item.Status != "completed" {
+		return fmt.Errorf("%w: completed web search action is required", ErrInvalidUpstreamResponse)
+	}
+	if item.Action.Type != "search" && item.Action.Type != "open_page" && item.Action.Type != "find_in_page" {
+		return fmt.Errorf("%w: unsupported web search action %q", ErrInvalidUpstreamResponse, item.Action.Type)
+	}
+	searchID := item.ID
+	if searchID == "" {
+		searchID = vcp.DeriveID("search", d.emitter.responseID, semantic.itemID)
+	}
+	searchCall := &vcp.SearchCall{ID: searchID, Status: item.Status, ActionType: item.Action.Type, Query: item.Action.Query, URL: item.Action.URL, Pattern: item.Action.Pattern}
+	for _, source := range item.Action.Sources {
+		if errURL := validateResponseSourceURL(source.URL); errURL != nil {
+			return errURL
+		}
+		searchCall.Sources = append(searchCall.Sources, vcp.SearchSource{Type: source.Type, URL: source.URL})
+	}
+	completed := d.emitter.itemEvent(vcp.EventItemCompleted, semantic.itemID)
+	completed.SearchCall = searchCall
+	if errEmit := d.emit(completed, output); errEmit != nil {
+		return errEmit
+	}
+	semantic.completed = true
+	return nil
+}
+
+// emitOutputAnnotation converts one URL citation and explicitly warns for non-URL annotation variants.
+// emitOutputAnnotation 转换一个 URL 引用，并对非 URL 注释变体显式告警。
+func (d *StreamDecoder) emitOutputAnnotation(itemID string, contentIndex int, annotationIndex int, annotation OutputAnnotation, output *[]vcp.Event) error {
+	if annotation.Type != "url_citation" {
+		return d.emitWarning("openai_responses.output_annotation_omitted", output)
+	}
+	if annotation.StartIndex == nil || annotation.EndIndex == nil || *annotation.StartIndex < 0 || *annotation.EndIndex < *annotation.StartIndex {
+		return fmt.Errorf("%w: invalid URL citation offsets", ErrInvalidUpstreamResponse)
+	}
+	if errURL := validateResponseSourceURL(annotation.URL); errURL != nil {
+		return errURL
+	}
+	citationID := vcp.DeriveID("citation", d.emitter.responseID, itemID, strconv.Itoa(contentIndex), strconv.Itoa(annotationIndex), annotation.URL)
+	if _, exists := d.citationIDs[citationID]; exists {
+		return nil
+	}
+	d.citationIDs[citationID] = struct{}{}
+	start := *annotation.StartIndex
+	end := *annotation.EndIndex
+	event := d.emitter.itemEvent(vcp.EventCitationCompleted, itemID)
+	event.Citation = &vcp.Citation{ID: citationID, URL: annotation.URL, Title: annotation.Title, Location: vcp.CitationLocation{OutputItemID: itemID, Start: &start, End: &end}}
+	return d.emit(event, output)
+}
+
+// validateResponseSourceURL requires an absolute HTTPS provider source URL.
+// validateResponseSourceURL 要求一个绝对 HTTPS 供应商来源 URL。
+func validateResponseSourceURL(value string) error {
+	parsed, errParse := url.Parse(value)
+	if errParse != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return fmt.Errorf("%w: invalid web search source URL", ErrInvalidUpstreamResponse)
+	}
+	return nil
 }
 
 // ensureReasoning starts or returns one summary or reasoning-content semantic item at its provider-declared index.

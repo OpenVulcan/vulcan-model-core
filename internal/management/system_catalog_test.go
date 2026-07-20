@@ -9,8 +9,10 @@ import (
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog verifies provider selection never fails after credential acquisition.
@@ -40,18 +42,45 @@ func TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog(t *testing.T)
 		if errValidate := snapshot.Validate(); errValidate != nil {
 			t.Errorf("definition %s catalog validation error = %v", definition.ID, errValidate)
 		}
+		offeringsByID := make(map[string]catalog.ModelOffering, len(snapshot.Offerings))
+		for _, offering := range snapshot.Offerings {
+			offeringsByID[offering.ID] = offering
+		}
+		serviceOfferingsByID := make(map[string]catalog.ServiceOffering, len(snapshot.ServiceOfferings))
+		for _, offering := range snapshot.ServiceOfferings {
+			serviceOfferingsByID[offering.ID] = offering
+		}
+		for _, profile := range snapshot.Profiles {
+			action, errAction := definitionActionByID(definition, profile.ActionBindingID)
+			if profile.ServiceOfferingID != "" {
+				offering := serviceOfferingsByID[profile.ServiceOfferingID]
+				if errAction != nil || profile.ActionBindingID != action.ID || offering.ChannelID != action.ProtocolProfileID || profile.ServiceCapabilities == nil {
+					t.Errorf("definition %s service profile action contract = %#v", definition.ID, profile)
+				}
+				continue
+			}
+			offering := offeringsByID[profile.OfferingID]
+			if errAction != nil || profile.ActionBindingID != action.ID || offering.ChannelID != action.ProtocolProfileID || profile.Capabilities.Delivery.Synchronous != action.Delivery.Synchronous || profile.Capabilities.Delivery.Streaming != action.Delivery.Streaming || profile.Capabilities.Delivery.Asynchronous != action.Delivery.Asynchronous {
+				t.Errorf("definition %s profile action contract = %#v", definition.ID, profile)
+			}
+		}
 	}
 }
 
-// TestOpenAIAPIInitialCatalogDoesNotInventModels verifies the pinned CLIProxyAPI baseline has no static public OpenAI model inventory to copy.
-// TestOpenAIAPIInitialCatalogDoesNotInventModels 验证固定 CLIProxyAPI 基线没有可复制的公开 OpenAI 静态模型清单。
-func TestOpenAIAPIInitialCatalogDoesNotInventModels(t *testing.T) {
+// TestOpenAIAPIInitialCatalogPublishesGroundedSearchAndEmbeddingModels verifies the evidence-closed OpenAI inventory.
+// TestOpenAIAPIInitialCatalogPublishesGroundedSearchAndEmbeddingModels 验证证据封闭的 OpenAI 清单。
+func TestOpenAIAPIInitialCatalogPublishesGroundedSearchAndEmbeddingModels(t *testing.T) {
 	templates, errTemplates := systemModelTemplates("openai_api")
 	if errTemplates != nil {
 		t.Fatalf("systemModelTemplates() error = %v", errTemplates)
 	}
-	if len(templates) != 0 {
-		t.Fatalf("OpenAI API template count = %d, want 0 without source evidence", len(templates))
+	if len(templates) != 11 || templates[0].upstreamID != provideropenai.SearchBackingModelID || templates[1].upstreamID != "text-embedding-3-small" || templates[2].upstreamID != "text-embedding-3-large" || templates[3].operation != vcp.OperationImageGenerate || templates[4].operation != vcp.OperationImageEdit || templates[5].operation != vcp.OperationSpeechSynthesize || templates[7].operation != vcp.OperationSpeechTranscribe || templates[10].upstreamID != "whisper-1" {
+		t.Fatalf("OpenAI API templates = %#v", templates)
+	}
+	for _, template := range templates[1:3] {
+		if template.operation != vcp.OperationEmbeddingCreate || template.embedding == nil || template.embedding.MaxBatchItems.Value != 2048 {
+			t.Fatalf("OpenAI embedding template = %#v", template)
+		}
 	}
 }
 

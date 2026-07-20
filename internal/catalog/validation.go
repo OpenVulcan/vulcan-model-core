@@ -6,6 +6,8 @@ import (
 	"math"
 	"regexp"
 	"strings"
+
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 var (
@@ -61,8 +63,44 @@ func (s Snapshot) Validate() error {
 		}
 		offerings[offering.ID] = offering
 	}
+	services := make(map[string]ProviderService, len(s.Services))
+	for _, service := range s.Services {
+		if errService := service.Validate(); errService != nil {
+			return errService
+		}
+		if service.ProviderInstanceID != s.ProviderInstanceID {
+			return invalid("service %q crosses provider instances", service.ID)
+		}
+		if _, exists := services[service.ID]; exists {
+			return invalid("duplicate service id %q", service.ID)
+		}
+		services[service.ID] = service
+	}
+	serviceOfferings := make(map[string]ServiceOffering, len(s.ServiceOfferings))
+	for _, offering := range s.ServiceOfferings {
+		service, exists := services[offering.ProviderServiceID]
+		if !exists {
+			return invalid("service offering %q references unknown service %q", offering.ID, offering.ProviderServiceID)
+		}
+		if errOffering := offering.Validate(service.Operation); errOffering != nil {
+			return errOffering
+		}
+		if offering.Capabilities.WebSearch != nil && offering.Capabilities.WebSearch.BackendKind == vcp.SearchBackendGroundedModel {
+			if _, exists := offerings[offering.Capabilities.WebSearch.BackingModelOfferingID]; !exists {
+				return invalid("service offering %q references unknown backing model offering %q", offering.ID, offering.Capabilities.WebSearch.BackingModelOfferingID)
+			}
+		}
+		if offering.ProviderInstanceID != s.ProviderInstanceID {
+			return invalid("service offering %q crosses provider instances", offering.ID)
+		}
+		if _, exists := serviceOfferings[offering.ID]; exists {
+			return invalid("duplicate service offering id %q", offering.ID)
+		}
+		serviceOfferings[offering.ID] = offering
+	}
 	profiles := make(map[string]ExecutionProfile, len(s.Profiles))
 	profileModels := make(map[string]string, len(s.Profiles))
+	profileServices := make(map[string]string, len(s.Profiles))
 	defaultProfiles := make(map[string]string)
 	for _, profile := range s.Profiles {
 		if err := profile.Validate(); err != nil {
@@ -71,24 +109,45 @@ func (s Snapshot) Validate() error {
 		if profile.ProviderInstanceID != s.ProviderInstanceID {
 			return invalid("profile %q crosses provider instances", profile.ID)
 		}
-		if _, exists := offerings[profile.OfferingID]; !exists {
-			return invalid("profile %q references unknown offering %q", profile.ID, profile.OfferingID)
+		profileSubject := ""
+		if profile.OfferingID != "" {
+			offering, exists := offerings[profile.OfferingID]
+			if !exists {
+				return invalid("profile %q references unknown offering %q", profile.ID, profile.OfferingID)
+			}
+			profileSubject = "model\x00" + profile.OfferingID
+			profileModels[profile.ID] = offering.ProviderModelID
+		} else {
+			offering, exists := serviceOfferings[profile.ServiceOfferingID]
+			if !exists {
+				return invalid("profile %q references unknown service offering %q", profile.ID, profile.ServiceOfferingID)
+			}
+			service := services[offering.ProviderServiceID]
+			if profile.Operation != service.Operation {
+				return invalid("profile %q operation does not match service %q", profile.ID, service.ID)
+			}
+			profileSubject = "service\x00" + profile.ServiceOfferingID
+			profileServices[profile.ID] = offering.ProviderServiceID
 		}
 		if _, exists := profiles[profile.ID]; exists {
 			return invalid("duplicate profile id %q", profile.ID)
 		}
 		if profile.Default {
-			if existingProfileID, exists := defaultProfiles[profile.OfferingID]; exists {
-				return invalid("offering %q has multiple default profiles %q and %q", profile.OfferingID, existingProfileID, profile.ID)
+			if existingProfileID, exists := defaultProfiles[profileSubject]; exists {
+				return invalid("offering %q has multiple default profiles %q and %q", profileSubject, existingProfileID, profile.ID)
 			}
-			defaultProfiles[profile.OfferingID] = profile.ID
+			defaultProfiles[profileSubject] = profile.ID
 		}
 		profiles[profile.ID] = profile
-		profileModels[profile.ID] = offerings[profile.OfferingID].ProviderModelID
 	}
 	for offeringID := range offerings {
-		if _, exists := defaultProfiles[offeringID]; !exists {
+		if _, exists := defaultProfiles["model\x00"+offeringID]; !exists {
 			return invalid("offering %q requires exactly one default profile", offeringID)
+		}
+	}
+	for offeringID := range serviceOfferings {
+		if _, exists := defaultProfiles["service\x00"+offeringID]; !exists {
+			return invalid("service offering %q requires exactly one default profile", offeringID)
 		}
 	}
 	entitlementIDs := make(map[string]struct{}, len(s.Entitlements))
@@ -118,6 +177,36 @@ func (s Snapshot) Validate() error {
 			}
 			if profileModels[profileID] != entitlement.ProviderModelID {
 				return invalid("entitlement %q references profile %q from another model", entitlement.ID, profileID)
+			}
+		}
+	}
+	serviceEntitlementIDs := make(map[string]struct{}, len(s.ServiceEntitlements))
+	serviceEntitlementSubjects := make(map[string]string, len(s.ServiceEntitlements))
+	for _, entitlement := range s.ServiceEntitlements {
+		if errEntitlement := entitlement.Validate(); errEntitlement != nil {
+			return errEntitlement
+		}
+		if entitlement.ProviderInstanceID != s.ProviderInstanceID {
+			return invalid("service entitlement %q crosses provider instances", entitlement.ID)
+		}
+		if _, exists := services[entitlement.ProviderServiceID]; !exists {
+			return invalid("service entitlement %q references unknown service %q", entitlement.ID, entitlement.ProviderServiceID)
+		}
+		if _, exists := serviceEntitlementIDs[entitlement.ID]; exists {
+			return invalid("duplicate service entitlement id %q", entitlement.ID)
+		}
+		serviceEntitlementIDs[entitlement.ID] = struct{}{}
+		entitlementSubject := entitlement.CredentialID + "\x00" + entitlement.ProviderServiceID
+		if existingEntitlementID, exists := serviceEntitlementSubjects[entitlementSubject]; exists {
+			return invalid("credential %q and service %q have multiple entitlements %q and %q", entitlement.CredentialID, entitlement.ProviderServiceID, existingEntitlementID, entitlement.ID)
+		}
+		serviceEntitlementSubjects[entitlementSubject] = entitlement.ID
+		for _, profileID := range entitlement.AllowedProfileIDs {
+			if _, exists := profiles[profileID]; !exists {
+				return invalid("service entitlement %q references unknown profile %q", entitlement.ID, profileID)
+			}
+			if profileServices[profileID] != entitlement.ProviderServiceID {
+				return invalid("service entitlement %q references profile %q from another service", entitlement.ID, profileID)
 			}
 		}
 	}
@@ -231,8 +320,32 @@ func (p ExecutionProfile) Validate() error {
 	if err := validatePrefixedID("execution profile instance id", p.ProviderInstanceID, "pvi_"); err != nil {
 		return err
 	}
-	if err := validatePrefixedID("execution profile offering id", p.OfferingID, "offer_"); err != nil {
-		return err
+	if (p.OfferingID == "") == (p.ServiceOfferingID == "") {
+		return invalid("execution profile requires exactly one model or service offering")
+	}
+	if p.OfferingID != "" {
+		if errOffering := validatePrefixedID("execution profile offering id", p.OfferingID, "offer_"); errOffering != nil {
+			return errOffering
+		}
+		if p.ServiceCapabilities != nil {
+			return invalid("model execution profile cannot carry service capabilities")
+		}
+		if p.Operation == vcp.OperationSearchWeb {
+			return invalid("search.web requires a service execution profile")
+		}
+		if p.Operation != "" && p.ActionBindingID == "" {
+			return invalid("typed model execution profile requires action binding id")
+		}
+	} else {
+		if errOffering := validatePrefixedID("execution profile service offering id", p.ServiceOfferingID, "service_offer_"); errOffering != nil {
+			return errOffering
+		}
+		if p.Operation == "" || p.ServiceCapabilities == nil {
+			return invalid("service execution profile requires operation and service capabilities")
+		}
+		if errAction := validatePrefixedID("execution profile action binding id", p.ActionBindingID, "action_"); errAction != nil {
+			return errAction
+		}
 	}
 	if strings.TrimSpace(p.DisplayName) == "" || p.CapabilityRevision == 0 || p.Revision == 0 {
 		return invalid("execution profile display name and revisions are required")
@@ -245,7 +358,13 @@ func (p ExecutionProfile) Validate() error {
 			return err
 		}
 	}
-	return p.Capabilities.Validate()
+	if p.OfferingID != "" {
+		if errCapabilities := p.Capabilities.Validate(); errCapabilities != nil {
+			return errCapabilities
+		}
+		return p.Capabilities.ValidateOperation(p.Operation)
+	}
+	return p.ServiceCapabilities.Validate(p.Operation)
 }
 
 // Validate verifies one credential-specific model entitlement.
@@ -395,7 +514,7 @@ func (c ModelCapabilities) Validate() error {
 			return err
 		}
 	}
-	return nil
+	return c.validateExtended()
 }
 
 // Validate verifies token recommendations and their relationship to independently known hard ceilings.

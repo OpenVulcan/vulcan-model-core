@@ -4,7 +4,11 @@ import { AppSidebar } from "@/components/app-sidebar"
 import { DataTable } from "@/components/data-table"
 import { SectionCards } from "@/components/section-cards"
 import { SiteHeader } from "@/components/site-header"
+import { DiagnosticsPage } from "@/pages/diagnostics-page"
+import { ModelCapabilitiesPage } from "@/pages/model-capabilities-page"
 import { ProviderManagementPage } from "@/pages/provider-management-page"
+import { ServiceCapabilitiesPage } from "@/pages/service-capabilities-page"
+import type { TranslationKey } from "@/i18n"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 
 import data from "@/app/dashboard/data.json"
@@ -26,6 +30,44 @@ interface DashboardPageProps {
   onLogout: () => void
 }
 
+// resolvePageTitleKey maps every authenticated management route to its exact localized header.
+// resolvePageTitleKey 将每个已认证管理路由映射到其精确的本地化标题。
+function resolvePageTitleKey(currentPath: string): TranslationKey {
+  switch (currentPath) {
+    case "/providers":
+      return "providers.title"
+    case "/capabilities/models":
+      return "capabilities.modelsTitle"
+    case "/capabilities/services":
+      return "capabilities.servicesTitle"
+    case "/diagnostics/resources":
+      return "diagnostics.resourcesTitle"
+    case "/diagnostics/executions":
+      return "diagnostics.executionsTitle"
+    default:
+      return "dashboard.overview"
+  }
+}
+
+// renderAuthenticatedPage selects one exact management page without broad route fallbacks.
+// renderAuthenticatedPage 选择一个精确管理页面且不使用宽泛路由回退。
+function renderAuthenticatedPage(currentPath: string, managementAuthToken: string) {
+  switch (currentPath) {
+    case "/providers":
+      return <ProviderManagementPage managementAuthToken={managementAuthToken} />
+    case "/capabilities/models":
+      return <ModelCapabilitiesPage managementAuthToken={managementAuthToken} />
+    case "/capabilities/services":
+      return <ServiceCapabilitiesPage managementAuthToken={managementAuthToken} />
+    case "/diagnostics/resources":
+      return <DiagnosticsPage kind="resources" managementAuthToken={managementAuthToken} />
+    case "/diagnostics/executions":
+      return <DiagnosticsPage kind="executions" managementAuthToken={managementAuthToken} />
+    default:
+      return <><SectionCards /><DataTable data={data} /></>
+  }
+}
+
 // DashboardPage renders the shadcn dashboard-01 block as the application home page.
 // DashboardPage 将 shadcn dashboard-01 区块渲染为应用首页。
 export function DashboardPage({ currentPath, managementAuthToken, onNavigate, onLogout }: DashboardPageProps) {
@@ -40,18 +82,11 @@ export function DashboardPage({ currentPath, managementAuthToken, onNavigate, on
     <SidebarProvider style={sidebarStyle}>
       <AppSidebar variant="inset" onNavigate={onNavigate} onLogout={onLogout} />
       <SidebarInset>
-        <SiteHeader titleKey={currentPath === "/providers" ? "providers.title" : "dashboard.overview"} />
+        <SiteHeader titleKey={resolvePageTitleKey(currentPath)} />
         <div className="flex flex-1 flex-col">
           <div className="@container/main flex flex-1 flex-col gap-2">
             <div className="flex flex-col gap-4 py-4 md:gap-6 md:py-6">
-              {currentPath === "/providers" ? (
-                <ProviderManagementPage managementAuthToken={managementAuthToken} />
-              ) : (
-                <>
-                  <SectionCards />
-                  <DataTable data={data} />
-                </>
-              )}
+              {renderAuthenticatedPage(currentPath, managementAuthToken)}
             </div>
           </div>
         </div>

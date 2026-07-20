@@ -3,6 +3,7 @@ package bootstrap
 import (
 	"fmt"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
 	protocolantigravity "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/antigravity"
@@ -17,6 +18,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 const (
@@ -84,7 +86,64 @@ func registerCLIProxyProviderCatalog(registry *providerconfig.SystemRegistry) er
 		}
 	}
 	for _, definition := range cliProxyProviderDefinitions() {
-		if errRegister := registry.Register(definition); errRegister != nil {
+		if definition.ID == OpenAIAPIDefinitionID {
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: provideropenai.EmbeddingActionBindingID, Operation: vcp.OperationEmbeddingCreate, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: provideropenai.EmbeddingProtocolProfileID, EndpointProfileID: "openai_embeddings", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1,
+			})
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: provideropenai.SearchActionBindingID, Operation: vcp.OperationSearchWeb, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: provideropenai.SearchProtocolProfileID, EndpointProfileID: "openai_responses_web_search", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendGroundedModel, BackingModelOfferingID: provideropenai.SearchBackingModelOfferingID, EnableNativeSearch: true, PromptTemplateID: provideropenai.SearchPromptTemplateID, PromptTemplateRevision: provideropenai.SearchPromptTemplateRevision}, Revision: 1,
+			})
+			definition.ActionBindings = append(definition.ActionBindings,
+				providerconfig.ProviderActionBinding{ID: provideropenai.ImageGenerateActionBindingID, Operation: vcp.OperationImageGenerate, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: provideropenai.ImageGenerateProtocolProfileID, EndpointProfileID: "openai_images_generate", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: provideropenai.ImageEditActionBindingID, Operation: vcp.OperationImageEdit, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: provideropenai.ImageEditProtocolProfileID, EndpointProfileID: "openai_images_edit", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: provideropenai.SpeechSynthesizeActionBindingID, Operation: vcp.OperationSpeechSynthesize, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: provideropenai.SpeechSynthesizeProtocolProfileID, EndpointProfileID: "openai_audio_speech", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: provideropenai.SpeechTranscribeActionBindingID, Operation: vcp.OperationSpeechTranscribe, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: provideropenai.SpeechTranscribeProtocolProfileID, EndpointProfileID: "openai_audio_transcriptions", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline}, Revision: 1},
+			)
+		}
+		if definition.ID == AnthropicAPIDefinitionID {
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: provideranthropic.SearchActionBindingID, Operation: vcp.OperationSearchWeb, DriverID: "anthropic", DriverVersion: "1", ProtocolProfileID: provideranthropic.SearchProtocolProfileID, EndpointProfileID: "anthropic_messages", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendGroundedModel, BackingModelOfferingID: provideranthropic.SearchBackingModelOfferingID, EnableNativeSearch: true, PromptTemplateID: provideranthropic.SearchPromptTemplateID, PromptTemplateRevision: provideranthropic.SearchPromptTemplateRevision}, Revision: 1,
+			})
+		}
+		if definition.ID == GoogleAIStudioDefinitionID {
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: providergoogle.EmbeddingActionBindingID, Operation: vcp.OperationEmbeddingCreate, DriverID: "aistudio", DriverVersion: "1", ProtocolProfileID: providergoogle.EmbeddingProtocolProfileID, EndpointProfileID: "google_ai_studio_embeddings", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1,
+			})
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: providergoogle.MediaAnalyzeActionBindingID, Operation: vcp.OperationMediaAnalyze, DriverID: "aistudio", DriverVersion: "1", ProtocolProfileID: providergoogle.MediaAnalyzeProtocolProfileID, EndpointProfileID: "google_ai_studio", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1,
+			})
+			definition.ActionBindings = append(definition.ActionBindings,
+				providerconfig.ProviderActionBinding{ID: providergoogle.VideoGenerateActionBindingID, Operation: vcp.OperationVideoGenerate, DriverID: "aistudio", DriverVersion: "1", ProtocolProfileID: providergoogle.VideoGenerateProtocolProfileID, EndpointProfileID: "google_veo", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Asynchronous: true, Polling: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providergoogle.VideoExtendActionBindingID, Operation: vcp.OperationVideoExtend, DriverID: "aistudio", DriverVersion: "1", ProtocolProfileID: providergoogle.VideoExtendProtocolProfileID, EndpointProfileID: "google_veo", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Asynchronous: true, Polling: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline}, Revision: 1},
+			)
+		}
+		if definition.ID == GoogleInteractionsDefinitionID {
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: providergoogle.SearchActionBindingID, Operation: vcp.OperationSearchWeb, DriverID: "interactions", DriverVersion: "1", ProtocolProfileID: providergoogle.SearchProtocolProfileID, EndpointProfileID: "google_interactions", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendGroundedModel, BackingModelOfferingID: providergoogle.SearchBackingModelOfferingID, EnableNativeSearch: true, PromptTemplateID: providergoogle.SearchPromptTemplateID, PromptTemplateRevision: providergoogle.SearchPromptTemplateRevision}, Revision: 1,
+			})
+			definition.ActionBindings = append(definition.ActionBindings,
+				providerconfig.ProviderActionBinding{ID: providergoogle.ImageGenerateActionBindingID, Operation: vcp.OperationImageGenerate, DriverID: "interactions", DriverVersion: "1", ProtocolProfileID: providergoogle.ImageGenerateProtocolProfileID, EndpointProfileID: "google_interactions_image", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providergoogle.ImageEditActionBindingID, Operation: vcp.OperationImageEdit, DriverID: "interactions", DriverVersion: "1", ProtocolProfileID: providergoogle.ImageEditProtocolProfileID, EndpointProfileID: "google_interactions_image", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providergoogle.SpeechSynthesizeActionBindingID, Operation: vcp.OperationSpeechSynthesize, DriverID: "interactions", DriverVersion: "1", ProtocolProfileID: providergoogle.SpeechSynthesizeProtocolProfileID, EndpointProfileID: "google_interactions_speech", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1},
+			)
+		}
+		if definition.ID == XAIAPIDefinitionID {
+			definition.ActionBindings = append(definition.ActionBindings, providerconfig.ProviderActionBinding{
+				ID: providerxai.SearchActionBindingID, Operation: vcp.OperationSearchWeb, DriverID: "xai", DriverVersion: "1", ProtocolProfileID: providerxai.SearchProtocolProfileID, EndpointProfileID: "xai_responses", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendGroundedModel, BackingModelOfferingID: providerxai.SearchBackingModelOfferingID, EnableNativeSearch: true, PromptTemplateID: providerxai.SearchPromptTemplateID, PromptTemplateRevision: providerxai.SearchPromptTemplateRevision}, Revision: 1,
+			})
+			definition.ActionBindings = append(definition.ActionBindings,
+				providerconfig.ProviderActionBinding{ID: providerxai.ImageGenerateActionBindingID, Operation: vcp.OperationImageGenerate, DriverID: "xai", DriverVersion: "1", ProtocolProfileID: providerxai.ImageGenerateProtocolProfileID, EndpointProfileID: "xai_images", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providerxai.ImageEditActionBindingID, Operation: vcp.OperationImageEdit, DriverID: "xai", DriverVersion: "1", ProtocolProfileID: providerxai.ImageEditProtocolProfileID, EndpointProfileID: "xai_images", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providerxai.VideoGenerateActionBindingID, Operation: vcp.OperationVideoGenerate, DriverID: "xai", DriverVersion: "1", ProtocolProfileID: providerxai.VideoGenerateProtocolProfileID, EndpointProfileID: "xai_videos", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Asynchronous: true, Polling: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL, providerconfig.ResourceMaterializationProviderFile}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providerxai.VideoEditActionBindingID, Operation: vcp.OperationVideoEdit, DriverID: "xai", DriverVersion: "1", ProtocolProfileID: providerxai.VideoEditProtocolProfileID, EndpointProfileID: "xai_videos", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Asynchronous: true, Polling: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL, providerconfig.ResourceMaterializationProviderFile}, Revision: 1},
+				providerconfig.ProviderActionBinding{ID: providerxai.VideoExtendActionBindingID, Operation: vcp.OperationVideoExtend, DriverID: "xai", DriverVersion: "1", ProtocolProfileID: providerxai.VideoExtendProtocolProfileID, EndpointProfileID: "xai_videos", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Asynchronous: true, Polling: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL, providerconfig.ResourceMaterializationProviderFile}, Revision: 1},
+			)
+		}
+		definitionWithAction, errAction := withConversationAction(definition)
+		if errAction != nil {
+			return errAction
+		}
+		if errRegister := registry.Register(definitionWithAction); errRegister != nil {
 			return fmt.Errorf("register provider definition %s: %w", definition.ID, errRegister)
 		}
 	}
@@ -100,7 +159,7 @@ func RegisterCLIProxyExecutionDrivers(registry *provider.ExecutionRegistry, clie
 	// drivers are created from copied, provider-specific protocol implementations already present in this repository.
 	// drivers 由仓库中已有的、复制并适配后的供应商专属协议实现创建。
 	drivers := make([]provider.ExecutionDriver, 0, 11)
-	openAIAPI, errOpenAIAPI := provideropenai.NewResponsesDriver(OpenAIAPIDefinitionID, client, responsesCapabilities())
+	openAIAPI, errOpenAIAPI := provideropenai.NewResponsesDriver(OpenAIAPIDefinitionID, client, openAIResponsesCapabilities())
 	if errOpenAIAPI != nil {
 		return fmt.Errorf("create OpenAI API driver: %w", errOpenAIAPI)
 	}
@@ -115,12 +174,12 @@ func RegisterCLIProxyExecutionDrivers(registry *provider.ExecutionRegistry, clie
 		return fmt.Errorf("create OpenAI Codex driver: %w", errOpenAICodex)
 	}
 	drivers = append(drivers, openAICodex)
-	anthropicAPI, errAnthropicAPI := provideranthropic.NewMessagesDriver(AnthropicAPIDefinitionID, client, responsesCapabilities())
+	anthropicAPI, errAnthropicAPI := provideranthropic.NewMessagesDriver(AnthropicAPIDefinitionID, client, anthropicMessagesCapabilities())
 	if errAnthropicAPI != nil {
 		return fmt.Errorf("create Anthropic API driver: %w", errAnthropicAPI)
 	}
 	drivers = append(drivers, anthropicAPI)
-	claudeCode, errClaudeCode := provideranthropic.NewBearerMessagesDriver(AnthropicClaudeCodeDefinitionID, claudeClient, responsesCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodOAuth})
+	claudeCode, errClaudeCode := provideranthropic.NewBearerMessagesDriver(AnthropicClaudeCodeDefinitionID, claudeClient, anthropicMessagesCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodOAuth})
 	if errClaudeCode != nil {
 		return fmt.Errorf("create Claude Code driver: %w", errClaudeCode)
 	}
@@ -156,8 +215,118 @@ func RegisterCLIProxyExecutionDrivers(registry *provider.ExecutionRegistry, clie
 	}
 	drivers = append(drivers, xaiOAuth)
 	for _, driver := range drivers {
-		if errRegister := registry.Register(driver); errRegister != nil {
+		if errRegister := registerConversationDriver(registry, driver); errRegister != nil {
 			return fmt.Errorf("register execution driver %s: %w", driver.ProviderDefinitionID(), errRegister)
+		}
+	}
+	openAIEmbedding, errOpenAIEmbedding := provideropenai.NewEmbeddingDriver(OpenAIAPIDefinitionID, client)
+	if errOpenAIEmbedding != nil {
+		return fmt.Errorf("create OpenAI embedding driver: %w", errOpenAIEmbedding)
+	}
+	if errRegister := registry.RegisterAction(openAIEmbedding); errRegister != nil {
+		return fmt.Errorf("register OpenAI embedding driver: %w", errRegister)
+	}
+	openAISearch, errOpenAISearch := provideropenai.NewGroundedSearchDriver(OpenAIAPIDefinitionID, client)
+	if errOpenAISearch != nil {
+		return fmt.Errorf("create OpenAI grounded search driver: %w", errOpenAISearch)
+	}
+	if errRegister := registry.RegisterAction(openAISearch); errRegister != nil {
+		return fmt.Errorf("register OpenAI grounded search driver: %w", errRegister)
+	}
+	for _, actionBindingID := range []string{provideropenai.ImageGenerateActionBindingID, provideropenai.ImageEditActionBindingID} {
+		imageDriver, errImageDriver := provideropenai.NewImageActionDriver(OpenAIAPIDefinitionID, actionBindingID, client)
+		if errImageDriver != nil {
+			return fmt.Errorf("create OpenAI image driver %s: %w", actionBindingID, errImageDriver)
+		}
+		if errRegister := registry.RegisterAction(imageDriver); errRegister != nil {
+			return fmt.Errorf("register OpenAI image driver %s: %w", actionBindingID, errRegister)
+		}
+	}
+	for _, actionBindingID := range []string{provideropenai.SpeechSynthesizeActionBindingID, provideropenai.SpeechTranscribeActionBindingID} {
+		audioDriver, errAudioDriver := provideropenai.NewAudioActionDriver(OpenAIAPIDefinitionID, actionBindingID, client)
+		if errAudioDriver != nil {
+			return fmt.Errorf("create OpenAI audio driver %s: %w", actionBindingID, errAudioDriver)
+		}
+		if errRegister := registry.RegisterAction(audioDriver); errRegister != nil {
+			return fmt.Errorf("register OpenAI audio driver %s: %w", actionBindingID, errRegister)
+		}
+	}
+	anthropicSearch, errAnthropicSearch := provideranthropic.NewGroundedSearchDriver(AnthropicAPIDefinitionID, client)
+	if errAnthropicSearch != nil {
+		return fmt.Errorf("create Anthropic grounded search driver: %w", errAnthropicSearch)
+	}
+	if errRegister := registry.RegisterAction(anthropicSearch); errRegister != nil {
+		return fmt.Errorf("register Anthropic grounded search driver: %w", errRegister)
+	}
+	googleEmbedding, errGoogleEmbedding := providergoogle.NewEmbeddingDriver(GoogleAIStudioDefinitionID, client)
+	if errGoogleEmbedding != nil {
+		return fmt.Errorf("create Google AI Studio embedding driver: %w", errGoogleEmbedding)
+	}
+	if errRegister := registry.RegisterAction(googleEmbedding); errRegister != nil {
+		return fmt.Errorf("register Google AI Studio embedding driver: %w", errRegister)
+	}
+	googleMediaAnalyze, errGoogleMediaAnalyze := providergoogle.NewMediaAnalyzeDriver(GoogleAIStudioDefinitionID, client)
+	if errGoogleMediaAnalyze != nil {
+		return fmt.Errorf("create Google AI Studio media analysis driver: %w", errGoogleMediaAnalyze)
+	}
+	if errRegister := registry.RegisterAction(googleMediaAnalyze); errRegister != nil {
+		return fmt.Errorf("register Google AI Studio media analysis driver: %w", errRegister)
+	}
+	for _, actionBindingID := range []string{providergoogle.VideoGenerateActionBindingID, providergoogle.VideoExtendActionBindingID} {
+		googleVideo, errGoogleVideo := providergoogle.NewVideoTaskDriver(GoogleAIStudioDefinitionID, actionBindingID, client)
+		if errGoogleVideo != nil {
+			return fmt.Errorf("create Google Veo driver %s: %w", actionBindingID, errGoogleVideo)
+		}
+		if errRegister := registry.RegisterTaskAction(googleVideo); errRegister != nil {
+			return fmt.Errorf("register Google Veo driver %s: %w", actionBindingID, errRegister)
+		}
+	}
+	googleSearch, errGoogleSearch := providergoogle.NewGroundedSearchDriver(GoogleInteractionsDefinitionID, client)
+	if errGoogleSearch != nil {
+		return fmt.Errorf("create Google grounded search driver: %w", errGoogleSearch)
+	}
+	if errRegister := registry.RegisterAction(googleSearch); errRegister != nil {
+		return fmt.Errorf("register Google grounded search driver: %w", errRegister)
+	}
+	for _, actionBindingID := range []string{providergoogle.ImageGenerateActionBindingID, providergoogle.ImageEditActionBindingID} {
+		imageDriver, errImageDriver := providergoogle.NewInteractionsImageActionDriver(GoogleInteractionsDefinitionID, actionBindingID, client)
+		if errImageDriver != nil {
+			return fmt.Errorf("create Google Interactions image driver %s: %w", actionBindingID, errImageDriver)
+		}
+		if errRegister := registry.RegisterAction(imageDriver); errRegister != nil {
+			return fmt.Errorf("register Google Interactions image driver %s: %w", actionBindingID, errRegister)
+		}
+	}
+	googleSpeech, errGoogleSpeech := providergoogle.NewInteractionsSpeechActionDriver(GoogleInteractionsDefinitionID, client)
+	if errGoogleSpeech != nil {
+		return fmt.Errorf("create Google Interactions speech driver: %w", errGoogleSpeech)
+	}
+	if errRegister := registry.RegisterAction(googleSpeech); errRegister != nil {
+		return fmt.Errorf("register Google Interactions speech driver: %w", errRegister)
+	}
+	xaiSearch, errXAISearch := providerxai.NewGroundedSearchDriver(XAIAPIDefinitionID, client)
+	if errXAISearch != nil {
+		return fmt.Errorf("create xAI grounded search driver: %w", errXAISearch)
+	}
+	if errRegister := registry.RegisterAction(xaiSearch); errRegister != nil {
+		return fmt.Errorf("register xAI grounded search driver: %w", errRegister)
+	}
+	for _, actionBindingID := range []string{providerxai.ImageGenerateActionBindingID, providerxai.ImageEditActionBindingID} {
+		imageDriver, errImageDriver := providerxai.NewImageActionDriver(XAIAPIDefinitionID, actionBindingID, client)
+		if errImageDriver != nil {
+			return fmt.Errorf("create xAI image driver %s: %w", actionBindingID, errImageDriver)
+		}
+		if errRegister := registry.RegisterAction(imageDriver); errRegister != nil {
+			return fmt.Errorf("register xAI image driver %s: %w", actionBindingID, errRegister)
+		}
+	}
+	for _, actionBindingID := range []string{providerxai.VideoGenerateActionBindingID, providerxai.VideoEditActionBindingID, providerxai.VideoExtendActionBindingID} {
+		videoDriver, errVideoDriver := providerxai.NewVideoTaskDriver(XAIAPIDefinitionID, actionBindingID, client)
+		if errVideoDriver != nil {
+			return fmt.Errorf("create xAI video driver %s: %w", actionBindingID, errVideoDriver)
+		}
+		if errRegister := registry.RegisterTaskAction(videoDriver); errRegister != nil {
+			return fmt.Errorf("register xAI video driver %s: %w", actionBindingID, errRegister)
 		}
 	}
 	return nil
@@ -166,13 +335,31 @@ func RegisterCLIProxyExecutionDrivers(registry *provider.ExecutionRegistry, clie
 // responsesCapabilities returns the common verified Responses translation feature set copied from CLIProxyAPI.
 // responsesCapabilities 返回从 CLIProxyAPI 复制并验证的通用 Responses 转换能力集合。
 func responsesCapabilities() protocolresponses.ProfileCapabilities {
-	return protocolresponses.ProfileCapabilities{NativeSystemPreamble: true, NativeDeveloper: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, Reasoning: true, ReasoningContinuation: true}
+	return protocolresponses.ProfileCapabilities{NativeSystemPreamble: true, NativeDeveloper: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, Reasoning: true, ReasoningContinuation: true, NativeWebSearch: true}
+}
+
+// openAIResponsesCapabilities adds only documented OpenAI media carriers to the shared Responses behavior.
+// openAIResponsesCapabilities 仅向共享 Responses 行为添加已记录的 OpenAI 媒体载体。
+func openAIResponsesCapabilities() protocolresponses.ProfileCapabilities {
+	capabilities := responsesCapabilities()
+	capabilities.MediaInputKinds = []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaFile}
+	capabilities.MediaMaterializations = []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64, catalog.MaterializationProviderFileID}
+	return capabilities
+}
+
+// anthropicMessagesCapabilities limits the copied translator to image and document data it preserves exactly.
+// anthropicMessagesCapabilities 将复制转换器限制为其能精确保留的图片与文档数据。
+func anthropicMessagesCapabilities() protocolresponses.ProfileCapabilities {
+	capabilities := responsesCapabilities()
+	capabilities.MediaInputKinds = []vcp.MediaKind{vcp.MediaImage, vcp.MediaFile}
+	capabilities.MediaMaterializations = []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64}
+	return capabilities
 }
 
 // aiStudioCapabilities returns the verified Gemini GenerateContent feature set.
 // aiStudioCapabilities 返回已验证的 Gemini GenerateContent 能力集合。
 func aiStudioCapabilities() protocolaistudio.ProfileCapabilities {
-	return protocolaistudio.ProfileCapabilities{NativeSystemInstruction: true, StructuredTools: true, ParallelTools: true, StrictJSONSchema: true, NativeReasoning: true, NativeReasoningSummary: true}
+	return protocolaistudio.ProfileCapabilities{MediaInputKinds: []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaVideo}, NativeSystemInstruction: true, StructuredTools: true, ParallelTools: true, StrictJSONSchema: true, NativeReasoning: true, NativeReasoningSummary: true}
 }
 
 // xaiAPIResponsesCapabilities returns the verified official xAI API feature set, including its compact endpoint.

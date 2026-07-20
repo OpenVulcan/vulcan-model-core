@@ -139,6 +139,52 @@ const alibabaGroupResponse = {
   ],
 };
 
+// alibabaWorkspaceGroupResponse reproduces the parameterized endpoint returned by the real Alibaba catalog.
+// alibabaWorkspaceGroupResponse 复现真实 Alibaba 目录返回的参数化端点。
+const alibabaWorkspaceGroupResponse = {
+  provider_groups: [
+    {
+      id: "alibaba",
+      display_name: "Alibaba Cloud Model Studio",
+      description: "Alibaba Model Studio products.",
+      description_key: "providers.alibaba.description",
+      provider_definitions: [
+        {
+          id: "system_alibaba_model_studio_workspace_global",
+          display_name: "Alibaba Model Studio Workspace Global",
+          group_id: "alibaba",
+          variant_name: "Model Studio Workspace Global",
+          variant_description:
+            "Alibaba Model Studio API hosted in Singapore and isolated by workspace ID.",
+          variant_description_key:
+            "providers.alibaba.modelStudioWorkspaceGlobalDescription",
+          model_catalog_id: "alibaba_model_studio_workspace_global",
+          auth_methods: [
+            { id: "api_key", type: "api_key", refreshable: false },
+          ],
+          features: unavailableFeatures,
+          protocol_profile_id: "alibaba.embedding",
+          endpoint_presets: [
+            {
+              id: "model_studio_workspace_global",
+              base_url: "",
+              region: "Global",
+              user_editable: false,
+              parameters: [
+                {
+                  id: "workspace_id",
+                  kind: "hostname_label",
+                  required: true,
+                },
+              ],
+            },
+          ],
+        },
+      ],
+    },
+  ],
+};
+
 // mixedProviderGroupResponse adds one single-definition provider to exercise direct configuration.
 // mixedProviderGroupResponse 增加一个单定义供应商，用于验证直接配置流程。
 const mixedProviderGroupResponse = {
@@ -589,6 +635,89 @@ describe("ProviderManagementPage", () => {
     expect(screen.getByLabelText("API key")).toHaveAttribute("type", "password");
   });
 
+  // This test verifies a parameterized Alibaba endpoint loads and submits its declared workspace value.
+  // 此测试验证参数化 Alibaba 端点能够加载并提交其声明的 Workspace 值。
+  it("loads and onboards the Alibaba workspace endpoint", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/vulcan/manage/provider-groups")
+            return Promise.resolve(
+              jsonResponse(alibabaWorkspaceGroupResponse),
+            );
+          if (url === "/vulcan/manage/provider-instances")
+            return Promise.resolve(
+              jsonResponse(emptyProviderInstancesResponse),
+            );
+          if (
+            url === "/vulcan/manage/provider-instances/onboard" &&
+            init?.method === "POST"
+          )
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  provider_instance_id: "pvi_alibaba_workspace",
+                  credential_id: "cred_alibaba_workspace",
+                  endpoint_ids: ["endpoint_alibaba_workspace"],
+                  binding_ids: ["binding_alibaba_workspace"],
+                },
+                201,
+              ),
+            );
+          return Promise.resolve(new Response(null, { status: 404 }));
+        },
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    expect(
+      await screen.findByText("No authorized providers yet."),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(
+        "Unable to load the provider catalog. Adding providers is temporarily unavailable.",
+      ),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: /Alibaba Cloud Model Studio/ }),
+    );
+    fireEvent.change(screen.getByLabelText("Name"), {
+      target: { value: "Alibaba Workspace" },
+    });
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "test-api-key" },
+    });
+    fireEvent.change(screen.getByLabelText("Workspace ID"), {
+      target: { value: "workspace-one" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create provider" }));
+
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/vulcan/manage/provider-instances/onboard",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
+    const onboardingCall = fetchMock.mock.calls.find(
+      ([url, init]) =>
+        String(url) === "/vulcan/manage/provider-instances/onboard" &&
+        init?.method === "POST",
+    );
+    expect(JSON.parse(String(onboardingCall?.[1]?.body))).toEqual({
+      provider_definition_id:
+        "system_alibaba_model_studio_workspace_global",
+      name: "Alibaba Workspace",
+      auth_method_id: "api_key",
+      secret: "test-api-key",
+      endpoint_parameters: [
+        { id: "workspace_id", value: "workspace-one" },
+      ],
+    });
+  });
+
   // This test verifies an authorized-list failure cannot leave the still-available creation workflow blank.
   // 此测试验证已授权列表失败时，仍可用的新增流程不会出现空白。
   it("keeps provider creation usable when only the authorized list fails", async () => {
@@ -729,6 +858,8 @@ describe("ProviderManagementPage", () => {
           display_name: "Gemini GenerateContent (Vertex-compatible)",
           user_configurable: true,
           runtime_ready: true,
+          model_discovery: "unsupported",
+          capabilities: [],
           allowed_auth_methods: ["header_api_key"],
         },
         {
@@ -737,7 +868,19 @@ describe("ProviderManagementPage", () => {
           display_name: "OpenAI Chat Completions",
           user_configurable: true,
           runtime_ready: true,
+          model_discovery: "unsupported",
+          capabilities: [],
           allowed_auth_methods: ["bearer"],
+        },
+        {
+          id: "openai.responses",
+          version: "1",
+          display_name: "OpenAI Responses",
+          user_configurable: false,
+          runtime_ready: true,
+          model_discovery: "unsupported",
+          capabilities: [],
+          allowed_auth_methods: null,
         },
       ],
     };

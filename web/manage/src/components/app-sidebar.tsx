@@ -18,14 +18,15 @@ import {
 import {
   ChartBarIcon,
   CircleHelpIcon,
+  CpuIcon,
   DatabaseIcon,
-  FileChartColumnIcon,
-  FileIcon,
+  FileClockIcon,
   FolderIcon,
   LayoutDashboardIcon,
   ListIcon,
   SearchIcon,
   ServerCogIcon,
+  SparklesIcon,
   Settings2Icon,
   UsersIcon,
 } from "lucide-react"
@@ -171,26 +172,34 @@ const data: SidebarData = {
       ),
     },
     {
-      nameKey: "sidebar.dataLibrary",
-      url: "#",
+      nameKey: "sidebar.modelCapabilities",
+      url: "/capabilities/models",
+      icon: (
+        <CpuIcon
+        />
+      ),
+    },
+    {
+      nameKey: "sidebar.serviceCapabilities",
+      url: "/capabilities/services",
+      icon: (
+        <SparklesIcon
+        />
+      ),
+    },
+    {
+      nameKey: "sidebar.resourceDiagnostics",
+      url: "/diagnostics/resources",
       icon: (
         <DatabaseIcon
         />
       ),
     },
     {
-      nameKey: "sidebar.reports",
-      url: "#",
+      nameKey: "sidebar.executionDiagnostics",
+      url: "/diagnostics/executions",
       icon: (
-        <FileChartColumnIcon
-        />
-      ),
-    },
-    {
-      nameKey: "sidebar.wordAssistant",
-      url: "#",
-      icon: (
-        <FileIcon
+        <FileClockIcon
         />
       ),
     },

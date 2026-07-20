@@ -10,6 +10,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // QueryService builds client-safe provider and model discovery views.
@@ -105,6 +106,31 @@ type ProviderGroupView struct {
 	Revision uint64 `json:"revision"`
 }
 
+// EndpointParameterDefinitionView exposes one safe non-secret endpoint input contract.
+// EndpointParameterDefinitionView 暴露一个安全的非秘密端点输入契约。
+type EndpointParameterDefinitionView struct {
+	// ID is the stable request-field identifier.
+	// ID 是稳定的请求字段标识。
+	ID string `json:"id"`
+	// Kind identifies the closed client validation rule.
+	// Kind 标识封闭的客户端校验规则。
+	Kind providerconfig.EndpointParameterKind `json:"kind"`
+	// Required reports whether onboarding must provide the value.
+	// Required 表示录入时是否必须提供该值。
+	Required bool `json:"required"`
+}
+
+// EndpointParameterValueView exposes one persisted non-secret endpoint value.
+// EndpointParameterValueView 暴露一个持久化的非秘密端点值。
+type EndpointParameterValueView struct {
+	// ID identifies the matching endpoint parameter definition.
+	// ID 标识匹配的端点参数定义。
+	ID string `json:"id"`
+	// Value is the validated non-secret parameter value.
+	// Value 是经过校验的非秘密参数值。
+	Value string `json:"value"`
+}
+
 // EndpointPresetView exposes one safe default destination during provider onboarding.
 // EndpointPresetView 在供应商录入期间暴露一个安全的默认目标。
 type EndpointPresetView struct {
@@ -120,6 +146,9 @@ type EndpointPresetView struct {
 	// UserEditable reports whether management clients may replace the address.
 	// UserEditable 表示管理客户端是否可以替换该地址。
 	UserEditable bool `json:"user_editable"`
+	// Parameters declares the exact non-secret values required during onboarding.
+	// Parameters 声明录入时所需的精确非秘密值。
+	Parameters []EndpointParameterDefinitionView `json:"parameters,omitempty"`
 }
 
 // AuthMethodView describes one supported authentication method.
@@ -206,6 +235,9 @@ type EndpointView struct {
 	// Region is the optional provider-defined region label.
 	// Region 是可选供应商定义区域标签。
 	Region string `json:"region"`
+	// Parameters contains the validated non-secret values used to derive the endpoint.
+	// Parameters 包含用于派生端点且经过校验的非秘密值。
+	Parameters []EndpointParameterValueView `json:"parameters,omitempty"`
 	// Status is the current local endpoint availability state.
 	// Status 是当前本地端点可用性状态。
 	Status providerconfig.EndpointStatus `json:"status"`
@@ -261,6 +293,9 @@ type BindingView struct {
 	// AllowedModelIDs lists explicit model restrictions when present.
 	// AllowedModelIDs 列出存在时的显式模型限制。
 	AllowedModelIDs []string `json:"allowed_model_ids"`
+	// AllowedServiceIDs lists explicit special-service restrictions when present.
+	// AllowedServiceIDs 列出存在时的明确特殊服务限制。
+	AllowedServiceIDs []string `json:"allowed_service_ids"`
 	// Priority is the deterministic same-pool selection order.
 	// Priority 是确定性的同账号池选择顺序。
 	Priority int `json:"priority"`
@@ -281,6 +316,9 @@ type CatalogView struct {
 	// Models contains logical provider models and selectable execution shapes.
 	// Models 包含逻辑供应商模型与可选执行形态。
 	Models []ModelView `json:"models"`
+	// Services contains logical special services and exact offerings.
+	// Services 包含逻辑特殊服务与精确产品。
+	Services []ServiceView `json:"services"`
 	// Allowances contains redacted quota, balance, and credit state.
 	// Allowances 包含已经脱敏的额度、余额与 Credit 状态。
 	Allowances []AllowanceView `json:"allowances"`
@@ -293,6 +331,75 @@ type CatalogView struct {
 	// ObservedAt records when the catalog was produced.
 	// ObservedAt 记录目录生成时间。
 	ObservedAt time.Time `json:"observed_at"`
+}
+
+// ServiceView describes one provider-scoped special service.
+// ServiceView 描述一个供应商作用域特殊服务。
+type ServiceView struct {
+	// ID is the provider-scoped service identifier.
+	// ID 是供应商作用域服务标识。
+	ID string `json:"id"`
+	// DisplayName is the client-facing service name.
+	// DisplayName 是客户端显示服务名称。
+	DisplayName string `json:"display_name"`
+	// Operation is the sole public VCP operation.
+	// Operation 是唯一公共 VCP 操作。
+	Operation vcp.OperationKind `json:"operation"`
+	// EntitlementMode reports account-specific authorization requirements.
+	// EntitlementMode 报告账号特定授权要求。
+	EntitlementMode catalog.EntitlementMode `json:"entitlement_mode"`
+	// Enabled reports local management policy.
+	// Enabled 报告本地管理策略。
+	Enabled bool `json:"enabled"`
+	// ProviderAuthorized reports provider-evidenced account access.
+	// ProviderAuthorized 报告供应商证据支持的账号访问。
+	ProviderAuthorized bool `json:"provider_authorized"`
+	// Offerings contains exact channel implementations.
+	// Offerings 包含精确通道实现。
+	Offerings []ServiceOfferingView `json:"offerings"`
+}
+
+// ServiceOfferingView describes one exact special-service implementation.
+// ServiceOfferingView 描述一个精确特殊服务实现。
+type ServiceOfferingView struct {
+	// ID is the immutable service offering identifier.
+	// ID 是不可变服务产品标识。
+	ID string `json:"id"`
+	// UpstreamServiceID is the exact safe upstream engine or model handle.
+	// UpstreamServiceID 是精确安全上游引擎或模型句柄。
+	UpstreamServiceID string `json:"upstream_service_id"`
+	// Capabilities contains the closed service capability variant.
+	// Capabilities 包含封闭服务能力变体。
+	Capabilities catalog.ServiceCapabilities `json:"capabilities"`
+	// Profiles contains client-selectable executable shapes.
+	// Profiles 包含客户端可选择执行形态。
+	Profiles []ServiceExecutionProfileView `json:"profiles"`
+}
+
+// ServiceExecutionProfileView describes one exact service profile.
+// ServiceExecutionProfileView 描述一个精确服务规格。
+type ServiceExecutionProfileView struct {
+	// ID is the exact profile identifier.
+	// ID 是精确规格标识。
+	ID string `json:"id"`
+	// DisplayName is the client-visible profile name.
+	// DisplayName 是客户端可见规格名称。
+	DisplayName string `json:"display_name"`
+	// Default reports whether selection may be omitted.
+	// Default 报告是否可以省略选择。
+	Default bool `json:"default"`
+	// Operation identifies the exact VCP operation.
+	// Operation 标识精确 VCP 操作。
+	Operation vcp.OperationKind `json:"operation"`
+	// ActionBindingID identifies the immutable provider action.
+	// ActionBindingID 标识不可变供应商动作。
+	ActionBindingID string `json:"action_binding_id"`
+	// Capabilities contains the effective service contract.
+	// Capabilities 包含有效服务契约。
+	Capabilities catalog.ServiceCapabilities `json:"capabilities"`
+	// Pool reports aggregate runtime eligibility.
+	// Pool 报告聚合运行资格。
+	Pool *PoolView `json:"pool,omitempty"`
 }
 
 // ModelView describes one logical provider model and its channel offerings.
@@ -347,6 +454,12 @@ type ExecutionProfileView struct {
 	// Default reports whether profile selection may be omitted.
 	// Default 报告是否可以省略规格选择。
 	Default bool `json:"default"`
+	// Operation identifies the exact VCP operation when this is a typed profile.
+	// Operation 标识类型化 Profile 的精确 VCP 操作。
+	Operation vcp.OperationKind `json:"operation,omitempty"`
+	// ActionBindingID identifies the immutable provider action implementation.
+	// ActionBindingID 标识不可变供应商动作实现。
+	ActionBindingID string `json:"action_binding_id,omitempty"`
 	// Capabilities contains normalized client-visible behavior.
 	// Capabilities 包含规范化的客户端可见行为。
 	Capabilities CapabilityView `json:"capabilities"`
@@ -403,6 +516,30 @@ type CapabilityView struct {
 	// OutputModalities lists normalized produced output modalities.
 	// OutputModalities 列出规范化输出模态。
 	OutputModalities []string `json:"output_modalities"`
+	// MediaInputs contains typed media input contracts.
+	// MediaInputs 包含类型化媒体输入合同。
+	MediaInputs []catalog.MediaInputCapability `json:"media_inputs,omitempty"`
+	// Delivery declares real execution delivery modes.
+	// Delivery 声明真实执行交付模式。
+	Delivery catalog.DeliveryCapabilities `json:"delivery"`
+	// Embedding contains vectorization constraints when applicable.
+	// Embedding 在适用时包含向量化约束。
+	Embedding *catalog.EmbeddingCapabilities `json:"embedding,omitempty"`
+	// Rerank contains ranking constraints when applicable.
+	// Rerank 在适用时包含排序约束。
+	Rerank *catalog.RerankCapabilities `json:"rerank,omitempty"`
+	// MediaOutputs contains typed generated-media contracts.
+	// MediaOutputs 包含类型化生成媒体合同。
+	MediaOutputs []catalog.MediaOutputCapability `json:"media_outputs,omitempty"`
+	// Parameters contains closed operation parameter descriptors.
+	// Parameters 包含封闭操作参数描述。
+	Parameters []catalog.ParameterDescriptor `json:"parameters,omitempty"`
+	// ParameterRules contains typed cross-parameter conditions.
+	// ParameterRules 包含类型化跨参数条件。
+	ParameterRules []catalog.ParameterRule `json:"parameter_rules,omitempty"`
+	// UsageMetrics lists independently observable usage dimensions.
+	// UsageMetrics 列出可独立观察的用量维度。
+	UsageMetrics []catalog.UsageMetricCapability `json:"usage_metrics,omitempty"`
 }
 
 // TokenLimitView preserves the distinction between unknown and zero.
@@ -624,7 +761,7 @@ func (q *QueryService) GetCatalog(ctx context.Context, instanceID string) (Catal
 	if errSnapshot != nil {
 		return CatalogView{}, errSnapshot
 	}
-	return catalogView(snapshot, instance.DisabledModelIDs), nil
+	return catalogView(snapshot, instance.DisabledModelIDs, instance.DisabledServiceIDs), nil
 }
 
 // ListEndpoints returns management-safe endpoint records for one exact provider instance.
@@ -636,11 +773,16 @@ func (q *QueryService) ListEndpoints(ctx context.Context, instanceID string) ([]
 	}
 	views := make([]EndpointView, 0, len(endpoints))
 	for _, endpoint := range endpoints {
+		parameters := make([]EndpointParameterValueView, 0, len(endpoint.Parameters))
+		for _, parameter := range endpoint.Parameters {
+			parameters = append(parameters, EndpointParameterValueView{ID: parameter.ID, Value: parameter.Value})
+		}
 		views = append(views, EndpointView{
 			ID:                 endpoint.ID,
 			ProviderInstanceID: endpoint.ProviderInstanceID,
 			BaseURL:            endpoint.BaseURL,
 			Region:             endpoint.Region,
+			Parameters:         parameters,
 			Status:             endpoint.Status,
 			Revision:           endpoint.Revision,
 		})
@@ -686,6 +828,7 @@ func (q *QueryService) ListBindings(ctx context.Context, instanceID string) ([]B
 			EndpointID:         binding.EndpointID,
 			CredentialID:       binding.CredentialID,
 			AllowedModelIDs:    append([]string(nil), binding.AllowedModelIDs...),
+			AllowedServiceIDs:  append([]string(nil), binding.AllowedServiceIDs...),
 			Priority:           binding.Priority,
 			Enabled:            binding.Enabled,
 			Revision:           binding.Revision,
@@ -739,11 +882,16 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 	}
 	endpointPresets := make([]EndpointPresetView, 0, len(definition.EndpointPresets))
 	for _, preset := range definition.EndpointPresets {
+		parameters := make([]EndpointParameterDefinitionView, 0, len(preset.Parameters))
+		for _, parameter := range preset.Parameters {
+			parameters = append(parameters, EndpointParameterDefinitionView{ID: parameter.ID, Kind: parameter.Kind, Required: parameter.Required})
+		}
 		endpointPresets = append(endpointPresets, EndpointPresetView{
 			ID:           preset.ID,
 			BaseURL:      preset.BaseURL,
 			Region:       preset.Region,
 			UserEditable: preset.UserEditable,
+			Parameters:   parameters,
 		})
 	}
 	return ProviderDefinitionView{
@@ -771,7 +919,7 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 
 // catalogView converts one atomic internal snapshot to a redacted client view.
 // catalogView 将一个原子内部快照转换为脱敏客户端视图。
-func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogView {
+func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledServiceIDs []string) CatalogView {
 	offeringsByModel := make(map[string][]catalog.ModelOffering)
 	for _, offering := range snapshot.Offerings {
 		offeringsByModel[offering.ProviderModelID] = append(offeringsByModel[offering.ProviderModelID], offering)
@@ -799,12 +947,14 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 			profileViews := make([]ExecutionProfileView, 0, len(profilesByOffering[offering.ID]))
 			for _, profile := range profilesByOffering[offering.ID] {
 				profileView := ExecutionProfileView{
-					ID:           profile.ID,
-					DisplayName:  profile.DisplayName,
-					Default:      profile.Default,
-					Capabilities: capabilityView(profile.Capabilities),
-					SwitchPolicy: profile.SwitchPolicy,
-					PoolPolicy:   profile.PoolPolicy,
+					ID:              profile.ID,
+					DisplayName:     profile.DisplayName,
+					Default:         profile.Default,
+					Operation:       profile.Operation,
+					ActionBindingID: profile.ActionBindingID,
+					Capabilities:    capabilityView(profile.Capabilities),
+					SwitchPolicy:    profile.SwitchPolicy,
+					PoolPolicy:      profile.PoolPolicy,
 				}
 				if pool, exists := poolsByProfile[profile.ID]; exists {
 					poolValue := poolView(pool)
@@ -839,6 +989,48 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 	sort.Slice(models, func(left int, right int) bool {
 		return models[left].ID < models[right].ID
 	})
+	serviceOfferingsByService := make(map[string][]catalog.ServiceOffering)
+	for _, offering := range snapshot.ServiceOfferings {
+		serviceOfferingsByService[offering.ProviderServiceID] = append(serviceOfferingsByService[offering.ProviderServiceID], offering)
+	}
+	serviceProfilesByOffering := make(map[string][]catalog.ExecutionProfile)
+	for _, profile := range snapshot.Profiles {
+		if profile.ServiceOfferingID != "" {
+			serviceProfilesByOffering[profile.ServiceOfferingID] = append(serviceProfilesByOffering[profile.ServiceOfferingID], profile)
+		}
+	}
+	authorizedServices := make(map[string]struct{})
+	for _, entitlement := range snapshot.ServiceEntitlements {
+		if entitlement.Availability == catalog.AvailabilityAllowed {
+			authorizedServices[entitlement.ProviderServiceID] = struct{}{}
+		}
+	}
+	services := make([]ServiceView, 0, len(snapshot.Services))
+	for _, service := range snapshot.Services {
+		offeringViews := make([]ServiceOfferingView, 0, len(serviceOfferingsByService[service.ID]))
+		for _, offering := range serviceOfferingsByService[service.ID] {
+			profileViews := make([]ServiceExecutionProfileView, 0, len(serviceProfilesByOffering[offering.ID]))
+			for _, profile := range serviceProfilesByOffering[offering.ID] {
+				capabilities := offering.Capabilities
+				if profile.ServiceCapabilities != nil {
+					capabilities = *profile.ServiceCapabilities
+				}
+				profileView := ServiceExecutionProfileView{ID: profile.ID, DisplayName: profile.DisplayName, Default: profile.Default, Operation: profile.Operation, ActionBindingID: profile.ActionBindingID, Capabilities: capabilities}
+				if pool, exists := poolsByProfile[profile.ID]; exists {
+					poolValue := poolView(pool)
+					profileView.Pool = &poolValue
+				}
+				profileViews = append(profileViews, profileView)
+			}
+			sort.Slice(profileViews, func(left int, right int) bool { return profileViews[left].ID < profileViews[right].ID })
+			offeringViews = append(offeringViews, ServiceOfferingView{ID: offering.ID, UpstreamServiceID: offering.UpstreamServiceID, Capabilities: offering.Capabilities, Profiles: profileViews})
+		}
+		sort.Slice(offeringViews, func(left int, right int) bool { return offeringViews[left].ID < offeringViews[right].ID })
+		_, explicitlyAuthorized := authorizedServices[service.ID]
+		providerAuthorized := service.EntitlementMode == catalog.EntitlementAllBoundCredentials || explicitlyAuthorized
+		services = append(services, ServiceView{ID: service.ID, DisplayName: service.DisplayName, Operation: service.Operation, EntitlementMode: service.EntitlementMode, Enabled: !serviceDisabled(disabledServiceIDs, service.ID), ProviderAuthorized: providerAuthorized, Offerings: offeringViews})
+	}
+	sort.Slice(services, func(left int, right int) bool { return services[left].ID < services[right].ID })
 	allowances := make([]AllowanceView, 0, len(snapshot.Allowances))
 	for _, allowance := range snapshot.Allowances {
 		allowanceView := AllowanceView{
@@ -883,7 +1075,7 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 		}
 		return plans[left].Status < plans[right].Status
 	})
-	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, Models: models, Allowances: allowances, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, Models: models, Services: services, Allowances: allowances, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
 }
 
 // modelDisabled reports whether local management policy explicitly disables one model identifier.
@@ -891,6 +1083,17 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string) CatalogVi
 func modelDisabled(disabledModelIDs []string, modelID string) bool {
 	for _, disabledModelID := range disabledModelIDs {
 		if disabledModelID == modelID {
+			return true
+		}
+	}
+	return false
+}
+
+// serviceDisabled reports whether local management policy explicitly disables one service identifier.
+// serviceDisabled 返回本地管理策略是否显式停用一个服务标识。
+func serviceDisabled(disabledServiceIDs []string, serviceID string) bool {
+	for _, disabledServiceID := range disabledServiceIDs {
+		if disabledServiceID == serviceID {
 			return true
 		}
 	}
@@ -914,6 +1117,14 @@ func capabilityView(capabilities catalog.ModelCapabilities) CapabilityView {
 		Reasoning:                  capabilities.Reasoning,
 		InputModalities:            append([]string(nil), capabilities.InputModalities...),
 		OutputModalities:           append([]string(nil), capabilities.OutputModalities...),
+		MediaInputs:                append([]catalog.MediaInputCapability(nil), capabilities.MediaInputs...),
+		Delivery:                   capabilities.Delivery,
+		Embedding:                  capabilities.Embedding,
+		Rerank:                     capabilities.Rerank,
+		MediaOutputs:               append([]catalog.MediaOutputCapability(nil), capabilities.MediaOutputs...),
+		Parameters:                 append([]catalog.ParameterDescriptor(nil), capabilities.Parameters...),
+		ParameterRules:             append([]catalog.ParameterRule(nil), capabilities.ParameterRules...),
+		UsageMetrics:               append([]catalog.UsageMetricCapability(nil), capabilities.UsageMetrics...),
 	}
 }
 

@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	responsesprofile "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -52,7 +53,10 @@ func NewResponsesDriver(definitionID string, client *transport.Client, capabilit
 	if strings.TrimSpace(definitionID) == "" || client == nil {
 		return nil, ErrInvalidResponsesDriver
 	}
-	return &ResponsesDriver{definitionID: definitionID, client: client, capabilities: capabilities}, nil
+	copiedCapabilities := capabilities
+	copiedCapabilities.MediaInputKinds = append([]vcp.MediaKind(nil), capabilities.MediaInputKinds...)
+	copiedCapabilities.MediaMaterializations = append([]catalog.UpstreamMaterializationMode(nil), capabilities.MediaMaterializations...)
+	return &ResponsesDriver{definitionID: definitionID, client: client, capabilities: copiedCapabilities}, nil
 }
 
 // ProviderDefinitionID returns the exact definition that owns this Responses driver.
@@ -86,7 +90,7 @@ func (d *ResponsesDriver) Execute(ctx context.Context, execution provider.Execut
 	if execution.Continuation != nil {
 		previousResponseID = execution.Continuation.UpstreamResponseID
 	}
-	projected, errProject := responsesprofile.ProjectRequest(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, previousResponseID, execution.Now)
+	projected, errProject := responsesprofile.ProjectRequestWithInputs(execution.Request, execution.Binding.Target, d.capabilities, execution.LineageID, previousResponseID, execution.Now, execution.MaterializedInputs)
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}
