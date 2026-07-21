@@ -16,16 +16,22 @@ import (
 func TestRoutingServicePersistsPolicyPriorityAndKimiPlan(t *testing.T) {
 	ctx := context.Background()
 	commands, configurations, _ := newKimiOnboardingService(t)
+	// onboardingTime is the deterministic creation time preceding every mutation in this test.
+	// onboardingTime 是此测试中早于所有变更操作的确定性创建时间。
+	onboardingTime := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	commands.now = func() time.Time { return onboardingTime }
 	onboarding, errOnboard := commands.OnboardSystemProvider(ctx, OnboardSystemProviderInput{DefinitionID: bootstrap.KimiCodingDefinitionID, DisplayName: "Kimi Account", AuthMethodID: "api_key", CredentialLabel: "Kimi Account", Secret: []byte("test-key"), PlanOptionID: providerkimi.PlanOptionAllegro})
 	if errOnboard != nil {
 		t.Fatalf("OnboardSystemProvider() error = %v", errOnboard)
 	}
-	states := routingstate.NewMemoryStore(time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC))
+	states := routingstate.NewMemoryStore(onboardingTime.Add(-24 * time.Hour))
 	service, errService := NewRoutingService(configurations, commands.catalogs, states)
 	if errService != nil {
 		t.Fatalf("NewRoutingService() error = %v", errService)
 	}
-	mutationTime := time.Date(2026, 7, 21, 13, 0, 0, 0, time.UTC)
+	// mutationTime proves every update occurs after the deterministic provider creation time.
+	// mutationTime 证明每次更新均发生在确定性的供应商创建时间之后。
+	mutationTime := onboardingTime.Add(time.Hour)
 	service.now = func() time.Time { return mutationTime }
 	settings, errSettings := service.SetDefaultRoutingStrategy(ctx, providerconfig.RoutingFillFirst)
 	if errSettings != nil || settings.DefaultRoutingStrategy != providerconfig.RoutingFillFirst || settings.Revision != 2 {
