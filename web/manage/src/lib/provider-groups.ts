@@ -166,6 +166,9 @@ export interface ProviderDefinitionIdentity {
   // display_name is the management-facing provider name.
   // display_name 是管理界面显示的供应商名称。
   display_name: string;
+  // group_id identifies the optional server-owned provider family used only for management presentation.
+  // group_id 标识仅用于管理展示的可选服务端供应商系列。
+  group_id?: string;
   // protocol_profile_id identifies the definition's sole executable protocol.
   // protocol_profile_id 标识 Definition 唯一的可执行协议。
   protocol_profile_id: string;
@@ -274,10 +277,66 @@ export interface SimpleCustomModelInput {
   max_output_tokens?: number;
   // tool_calling is the explicit declared tool capability.
   // tool_calling 是显式声明的工具能力。
-  tool_calling: "native" | "unsupported" | "unknown";
+  tool_calling: "native" | "unsupported";
   // reasoning is the explicit declared reasoning capability.
   // reasoning 是显式声明的推理能力。
-  reasoning: "native" | "unsupported" | "unknown";
+  reasoning: "native" | "unsupported";
+  // request_projection contains model-specific canonical reasoning and additional payload rules.
+  // request_projection 包含模型专属的规范推理与额外载荷规则。
+  request_projection?: RequestProjection;
+}
+
+// PayloadParameter assigns one JSON value to one exact upstream object path.
+// PayloadParameter 将一个 JSON 值赋给一个精确的上游对象路径。
+export interface PayloadParameter {
+  // path is one dot-separated object path.
+  // path 是一个点分隔对象路径。
+  path: string;
+  // value is the exact JSON-compatible value written to the path.
+  // value 是写入该路径的精确 JSON 兼容值。
+  value: unknown;
+}
+
+// ReasoningParameterRule maps one canonical request value to exact upstream mutations.
+// ReasoningParameterRule 将一个规范请求值映射为精确上游变更。
+export interface ReasoningParameterRule {
+  // value is one caller-visible effort or summary value.
+  // value 是一个调用方可见的强度或摘要值。
+  value: string;
+  // set contains exact assignments.
+  // set 包含精确赋值。
+  set?: PayloadParameter[];
+  // delete contains exact paths removed for this value.
+  // delete 包含为此值删除的精确路径。
+  delete?: string[];
+}
+
+// RequestProjection is the editable per-model outbound parameter configuration.
+// RequestProjection 是可编辑的模型级出站参数配置。
+export interface RequestProjection {
+  // reasoning contains effort and visible summary mappings.
+  // reasoning 包含强度与可见摘要映射。
+  reasoning: {
+    effort?: ReasoningParameterRule[];
+    summary?: ReasoningParameterRule[];
+  };
+  // additional follows default, override, and filter precedence.
+  // additional 遵循默认、覆盖与过滤的优先级。
+  additional: AdditionalPayloadProjection;
+}
+
+// AdditionalPayloadProjection contains provider- or model-level non-core payload mutations.
+// AdditionalPayloadProjection 包含供应商级或模型级非核心载荷变更。
+export interface AdditionalPayloadProjection {
+  // default assigns values only when an earlier layer omitted each path.
+  // default 仅在更早层级未生成对应路径时赋值。
+  default?: PayloadParameter[];
+  // override replaces values produced by earlier layers.
+  // override 覆盖更早层级生成的值。
+  override?: PayloadParameter[];
+  // filter removes exact paths after assignments in the same layer.
+  // filter 在同层赋值完成后删除精确路径。
+  filter?: string[];
 }
 
 // ProviderConfigurationResponse contains identifiers created without credential material.
@@ -644,6 +703,7 @@ export interface ProviderCatalogModel {
   offerings?: Array<{
     id: string;
     upstream_model_id: string;
+    request_projection: RequestProjection;
     profiles: Array<{
       id: string;
       display_name: string;
@@ -767,9 +827,12 @@ export interface ProviderAllowance {
 // ProviderCatalogMetadata contains the management-safe portion of one refreshed catalog snapshot.
 // ProviderCatalogMetadata 包含一个已刷新目录快照中管理安全的部分。
 export interface ProviderCatalogMetadata {
-  // provider_instance_id identifies the refreshed provider instance.
-  // provider_instance_id 标识已刷新的供应商实例。
-  provider_instance_id: string;
+	// provider_instance_id identifies the refreshed provider instance.
+	// provider_instance_id 标识已刷新的供应商实例。
+	provider_instance_id: string;
+	// default_additional_parameters contains provider-wide rules inherited by every model.
+	// default_additional_parameters 包含由每个模型继承的供应商级规则。
+	default_additional_parameters: AdditionalPayloadProjection;
   // models contains the refreshed provider model inventory and local eligibility.
   // models 包含已刷新的供应商模型清单与本地可用性。
   models: ProviderCatalogModel[];
@@ -889,6 +952,7 @@ const providerDefinitionSummarySchema = z.object({
   id: z.string().min(1),
   kind: z.enum(["system", "custom"]),
   display_name: z.string().min(1),
+  group_id: z.string().min(1).optional(),
   protocol_profile_id: z.string().min(1),
   auth_methods: z.array(
     z.object({
@@ -1076,6 +1140,7 @@ const exactNonNegativeIntegerPattern = /^(0|[1-9][0-9]*)$/;
 // providerCatalogMetadataSchema 在渲染前校验供应商原生套餐与额度观测。
 const providerCatalogMetadataSchema = z.object({
   provider_instance_id: z.string().min(1),
+  default_additional_parameters: z.lazy(() => additionalPayloadProjectionSchema).optional().default({}),
   models: z.array(
     z.object({
       id: z.string().min(1),
@@ -1089,6 +1154,7 @@ const providerCatalogMetadataSchema = z.object({
           z.object({
             id: z.string().min(1),
             upstream_model_id: z.string().min(1),
+            request_projection: z.lazy(() => requestProjectionSchema),
             profiles: z.array(
               z.object({
                 id: z.string().min(1),
@@ -1197,6 +1263,150 @@ const providerCatalogMetadataSchema = z.object({
   revision: z.number().int().positive(),
   observed_at: z.string().datetime({ offset: true }),
 });
+
+// payloadPathSchema accepts unambiguous dot-separated JSON object paths.
+// payloadPathSchema 接受无歧义的点分隔 JSON 对象路径。
+const payloadPathSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*$/);
+
+// payloadParameterSchema validates one exact JSON assignment.
+// payloadParameterSchema 校验一个精确 JSON 赋值。
+const payloadParameterSchema = z.object({
+  path: payloadPathSchema,
+  value: z.json(),
+});
+
+// reasoningParameterRuleSchema validates one non-empty value-to-mutation mapping.
+// reasoningParameterRuleSchema 校验一个非空的值到变更映射。
+const reasoningParameterRuleSchema = z.object({
+  value: z.string().trim().min(1),
+  set: z.array(payloadParameterSchema).optional(),
+  delete: z.array(payloadPathSchema).optional(),
+}).refine((rule) => (rule.set?.length ?? 0) + (rule.delete?.length ?? 0) > 0, {
+  message: "each reasoning rule requires at least one set or delete mutation",
+});
+
+// requestProjectionSchema validates editable projection JSON before it reaches the server.
+// requestProjectionSchema 在可编辑投影 JSON 到达服务端之前进行校验。
+const requestProjectionSchema: z.ZodType<RequestProjection> = z.object({
+  reasoning: z.object({
+    effort: z.array(reasoningParameterRuleSchema).optional(),
+    summary: z.array(reasoningParameterRuleSchema).optional(),
+  }),
+  additional: z.object({
+    default: z.array(payloadParameterSchema).optional(),
+    override: z.array(payloadParameterSchema).optional(),
+    filter: z.array(payloadPathSchema).optional(),
+  }),
+});
+
+// additionalPayloadProjectionSchema validates one provider- or model-level additional rule document.
+// additionalPayloadProjectionSchema 校验一份供应商级或模型级附加规则文档。
+const additionalPayloadProjectionSchema: z.ZodType<AdditionalPayloadProjection> = z.object({
+  default: z.array(payloadParameterSchema).optional(),
+  override: z.array(payloadParameterSchema).optional(),
+  filter: z.array(payloadPathSchema).optional(),
+});
+
+// parseAdditionalPayloadProjectionJSON parses and validates non-reasoning payload rules.
+// parseAdditionalPayloadProjectionJSON 解析并校验非推理载荷规则。
+export function parseAdditionalPayloadProjectionJSON(value: string): AdditionalPayloadProjection {
+  const projection = additionalPayloadProjectionSchema.parse(JSON.parse(value));
+  validateAdditionalParameters(projection.default ?? [], "default", new Set());
+  validateAdditionalParameters(projection.override ?? [], "override", new Set());
+  const filterPaths = new Set<string>();
+  for (const path of projection.filter ?? []) {
+    validateSafeProjectionPath(path);
+    if (pathConflicts(path, filterPaths)) throw new Error(`filter path ${path} is duplicated`);
+    filterPaths.add(path);
+  }
+  return projection;
+}
+
+// parseRequestProjectionJSON parses and validates one complete editable rule document.
+// parseRequestProjectionJSON 解析并校验一份完整的可编辑规则文档。
+export function parseRequestProjectionJSON(value: string, protocolProfileID = ""): RequestProjection {
+  const projection = requestProjectionSchema.parse(JSON.parse(value));
+  const effortPaths = new Set<string>();
+  validateReasoningRules(projection.reasoning.effort ?? [], "effort", effortPaths, protocolProfileID);
+  const summaryPaths = new Set<string>();
+  validateReasoningRules(projection.reasoning.summary ?? [], "summary", summaryPaths, protocolProfileID);
+  for (const path of summaryPaths) {
+    if (pathConflicts(path, effortPaths)) throw new Error(`summary path ${path} conflicts with an effort rule`);
+  }
+  const reasoningPaths = new Set([...effortPaths, ...summaryPaths]);
+  validateAdditionalParameters(projection.additional.default ?? [], "default", reasoningPaths);
+  validateAdditionalParameters(projection.additional.override ?? [], "override", reasoningPaths);
+  const filterPaths = new Set<string>();
+  for (const path of projection.additional.filter ?? []) {
+    validateSafeProjectionPath(path);
+    if (pathConflicts(path, reasoningPaths) || pathConflicts(path, filterPaths)) {
+      throw new Error(`filter path ${path} is duplicated or conflicts with a reasoning rule`);
+    }
+    filterPaths.add(path);
+  }
+  return projection;
+}
+
+// validateReasoningRules verifies unique canonical values, safe paths, and deterministic mutations.
+// validateReasoningRules 校验唯一规范值、安全路径与确定性变更。
+function validateReasoningRules(rules: ReasoningParameterRule[], label: string, ownedPaths: Set<string>, protocolProfileID: string): void {
+  const values = new Set<string>();
+  for (const rule of rules) {
+    if (values.has(rule.value)) throw new Error(`${label} value ${rule.value} is duplicated`);
+    values.add(rule.value);
+    const rulePaths = new Set<string>();
+    for (const parameter of rule.set ?? []) {
+      validateSafeProjectionPath(parameter.path);
+      if (pathConflicts(parameter.path, rulePaths)) throw new Error(`${label} value ${rule.value} mutates ${parameter.path} more than once`);
+      rulePaths.add(parameter.path);
+      ownedPaths.add(parameter.path);
+    }
+    for (const path of rule.delete ?? []) {
+      validateSafeProjectionPath(path);
+      if (pathConflicts(path, rulePaths)) throw new Error(`${label} value ${rule.value} mutates ${path} more than once`);
+      rulePaths.add(path);
+      ownedPaths.add(path);
+    }
+    if (protocolProfileID === "openai.chat" && (rule.set ?? []).some((parameter) => parameter.path === "reasoning.effort") && !(rule.delete ?? []).includes("reasoning_effort")) {
+      throw new Error(`${label} value ${rule.value} must delete reasoning_effort when using reasoning.effort with OpenAI Chat`);
+    }
+    if (protocolProfileID === "openai.responses" && (rule.set ?? []).some((parameter) => parameter.path === "reasoning_effort") && !(rule.delete ?? []).includes("reasoning.effort")) {
+      throw new Error(`${label} value ${rule.value} must delete reasoning.effort when using reasoning_effort with OpenAI Responses`);
+    }
+  }
+}
+
+// validateAdditionalParameters rejects duplicate, protected, and reasoning-owned paths.
+// validateAdditionalParameters 拒绝重复、受保护及由推理规则拥有的路径。
+function validateAdditionalParameters(parameters: PayloadParameter[], label: string, reasoningPaths: Set<string>): void {
+  const paths = new Set<string>();
+  for (const parameter of parameters) {
+    validateSafeProjectionPath(parameter.path);
+    if (pathConflicts(parameter.path, paths) || pathConflicts(parameter.path, reasoningPaths)) {
+      throw new Error(`${label} path ${parameter.path} is duplicated or conflicts with a reasoning rule`);
+    }
+    paths.add(parameter.path);
+  }
+}
+
+// validateSafeProjectionPath rejects protocol identity, content, tool, stream, and authentication roots.
+// validateSafeProjectionPath 拒绝协议身份、内容、工具、流式及认证根路径。
+function validateSafeProjectionPath(path: string): void {
+  const protectedRoots = new Set(["model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream", "previous_response_id", "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key", "access_token", "auth_token", "token", "secret", "client_secret", "password", "credential", "cookie", "set_cookie"]);
+  const root = path.split(".", 1)[0].toLowerCase().replaceAll("-", "_");
+  if (protectedRoots.has(root)) {
+    throw new Error(`path ${path} is owned by the protocol or authentication boundary`);
+  }
+}
+
+// pathConflicts reports exact or parent-child path overlap.
+// pathConflicts 报告精确或父子路径重叠。
+function pathConflicts(path: string, paths: Set<string>): boolean {
+  for (const candidate of paths) {
+    if (path === candidate || path.startsWith(`${candidate}.`) || candidate.startsWith(`${path}.`)) return true;
+  }
+  return false;
+}
 
 // controlErrorResponseSchema validates the stable non-sensitive error envelope returned by management APIs.
 // controlErrorResponseSchema 校验管理 API 返回的稳定且不敏感错误信封。
@@ -1333,9 +1543,9 @@ export async function fetchProviderDefinitions(
   return payload.provider_definitions;
 }
 
-// fetchCustomProtocolProfiles loads only executable profiles that the server permits custom providers to select.
-// fetchCustomProtocolProfiles 仅加载服务端允许自定义供应商选择的可执行 Profile。
-export async function fetchCustomProtocolProfiles(
+// fetchProtocolProfiles loads the complete process-owned protocol display catalog.
+// fetchProtocolProfiles 加载完整的进程拥有协议显示目录。
+export async function fetchProtocolProfiles(
   managementAuthToken: string,
   signal?: AbortSignal,
 ): Promise<CustomProtocolProfile[]> {
@@ -1352,11 +1562,30 @@ export async function fetchCustomProtocolProfiles(
   const payload = customProtocolProfileListResponseSchema.parse(
     await response.json(),
   );
-  return payload.protocol_profiles.filter(
+  return payload.protocol_profiles;
+}
+
+// filterCustomProtocolProfiles retains only executable protocols approved for operator-defined providers.
+// filterCustomProtocolProfiles 仅保留批准用于管理员自定义供应商的可执行协议。
+export function filterCustomProtocolProfiles(
+  profiles: CustomProtocolProfile[],
+): CustomProtocolProfile[] {
+  return profiles.filter(
     (profile) =>
       profile.user_configurable &&
       profile.runtime_ready &&
       selectableCustomProviderProtocolIDs.has(profile.id),
+  );
+}
+
+// fetchCustomProtocolProfiles loads only executable profiles that the server permits custom providers to select.
+// fetchCustomProtocolProfiles 仅加载服务端允许自定义供应商选择的可执行 Profile。
+export async function fetchCustomProtocolProfiles(
+  managementAuthToken: string,
+  signal?: AbortSignal,
+): Promise<CustomProtocolProfile[]> {
+  return filterCustomProtocolProfiles(
+    await fetchProtocolProfiles(managementAuthToken, signal),
   );
 }
 
@@ -1541,6 +1770,32 @@ export async function saveCustomProviderModels(
   return providerCatalogMetadataSchema.parse(await response.json());
 }
 
+// saveCustomProviderAdditionalParameters replaces provider-wide additional request rules.
+// saveCustomProviderAdditionalParameters 替换供应商级附加请求规则。
+export async function saveCustomProviderAdditionalParameters(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  additional: AdditionalPayloadProjection,
+): Promise<ProviderCatalogMetadata> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/additional-parameters`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ additional }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `custom provider additional parameter update failed with status ${response.status}`,
+    );
+  }
+  return providerCatalogMetadataSchema.parse(await response.json());
+}
+
 // configureProvider creates one provider instance, endpoint graph, and catalog without credentials.
 // configureProvider 创建一个不含凭据的供应商实例、入口图及目录。
 export async function configureProvider(
@@ -1585,6 +1840,34 @@ export async function updateProviderInstance(
     throw new Error(`provider instance update failed with status ${response.status}`);
   }
   z.object({ id: z.literal(providerInstanceID) }).parse(await response.json());
+}
+
+// updateProviderEndpoint replaces one custom provider API destination while preserving endpoint ownership and status.
+// updateProviderEndpoint 替换一个自定义供应商的 API 目标，同时保留入口归属与状态。
+export async function updateProviderEndpoint(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  endpoint: Pick<ProviderEndpoint, "id" | "region" | "status"> & { base_url: string },
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/endpoints/${encodeURIComponent(endpoint.id)}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        base_url: endpoint.base_url,
+        region: endpoint.region,
+        status: endpoint.status,
+      }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`provider endpoint update failed with status ${response.status}`);
+  }
+  z.object({ id: z.literal(endpoint.id) }).parse(await response.json());
 }
 
 // createCustomProviderDefinition creates one user-owned provider definition without an instance or credential.

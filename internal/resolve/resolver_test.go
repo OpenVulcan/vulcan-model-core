@@ -2,6 +2,7 @@ package resolve
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"testing"
 	"time"
@@ -89,6 +90,26 @@ func TestResolveSelectsExactModelGroundedSearchService(t *testing.T) {
 	}
 	if diagnostics.ReadyCandidates != 2 || target.CredentialID != "cred_kimi_1m" {
 		t.Fatalf("search service selection diagnostics=%+v target=%+v", diagnostics, target)
+	}
+}
+
+// TestResolverCarriesProviderAndModelRequestRulesSeparately verifies runtime targets preserve both inheritance levels.
+// TestResolverCarriesProviderAndModelRequestRulesSeparately 验证运行时目标分别保留两个继承层级。
+func TestResolverCarriesProviderAndModelRequestRulesSeparately(t *testing.T) {
+	fixture := newResolverFixture(t)
+	fixture.snapshot.DefaultAdditionalParameters = catalog.AdditionalPayloadProjection{Default: []catalog.PayloadParameter{{Path: "temperature", Value: json.RawMessage(`0.7`)}}}
+	fixture.snapshot.Offerings[0].RequestProjection = catalog.RequestProjection{Additional: catalog.AdditionalPayloadProjection{Override: []catalog.PayloadParameter{{Path: "provider_options.route", Value: json.RawMessage(`"fast"`)}}}}
+	fixture.snapshot.Revision++
+	fixture.snapshot.ObservedAt = fixture.snapshot.ObservedAt.Add(time.Second)
+	if errSave := fixture.catalogs.Save(context.Background(), fixture.snapshot); errSave != nil {
+		t.Fatalf("save projected catalog snapshot: %v", errSave)
+	}
+	target, _, errResolve := fixture.resolver.Resolve(context.Background(), Request{ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Operation: vcp.OperationConversationRespond, Now: fixture.now})
+	if errResolve != nil {
+		t.Fatalf("Resolve() error = %v", errResolve)
+	}
+	if len(target.ProviderAdditionalParameters.Default) != 1 || len(target.RequestProjection.Additional.Override) != 1 {
+		t.Fatalf("resolved target projections = provider %#v model %#v", target.ProviderAdditionalParameters, target.RequestProjection)
 	}
 }
 

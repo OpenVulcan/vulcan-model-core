@@ -131,6 +131,12 @@ func (d *ResponsesDriver) Execute(ctx context.Context, execution provider.Execut
 	if errMarshal != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: encode request: %v", ErrInvalidResponsesDriver, errMarshal)
 	}
+	if !provider.AdditionalPayloadProjectionIsEmpty(execution.Binding.Target.ProviderAdditionalParameters) || !provider.RequestProjectionIsEmpty(execution.Binding.Target.RequestProjection) {
+		encodedRequest, errMarshal = provider.ApplyRequestProjections(encodedRequest, execution.Binding.Target.ProviderAdditionalParameters, execution.Binding.Target.RequestProjection, execution.Request.ReasoningPolicy)
+		if errMarshal != nil {
+			return provider.ExecutionResult{}, errMarshal
+		}
+	}
 	outbound := transport.Request{
 		Binding: execution.Binding, Method: http.MethodPost, Path: d.endpointPath, Body: encodedRequest,
 		Headers:        []transport.Header{{Name: "Content-Type", Value: "application/json"}},

@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "@/i18n";
@@ -102,7 +102,18 @@ function commonReadResponse(url: string): Response | null {
     });
   }
   if (url.endsWith("/protocol-profiles")) {
-    return jsonResponse({ protocol_profiles: [] });
+    return jsonResponse({
+      protocol_profiles: [{
+        id: "openai.chat",
+        version: "1",
+        display_name: "OpenAI Chat Completions",
+        user_configurable: true,
+        runtime_ready: true,
+        model_discovery: "unsupported",
+        capabilities: [],
+        allowed_auth_methods: ["bearer"],
+      }],
+    });
   }
   if (url.endsWith("/provider-instances")) {
     return jsonResponse({ provider_instances: [instance] });
@@ -142,6 +153,17 @@ describe("separated provider and credential management", () => {
           return Promise.resolve(jsonResponse({
             provider_instance_id: "pvi_deepseek",
             endpoint_ids: ["ep_deepseek"],
+          }, 201));
+        }
+        if (
+          url.endsWith("/provider-instances/pvi_deepseek/credentials/attach") &&
+          method === "POST"
+        ) {
+          return Promise.resolve(jsonResponse({
+            provider_instance_id: "pvi_deepseek",
+            credential_id: "cred_deepseek",
+            endpoint_ids: [],
+            binding_ids: ["bind_deepseek"],
           }, 201));
         }
         if (url.endsWith("/provider-instances")) {
@@ -193,8 +215,11 @@ describe("separated provider and credential management", () => {
     fireEvent.change(screen.getByLabelText("Provider handle"), {
       target: { value: "deepseek" },
     });
-    fireEvent.change(screen.getByLabelText("Base URL"), {
+    fireEvent.change(screen.getByLabelText("API endpoint URL"), {
       target: { value: "https://api.deepseek.com/v1" },
+    });
+    fireEvent.change(screen.getByLabelText("API key (optional)"), {
+      target: { value: "sk-deepseek-test" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create provider" }));
 
@@ -222,6 +247,18 @@ describe("separated provider and credential management", () => {
       base_url: "https://api.deepseek.com/v1",
     });
     expect(configurationPayload).not.toHaveProperty("initial_model");
+    expect(configurationPayload).not.toHaveProperty("secret");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/pvi_deepseek/credentials/attach",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          auth_method_id: "default",
+          label: "DeepSeek",
+          secret: "sk-deepseek-test",
+        }),
+      }),
+    );
   });
 
   // This test verifies provider management renders only definitions, endpoints, catalogs, and credential counts.
@@ -231,8 +268,24 @@ describe("separated provider and credential management", () => {
       "fetch",
       vi.fn().mockImplementation((input: string | URL | Request) => {
         const url = String(input);
+        if (url.endsWith("/provider-definitions")) {
+          return Promise.resolve(jsonResponse({
+            provider_definitions: [{
+              id: definition.id,
+              kind: "custom",
+              display_name: definition.display_name,
+              protocol_profile_id: definition.protocol_profile_id,
+              auth_methods: definition.auth_methods,
+              plan_options: [],
+              features: unavailableFeatures,
+            }],
+          }));
+        }
         const common = commonReadResponse(url);
         if (common) return Promise.resolve(common);
+        if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
+          return Promise.resolve(jsonResponse({ credentials: [] }));
+        }
         if (url.endsWith(`/provider-instances/${instance.id}/endpoints`)) {
           return Promise.resolve(
             jsonResponse({
@@ -283,8 +336,95 @@ describe("separated provider and credential management", () => {
     expect(await screen.findByText("Native providers")).toBeInTheDocument();
     expect(await screen.findByText("Test Production")).toBeInTheDocument();
     expect(screen.getByText("https://provider.example/v1")).toBeInTheDocument();
+    const configuredRow = screen.getByText("Test Production").closest("tr");
+    expect(configuredRow).not.toBeNull();
+    const configuredRowQueries = within(configuredRow as HTMLTableRowElement);
+    expect(configuredRowQueries.getByText("Custom")).toHaveAttribute("data-slot", "badge");
+    expect(configuredRowQueries.getByText("OpenAI Chat Completions")).toBeInTheDocument();
+    expect(configuredRowQueries.getByText("Models: 1")).toBeInTheDocument();
+    expect(configuredRowQueries.getByText("Credentials: 1")).toBeInTheDocument();
+    expect(configuredRowQueries.getByText("Ready")).toHaveAttribute("data-slot", "badge");
+    expect(screen.queryByText("Test Model")).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Configure Test Production" }));
     expect(screen.getByText("Test Model")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Edit models" }));
+    expect(screen.getByRole("heading", { name: "Edit models" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+    expect(screen.getByRole("heading", { name: "Test Production" })).toBeInTheDocument();
     expect(screen.queryByText("Authorizations")).not.toBeInTheDocument();
+  });
+
+  // This test verifies a native provider row attaches a credential to its existing configuration instead of cloning the provider.
+  // 此测试验证原生供应商行将凭据附加到既有配置，而不是克隆供应商。
+  it("attaches a credential to the existing native provider configuration", async () => {
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method = init?.method ?? (input instanceof Request ? input.method : "GET");
+        if (url.endsWith("/provider-instances")) {
+          return Promise.resolve(jsonResponse({ provider_instances: [instance] }));
+        }
+        if (url.endsWith(`/provider-instances/${instance.id}/endpoints`)) {
+          return Promise.resolve(jsonResponse({
+            endpoints: [{
+              id: "ep_test_provider",
+              provider_instance_id: instance.id,
+              base_url: "https://provider.example/v1",
+              region: "Global",
+              parameters: [],
+              status: "ready",
+              revision: 1,
+            }],
+          }));
+        }
+        if (url.endsWith(`/provider-instances/${instance.id}/credentials/attach`) && method === "POST") {
+          return Promise.resolve(jsonResponse({
+            provider_instance_id: instance.id,
+            credential_id: "cred_native_test",
+            endpoint_ids: [],
+            binding_ids: ["bind_native_test"],
+          }, 201));
+        }
+        const common = commonReadResponse(url);
+        if (common) return Promise.resolve(common);
+        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <I18nProvider>
+        <ProviderConfigurationPage managementAuthToken="management-token" />
+      </I18nProvider>,
+    );
+
+    await screen.findByText("Native providers");
+    fireEvent.click(screen.getByRole("button", { name: "New credential Test" }));
+    expect(screen.getByRole("heading", { name: "Add provider credential" })).toBeInTheDocument();
+    expect(screen.getAllByRole("combobox")[0]).toHaveValue("Global");
+    expect(screen.getAllByRole("combobox")[1]).toHaveValue("Test Production · test-provider");
+    fireEvent.change(screen.getByLabelText("Credential name"), {
+      target: { value: "Primary test key" },
+    });
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "test-native-secret" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        `/vulcan/manage/provider-instances/${instance.id}/credentials/attach`,
+        expect.objectContaining({
+          method: "POST",
+          body: JSON.stringify({
+            auth_method_id: "api_key",
+            label: "Primary test key",
+            secret: "test-native-secret",
+          }),
+        }),
+      );
+    });
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/provider-configurations"))).toBe(false);
+    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/provider-instances/onboard"))).toBe(false);
   });
 
   // This test verifies credential management selects an existing provider and uses the attachment endpoint.

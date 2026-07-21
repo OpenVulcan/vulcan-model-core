@@ -34,6 +34,17 @@ func (r VulcanRequest) Validate() error {
 	if r.ReasoningPolicy.ContinuationID != "" && len(r.Context) != 0 {
 		return fmt.Errorf("%w: continuation and full canonical context are mutually exclusive", ErrInvalidRequest)
 	}
+	if r.ReasoningPolicy.Summary && strings.TrimSpace(r.ReasoningPolicy.SummaryMode) != "" {
+		return fmt.Errorf("%w: reasoning summary and summary_mode are mutually exclusive", ErrInvalidRequest)
+	}
+	if r.ReasoningPolicy.SummaryMode != strings.TrimSpace(r.ReasoningPolicy.SummaryMode) {
+		return fmt.Errorf("%w: reasoning summary_mode cannot contain surrounding whitespace", ErrInvalidRequest)
+	}
+	switch r.ReasoningPolicy.SummaryMode {
+	case "", "auto", "concise", "detailed":
+	default:
+		return fmt.Errorf("%w: reasoning summary_mode %q is invalid", ErrInvalidRequest, r.ReasoningPolicy.SummaryMode)
+	}
 	if r.RemoteCompaction != nil && r.RemoteCompaction.PreviousResponseID != "" && len(r.RemoteCompaction.Context) != 0 {
 		return fmt.Errorf("%w: remote compaction requires previous_response_id or context, not both", ErrInvalidRequest)
 	}

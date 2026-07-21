@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	chatprofile "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -25,6 +26,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
+	"github.com/tidwall/gjson"
 )
 
 const (
@@ -62,6 +64,33 @@ func TestChatDriverExecutesBoundNonStreamingRequest(t *testing.T) {
 	}
 	if result.UpstreamResponseID != "chat-upstream-1" || result.Response.Status != vcp.ResponseCompleted || len(result.Response.Items) != 1 || result.Response.Items[0].Content[0].Text != "Hello" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestChatDriverAppliesOfferingRequestProjection verifies configured reasoning mutations reach the final outbound wire body.
+// TestChatDriverAppliesOfferingRequestProjection 验证已配置的推理变更会到达最终出站 Wire Body。
+func TestChatDriverAppliesOfferingRequestProjection(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		body, errRead := io.ReadAll(request.Body)
+		if errRead != nil {
+			t.Errorf("read request: %v", errRead)
+		}
+		if gjson.GetBytes(body, "thinking.type").String() != "enabled" || gjson.GetBytes(body, "reasoning_effort").String() != "high" {
+			t.Errorf("projected request = %s", body)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"chat-projected","choices":[{"index":0,"message":{"role":"assistant","content":"Hello"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	driver, execution := newChatDriverExecution(t, server.URL, false)
+	execution.Request.ReasoningPolicy.Effort = "high"
+	execution.Binding.Target.ModelCapabilities = catalog.ModelCapabilities{Reasoning: catalog.CapabilityNative, ReasoningEfforts: []string{"high"}}
+	execution.Binding.Target.RequestProjection = catalog.RequestProjection{Reasoning: catalog.ReasoningRequestProjection{Effort: []catalog.ReasoningParameterRule{{
+		Value: "high", Set: []catalog.PayloadParameter{{Path: "thinking.type", Value: json.RawMessage(`"enabled"`)}, {Path: "reasoning_effort", Value: json.RawMessage(`"high"`)}},
+	}}}}
+	if _, errExecute := driver.Execute(context.Background(), execution); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
 	}
 }
 

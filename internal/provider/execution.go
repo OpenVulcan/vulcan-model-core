@@ -165,6 +165,12 @@ func (r ExecutionRequest) ValidateForProfile(profileID string, supportedAuthType
 	if errRequest := r.Request.Validate(); errRequest != nil {
 		return "", errRequest
 	}
+	if requestedEffort := strings.TrimSpace(r.Request.ReasoningPolicy.Effort); requestedEffort != "" && len(r.Binding.Target.ModelCapabilities.ReasoningEfforts) > 0 && !containsString(r.Binding.Target.ModelCapabilities.ReasoningEfforts, requestedEffort) {
+		return "", fmt.Errorf("%w: reasoning effort %q is not configured for the selected model offering", ErrExecutionBinding, requestedEffort)
+	}
+	if requestedSummary := r.Request.ReasoningPolicy.RequestedSummaryMode(); requestedSummary != "" && len(r.Binding.Target.ModelCapabilities.ReasoningSummaryModes) > 0 && !containsString(r.Binding.Target.ModelCapabilities.ReasoningSummaryModes, requestedSummary) {
+		return "", fmt.Errorf("%w: reasoning summary mode %q is not configured for the selected model offering", ErrExecutionBinding, requestedSummary)
+	}
 	if r.Definition.ProtocolProfileID != profileID || !r.Definition.RuntimeReady {
 		return "", fmt.Errorf("%w: provider protocol is not executable for %q", ErrExecutionBinding, profileID)
 	}

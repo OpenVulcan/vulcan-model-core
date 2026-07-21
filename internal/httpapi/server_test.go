@@ -278,6 +278,12 @@ func (staticManagementCommands) SaveCustomProviderModels(context.Context, string
 	return catalog.Snapshot{}, errors.New("static command fixture")
 }
 
+// SaveCustomProviderAdditionalParameters reports that the static fixture does not execute provider parameter editing flows.
+// SaveCustomProviderAdditionalParameters 报告静态夹具不执行供应商参数编辑流程。
+func (staticManagementCommands) SaveCustomProviderAdditionalParameters(context.Context, string, catalog.AdditionalPayloadProjection) (catalog.Snapshot, error) {
+	return catalog.Snapshot{}, errors.New("static command fixture")
+}
+
 // CreateInstance reports that the static fixture does not execute mutation flows.
 // CreateInstance 报告静态夹具不执行变更流程。
 func (staticManagementCommands) CreateInstance(context.Context, management.CreateInstanceInput) (providerconfig.ProviderInstance, error) {

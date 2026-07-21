@@ -212,8 +212,9 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 	// reasoningNative evaluates the request-specific subset of thinking controls that this exact target has verified.
 	// reasoningNative 评估该精确 Target 已验证的请求特定推理控制子集。
 	reasoningNative := capabilities.NativeReasoning
-	if request.ReasoningPolicy.Summary {
+	if request.ReasoningPolicy.RequestedSummaryMode() != "" {
 		reasoningNative = reasoningNative && capabilities.NativeReasoningSummary
+		reasoningNative = reasoningNative && request.ReasoningPolicy.RequestedSummaryMode() == "auto"
 	}
 	if request.ReasoningPolicy.Effort != "" {
 		reasoningNative = reasoningNative && capabilities.supportsThinkingLevel(request.ReasoningPolicy.Effort)
@@ -274,7 +275,7 @@ func projectGeneration(upstream *GenerateContentRequest, request vcp.VulcanReque
 		config.ResponseMIMEType = "application/json"
 		config.ResponseJSONSchema = append([]byte(nil), request.GenerationPolicy.StrictJSONSchema...)
 	}
-	if request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.Summary {
+	if request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.RequestedSummaryMode() != "" {
 		if !capabilitySelected(plan, vcp.FeatureReasoning, vcp.CapabilityNative) {
 			return fmt.Errorf("%w: requested reasoning controls were not selected natively", ErrUnsupportedContext)
 		}
@@ -285,9 +286,12 @@ func projectGeneration(upstream *GenerateContentRequest, request vcp.VulcanReque
 			}
 			thinking.ThinkingLevel = request.ReasoningPolicy.Effort
 		}
-		if request.ReasoningPolicy.Summary {
+		if request.ReasoningPolicy.RequestedSummaryMode() != "" {
 			if !capabilities.NativeReasoningSummary {
 				return fmt.Errorf("%w: visible reasoning summaries are not verified for this target", ErrUnsupportedContext)
+			}
+			if request.ReasoningPolicy.RequestedSummaryMode() != "auto" {
+				return fmt.Errorf("%w: Gemini supports only automatic visible reasoning summaries", ErrUnsupportedContext)
 			}
 			includeThoughts := true
 			thinking.IncludeThoughts = &includeThoughts

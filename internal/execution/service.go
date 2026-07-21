@@ -562,7 +562,7 @@ func validateMediaFeatureCombination(operation vcp.ConversationOperation, stream
 	if stream && !callableCapabilityLevel(capability.Compatibility.Streaming) {
 		return fmt.Errorf("%w: streaming is not compatible with selected media input", vcp.ErrInvalidRequest)
 	}
-	if (strings.TrimSpace(operation.ReasoningPolicy.Effort) != "" || operation.ReasoningPolicy.Summary || strings.TrimSpace(operation.ReasoningPolicy.ContinuationID) != "") && !callableCapabilityLevel(capability.Compatibility.Reasoning) {
+	if (strings.TrimSpace(operation.ReasoningPolicy.Effort) != "" || operation.ReasoningPolicy.RequestedSummaryMode() != "" || strings.TrimSpace(operation.ReasoningPolicy.ContinuationID) != "") && !callableCapabilityLevel(capability.Compatibility.Reasoning) {
 		return fmt.Errorf("%w: reasoning is not compatible with selected media input", vcp.ErrInvalidRequest)
 	}
 	if len(operation.GenerationPolicy.StrictJSONSchema) > 0 && !callableCapabilityLevel(capability.Compatibility.StructuredOutput) {

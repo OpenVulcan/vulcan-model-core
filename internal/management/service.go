@@ -942,6 +942,9 @@ type InitialProviderModelInput struct {
 	// Reasoning is an explicit user-declared capability level.
 	// Reasoning 是显式的用户声明能力级别。
 	Reasoning catalog.CapabilityLevel
+	// RequestProjection optionally replaces the protocol-specific default outbound parameter mapping.
+	// RequestProjection 可选替换协议专属的默认出站参数映射。
+	RequestProjection *catalog.RequestProjection
 }
 
 // ProviderConfigurationResult contains the committed provider configuration and its credential-independent catalog.
@@ -1006,10 +1009,39 @@ func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, chann
 		return catalog.Snapshot{}, errors.New("initial custom-provider token limits cannot be negative")
 	}
 	if input.ToolCalling == "" {
-		input.ToolCalling = catalog.CapabilityUnknown
+		input.ToolCalling = catalog.CapabilityNative
 	}
 	if input.Reasoning == "" {
-		input.Reasoning = catalog.CapabilityUnknown
+		input.Reasoning = catalog.CapabilityNative
+	}
+	if input.ToolCalling != catalog.CapabilityNative && input.ToolCalling != catalog.CapabilityUnsupported {
+		return catalog.Snapshot{}, errors.New("custom-provider tool calling must be native or unsupported")
+	}
+	if input.Reasoning != catalog.CapabilityNative && input.Reasoning != catalog.CapabilityUnsupported {
+		return catalog.Snapshot{}, errors.New("custom-provider reasoning must be native or unsupported")
+	}
+	requestProjection := catalog.RequestProjection{}
+	if input.Reasoning == catalog.CapabilityNative {
+		var errProjection error
+		requestProjection, errProjection = defaultCustomRequestProjection(channelID)
+		if errProjection != nil {
+			return catalog.Snapshot{}, errProjection
+		}
+	}
+	if input.RequestProjection != nil {
+		requestProjection = catalog.CloneRequestProjection(*input.RequestProjection)
+	}
+	if errProjection := requestProjection.Validate(); errProjection != nil {
+		return catalog.Snapshot{}, errProjection
+	}
+	if input.Reasoning == catalog.CapabilityNative && len(requestProjection.Reasoning.Effort) == 0 {
+		return catalog.Snapshot{}, errors.New("callable custom-provider reasoning requires at least one effort projection rule")
+	}
+	if input.Reasoning == catalog.CapabilityUnsupported && (len(requestProjection.Reasoning.Effort) > 0 || len(requestProjection.Reasoning.Summary) > 0) {
+		return catalog.Snapshot{}, errors.New("unsupported custom-provider reasoning cannot carry effort or summary projection rules")
+	}
+	if errProjection := validateCustomProjectionForProtocol(channelID, requestProjection); errProjection != nil {
+		return catalog.Snapshot{}, errProjection
 	}
 	identifiers := make([]string, 3)
 	for index, prefix := range []string{"model_", "offer_", "profile_"} {
@@ -1022,7 +1054,9 @@ func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, chann
 	capabilities := catalog.ModelCapabilities{
 		ToolCalling: input.ToolCalling, ParallelToolCalls: catalog.CapabilityUnknown,
 		StreamingToolArguments: catalog.CapabilityUnknown, StrictJSONSchema: catalog.CapabilityUnknown,
-		Reasoning: input.Reasoning, InputModalities: []string{"text"}, OutputModalities: []string{"text"},
+		Reasoning: input.Reasoning, ReasoningEfforts: reasoningValues(requestProjection.Reasoning.Effort),
+		ReasoningSummaryModes: reasoningValues(requestProjection.Reasoning.Summary),
+		InputModalities:       []string{"text"}, OutputModalities: []string{"text"},
 	}
 	if input.ContextWindow > 0 {
 		capabilities.Tokens.ContextWindow = catalog.OptionalTokenLimit{Known: true, Value: input.ContextWindow}
@@ -1033,7 +1067,7 @@ func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, chann
 	snapshot := catalog.Snapshot{
 		ProviderInstanceID: instance.ID,
 		Models:             []catalog.ProviderModel{{ID: identifiers[0], ProviderInstanceID: instance.ID, UpstreamModelID: input.UpstreamModelID, DisplayName: input.DisplayName, Source: catalog.ModelSourceUserDeclared, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1}},
-		Offerings:          []catalog.ModelOffering{{ID: identifiers[1], ProviderInstanceID: instance.ID, ProviderModelID: identifiers[0], ChannelID: channelID, UpstreamModelID: input.UpstreamModelID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1}},
+		Offerings:          []catalog.ModelOffering{{ID: identifiers[1], ProviderInstanceID: instance.ID, ProviderModelID: identifiers[0], ChannelID: channelID, UpstreamModelID: input.UpstreamModelID, Capabilities: capabilities, RequestProjection: requestProjection, CapabilityRevision: 1, Revision: 1}},
 		Profiles:           []catalog.ExecutionProfile{{ID: identifiers[2], ProviderInstanceID: instance.ID, OfferingID: identifiers[1], DisplayName: "Default", Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchSeamless, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1}},
 		Revision:           1, ObservedAt: observedAt,
 	}
@@ -1134,7 +1168,8 @@ func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInst
 	updated := catalog.Snapshot{
 		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
 		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances,
-		Revision: current.Revision + 1, ObservedAt: s.now().UTC(),
+		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(current.DefaultAdditionalParameters),
+		Revision:                    current.Revision + 1, ObservedAt: s.now().UTC(),
 	}
 	seen := make(map[string]struct{}, len(modelListPayload.Data))
 	for _, discovered := range modelListPayload.Data {
@@ -1217,7 +1252,8 @@ func (s *Service) SaveCustomProviderModels(ctx context.Context, providerInstance
 	updated := catalog.Snapshot{
 		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
 		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances,
-		Revision: current.Revision + 1, ObservedAt: s.now().UTC(),
+		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(current.DefaultAdditionalParameters),
+		Revision:                    current.Revision + 1, ObservedAt: s.now().UTC(),
 	}
 	seen := make(map[string]struct{}, len(inputs))
 	for _, input := range inputs {
@@ -1255,6 +1291,47 @@ func (s *Service) SaveCustomProviderModels(ctx context.Context, providerInstance
 		return catalog.Snapshot{}, errResolver
 	}
 	updated.Pools, errResolver = resolver.SummarizeSnapshot(ctx, updated, updated.ObservedAt, updated.Revision)
+	if errResolver != nil {
+		return catalog.Snapshot{}, errResolver
+	}
+	if errSave := s.catalogs.Save(ctx, updated); errSave != nil {
+		return catalog.Snapshot{}, errSave
+	}
+	return updated, nil
+}
+
+// SaveCustomProviderAdditionalParameters replaces provider-wide additional request rules for one custom provider.
+// SaveCustomProviderAdditionalParameters 替换一个自定义供应商的供应商级附加请求规则。
+func (s *Service) SaveCustomProviderAdditionalParameters(ctx context.Context, providerInstanceID string, parameters catalog.AdditionalPayloadProjection) (catalog.Snapshot, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, strings.TrimSpace(providerInstanceID))
+	if errInstance != nil {
+		return catalog.Snapshot{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return catalog.Snapshot{}, errDefinition
+	}
+	if definition.Kind != providerconfig.DefinitionKindCustom {
+		return catalog.Snapshot{}, errors.New("provider additional parameter editing is supported only for custom providers")
+	}
+	if errValidate := parameters.Validate(); errValidate != nil {
+		return catalog.Snapshot{}, errValidate
+	}
+	updated, errCurrent := s.catalogs.Get(ctx, instance.ID)
+	if errCurrent != nil {
+		return catalog.Snapshot{}, errCurrent
+	}
+	updated.DefaultAdditionalParameters = catalog.CloneAdditionalPayloadProjection(parameters)
+	updated.Revision++
+	updated.ObservedAt = s.now().UTC()
+	if errValidate := updated.Validate(); errValidate != nil {
+		return catalog.Snapshot{}, errValidate
+	}
+	targetResolver, errResolver := resolve.New(s.configurations, s.catalogs)
+	if errResolver != nil {
+		return catalog.Snapshot{}, errResolver
+	}
+	updated.Pools, errResolver = targetResolver.SummarizeSnapshot(ctx, updated, updated.ObservedAt, updated.Revision)
 	if errResolver != nil {
 		return catalog.Snapshot{}, errResolver
 	}
@@ -2598,6 +2675,9 @@ type SaveCustomCatalogInput struct {
 	// ProviderInstanceID owns every supplied model record.
 	// ProviderInstanceID 是全部传入模型记录的所有者。
 	ProviderInstanceID string
+	// DefaultAdditionalParameters contains provider-wide request mutations inherited by every model.
+	// DefaultAdditionalParameters 包含由每个模型继承的供应商级请求变更。
+	DefaultAdditionalParameters catalog.AdditionalPayloadProjection
 	// Models contains logical user-declared models.
 	// Models 包含逻辑用户声明模型。
 	Models []catalog.ProviderModel
@@ -2657,12 +2737,13 @@ func (s *CustomCatalogService) SaveCustomCatalog(ctx context.Context, input Save
 		profiles[index].Revision = revision
 	}
 	snapshot := catalog.Snapshot{
-		ProviderInstanceID: instance.ID,
-		Models:             models,
-		Offerings:          offerings,
-		Profiles:           profiles,
-		Revision:           revision,
-		ObservedAt:         input.ObservedAt,
+		ProviderInstanceID:          instance.ID,
+		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(input.DefaultAdditionalParameters),
+		Models:                      models,
+		Offerings:                   offerings,
+		Profiles:                    profiles,
+		Revision:                    revision,
+		ObservedAt:                  input.ObservedAt,
 	}
 	if errValidate := snapshot.Validate(); errValidate != nil {
 		return catalog.Snapshot{}, errValidate

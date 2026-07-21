@@ -106,10 +106,12 @@ func (s *MemoryStore) Get(ctx context.Context, providerInstanceID string) (Snaps
 // cloneSnapshot returns a deep-enough immutable catalog value for all slice and pointer fields.
 // cloneSnapshot 为全部切片和指针字段返回足够深度的不可变目录值。
 func cloneSnapshot(snapshot Snapshot) Snapshot {
+	snapshot.DefaultAdditionalParameters = cloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters)
 	snapshot.Models = append([]ProviderModel(nil), snapshot.Models...)
 	snapshot.Offerings = append([]ModelOffering(nil), snapshot.Offerings...)
 	for index := range snapshot.Offerings {
 		snapshot.Offerings[index].Capabilities = cloneCapabilities(snapshot.Offerings[index].Capabilities)
+		snapshot.Offerings[index].RequestProjection = cloneRequestProjection(snapshot.Offerings[index].RequestProjection)
 	}
 	snapshot.Services = append([]ProviderService(nil), snapshot.Services...)
 	snapshot.ServiceOfferings = append([]ServiceOffering(nil), snapshot.ServiceOfferings...)
@@ -155,6 +157,7 @@ func cloneCapabilities(capabilities ModelCapabilities) ModelCapabilities {
 	capabilities.InputModalities = append([]string(nil), capabilities.InputModalities...)
 	capabilities.OutputModalities = append([]string(nil), capabilities.OutputModalities...)
 	capabilities.ReasoningEfforts = append([]string(nil), capabilities.ReasoningEfforts...)
+	capabilities.ReasoningSummaryModes = append([]string(nil), capabilities.ReasoningSummaryModes...)
 	capabilities.MediaInputs = append([]MediaInputCapability(nil), capabilities.MediaInputs...)
 	for index := range capabilities.MediaInputs {
 		capabilities.MediaInputs[index] = cloneMediaInputCapability(capabilities.MediaInputs[index])
@@ -189,6 +192,57 @@ func cloneCapabilities(capabilities ModelCapabilities) ModelCapabilities {
 	}
 	capabilities.UsageMetrics = append([]UsageMetricCapability(nil), capabilities.UsageMetrics...)
 	return capabilities
+}
+
+// cloneRequestProjection returns one mutation-safe outbound projection value.
+// cloneRequestProjection 返回一个防止外部修改的出站投影值。
+func cloneRequestProjection(projection RequestProjection) RequestProjection {
+	projection.Reasoning.Effort = cloneReasoningParameterRules(projection.Reasoning.Effort)
+	projection.Reasoning.Summary = cloneReasoningParameterRules(projection.Reasoning.Summary)
+	projection.Additional = cloneAdditionalPayloadProjection(projection.Additional)
+	return projection
+}
+
+// cloneAdditionalPayloadProjection returns one mutation-safe additional payload configuration.
+// cloneAdditionalPayloadProjection 返回一个防止外部修改的附加载荷配置。
+func cloneAdditionalPayloadProjection(projection AdditionalPayloadProjection) AdditionalPayloadProjection {
+	projection.Default = clonePayloadParameters(projection.Default)
+	projection.Override = clonePayloadParameters(projection.Override)
+	projection.Filter = append([]string(nil), projection.Filter...)
+	return projection
+}
+
+// CloneAdditionalPayloadProjection returns one mutation-safe public additional payload configuration.
+// CloneAdditionalPayloadProjection 返回一个防止外部修改的公开附加载荷配置。
+func CloneAdditionalPayloadProjection(projection AdditionalPayloadProjection) AdditionalPayloadProjection {
+	return cloneAdditionalPayloadProjection(projection)
+}
+
+// CloneRequestProjection returns one mutation-safe public outbound projection value.
+// CloneRequestProjection 返回一个防止外部修改的公开出站投影值。
+func CloneRequestProjection(projection RequestProjection) RequestProjection {
+	return cloneRequestProjection(projection)
+}
+
+// cloneReasoningParameterRules deep-copies rule slices and raw JSON values.
+// cloneReasoningParameterRules 深拷贝规则切片与原始 JSON 值。
+func cloneReasoningParameterRules(rules []ReasoningParameterRule) []ReasoningParameterRule {
+	cloned := append([]ReasoningParameterRule(nil), rules...)
+	for index := range cloned {
+		cloned[index].Set = clonePayloadParameters(cloned[index].Set)
+		cloned[index].Delete = append([]string(nil), cloned[index].Delete...)
+	}
+	return cloned
+}
+
+// clonePayloadParameters deep-copies parameter slices and their raw JSON values.
+// clonePayloadParameters 深拷贝参数切片及其原始 JSON 值。
+func clonePayloadParameters(parameters []PayloadParameter) []PayloadParameter {
+	cloned := append([]PayloadParameter(nil), parameters...)
+	for index := range cloned {
+		cloned[index].Value = append([]byte(nil), cloned[index].Value...)
+	}
+	return cloned
 }
 
 // CloneModelCapabilities returns one mutation-safe public capability value.

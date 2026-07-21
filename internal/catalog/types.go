@@ -3,6 +3,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
@@ -223,6 +224,9 @@ type ModelCapabilities struct {
 	// ReasoningEfforts lists exact accepted request effort values when reasoning control is callable.
 	// ReasoningEfforts 列出推理控制可调用时接受的精确请求强度值。
 	ReasoningEfforts []string
+	// ReasoningSummaryModes lists exact visible reasoning summary values accepted by the offering.
+	// ReasoningSummaryModes 列出该产品接受的精确可见推理摘要值。
+	ReasoningSummaryModes []string
 	// InputModalities lists normalized accepted input modality identifiers.
 	// InputModalities 列出规范化的输入模态标识。
 	InputModalities []string
@@ -253,6 +257,67 @@ type ModelCapabilities struct {
 	// UsageMetrics lists independently observable usage dimensions.
 	// UsageMetrics 列出可独立观察的用量维度。
 	UsageMetrics []UsageMetricCapability
+}
+
+// PayloadParameter assigns one validated JSON value to an exact upstream JSON path.
+// PayloadParameter 将一个已校验 JSON 值赋给精确的上游 JSON 路径。
+type PayloadParameter struct {
+	// Path is a tidwall/sjson-compatible JSON path owned by configuration.
+	// Path 是由配置拥有且兼容 tidwall/sjson 的 JSON 路径。
+	Path string `json:"path"`
+	// Value is the exact JSON scalar, object, array, or null written at Path.
+	// Value 是写入 Path 的精确 JSON 标量、对象、数组或 null。
+	Value json.RawMessage `json:"value"`
+}
+
+// ReasoningParameterRule maps one canonical reasoning value to exact upstream mutations.
+// ReasoningParameterRule 将一个规范推理值映射为精确的上游变更。
+type ReasoningParameterRule struct {
+	// Value is the canonical effort or summary value selected by the caller.
+	// Value 是调用方选择的规范强度或摘要值。
+	Value string `json:"value"`
+	// Set contains exact assignments applied for this value.
+	// Set 包含为此值应用的精确赋值。
+	Set []PayloadParameter `json:"set,omitempty"`
+	// Delete contains exact paths removed for this value.
+	// Delete 包含为此值删除的精确路径。
+	Delete []string `json:"delete,omitempty"`
+}
+
+// ReasoningRequestProjection describes configurable canonical-to-upstream reasoning mappings.
+// ReasoningRequestProjection 描述可配置的规范推理到上游参数映射。
+type ReasoningRequestProjection struct {
+	// Effort maps each supported canonical effort to its exact upstream representation.
+	// Effort 将每个受支持的规范强度映射为精确上游表示。
+	Effort []ReasoningParameterRule `json:"effort,omitempty"`
+	// Summary maps each supported visible summary mode to its exact upstream representation.
+	// Summary 将每个受支持的可见摘要模式映射为精确上游表示。
+	Summary []ReasoningParameterRule `json:"summary,omitempty"`
+}
+
+// AdditionalPayloadProjection applies explicit CLIProxyAPI-style defaults, overrides, and removals.
+// AdditionalPayloadProjection 应用显式的 CLIProxyAPI 风格默认值、覆盖值与删除项。
+type AdditionalPayloadProjection struct {
+	// Default assigns a value only when the typed protocol projection omitted the path.
+	// Default 仅在类型化协议投影未生成该路径时赋值。
+	Default []PayloadParameter `json:"default,omitempty"`
+	// Override replaces the typed protocol projection at the exact configured path.
+	// Override 在精确配置路径覆盖类型化协议投影。
+	Override []PayloadParameter `json:"override,omitempty"`
+	// Filter removes exact paths after every assignment has completed.
+	// Filter 在全部赋值完成后删除精确路径。
+	Filter []string `json:"filter,omitempty"`
+}
+
+// RequestProjection contains model-offering-specific outbound request customization.
+// RequestProjection 包含模型产品专属的出站请求定制。
+type RequestProjection struct {
+	// Reasoning contains canonical reasoning parameter mappings.
+	// Reasoning 包含规范推理参数映射。
+	Reasoning ReasoningRequestProjection `json:"reasoning"`
+	// Additional contains operator-declared non-core payload parameters.
+	// Additional 包含操作员声明的非核心载荷参数。
+	Additional AdditionalPayloadProjection `json:"additional"`
 }
 
 // ProviderModel describes one logical model within one provider instance.
@@ -302,6 +367,9 @@ type ModelOffering struct {
 	// Capabilities contains the channel-specific model baseline.
 	// Capabilities 包含通道特定的模型能力基线。
 	Capabilities ModelCapabilities
+	// RequestProjection contains provider-channel-specific outbound parameter rules.
+	// RequestProjection 包含供应商通道专属的出站参数规则。
+	RequestProjection RequestProjection
 	// CapabilityRevision identifies the capability evidence revision.
 	// CapabilityRevision 标识能力证据修订号。
 	CapabilityRevision uint64
@@ -687,6 +755,9 @@ type Snapshot struct {
 	// ProviderInstanceID owns every record in the snapshot.
 	// ProviderInstanceID 是快照内全部记录的所有者。
 	ProviderInstanceID string
+	// DefaultAdditionalParameters contains provider-wide non-core request mutations inherited by every model offering.
+	// DefaultAdditionalParameters 包含由每个模型产品继承的供应商级非核心请求变更。
+	DefaultAdditionalParameters AdditionalPayloadProjection
 	// Models contains provider-scoped logical models.
 	// Models 包含供应商作用域的逻辑模型。
 	Models []ProviderModel

@@ -98,7 +98,7 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 	demands := make([]CapabilityDemand, 0)
 	needsProjection := false
 	mediaFeatures := make(map[CapabilityFeature]struct{})
-	needsReasoning := request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.Summary
+	needsReasoning := request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.RequestedSummaryMode() != ""
 	needsStrictSchema := len(request.GenerationPolicy.StrictJSONSchema) > 0
 	needsContinuation := request.ReasoningPolicy.ContinuationID != ""
 	for _, item := range request.Context {

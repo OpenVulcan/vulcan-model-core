@@ -111,6 +111,9 @@ type ManagementCommands interface {
 	// SaveCustomProviderModels replaces one custom provider's simplified model catalog.
 	// SaveCustomProviderModels 替换一个自定义供应商的简化模型目录。
 	SaveCustomProviderModels(context.Context, string, []management.InitialProviderModelInput) (catalog.Snapshot, error)
+	// SaveCustomProviderAdditionalParameters replaces provider-wide additional request rules for one custom provider.
+	// SaveCustomProviderAdditionalParameters 替换一个自定义供应商的供应商级附加请求规则。
+	SaveCustomProviderAdditionalParameters(context.Context, string, catalog.AdditionalPayloadProjection) (catalog.Snapshot, error)
 	// CreateInstance creates one provider instance.
 	// CreateInstance 创建一个供应商实例。
 	CreateInstance(context.Context, management.CreateInstanceInput) (providerconfig.ProviderInstance, error)
@@ -722,6 +725,9 @@ type callServiceView struct {
 // customCatalogDocument is the complete management-facing configuration for one custom-provider model catalog.
 // customCatalogDocument 是一个自定义供应商模型目录的完整管理面配置。
 type customCatalogDocument struct {
+	// DefaultAdditionalParameters contains provider-wide request mutations inherited by every model.
+	// DefaultAdditionalParameters 包含由每个模型继承的供应商级请求变更。
+	DefaultAdditionalParameters catalog.AdditionalPayloadProjection `json:"default_additional_parameters"`
 	// Models contains logical models declared by the local operator.
 	// Models 包含由本地操作员声明的逻辑模型。
 	Models []customCatalogModel `json:"models"`
@@ -762,6 +768,9 @@ type customCatalogOffering struct {
 	// Capabilities explicitly declares the channel baseline without inferred values.
 	// Capabilities 显式声明通道基线能力且不推导缺失值。
 	Capabilities management.CapabilityView `json:"capabilities"`
+	// RequestProjection contains exact model-offering outbound parameter rules.
+	// RequestProjection 包含精确的模型产品出站参数规则。
+	RequestProjection catalog.RequestProjection `json:"request_projection"`
 }
 
 // customCatalogProfile describes one selectable custom model capability shape.
@@ -937,6 +946,9 @@ type initialProviderModelRequest struct {
 	// Reasoning is one explicit normalized capability level.
 	// Reasoning 是一个显式规范化能力级别。
 	Reasoning catalog.CapabilityLevel `json:"reasoning"`
+	// RequestProjection optionally replaces the protocol-specific default reasoning and extra parameter rules.
+	// RequestProjection 可选替换协议专属的默认推理与额外参数规则。
+	RequestProjection *catalog.RequestProjection `json:"request_projection,omitempty"`
 }
 
 // customProviderModelsRequest decodes one complete simplified custom model replacement.
@@ -945,6 +957,14 @@ type customProviderModelsRequest struct {
 	// Models contains the exact desired custom model set; an empty array deletes every model.
 	// Models 包含精确期望的自定义模型集合；空数组会删除全部模型。
 	Models []initialProviderModelRequest `json:"models"`
+}
+
+// providerAdditionalParametersRequest decodes provider-wide non-core request mutations.
+// providerAdditionalParametersRequest 解码供应商级非核心请求变更。
+type providerAdditionalParametersRequest struct {
+	// Additional contains default, override, and filter rules applied before model-specific rules.
+	// Additional 包含在模型专属规则前应用的默认、覆盖与过滤规则。
+	Additional catalog.AdditionalPayloadProjection `json:"additional"`
 }
 
 // endpointParameterValueRequest decodes one declared non-secret system endpoint parameter.
@@ -1657,6 +1677,7 @@ func (s *Server) handleConfigureProvider(writer http.ResponseWriter, request *ht
 			UpstreamModelID: payload.InitialModel.UpstreamModelID, DisplayName: payload.InitialModel.DisplayName,
 			ContextWindow: payload.InitialModel.ContextWindow, MaxOutputTokens: payload.InitialModel.MaxOutputTokens,
 			ToolCalling: payload.InitialModel.ToolCalling, Reasoning: payload.InitialModel.Reasoning,
+			RequestProjection: payload.InitialModel.RequestProjection,
 		}
 	}
 	result, errConfigure := s.control.Commands.ConfigureProvider(request.Context(), management.ConfigureProviderInput{
@@ -2355,10 +2376,32 @@ func (s *Server) handleSaveCustomProviderModels(writer http.ResponseWriter, requ
 			UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName,
 			ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
 			ToolCalling: model.ToolCalling, Reasoning: model.Reasoning,
+			RequestProjection: model.RequestProjection,
 		})
 	}
 	instanceID := request.PathValue("provider_instance_id")
 	if _, errSave := s.control.Commands.SaveCustomProviderModels(request.Context(), instanceID, models); errSave != nil {
+		writeControlError(writer, errSave)
+		return
+	}
+	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
+	if errView != nil {
+		writeControlError(writer, errView)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+// handleSaveCustomProviderAdditionalParameters replaces provider-wide additional rules and returns the safe catalog view.
+// handleSaveCustomProviderAdditionalParameters 替换供应商级附加规则并返回安全目录视图。
+func (s *Server) handleSaveCustomProviderAdditionalParameters(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[providerAdditionalParametersRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	instanceID := request.PathValue("provider_instance_id")
+	if _, errSave := s.control.Commands.SaveCustomProviderAdditionalParameters(request.Context(), instanceID, payload.Additional); errSave != nil {
 		writeControlError(writer, errSave)
 		return
 	}
@@ -2557,6 +2600,7 @@ func customCatalogInput(providerInstanceID string, document customCatalogDocumen
 			ProviderModelID:    offering.ProviderModelID,
 			UpstreamModelID:    offering.UpstreamModelID,
 			Capabilities:       capabilityFromView(offering.Capabilities),
+			RequestProjection:  catalog.CloneRequestProjection(offering.RequestProjection),
 		})
 	}
 	// profiles receive the exact parent instance and service-owned revision fields.
@@ -2576,11 +2620,12 @@ func customCatalogInput(providerInstanceID string, document customCatalogDocumen
 		})
 	}
 	return management.SaveCustomCatalogInput{
-		ProviderInstanceID: providerInstanceID,
-		Models:             models,
-		Offerings:          offerings,
-		Profiles:           profiles,
-		ObservedAt:         observedAt,
+		ProviderInstanceID:          providerInstanceID,
+		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(document.DefaultAdditionalParameters),
+		Models:                      models,
+		Offerings:                   offerings,
+		Profiles:                    profiles,
+		ObservedAt:                  observedAt,
 	}
 }
 
@@ -2590,9 +2635,10 @@ func customCatalogDocumentFromSnapshot(snapshot catalog.Snapshot) customCatalogD
 	// document is initialized with allocated slices so management responses stay JSON-array stable.
 	// document 使用已分配切片初始化，以保持管理响应中的 JSON 数组稳定。
 	document := customCatalogDocument{
-		Models:    make([]customCatalogModel, 0, len(snapshot.Models)),
-		Offerings: make([]customCatalogOffering, 0, len(snapshot.Offerings)),
-		Profiles:  make([]customCatalogProfile, 0, len(snapshot.Profiles)),
+		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters),
+		Models:                      make([]customCatalogModel, 0, len(snapshot.Models)),
+		Offerings:                   make([]customCatalogOffering, 0, len(snapshot.Offerings)),
+		Profiles:                    make([]customCatalogProfile, 0, len(snapshot.Profiles)),
 	}
 	for _, model := range snapshot.Models {
 		document.Models = append(document.Models, customCatalogModel{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName})
@@ -2600,7 +2646,7 @@ func customCatalogDocumentFromSnapshot(snapshot catalog.Snapshot) customCatalogD
 	for _, offering := range snapshot.Offerings {
 		document.Offerings = append(document.Offerings, customCatalogOffering{
 			ID: offering.ID, ProviderModelID: offering.ProviderModelID, UpstreamModelID: offering.UpstreamModelID,
-			Capabilities: capabilityView(offering.Capabilities),
+			Capabilities: capabilityView(offering.Capabilities), RequestProjection: catalog.CloneRequestProjection(offering.RequestProjection),
 		})
 	}
 	for _, profile := range snapshot.Profiles {
@@ -2641,6 +2687,8 @@ func capabilityFromView(view management.CapabilityView) catalog.ModelCapabilitie
 		StreamingToolArguments: view.StreamingToolArguments,
 		StrictJSONSchema:       view.StrictJSONSchema,
 		Reasoning:              view.Reasoning,
+		ReasoningEfforts:       append([]string{}, view.ReasoningEfforts...),
+		ReasoningSummaryModes:  append([]string{}, view.ReasoningSummaryModes...),
 		InputModalities:        append([]string{}, view.InputModalities...),
 		OutputModalities:       append([]string{}, view.OutputModalities...),
 		MediaInputs:            append([]catalog.MediaInputCapability(nil), view.MediaInputs...),
@@ -2669,6 +2717,8 @@ func capabilityView(capabilities catalog.ModelCapabilities) management.Capabilit
 		StreamingToolArguments:     capabilities.StreamingToolArguments,
 		StrictJSONSchema:           capabilities.StrictJSONSchema,
 		Reasoning:                  capabilities.Reasoning,
+		ReasoningEfforts:           append([]string{}, capabilities.ReasoningEfforts...),
+		ReasoningSummaryModes:      append([]string{}, capabilities.ReasoningSummaryModes...),
 		InputModalities:            append([]string{}, capabilities.InputModalities...),
 		OutputModalities:           append([]string{}, capabilities.OutputModalities...),
 		MediaInputs:                append([]catalog.MediaInputCapability(nil), capabilities.MediaInputs...),

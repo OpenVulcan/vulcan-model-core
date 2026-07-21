@@ -253,7 +253,7 @@ func (c ProfileCapabilities) supportsMaterialization(mode catalog.UpstreamMateri
 func supportsRequestedReasoning(request vcp.VulcanRequest, capabilities ProfileCapabilities) bool {
 	// Historical reasoning is native only when this exact profile declares the compatible reasoning_content carrier.
 	// 历史推理仅在此精确 Profile 声明兼容 reasoning_content 载体时才是原生能力。
-	if !capabilities.Reasoning || request.ReasoningPolicy.Summary {
+	if !capabilities.Reasoning || request.ReasoningPolicy.RequestedSummaryMode() != "" {
 		return false
 	}
 	for _, item := range request.Context {

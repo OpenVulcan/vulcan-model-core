@@ -47,6 +47,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { type TranslationKey, useI18n } from "@/i18n";
+import { ProviderIcon } from "@/lib/provider-icons";
 import {
   cancelAntigravityOAuthFlow,
   cancelClaudeOAuthFlow,
@@ -112,7 +113,7 @@ interface ProviderManagementPageProps {
 
 // CredentialReauthorizationSelection binds one local credential to its immutable provider definition.
 // CredentialReauthorizationSelection 将一个本地凭据绑定到其不可变供应商定义。
-interface CredentialReauthorizationSelection {
+export interface CredentialReauthorizationSelection {
   // providerInstanceID owns the credential.
   // providerInstanceID 拥有该凭据。
   providerInstanceID: string;
@@ -123,7 +124,7 @@ interface CredentialReauthorizationSelection {
 
 // CredentialAttachmentSelection identifies an existing provider configuration receiving a new credential.
 // CredentialAttachmentSelection 标识接收新凭据的既有供应商配置。
-interface CredentialAttachmentSelection {
+export interface CredentialAttachmentSelection {
   // providerInstanceID is the credential-independent provider configuration root.
   // providerInstanceID 是独立于凭据的供应商配置根。
   providerInstanceID: string;
@@ -544,13 +545,13 @@ export function ProviderManagementPage({
   // renderAuthorizedProviderCard binds one exact provider instance to shared credential operations.
   // renderAuthorizedProviderCard 将一个精确供应商实例绑定到共用凭据操作。
   function renderAuthorizedProviderCard(provider: AuthorizedProvider) {
-    const definition =
-      definitions.find(
-        (candidate) => candidate.id === provider.instance.definition_id,
-      ) ??
-      groups
-        .flatMap((group) => group.provider_definitions)
-        .find((candidate) => candidate.id === provider.instance.definition_id);
+    // definition is the authoritative product metadata associated with this configured instance.
+    // definition 是与此已配置实例关联的权威产品元数据。
+    const definition = findProviderDefinition(
+      definitions,
+      groups,
+      provider.instance.definition_id,
+    );
     return (
       <AuthorizedProviderCard
         key={provider.instance.id}
@@ -623,22 +624,38 @@ export function ProviderManagementPage({
             <div className="grid min-h-[32rem] overflow-hidden rounded-xl border lg:grid-cols-[16rem_minmax(0,1fr)]">
               <aside className="border-b bg-muted/20 p-2 lg:border-b-0 lg:border-r">
                 <div className="space-y-1" role="tree" aria-label={t("credentials.title")}>
-                  {authorizedProviders.map((provider) => (
-                    <button
-                      key={provider.instance.id}
-                      type="button"
-                      role="treeitem"
-                      aria-selected={provider.instance.id === selectedProviderInstanceID}
-                      className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${provider.instance.id === selectedProviderInstanceID ? "bg-foreground text-background" : "hover:bg-muted"}`}
-                      onClick={() => setSelectedProviderInstanceID(provider.instance.id)}
-                    >
-                      <span className="min-w-0">
-                        <span className="block truncate font-medium">{provider.instance.display_name}</span>
-                        <span className="block truncate text-xs opacity-70">{provider.instance.handle}</span>
-                      </span>
-                      <Badge variant="secondary">{provider.credentials.length}</Badge>
-                    </button>
-                  ))}
+                  {authorizedProviders.map((provider) => {
+                    // definition supplies the stable family key used by the frontend-only icon library.
+                    // definition 提供前端专用图标库使用的稳定系列键。
+                    const definition = findProviderDefinition(
+                      definitions,
+                      groups,
+                      provider.instance.definition_id,
+                    );
+                    return (
+                      <button
+                        key={provider.instance.id}
+                        type="button"
+                        role="treeitem"
+                        aria-selected={provider.instance.id === selectedProviderInstanceID}
+                        className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${provider.instance.id === selectedProviderInstanceID ? "bg-muted/80 text-foreground ring-1 ring-inset ring-border" : "hover:bg-muted"}`}
+                        onClick={() => setSelectedProviderInstanceID(provider.instance.id)}
+                      >
+                        <span className="flex min-w-0 items-center gap-2.5">
+                          <ProviderIcon
+                            definitionID={provider.instance.definition_id}
+                            groupID={definition?.group_id}
+                            className="size-[26px]"
+                          />
+                          <span className="min-w-0">
+                            <span className="block truncate font-medium">{provider.instance.display_name}</span>
+                            <span className="block truncate text-xs opacity-70">{provider.instance.handle}</span>
+                          </span>
+                        </span>
+                        <Badge variant="secondary">{provider.credentials.length}</Badge>
+                      </button>
+                    );
+                  })}
                 </div>
               </aside>
               <main className="p-3 lg:p-4">
@@ -820,6 +837,19 @@ function providerGroupMatches(
   );
 }
 
+// findProviderDefinition resolves one configured instance to the exact server-authored definition used for icon and credential presentation.
+// findProviderDefinition 将一个已配置实例解析到用于图标与凭据展示的精确服务端 Definition。
+function findProviderDefinition(
+  definitions: ProviderDefinitionSummary[],
+  groups: ProviderGroup[],
+  definitionID: string,
+): ProviderDefinitionIdentity | undefined {
+  return definitions.find((definition) => definition.id === definitionID) ??
+    groups
+      .flatMap((group) => group.provider_definitions)
+      .find((definition) => definition.id === definitionID);
+}
+
 // CustomProviderSelectionCardProps defines the direct custom-provider entry inside the shared catalog dialog.
 // CustomProviderSelectionCardProps 定义共享目录 Dialog 内的直接自定义供应商入口。
 interface CustomProviderSelectionCardProps {
@@ -846,7 +876,7 @@ function CustomProviderSelectionCard({
           onClick={onSelect}
         >
           <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <CableIcon className="size-5" />
+            <ProviderIcon className="size-[26px]" />
           </span>
           <span className="min-w-0 flex-1">
             <span className="block font-semibold">
@@ -936,7 +966,7 @@ function ProviderGroupSelectionCard({
           onClick={activateProvider}
         >
           <span className="flex size-10 shrink-0 items-center justify-center rounded-lg bg-muted">
-            <ServerIcon className="size-5" />
+            <ProviderIcon groupID={group.id} className="size-[26px]" />
           </span>
           <span className="min-w-0 flex-1">
             <span className="block font-semibold">{group.display_name}</span>
@@ -1100,11 +1130,18 @@ function AuthorizedProviderCard({
     <Card>
       <CardHeader>
         <div className="flex items-start justify-between gap-3">
-          <div>
-            <CardTitle>{provider.instance.display_name}</CardTitle>
-            <CardDescription className="mt-1">
-              {definition?.display_name ?? provider.instance.definition_id}
-            </CardDescription>
+          <div className="flex min-w-0 items-center gap-3">
+            <ProviderIcon
+              definitionID={provider.instance.definition_id}
+              groupID={definition?.group_id}
+              className="size-[26px]"
+            />
+            <div className="min-w-0">
+              <CardTitle>{provider.instance.display_name}</CardTitle>
+              <CardDescription className="mt-1">
+                {definition?.display_name ?? provider.instance.definition_id}
+              </CardDescription>
+            </div>
           </div>
           <Badge variant="secondary">
             {providerStatusLabel(t, provider.instance.status)}
@@ -1824,7 +1861,7 @@ function credentialRefreshErrorLabel(
 
 // providerStatusLabel localizes the complete lifecycle and credential status sets defined by providerconfig.
 // providerStatusLabel 本地化 providerconfig 定义的完整生命周期与凭据状态集合。
-function providerStatusLabel(
+export function providerStatusLabel(
   t: (key: TranslationKey) => string,
   status: string,
 ): string {
@@ -2174,7 +2211,7 @@ function CustomProviderOnboardingPanel({
 
 // ProviderWorkflowDefinition contains the common credential contract and optional system-only presentation metadata.
 // ProviderWorkflowDefinition 包含共用凭据合同与可选的仅系统展示元数据。
-type ProviderWorkflowDefinition = ProviderDefinitionIdentity &
+export type ProviderWorkflowDefinition = ProviderDefinitionIdentity &
   Partial<
     Pick<
       ProviderDefinition,
@@ -2186,7 +2223,7 @@ type ProviderWorkflowDefinition = ProviderDefinitionIdentity &
 
 // ProviderOnboardingPanelProps binds one exact definition and active management credential to its real workflow.
 // ProviderOnboardingPanelProps 将一个精确定义和当前管理凭证绑定到真实工作流。
-interface ProviderOnboardingPanelProps {
+export interface ProviderOnboardingPanelProps {
   // definition is the exact selected site or commercial plan.
   // definition 是精确选择的站点或商业套餐。
   definition: ProviderWorkflowDefinition;
@@ -2202,16 +2239,20 @@ interface ProviderOnboardingPanelProps {
   // attachmentTarget selects an existing provider configuration for a new credential.
   // attachmentTarget 为新凭据选择一个既有供应商配置。
   attachmentTarget?: CredentialAttachmentSelection | null;
+  // credentialIntent keeps labels credential-focused when first authorization must also create the configuration.
+  // credentialIntent 在首次授权必须同时创建配置时仍保持以凭据为中心的界面文案。
+  credentialIntent?: boolean;
 }
 
 // ProviderOnboardingPanel performs API-key, service-account, or server-confidential interactive onboarding.
 // ProviderOnboardingPanel 执行 API Key、服务账号或服务端保密交互授权录入。
-function ProviderOnboardingPanel({
+export function ProviderOnboardingPanel({
   definition,
   managementAuthToken,
   onComplete,
   reauthorizationTarget,
   attachmentTarget,
+  credentialIntent = false,
 }: ProviderOnboardingPanelProps) {
   const { t } = useI18n();
   const [authMethodID, setAuthMethodID] = useState(
@@ -2747,14 +2788,23 @@ function ProviderOnboardingPanel({
   return (
     <Card>
       <CardHeader>
-        <CardTitle>{definition.display_name}</CardTitle>
-        <CardDescription>
-          {localizedDescription(
-            t,
-            definition.variant_description_key,
-            definition.variant_description ?? definition.display_name,
-          )}
-        </CardDescription>
+        <div className="flex items-center gap-3">
+          <ProviderIcon
+            definitionID={definition.id}
+            groupID={definition.group_id}
+            className="size-[26px]"
+          />
+          <div className="min-w-0">
+            <CardTitle>{definition.display_name}</CardTitle>
+            <CardDescription className="mt-1">
+              {localizedDescription(
+                t,
+                definition.variant_description_key,
+                definition.variant_description ?? definition.display_name,
+              )}
+            </CardDescription>
+          </div>
+        </div>
       </CardHeader>
       <CardContent>
         <form
@@ -2791,7 +2841,7 @@ function ProviderOnboardingPanel({
           {requiresOperatorName ? (
             <div className="space-y-2">
               <Label htmlFor="provider-name">
-                {t(attachmentTarget ? "providers.credentialName" : "providers.name")}
+                {t(attachmentTarget || credentialIntent ? "providers.credentialName" : "providers.name")}
               </Label>
               <Input
                 id="provider-name"
@@ -2920,7 +2970,7 @@ function ProviderOnboardingPanel({
               >
                 {reauthorizationTarget
                   ? t("providers.replaceCredential")
-                  : attachmentTarget
+                  : attachmentTarget || credentialIntent
                     ? t("providers.addCredential")
                     : t("providers.onboard")}
               </Button>

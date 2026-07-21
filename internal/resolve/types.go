@@ -236,6 +236,12 @@ type Target struct {
 	// ModelCapabilities contains the exact selected execution profile contract.
 	// ModelCapabilities 包含精确选定执行规格契约。
 	ModelCapabilities catalog.ModelCapabilities
+	// RequestProjection contains the selected offering's immutable outbound parameter rules.
+	// RequestProjection 包含所选产品不可变的出站参数规则。
+	RequestProjection catalog.RequestProjection
+	// ProviderAdditionalParameters contains provider-wide request mutations applied before model-specific rules.
+	// ProviderAdditionalParameters 包含在模型专属规则前应用的供应商级请求变更。
+	ProviderAdditionalParameters catalog.AdditionalPayloadProjection
 	// CapabilityRevision records the capability evidence used for resolution.
 	// CapabilityRevision 记录解析使用的能力证据修订号。
 	CapabilityRevision uint64

@@ -375,6 +375,9 @@ type CatalogView struct {
 	// ProviderInstanceID owns every returned model and resource.
 	// ProviderInstanceID 是全部返回模型与资源的所有者。
 	ProviderInstanceID string `json:"provider_instance_id"`
+	// DefaultAdditionalParameters contains provider-wide request mutations inherited by every model.
+	// DefaultAdditionalParameters 包含由每个模型继承的供应商级请求变更。
+	DefaultAdditionalParameters catalog.AdditionalPayloadProjection `json:"default_additional_parameters"`
 	// Models contains logical provider models and selectable execution shapes.
 	// Models 包含逻辑供应商模型与可选执行形态。
 	Models []ModelView `json:"models"`
@@ -499,6 +502,9 @@ type OfferingView struct {
 	// UpstreamModelID is the exact model value used by the channel.
 	// UpstreamModelID 是通道使用的精确模型值。
 	UpstreamModelID string `json:"upstream_model_id"`
+	// RequestProjection contains editable provider-channel outbound parameter rules.
+	// RequestProjection 包含可编辑的供应商通道出站参数规则。
+	RequestProjection catalog.RequestProjection `json:"request_projection"`
 	// Profiles contains client-selectable capability shapes.
 	// Profiles 包含客户端可选能力形态。
 	Profiles []ExecutionProfileView `json:"profiles"`
@@ -575,6 +581,9 @@ type CapabilityView struct {
 	// ReasoningEfforts lists exact accepted reasoning control values.
 	// ReasoningEfforts 列出精确接受的推理控制值。
 	ReasoningEfforts []string `json:"reasoning_efforts"`
+	// ReasoningSummaryModes lists exact supported visible reasoning summary values.
+	// ReasoningSummaryModes 列出精确支持的可见推理摘要值。
+	ReasoningSummaryModes []string `json:"reasoning_summary_modes"`
 	// InputModalities lists normalized accepted input modalities.
 	// InputModalities 列出规范化输入模态。
 	InputModalities []string `json:"input_modalities"`
@@ -1365,7 +1374,7 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 				}
 				return profileViews[left].ID < profileViews[right].ID
 			})
-			offeringViews = append(offeringViews, OfferingView{ID: offering.ID, UpstreamModelID: offering.UpstreamModelID, Profiles: profileViews})
+			offeringViews = append(offeringViews, OfferingView{ID: offering.ID, UpstreamModelID: offering.UpstreamModelID, RequestProjection: catalog.CloneRequestProjection(offering.RequestProjection), Profiles: profileViews})
 		}
 		sort.Slice(offeringViews, func(left int, right int) bool {
 			return offeringViews[left].ID < offeringViews[right].ID
@@ -1446,7 +1455,7 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 		}
 		return plans[left].EvidenceSource < plans[right].EvidenceSource
 	})
-	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, Models: models, Services: services, Allowances: allowances, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters), Models: models, Services: services, Allowances: allowances, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
 }
 
 // modelAuthorizationStatus derives three-state access without treating absent or expired evidence as denial.
@@ -1638,6 +1647,7 @@ func capabilityView(capabilities catalog.ModelCapabilities) CapabilityView {
 		StrictJSONSchema:           capabilities.StrictJSONSchema,
 		Reasoning:                  capabilities.Reasoning,
 		ReasoningEfforts:           append([]string(nil), capabilities.ReasoningEfforts...),
+		ReasoningSummaryModes:      append([]string(nil), capabilities.ReasoningSummaryModes...),
 		InputModalities:            append([]string(nil), capabilities.InputModalities...),
 		OutputModalities:           append([]string(nil), capabilities.OutputModalities...),
 		MediaInputs:                append([]catalog.MediaInputCapability(nil), capabilities.MediaInputs...),

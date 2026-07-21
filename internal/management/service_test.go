@@ -2,6 +2,7 @@ package management
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -59,12 +60,25 @@ func TestDiscoverCustomProviderModelsUsesExplicitCredential(t *testing.T) {
 	if errAttach != nil {
 		t.Fatalf("AttachCredential() error = %v", errAttach)
 	}
+	configuredAdditional, errAdditional := service.SaveCustomProviderAdditionalParameters(ctx, configured.Configuration.Instance.ID, catalog.AdditionalPayloadProjection{Default: []catalog.PayloadParameter{{Path: "temperature", Value: json.RawMessage(`0.7`)}}})
+	if errAdditional != nil {
+		t.Fatalf("SaveCustomProviderAdditionalParameters() error = %v", errAdditional)
+	}
+	if len(configuredAdditional.DefaultAdditionalParameters.Default) != 1 {
+		t.Fatalf("configured provider additional parameters = %#v", configuredAdditional.DefaultAdditionalParameters)
+	}
 	discovered, errDiscover := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
 	if errDiscover != nil {
 		t.Fatalf("DiscoverCustomProviderModels() error = %v", errDiscover)
 	}
 	if len(discovered.Models) != 2 || discovered.Models[0].DisplayName != "Known Model" || discovered.Models[1].Source != catalog.ModelSourceProviderAPI {
 		t.Fatalf("discovered models = %#v", discovered.Models)
+	}
+	if discovered.Offerings[0].Capabilities.ToolCalling != catalog.CapabilityNative || discovered.Offerings[0].Capabilities.Reasoning != catalog.CapabilityNative || len(discovered.Offerings[0].RequestProjection.Reasoning.Effort) == 0 {
+		t.Fatalf("default custom capabilities or reasoning projection = %#v", discovered.Offerings[0])
+	}
+	if len(discovered.DefaultAdditionalParameters.Default) != 1 {
+		t.Fatalf("discovery discarded provider additional parameters = %#v", discovered.DefaultAdditionalParameters)
 	}
 	edited, errEdit := service.SaveCustomProviderModels(ctx, configured.Configuration.Instance.ID, []InitialProviderModelInput{
 		{UpstreamModelID: "known-model", DisplayName: "Renamed Model", ContextWindow: 262144, MaxOutputTokens: 16384, ToolCalling: catalog.CapabilityUnsupported, Reasoning: catalog.CapabilityNative},
@@ -74,6 +88,9 @@ func TestDiscoverCustomProviderModelsUsesExplicitCredential(t *testing.T) {
 	}
 	if len(edited.Models) != 1 || edited.Models[0].DisplayName != "Renamed Model" || edited.Offerings[0].Capabilities.Tokens.ContextWindow.Value != 262144 || edited.Offerings[0].Capabilities.Reasoning != catalog.CapabilityNative {
 		t.Fatalf("edited custom models = %#v offerings=%#v", edited.Models, edited.Offerings)
+	}
+	if len(edited.DefaultAdditionalParameters.Default) != 1 {
+		t.Fatalf("model editing discarded provider additional parameters = %#v", edited.DefaultAdditionalParameters)
 	}
 }
 
@@ -155,7 +172,7 @@ func TestConfigureProviderThenAttachCredentialSeparatesProviderAndAccountLifecyc
 	}
 	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
 		DefinitionID: definition.ID, Handle: "separated-lifecycle", DisplayName: "Separated Lifecycle", BaseURL: "https://separated.example/v1",
-		InitialModel: &InitialProviderModelInput{UpstreamModelID: "separated-model", DisplayName: "Separated Model", ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: catalog.CapabilityNative, Reasoning: catalog.CapabilityUnknown},
+		InitialModel: &InitialProviderModelInput{UpstreamModelID: "separated-model", DisplayName: "Separated Model", ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: catalog.CapabilityNative, Reasoning: catalog.CapabilityNative},
 	})
 	if errConfigure != nil {
 		t.Fatalf("ConfigureProvider() error = %v", errConfigure)

@@ -185,6 +185,14 @@ func (d *Driver) Execute(ctx context.Context, execution provider.ExecutionReques
 		body = adaptedBody
 		projected.UpstreamJSON = append([]byte(nil), adaptedBody...)
 	}
+	if !provider.AdditionalPayloadProjectionIsEmpty(execution.Binding.Target.ProviderAdditionalParameters) || !provider.RequestProjectionIsEmpty(execution.Binding.Target.RequestProjection) {
+		projectedBody, errProjection := provider.ApplyRequestProjections(body, execution.Binding.Target.ProviderAdditionalParameters, execution.Binding.Target.RequestProjection, execution.Request.ReasoningPolicy)
+		if errProjection != nil {
+			return provider.ExecutionResult{}, errProjection
+		}
+		body = projectedBody
+		projected.UpstreamJSON = append([]byte(nil), projectedBody...)
+	}
 	upstreamStream := projected.Base.Upstream.Stream || d.configuration.ForceUpstreamStream
 	path := d.configuration.Path
 	if upstreamStream {

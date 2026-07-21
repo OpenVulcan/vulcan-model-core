@@ -57,6 +57,25 @@ func TestVulcanRequestValidateAllowsCustomTools(t *testing.T) {
 	}
 }
 
+// TestVulcanRequestValidateReasoningSummaryModes verifies exact modes are accepted and cannot conflict with the legacy boolean.
+// TestVulcanRequestValidateReasoningSummaryModes 验证精确摘要模式可用且不能与旧布尔值冲突。
+func TestVulcanRequestValidateReasoningSummaryModes(t *testing.T) {
+	request := testTextRequest()
+	request.ReasoningPolicy.SummaryMode = "detailed"
+	if errValidate := request.Validate(); errValidate != nil {
+		t.Fatalf("Validate() detailed summary error = %v", errValidate)
+	}
+	request.ReasoningPolicy.Summary = true
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("Validate() conflicting summary error = %v, want ErrInvalidRequest", errValidate)
+	}
+	request.ReasoningPolicy.Summary = false
+	request.ReasoningPolicy.SummaryMode = "verbose"
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("Validate() unknown summary mode error = %v, want ErrInvalidRequest", errValidate)
+	}
+}
+
 // TestVulcanRequestValidateRejectsStrictNonFunctionTools verifies strict schema intent cannot be attached to a tool without a function-schema carrier.
 // TestVulcanRequestValidateRejectsStrictNonFunctionTools 验证严格 Schema 意图不能附加到没有函数 Schema 载体的工具。
 func TestVulcanRequestValidateRejectsStrictNonFunctionTools(t *testing.T) {

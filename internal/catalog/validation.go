@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
@@ -24,6 +25,9 @@ var (
 	// nonNegativeDecimalPattern accepts only JSON-compatible non-negative decimal notation.
 	// nonNegativeDecimalPattern 仅接受与 JSON 兼容的非负十进制表示法。
 	nonNegativeDecimalPattern = regexp.MustCompile(`^(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$`)
+	// payloadPathPattern accepts explicit object paths while rejecting array selectors and ambiguous sjson syntax.
+	// payloadPathPattern 接受显式对象路径，同时拒绝数组选择器与有歧义的 sjson 语法。
+	payloadPathPattern = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*$`)
 )
 
 // Validate verifies one atomic provider-scoped catalog and all cross references.
@@ -35,6 +39,10 @@ func (s Snapshot) Validate() error {
 	if s.Revision == 0 || s.ObservedAt.IsZero() {
 		return invalid("catalog revision and observed time are required")
 	}
+	if errAdditional := s.DefaultAdditionalParameters.Validate(); errAdditional != nil {
+		return fmt.Errorf("provider default additional parameters: %w", errAdditional)
+	}
+	providerAdditionalPaths := additionalProjectionPaths(s.DefaultAdditionalParameters)
 	models := make(map[string]ProviderModel, len(s.Models))
 	for _, model := range s.Models {
 		if err := model.Validate(); err != nil {
@@ -52,6 +60,11 @@ func (s Snapshot) Validate() error {
 	for _, offering := range s.Offerings {
 		if err := offering.Validate(); err != nil {
 			return err
+		}
+		for reasoningPath := range reasoningProjectionPaths(offering.RequestProjection.Reasoning) {
+			if pathConflictsWithSet(reasoningPath, providerAdditionalPaths) {
+				return invalid("offering %q reasoning path %q conflicts with provider default additional parameters", offering.ID, reasoningPath)
+			}
 		}
 		if offering.ProviderInstanceID != s.ProviderInstanceID {
 			return invalid("offering %q crosses provider instances", offering.ID)
@@ -309,7 +322,10 @@ func (o ModelOffering) Validate() error {
 	if strings.TrimSpace(o.UpstreamModelID) == "" || o.CapabilityRevision == 0 || o.Revision == 0 {
 		return invalid("model offering upstream id and revisions are required")
 	}
-	return o.Capabilities.Validate()
+	if errCapabilities := o.Capabilities.Validate(); errCapabilities != nil {
+		return errCapabilities
+	}
+	return o.RequestProjection.Validate()
 }
 
 // Validate verifies one client-selectable execution profile.
@@ -518,10 +534,209 @@ func (c ModelCapabilities) Validate() error {
 	if errEfforts := validateUniqueStrings("reasoning effort", c.ReasoningEfforts); errEfforts != nil {
 		return errEfforts
 	}
+	if errSummaries := validateUniqueStrings("reasoning summary mode", c.ReasoningSummaryModes); errSummaries != nil {
+		return errSummaries
+	}
 	if len(c.ReasoningEfforts) > 0 && c.Reasoning != CapabilityNative && c.Reasoning != CapabilityEmulated && c.Reasoning != CapabilityConditional {
 		return invalid("reasoning efforts require callable reasoning capability")
 	}
+	if len(c.ReasoningSummaryModes) > 0 && c.Reasoning != CapabilityNative && c.Reasoning != CapabilityEmulated && c.Reasoning != CapabilityConditional {
+		return invalid("reasoning summary modes require callable reasoning capability")
+	}
 	return c.validateExtended()
+}
+
+// Validate verifies model-offering request rules without interpreting untyped execution payloads.
+// Validate 校验模型产品请求规则，且不解释无类型执行载荷。
+func (p RequestProjection) Validate() error {
+	effortPaths := make(map[string]struct{})
+	if errEffort := validateReasoningParameterRules("reasoning effort", p.Reasoning.Effort, effortPaths); errEffort != nil {
+		return errEffort
+	}
+	summaryPaths := make(map[string]struct{})
+	if errSummary := validateReasoningParameterRules("reasoning summary", p.Reasoning.Summary, summaryPaths); errSummary != nil {
+		return errSummary
+	}
+	reasoningPaths := make(map[string]struct{}, len(effortPaths)+len(summaryPaths))
+	for path := range effortPaths {
+		reasoningPaths[path] = struct{}{}
+	}
+	for path := range summaryPaths {
+		if pathConflictsWithSet(path, effortPaths) {
+			return invalid("reasoning summary path %q conflicts with an effort rule", path)
+		}
+		reasoningPaths[path] = struct{}{}
+	}
+	if errDefault := validatePayloadParameters("additional default", p.Additional.Default, reasoningPaths, true); errDefault != nil {
+		return errDefault
+	}
+	if errOverride := validatePayloadParameters("additional override", p.Additional.Override, reasoningPaths, true); errOverride != nil {
+		return errOverride
+	}
+	seenFilters := make(map[string]struct{}, len(p.Additional.Filter))
+	for _, path := range p.Additional.Filter {
+		originalPath := path
+		path = strings.TrimSpace(path)
+		if originalPath != path {
+			return invalid("additional filter path %q must not contain surrounding whitespace", originalPath)
+		}
+		if errPath := validatePayloadPath("additional filter", path, true); errPath != nil {
+			return errPath
+		}
+		if pathConflictsWithSet(path, reasoningPaths) {
+			return invalid("additional filter path %q conflicts with a reasoning rule", path)
+		}
+		if pathConflictsWithSet(path, seenFilters) {
+			return invalid("additional filter path %q is duplicated", path)
+		}
+		seenFilters[path] = struct{}{}
+	}
+	return nil
+}
+
+// Validate verifies provider-level additional payload mutations without interpreting an execution payload.
+// Validate 校验供应商级附加载荷变更，且不解释执行载荷。
+func (p AdditionalPayloadProjection) Validate() error {
+	return (RequestProjection{Additional: p}).Validate()
+}
+
+// reasoningProjectionPaths returns every path owned by model-level reasoning mappings.
+// reasoningProjectionPaths 返回模型级推理映射拥有的全部路径。
+func reasoningProjectionPaths(projection ReasoningRequestProjection) map[string]struct{} {
+	paths := make(map[string]struct{})
+	for _, rules := range [][]ReasoningParameterRule{projection.Effort, projection.Summary} {
+		for _, rule := range rules {
+			for _, parameter := range rule.Set {
+				paths[parameter.Path] = struct{}{}
+			}
+			for _, path := range rule.Delete {
+				paths[path] = struct{}{}
+			}
+		}
+	}
+	return paths
+}
+
+// additionalProjectionPaths returns every path mutated or removed by provider-level additional rules.
+// additionalProjectionPaths 返回供应商级附加规则变更或删除的全部路径。
+func additionalProjectionPaths(projection AdditionalPayloadProjection) map[string]struct{} {
+	paths := make(map[string]struct{}, len(projection.Default)+len(projection.Override)+len(projection.Filter))
+	for _, parameters := range [][]PayloadParameter{projection.Default, projection.Override} {
+		for _, parameter := range parameters {
+			paths[parameter.Path] = struct{}{}
+		}
+	}
+	for _, path := range projection.Filter {
+		paths[path] = struct{}{}
+	}
+	return paths
+}
+
+// validateReasoningParameterRules verifies a closed value-to-mutation rule set and records every owned path.
+// validateReasoningParameterRules 校验封闭的值到变更规则集合，并记录其拥有的每个路径。
+func validateReasoningParameterRules(label string, rules []ReasoningParameterRule, ownedPaths map[string]struct{}) error {
+	seenValues := make(map[string]struct{}, len(rules))
+	for _, rule := range rules {
+		value := strings.TrimSpace(rule.Value)
+		if value == "" {
+			return invalid("%s rule value is required", label)
+		}
+		if value != rule.Value {
+			return invalid("%s rule value %q must not contain surrounding whitespace", label, rule.Value)
+		}
+		if _, duplicate := seenValues[value]; duplicate {
+			return invalid("%s rule value %q is duplicated", label, value)
+		}
+		seenValues[value] = struct{}{}
+		if len(rule.Set) == 0 && len(rule.Delete) == 0 {
+			return invalid("%s rule %q requires at least one mutation", label, value)
+		}
+		rulePaths := make(map[string]struct{}, len(rule.Set)+len(rule.Delete))
+		if errSet := validatePayloadParameters(label+" set", rule.Set, nil, true); errSet != nil {
+			return errSet
+		}
+		for _, parameter := range rule.Set {
+			path := strings.TrimSpace(parameter.Path)
+			if pathConflictsWithSet(path, rulePaths) {
+				return invalid("%s rule %q mutates path %q more than once", label, value, path)
+			}
+			rulePaths[path] = struct{}{}
+			ownedPaths[path] = struct{}{}
+		}
+		for _, path := range rule.Delete {
+			originalPath := path
+			path = strings.TrimSpace(path)
+			if originalPath != path {
+				return invalid("%s delete path %q must not contain surrounding whitespace", label, originalPath)
+			}
+			if errPath := validatePayloadPath(label+" delete", path, true); errPath != nil {
+				return errPath
+			}
+			if pathConflictsWithSet(path, rulePaths) {
+				return invalid("%s rule %q mutates path %q more than once", label, value, path)
+			}
+			rulePaths[path] = struct{}{}
+			ownedPaths[path] = struct{}{}
+		}
+	}
+	return nil
+}
+
+// validatePayloadParameters verifies exact JSON assignments and optional conflicts with reasoning-owned paths.
+// validatePayloadParameters 校验精确 JSON 赋值及其与推理拥有路径的可选冲突。
+func validatePayloadParameters(label string, parameters []PayloadParameter, reasoningPaths map[string]struct{}, rejectProtected bool) error {
+	seen := make(map[string]struct{}, len(parameters))
+	for _, parameter := range parameters {
+		path := strings.TrimSpace(parameter.Path)
+		if path != parameter.Path {
+			return invalid("%s path %q must not contain surrounding whitespace", label, parameter.Path)
+		}
+		if errPath := validatePayloadPath(label, path, rejectProtected); errPath != nil {
+			return errPath
+		}
+		if !json.Valid(parameter.Value) {
+			return invalid("%s path %q requires one valid JSON value", label, path)
+		}
+		if pathConflictsWithSet(path, seen) {
+			return invalid("%s path %q is duplicated", label, path)
+		}
+		if pathConflictsWithSet(path, reasoningPaths) {
+			return invalid("%s path %q conflicts with a reasoning rule", label, path)
+		}
+		seen[path] = struct{}{}
+	}
+	return nil
+}
+
+// pathConflictsWithSet reports exact or parent-child overlap that would make mutation order observable.
+// pathConflictsWithSet 报告会使变更顺序可观察的精确或父子路径重叠。
+func pathConflictsWithSet(path string, existing map[string]struct{}) bool {
+	for candidate := range existing {
+		if path == candidate || strings.HasPrefix(path, candidate+".") || strings.HasPrefix(candidate, path+".") {
+			return true
+		}
+	}
+	return false
+}
+
+// validatePayloadPath accepts only explicit object paths and protects protocol-owned request identity and content.
+// validatePayloadPath 仅接受显式对象路径，并保护协议拥有的请求身份与内容。
+func validatePayloadPath(label string, path string, rejectProtected bool) error {
+	path = strings.TrimSpace(path)
+	if !payloadPathPattern.MatchString(path) {
+		return invalid("%s path %q is not a supported object path", label, path)
+	}
+	if !rejectProtected {
+		return nil
+	}
+	root := strings.SplitN(path, ".", 2)[0]
+	normalizedRoot := strings.ReplaceAll(strings.ToLower(root), "-", "_")
+	switch normalizedRoot {
+	case "model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream", "previous_response_id", "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key", "access_token", "auth_token", "token", "secret", "client_secret", "password", "credential", "cookie", "set_cookie":
+		return invalid("%s path %q is owned by the protocol or authentication boundary", label, path)
+	default:
+		return nil
+	}
 }
 
 // Validate verifies token recommendations and their relationship to independently known hard ceilings.

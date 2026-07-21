@@ -79,11 +79,9 @@ func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 	if len(request.GenerationPolicy.StrictJSONSchema) > 0 {
 		upstream.Text = &TextConfiguration{Format: TextFormat{Type: "json_schema", Name: "vulcan_response", Schema: append([]byte(nil), request.GenerationPolicy.StrictJSONSchema...), Strict: true}}
 	}
-	if capabilitySelected(plan, vcp.FeatureReasoning, vcp.CapabilityNative) && (request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.Summary) {
+	if capabilitySelected(plan, vcp.FeatureReasoning, vcp.CapabilityNative) && (request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.RequestedSummaryMode() != "") {
 		reasoning := ReasoningConfiguration{Effort: request.ReasoningPolicy.Effort}
-		if request.ReasoningPolicy.Summary {
-			reasoning.Summary = "auto"
-		}
+		reasoning.Summary = request.ReasoningPolicy.RequestedSummaryMode()
 		upstream.Reasoning = &reasoning
 	}
 	toolKinds, errTools := projectTools(&upstream, request, capabilities)

@@ -519,9 +519,21 @@ type ReasoningPolicy struct {
 	// Summary requests a visible reasoning summary.
 	// Summary 请求可见推理摘要。
 	Summary bool `json:"summary,omitempty"`
+	// SummaryMode requests one exact visible reasoning summary representation.
+	// SummaryMode 请求一种精确的可见推理摘要表示。
+	SummaryMode string `json:"summary_mode,omitempty"`
 	// ContinuationID references Router-owned sealed continuation state.
 	// ContinuationID 引用 Router 拥有的密封续接状态。
 	ContinuationID string `json:"continuation_id,omitempty"`
+}
+
+// RequestedSummaryMode returns the exact summary mode while preserving the legacy boolean as auto.
+// RequestedSummaryMode 返回精确摘要模式，同时将旧布尔值保留为 auto。
+func (p ReasoningPolicy) RequestedSummaryMode() string {
+	if p.Summary {
+		return "auto"
+	}
+	return p.SummaryMode
 }
 
 // CacheStrategy identifies explicit cache intent.
