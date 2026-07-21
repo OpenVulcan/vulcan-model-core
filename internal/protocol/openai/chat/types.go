@@ -120,6 +120,30 @@ type Request struct {
 	// ReasoningEffort constrains verified OpenAI Chat reasoning-model effort.
 	// ReasoningEffort 约束经过验证的 OpenAI Chat 推理模型强度。
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// Thinking carries the typed Moonshot thinking switch only after an explicitly registered provider adapter selects it.
+	// Thinking 仅在显式注册的供应商适配器选择后携带类型化 Moonshot 思考开关。
+	Thinking *ThinkingConfiguration `json:"thinking,omitempty"`
+}
+
+// ThinkingMode identifies one closed Moonshot thinking switch value.
+// ThinkingMode 标识一个封闭的 Moonshot 思考开关值。
+type ThinkingMode string
+
+const (
+	// ThinkingEnabled requests the provider's thinking route.
+	// ThinkingEnabled 请求供应商的思考路由。
+	ThinkingEnabled ThinkingMode = "enabled"
+	// ThinkingDisabled requests the provider's non-thinking route.
+	// ThinkingDisabled 请求供应商的非思考路由。
+	ThinkingDisabled ThinkingMode = "disabled"
+)
+
+// ThinkingConfiguration contains the provider-verified Moonshot thinking extension.
+// ThinkingConfiguration 包含供应商已验证的 Moonshot 思考扩展。
+type ThinkingConfiguration struct {
+	// Type selects the enabled or disabled thinking route.
+	// Type 选择启用或禁用思考的路由。
+	Type ThinkingMode `json:"type"`
 }
 
 // StreamOptions contains OpenAI Chat stream usage options.

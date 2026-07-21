@@ -52,12 +52,16 @@ func TestRegisterProtocolProfilesRegistersOnlySupportedCustomProfiles(t *testing
 			t.Fatalf("profile[%d].ModelDiscovery = %q, want unsupported", index, profiles[index].ModelDiscovery)
 		}
 	}
-	// customProfiles is the complete executable whitelist evidenced by CLIProxyAPI's OpenAICompatibility and VertexCompat configurations.
-	// customProfiles 是由 CLIProxyAPI 的 OpenAICompatibility 与 VertexCompat 配置验证的完整可执行白名单。
+	// customProfiles is the exact new-provider selection set exposed by management.
+	// customProfiles 是管理面公开的精确新增供应商选择集合。
 	customProfiles := map[string]providerconfig.AuthMethodType{
-		chat.ProfileID:     providerconfig.AuthMethodBearer,
-		aistudio.ProfileID: providerconfig.AuthMethodHeaderKey,
+		chat.ProfileID:            providerconfig.AuthMethodBearer,
+		openairesponses.ProfileID: providerconfig.AuthMethodBearer,
+		messages.ProfileID:        providerconfig.AuthMethodHeaderKey,
 	}
+	// compatibleProfiles includes the hidden legacy Vertex custom shape that must remain loadable but cannot be newly selected.
+	// compatibleProfiles 包含必须保持可加载但不可新增选择的旧版 Vertex 自定义形态。
+	compatibleProfiles := map[string]struct{}{chat.ProfileID: {}, openairesponses.ProfileID: {}, messages.ProfileID: {}, aistudio.ProfileID: {}}
 	for _, profile := range profiles {
 		expectedAuth, custom := customProfiles[profile.ID]
 		if profile.UserConfigurable != custom {
@@ -67,8 +71,12 @@ func TestRegisterProtocolProfilesRegistersOnlySupportedCustomProfiles(t *testing
 			if len(profile.AllowedAuthMethods) != 1 || profile.AllowedAuthMethods[0] != expectedAuth {
 				t.Fatalf("profile %q AllowedAuthMethods = %#v, want only %q", profile.ID, profile.AllowedAuthMethods, expectedAuth)
 			}
-		} else if len(profile.AllowedAuthMethods) != 0 {
+		} else if profile.ID != aistudio.ProfileID && len(profile.AllowedAuthMethods) != 0 {
 			t.Fatalf("non-custom profile %q exposes auth methods %#v", profile.ID, profile.AllowedAuthMethods)
+		}
+		_, compatible := compatibleProfiles[profile.ID]
+		if profile.CustomDefinitionCompatible != compatible {
+			t.Fatalf("profile %q CustomDefinitionCompatible = %v, want %v", profile.ID, profile.CustomDefinitionCompatible, compatible)
 		}
 	}
 }

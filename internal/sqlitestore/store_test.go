@@ -85,13 +85,14 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 	t.Helper()
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
-		ID:                 "openai.chat",
-		Version:            "1",
-		DisplayName:        "OpenAI Chat Completions",
-		UserConfigurable:   true,
-		RuntimeReady:       true,
-		ModelDiscovery:     providerconfig.SupportUnsupported,
-		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
+		ID:                         "openai.chat",
+		Version:                    "1",
+		DisplayName:                "OpenAI Chat Completions",
+		UserConfigurable:           true,
+		CustomDefinitionCompatible: true,
+		RuntimeReady:               true,
+		ModelDiscovery:             providerconfig.SupportUnsupported,
+		AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
 	}

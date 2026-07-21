@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
@@ -93,6 +94,47 @@ func NewServiceWithCredentialRefreshers(configurations providerconfig.Store, cat
 // Refresh reads one exact system provider instance and atomically replaces its catalog.
 // Refresh 读取一个精确系统供应商实例并原子替换其目录。
 func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time) (catalog.Snapshot, error) {
+	return s.refresh(ctx, instanceID, nil, now)
+}
+
+// RefreshWithCredential performs model discovery with one explicitly selected same-instance credential.
+// RefreshWithCredential 使用一个显式选择的同实例凭据执行模型发现。
+func (s *Service) RefreshWithCredential(ctx context.Context, instanceID string, credentialID string, now time.Time) (catalog.Snapshot, error) {
+	if ctx == nil {
+		return catalog.Snapshot{}, errors.New("context is required")
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return catalog.Snapshot{}, errContext
+	}
+	if strings.TrimSpace(credentialID) == "" || now.IsZero() {
+		return catalog.Snapshot{}, errors.New("credential-scoped discovery requires credential and evaluation time")
+	}
+	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return catalog.Snapshot{}, errInstance
+	}
+	driver, exists := s.drivers.Lookup(instance.DefinitionID)
+	if !exists {
+		return catalog.Snapshot{}, fmt.Errorf("%w: %s", ErrDriverNotFound, instance.DefinitionID)
+	}
+	if driver.Definition().Features.ModelDiscovery != providerconfig.SupportSupported {
+		return catalog.Snapshot{}, errors.New("provider does not support credential-scoped model discovery")
+	}
+	credentials, errCredentials := s.configurations.ListCredentials(ctx, instanceID)
+	if errCredentials != nil {
+		return catalog.Snapshot{}, errCredentials
+	}
+	for _, credential := range credentials {
+		if credential.ID == credentialID {
+			return s.refresh(ctx, instanceID, &credential, now)
+		}
+	}
+	return catalog.Snapshot{}, fmt.Errorf("%w: provider credential %s", providerconfig.ErrNotFound, credentialID)
+}
+
+// refresh executes one atomic metadata replacement with an optional exact discovery credential.
+// refresh 使用一个可选的精确发现凭据执行一次原子元数据替换。
+func (s *Service) refresh(ctx context.Context, instanceID string, discoveryCredential *providerconfig.Credential, now time.Time) (catalog.Snapshot, error) {
 	if ctx == nil {
 		return catalog.Snapshot{}, errors.New("context is required")
 	}
@@ -130,7 +172,7 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 		if !supportsDiscovery {
 			return catalog.Snapshot{}, errors.New("provider declares model discovery without a ModelDiscoverer")
 		}
-		freshDiscovery, errDiscovery := discoverer.DiscoverModels(ctx, provider.DiscoveryRequest{ProviderInstance: instance})
+		freshDiscovery, errDiscovery := discoverer.DiscoverModels(ctx, provider.DiscoveryRequest{ProviderInstance: instance, Credential: discoveryCredential})
 		if errDiscovery != nil {
 			return catalog.Snapshot{}, fmt.Errorf("discover provider models: %w", errDiscovery)
 		}

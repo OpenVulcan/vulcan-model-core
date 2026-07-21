@@ -61,6 +61,12 @@ func (p ProtocolProfile) Validate() error {
 		}
 		allowedAuthMethods[authMethod] = struct{}{}
 	}
+	if p.UserConfigurable && !p.CustomDefinitionCompatible {
+		return invalid("user-configurable protocol profile must be custom-definition compatible")
+	}
+	if p.CustomDefinitionCompatible && len(p.AllowedAuthMethods) == 0 {
+		return invalid("custom-definition compatible protocol profile requires an authentication method")
+	}
 	return nil
 }
 
@@ -611,6 +617,65 @@ func (b AccessBinding) ValidateMutation(next AccessBinding) error {
 	return nil
 }
 
+// ValidateAccessGraphReplacement verifies one complete replacement graph against current provider and credential ownership.
+// ValidateAccessGraphReplacement 校验一个完整替换图的当前供应商与凭据归属。
+func ValidateAccessGraphReplacement(replacement AccessGraphReplacement, definition ProviderDefinition, credentials []Credential) error {
+	if errInstanceID := validatePrefixedIdentifier("access graph provider instance id", replacement.ProviderInstanceID, "pvi_"); errInstanceID != nil {
+		return errInstanceID
+	}
+	for _, endpoint := range replacement.ExpectedEndpoints {
+		if errEndpoint := endpoint.Validate(); errEndpoint != nil || endpoint.ProviderInstanceID != replacement.ProviderInstanceID {
+			return invalid("expected endpoint is invalid or belongs to another provider instance")
+		}
+	}
+	for _, binding := range replacement.ExpectedBindings {
+		if errBinding := binding.Validate(); errBinding != nil || binding.ProviderInstanceID != replacement.ProviderInstanceID {
+			return invalid("expected binding is invalid or belongs to another provider instance")
+		}
+	}
+	credentialByID := make(map[string]Credential, len(credentials))
+	for _, credential := range credentials {
+		if credential.ProviderInstanceID == replacement.ProviderInstanceID {
+			credentialByID[credential.ID] = credential
+		}
+	}
+	endpointByID := make(map[string]Endpoint, len(replacement.Endpoints))
+	for _, endpoint := range replacement.Endpoints {
+		if errEndpoint := endpoint.Validate(); errEndpoint != nil {
+			return errEndpoint
+		}
+		if endpoint.ProviderInstanceID != replacement.ProviderInstanceID || !definition.HasChannel(endpoint.ChannelID) {
+			return invalid("replacement endpoint is outside provider ownership")
+		}
+		if errPreset := definition.ValidateEndpointPreset(endpoint); errPreset != nil {
+			return errPreset
+		}
+		if _, duplicate := endpointByID[endpoint.ID]; duplicate {
+			return invalid("replacement endpoint id %q is duplicated", endpoint.ID)
+		}
+		endpointByID[endpoint.ID] = endpoint
+	}
+	seenBindings := make(map[string]struct{}, len(replacement.Bindings))
+	for _, binding := range replacement.Bindings {
+		if errBinding := binding.Validate(); errBinding != nil {
+			return errBinding
+		}
+		endpoint, endpointExists := endpointByID[binding.EndpointID]
+		credential, credentialExists := credentialByID[binding.CredentialID]
+		if binding.ProviderInstanceID != replacement.ProviderInstanceID || !endpointExists || !credentialExists {
+			return invalid("replacement binding references resources outside provider ownership")
+		}
+		if binding.ChannelID != endpoint.ChannelID || !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
+			return invalid("replacement binding channel is incompatible with endpoint or credential auth method")
+		}
+		if _, duplicate := seenBindings[binding.ID]; duplicate {
+			return invalid("replacement binding id %q is duplicated", binding.ID)
+		}
+		seenBindings[binding.ID] = struct{}{}
+	}
+	return nil
+}
+
 // validateBaseURL verifies a credential-free absolute HTTP(S) base URL while preserving provider-owned paths.
 // validateBaseURL 校验不含凭据的绝对 HTTP(S) 基础 URL，同时保留供应商自有路径。
 func validateBaseURL(field string, value string) error {
@@ -793,6 +858,15 @@ func (p EndpointPreset) derivedBaseURL(region string) (string, error) {
 	return baseURL, nil
 }
 
+// MaterializeRegionalBaseURL derives one provider-owned regional origin only for a declared regional preset.
+// MaterializeRegionalBaseURL 仅为已声明的区域预设派生一个供应商拥有的区域 Origin。
+func (p EndpointPreset) MaterializeRegionalBaseURL(region string) (string, error) {
+	if p.RegionalBaseURLTemplate == "" {
+		return "", invalid("endpoint preset does not accept a region")
+	}
+	return p.derivedBaseURL(region)
+}
+
 // Validate verifies one closed endpoint parameter definition.
 // Validate 校验一个封闭的端点参数定义。
 func (p EndpointParameterDefinition) Validate() error {
@@ -879,6 +953,47 @@ func validateEndpointRegion(region string) error {
 			continue
 		}
 		return invalid("derived endpoint region contains unsupported characters")
+	}
+	return nil
+}
+
+// ValidateProviderConfiguration verifies a credential-independent instance and its complete endpoint graph.
+// ValidateProviderConfiguration 校验一个独立于凭据的实例及其完整入口图。
+func ValidateProviderConfiguration(configuration ProviderConfiguration, definition ProviderDefinition) error {
+	if configuration.Instance.DefinitionID != definition.ID {
+		return invalid("provider configuration requires its exact provider definition")
+	}
+	if errInstance := configuration.Instance.Validate(); errInstance != nil {
+		return errInstance
+	}
+	if configuration.Instance.DefinitionRevision != definition.Revision || configuration.Instance.Status != LifecycleDraft {
+		return invalid("credential-independent provider configuration must be draft and match the definition revision")
+	}
+	if len(configuration.Endpoints) == 0 {
+		return invalid("provider configuration requires at least one endpoint")
+	}
+	channels := make(map[string]struct{}, len(configuration.Endpoints))
+	for _, endpoint := range configuration.Endpoints {
+		if errEndpoint := endpoint.Validate(); errEndpoint != nil {
+			return errEndpoint
+		}
+		if endpoint.ProviderInstanceID != configuration.Instance.ID || !definition.HasChannel(endpoint.ChannelID) {
+			return invalid("provider configuration endpoint is outside its provider definition")
+		}
+		if definition.Kind == DefinitionKindSystem {
+			if errPreset := definition.ValidateEndpointPreset(endpoint); errPreset != nil {
+				return errPreset
+			}
+		}
+		if _, exists := channels[endpoint.ChannelID]; exists {
+			return invalid("duplicate provider configuration channel %q", endpoint.ChannelID)
+		}
+		channels[endpoint.ChannelID] = struct{}{}
+	}
+	for _, channelID := range definition.ChannelIDs() {
+		if _, exists := channels[channelID]; !exists {
+			return invalid("provider configuration is missing channel endpoint %q", channelID)
+		}
 	}
 	return nil
 }
@@ -996,6 +1111,10 @@ func ValidateCustomOnboarding(onboarding CustomOnboarding) error {
 	switch definition.EndpointProfileID {
 	case CustomEndpointProfileOpenAICompatibility:
 		expectedAuthType = AuthMethodBearer
+	case CustomEndpointProfileOpenAIResponsesCompatibility:
+		expectedAuthType = AuthMethodBearer
+	case CustomEndpointProfileAnthropicMessagesCompatibility:
+		expectedAuthType = AuthMethodHeaderKey
 	case CustomEndpointProfileVertexCompatibility:
 		expectedAuthType = AuthMethodHeaderKey
 	default:

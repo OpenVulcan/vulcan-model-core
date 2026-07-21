@@ -146,9 +146,15 @@ func membershipMetadata(instanceID string, credentialID string, tier MembershipT
 	// records freezes Kimi's confirmed tier matrix; every model receives explicit allow or deny evidence.
 	// records 固化 Kimi 已确认的档位矩阵；每个模型都会获得显式允许或拒绝证据。
 	records := []struct {
-		modelID      string
+		// modelID identifies the exact Kimi model receiving entitlement evidence.
+		// modelID 标识接收权益证据的精确 Kimi 模型。
+		modelID string
+		// availability is the explicit tier-derived authorization state.
+		// availability 是从档位显式派生的授权状态。
 		availability catalog.AvailabilityStatus
-		profiles     []string
+		// profiles lists the exact execution profiles authorized by the tier.
+		// profiles 列出该档位授权的精确执行规格。
+		profiles []string
 	}{
 		{modelID: ModelK27ID, availability: catalog.AvailabilityAllowed, profiles: []string{ProfileK27ID}},
 		{modelID: ModelK3ID, availability: availabilityFor(tier >= MembershipModerato), profiles: k3ProfilesForTier(tier)},

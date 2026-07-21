@@ -2,7 +2,6 @@ package management
 
 import (
 	"context"
-	"errors"
 	"testing"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
@@ -104,9 +103,9 @@ func TestReauthorizeVertexCredentialPreservesAccountProjectAndLocation(t *testin
 	}
 }
 
-// TestDeleteCredentialRemovesFinalInstanceCatalogAndSecret verifies final-account deletion leaves no orphan graph.
-// TestDeleteCredentialRemovesFinalInstanceCatalogAndSecret 验证最后账号删除不会留下孤立图。
-func TestDeleteCredentialRemovesFinalInstanceCatalogAndSecret(t *testing.T) {
+// TestDeleteCredentialRetainsFinalInstanceCatalogAndRemovesSecret verifies credential lifecycle does not own provider configuration.
+// TestDeleteCredentialRetainsFinalInstanceCatalogAndRemovesSecret 验证凭据生命周期不拥有供应商配置。
+func TestDeleteCredentialRetainsFinalInstanceCatalogAndRemovesSecret(t *testing.T) {
 	ctx := context.Background()
 	service, configurations, secrets := newKimiOnboardingService(t)
 	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{DefinitionID: bootstrap.KimiCNDefinitionID, DisplayName: "Kimi", AuthMethodID: "api_key", Secret: []byte("secret-key")})
@@ -114,17 +113,58 @@ func TestDeleteCredentialRemovesFinalInstanceCatalogAndSecret(t *testing.T) {
 		t.Fatalf("OnboardSystemProvider() error = %v", errOnboard)
 	}
 	deletion, errDelete := service.DeleteCredential(ctx, onboarding.Instance.ID, onboarding.Credential.ID)
-	if errDelete != nil || !deletion.InstanceDeleted {
+	if errDelete != nil || deletion.InstanceDeleted || !deletion.InstanceDrafted {
 		t.Fatalf("DeleteCredential() deletion=%#v error=%v", deletion, errDelete)
 	}
-	if _, errInstance := configurations.GetInstance(ctx, onboarding.Instance.ID); !errors.Is(errInstance, providerconfig.ErrNotFound) {
-		t.Fatalf("deleted instance error = %v", errInstance)
+	instance, errInstance := configurations.GetInstance(ctx, onboarding.Instance.ID)
+	if errInstance != nil || instance.Status != providerconfig.LifecycleDraft {
+		t.Fatalf("retained instance=%#v error=%v", instance, errInstance)
 	}
 	if _, errSecret := secrets.Get(ctx, onboarding.Credential.SecretRef); errSecret == nil {
 		t.Fatal("deleted credential secret remains readable")
 	}
-	if _, errCatalog := service.catalogs.Get(ctx, onboarding.Instance.ID); errCatalog == nil {
-		t.Fatal("deleted provider catalog remains readable")
+	if _, errCatalog := service.catalogs.Get(ctx, onboarding.Instance.ID); errCatalog != nil {
+		t.Fatalf("retained provider catalog error = %v", errCatalog)
+	}
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, onboarding.Instance.ID)
+	if errEndpoints != nil || len(endpoints) == 0 {
+		t.Fatalf("retained endpoints=%#v error=%v", endpoints, errEndpoints)
+	}
+}
+
+// TestConfigureSystemProviderWithoutCredentialBuildsDraftCatalog verifies native providers no longer require account creation for configuration.
+// TestConfigureSystemProviderWithoutCredentialBuildsDraftCatalog 验证原生供应商配置不再要求同时创建账号。
+func TestConfigureSystemProviderWithoutCredentialBuildsDraftCatalog(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := newKimiOnboardingService(t)
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
+		DefinitionID: bootstrap.KimiCNDefinitionID, Handle: "kimi-cn-draft", DisplayName: "Kimi CN Draft",
+	})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
+	}
+	if configured.Configuration.Instance.Status != providerconfig.LifecycleDraft || len(configured.Configuration.Endpoints) != 1 || len(configured.Catalog.Models) == 0 {
+		t.Fatalf("configured system provider=%#v catalog=%#v", configured.Configuration, configured.Catalog)
+	}
+	credentials, errCredentials := configurations.ListCredentials(ctx, configured.Configuration.Instance.ID)
+	if errCredentials != nil || len(credentials) != 0 {
+		t.Fatalf("system provider credentials=%#v error=%v", credentials, errCredentials)
+	}
+}
+
+// TestConfigureVertexProviderMaterializesSelectedRegion verifies provider configuration owns the regional endpoint before service-account attachment.
+// TestConfigureVertexProviderMaterializesSelectedRegion 验证供应商配置会在附加服务账号前拥有所选区域入口。
+func TestConfigureVertexProviderMaterializesSelectedRegion(t *testing.T) {
+	ctx := context.Background()
+	service, _, _ := newKimiOnboardingService(t)
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
+		DefinitionID: bootstrap.GoogleVertexDefinitionID, Handle: "vertex-europe", DisplayName: "Vertex Europe", Region: "europe-west1",
+	})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() Vertex error = %v", errConfigure)
+	}
+	if len(configured.Configuration.Endpoints) != 1 || configured.Configuration.Endpoints[0].Region != "europe-west1" || configured.Configuration.Endpoints[0].BaseURL != providergoogle.VertexBaseURL("europe-west1") {
+		t.Fatalf("configured Vertex endpoints = %#v", configured.Configuration.Endpoints)
 	}
 }
 

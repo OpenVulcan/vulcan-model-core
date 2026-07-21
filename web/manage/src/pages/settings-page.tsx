@@ -9,13 +9,7 @@ import {
   CardTitle,
 } from "@/components/ui/card";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { ReadonlyCombobox } from "@/components/ui/readonly-combobox";
 import { useI18n } from "@/i18n";
 import {
   fetchRoutingSettings,
@@ -91,7 +85,7 @@ export function SettingsPage({ managementAuthToken }: SettingsPageProps) {
             <Label htmlFor="default-routing-strategy">
               {t("settings.defaultStrategy")}
             </Label>
-            <Select
+            <ReadonlyCombobox
               value={strategy}
               disabled={loading || saving}
               onValueChange={(value) => {
@@ -99,19 +93,13 @@ export function SettingsPage({ managementAuthToken }: SettingsPageProps) {
                   setStrategy(value);
                 }
               }}
-            >
-              <SelectTrigger id="default-routing-strategy" className="w-full">
-                <SelectValue />
-              </SelectTrigger>
-              <SelectContent>
-                <SelectItem value="round_robin">
-                  {t("settings.roundRobin")}
-                </SelectItem>
-                <SelectItem value="fill_first">
-                  {t("settings.fillFirst")}
-                </SelectItem>
-              </SelectContent>
-            </Select>
+              options={[
+                { value: "round_robin", label: t("settings.roundRobin") },
+                { value: "fill_first", label: t("settings.fillFirst") },
+              ]}
+              id="default-routing-strategy"
+              className="w-full"
+            />
           </div>
           <p className="text-muted-foreground text-sm">
             {strategy === "round_robin"

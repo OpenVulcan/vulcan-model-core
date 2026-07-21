@@ -21,6 +21,12 @@ const (
 	// CustomEndpointProfileOpenAICompatibility identifies CLIProxyAPI's base-URL-relative OpenAI Chat compatibility shape.
 	// CustomEndpointProfileOpenAICompatibility 标识 CLIProxyAPI 相对于 Base URL 的 OpenAI Chat 兼容形态。
 	CustomEndpointProfileOpenAICompatibility = "openai_compatibility"
+	// CustomEndpointProfileOpenAIResponsesCompatibility identifies a versioned Base URL using the OpenAI Responses wire contract.
+	// CustomEndpointProfileOpenAIResponsesCompatibility 标识使用 OpenAI Responses Wire 合同的带版本 Base URL。
+	CustomEndpointProfileOpenAIResponsesCompatibility = "openai_responses_compatibility"
+	// CustomEndpointProfileAnthropicMessagesCompatibility identifies an origin Base URL using the Anthropic Messages wire contract.
+	// CustomEndpointProfileAnthropicMessagesCompatibility 标识使用 Anthropic Messages Wire 合同的 Origin Base URL。
+	CustomEndpointProfileAnthropicMessagesCompatibility = "anthropic_messages_compatibility"
 	// CustomEndpointProfileVertexCompatibility identifies CLIProxyAPI's API-key Vertex publisher-path compatibility shape.
 	// CustomEndpointProfileVertexCompatibility 标识 CLIProxyAPI 使用 API Key 的 Vertex Publisher 路径兼容形态。
 	CustomEndpointProfileVertexCompatibility = "vertex_compatibility"
@@ -234,6 +240,9 @@ type ProtocolProfile struct {
 	// UserConfigurable reports whether custom providers may select the profile.
 	// UserConfigurable 表示自定义供应商是否可以选择该 Profile。
 	UserConfigurable bool
+	// CustomDefinitionCompatible reports whether persisted custom definitions may continue to reference this executable profile.
+	// CustomDefinitionCompatible 表示已持久化自定义定义是否可以继续引用此可执行 Profile。
+	CustomDefinitionCompatible bool
 	// RuntimeReady reports whether the corresponding adapter is executable.
 	// RuntimeReady 表示对应 Adapter 是否已经可以执行。
 	RuntimeReady bool
@@ -656,6 +665,37 @@ type AccessBinding struct {
 	// Revision is the latest persisted binding revision.
 	// Revision 是最新持久化绑定修订号。
 	Revision uint64
+}
+
+// AccessGraphReplacement atomically replaces one instance's complete endpoint and binding graph after exact-state comparison.
+// AccessGraphReplacement 在精确状态比对后原子替换一个实例的完整入口与 Binding 图。
+type AccessGraphReplacement struct {
+	// ProviderInstanceID identifies the sole graph owner.
+	// ProviderInstanceID 标识唯一图归属实例。
+	ProviderInstanceID string
+	// ExpectedEndpoints contains the complete endpoint snapshot that must still be current.
+	// ExpectedEndpoints 包含必须仍为当前状态的完整入口快照。
+	ExpectedEndpoints []Endpoint
+	// ExpectedBindings contains the complete binding snapshot that must still be current.
+	// ExpectedBindings 包含必须仍为当前状态的完整 Binding 快照。
+	ExpectedBindings []AccessBinding
+	// Endpoints contains the complete replacement endpoint graph.
+	// Endpoints 包含完整替换入口图。
+	Endpoints []Endpoint
+	// Bindings contains the complete replacement binding graph.
+	// Bindings 包含完整替换 Binding 图。
+	Bindings []AccessBinding
+}
+
+// ProviderConfiguration contains one provider instance and its complete non-secret endpoint graph.
+// ProviderConfiguration 包含一个供应商实例及其完整非秘密入口图。
+type ProviderConfiguration struct {
+	// Instance is the credential-independent provider configuration root.
+	// Instance 是独立于凭据的供应商配置根。
+	Instance ProviderInstance
+	// Endpoints contains every configured channel destination owned by the instance.
+	// Endpoints 包含实例拥有的全部已配置通道目标。
+	Endpoints []Endpoint
 }
 
 // SystemOnboarding contains one complete new system-provider configuration committed as one unit.

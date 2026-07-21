@@ -11,12 +11,13 @@ import (
 // testProtocolProfile 返回一个就绪且允许用户配置的协议元数据测试夹具。
 func testProtocolProfile() ProtocolProfile {
 	return ProtocolProfile{
-		ID:               "openai.responses.v1",
-		Version:          "1",
-		DisplayName:      "OpenAI Responses",
-		UserConfigurable: true,
-		RuntimeReady:     true,
-		ModelDiscovery:   SupportSupported,
+		ID:                         "openai.responses.v1",
+		Version:                    "1",
+		DisplayName:                "OpenAI Responses",
+		UserConfigurable:           true,
+		CustomDefinitionCompatible: true,
+		RuntimeReady:               true,
+		ModelDiscovery:             SupportSupported,
 		Capabilities: []ProtocolCapabilityFact{
 			{Capability: ProtocolCapabilityStructuredTools, Status: SupportSupported},
 			{Capability: ProtocolCapabilityStreamingToolArguments, Status: SupportSupported},
@@ -494,6 +495,43 @@ func TestMemoryStoreKeepsAccessBindingsProviderScoped(t *testing.T) {
 	}
 	if err := store.SaveBinding(ctx, binding); err == nil {
 		t.Fatal("expected cross-instance access binding rejection")
+	}
+}
+
+// TestMemoryStoreReplacesCompleteAccessGraphAtomically verifies graph cleanup and compare-and-swap protection.
+// TestMemoryStoreReplacesCompleteAccessGraphAtomically 验证图清理与比较并交换保护。
+func TestMemoryStoreReplacesCompleteAccessGraphAtomically(t *testing.T) {
+	ctx := context.Background()
+	store, _ := testConfigurationStore(t)
+	instance := testInstance("pvi_graph", "graph", "system_test_provider")
+	if errSave := store.SaveInstance(ctx, instance); errSave != nil {
+		t.Fatalf("SaveInstance() error = %v", errSave)
+	}
+	credential := Credential{ID: "cred_graph", ProviderInstanceID: instance.ID, AuthMethodID: "api_key", Label: "Graph", SecretRef: "secret://graph", Fingerprint: "graph", Status: CredentialActive, Revision: 1}
+	if errSave := store.SaveCredential(ctx, credential); errSave != nil {
+		t.Fatalf("SaveCredential() error = %v", errSave)
+	}
+	legacyEndpoint := Endpoint{ID: "ep_graph_legacy", ProviderInstanceID: instance.ID, ChannelID: "openai.responses.v1", BaseURL: "https://legacy.example/v1", Status: EndpointReady, Revision: 1}
+	legacyBinding := AccessBinding{ID: "bind_graph_legacy", ProviderInstanceID: instance.ID, ChannelID: legacyEndpoint.ChannelID, EndpointID: legacyEndpoint.ID, CredentialID: credential.ID, Enabled: true, Revision: 1}
+	if errSave := store.SaveEndpoint(ctx, legacyEndpoint); errSave != nil {
+		t.Fatalf("SaveEndpoint() error = %v", errSave)
+	}
+	if errSave := store.SaveBinding(ctx, legacyBinding); errSave != nil {
+		t.Fatalf("SaveBinding() error = %v", errSave)
+	}
+	replacementEndpoint := Endpoint{ID: "ep_graph_current", ProviderInstanceID: instance.ID, ChannelID: "openai.responses.v1", BaseURL: "https://current.example/v1", Status: EndpointReady, Revision: 1}
+	replacementBinding := AccessBinding{ID: "bind_graph_current", ProviderInstanceID: instance.ID, ChannelID: replacementEndpoint.ChannelID, EndpointID: replacementEndpoint.ID, CredentialID: credential.ID, Enabled: true, Revision: 1}
+	replacement := AccessGraphReplacement{ProviderInstanceID: instance.ID, ExpectedEndpoints: []Endpoint{legacyEndpoint}, ExpectedBindings: []AccessBinding{legacyBinding}, Endpoints: []Endpoint{replacementEndpoint}, Bindings: []AccessBinding{replacementBinding}}
+	if errReplace := store.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		t.Fatalf("ReplaceAccessGraph() error = %v", errReplace)
+	}
+	endpoints, _ := store.ListEndpoints(ctx, instance.ID)
+	bindings, _ := store.ListBindings(ctx, instance.ID)
+	if len(endpoints) != 1 || endpoints[0].ID != replacementEndpoint.ID || len(bindings) != 1 || bindings[0].ID != replacementBinding.ID {
+		t.Fatalf("replaced graph endpoints=%#v bindings=%#v", endpoints, bindings)
+	}
+	if errReplace := store.ReplaceAccessGraph(ctx, replacement); errReplace == nil {
+		t.Fatal("ReplaceAccessGraph() accepted stale expected graph")
 	}
 }
 

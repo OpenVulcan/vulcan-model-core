@@ -5,8 +5,10 @@ import (
 	"net/http"
 	"testing"
 
+	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	protocolresponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -18,6 +20,8 @@ func TestCustomExecutionDriverFactoryBuildsOnlyWhitelistedShapes(t *testing.T) {
 	factory := newCustomExecutionFactoryFixture(t)
 	for _, definition := range []providerconfig.ProviderDefinition{
 		customExecutionDefinition("custom-openai", protocolchat.ProfileID, providerconfig.CustomEndpointProfileOpenAICompatibility, providerconfig.AuthMethodBearer),
+		customExecutionDefinition("custom-openai-responses", protocolresponses.ProfileID, providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility, providerconfig.AuthMethodBearer),
+		customExecutionDefinition("custom-anthropic", protocolmessages.ProfileID, providerconfig.CustomEndpointProfileAnthropicMessagesCompatibility, providerconfig.AuthMethodHeaderKey),
 		customExecutionDefinition("custom-vertex", protocolaistudio.ProfileID, providerconfig.CustomEndpointProfileVertexCompatibility, providerconfig.AuthMethodHeaderKey),
 	} {
 		driver, errDriver := factory.BuildCustomDriver(definition)
@@ -48,9 +52,11 @@ func TestCustomExecutionDriverFactoryRejectsShapeDrift(t *testing.T) {
 			return definition
 		}()},
 		{name: "openai header auth", definition: customExecutionDefinition("custom-openai-header", protocolchat.ProfileID, providerconfig.CustomEndpointProfileOpenAICompatibility, providerconfig.AuthMethodHeaderKey)},
+		{name: "responses header auth", definition: customExecutionDefinition("custom-responses-header", protocolresponses.ProfileID, providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility, providerconfig.AuthMethodHeaderKey)},
+		{name: "anthropic bearer auth", definition: customExecutionDefinition("custom-anthropic-bearer", protocolmessages.ProfileID, providerconfig.CustomEndpointProfileAnthropicMessagesCompatibility, providerconfig.AuthMethodBearer)},
 		{name: "vertex bearer auth", definition: customExecutionDefinition("custom-vertex-bearer", protocolaistudio.ProfileID, providerconfig.CustomEndpointProfileVertexCompatibility, providerconfig.AuthMethodBearer)},
 		{name: "endpoint drift", definition: customExecutionDefinition("custom-endpoint-drift", protocolchat.ProfileID, providerconfig.CustomEndpointProfileVertexCompatibility, providerconfig.AuthMethodBearer)},
-		{name: "unsupported protocol", definition: customExecutionDefinition("custom-anthropic", "anthropic.messages", "anthropic", providerconfig.AuthMethodBearer)},
+		{name: "unsupported protocol", definition: customExecutionDefinition("custom-special", "google.interactions", "google-interactions", providerconfig.AuthMethodBearer)},
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			if _, errDriver := factory.BuildCustomDriver(testCase.definition); !errors.Is(errDriver, ErrInvalidCustomExecutionDefinition) {

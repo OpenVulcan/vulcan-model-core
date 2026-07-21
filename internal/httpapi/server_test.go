@@ -48,18 +48,38 @@ func (staticManagementQuery) ListProviderGroups(context.Context) ([]management.P
 // staticProtocolProfiles 为认证路由测试提供不可变协议元数据。
 type staticProtocolProfiles struct{}
 
-// List returns one custom-provider-selectable protocol profile.
-// List 返回一个可供自定义供应商选择的协议 Profile。
+// List returns one selectable standard profile and one hidden special profile.
+// List 返回一个可选标准 Profile 与一个隐藏特殊 Profile。
 func (staticProtocolProfiles) List() []providerconfig.ProtocolProfile {
-	return []providerconfig.ProtocolProfile{{
-		ID:                 "openai.responses",
-		Version:            "1",
-		DisplayName:        "OpenAI Responses",
-		UserConfigurable:   true,
-		RuntimeReady:       true,
-		ModelDiscovery:     providerconfig.SupportUnsupported,
-		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey},
-	}}
+	return []providerconfig.ProtocolProfile{
+		{
+			ID: "openai.responses", Version: "1", DisplayName: "OpenAI Responses",
+			UserConfigurable: true, CustomDefinitionCompatible: true, RuntimeReady: true,
+			ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
+		},
+		{
+			ID: "google.interactions", Version: "1", DisplayName: "Google Interactions",
+			UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported,
+		},
+	}
+}
+
+// TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols verifies special native protocols never enter generic-provider selection data.
+// TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols 验证特殊原生协议不会进入通用供应商选择数据。
+func TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols(t *testing.T) {
+	server := &Server{control: &ControlPlane{Protocols: staticProtocolProfiles{}}}
+	recorder := httptest.NewRecorder()
+	server.handleProtocolProfiles(recorder, httptest.NewRequest(http.MethodGet, "/vulcan/manage/protocol-profiles", nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("status = %d, want %d", recorder.Code, http.StatusOK)
+	}
+	var payload protocolProfileListResponse
+	if errDecode := json.NewDecoder(recorder.Body).Decode(&payload); errDecode != nil {
+		t.Fatalf("decode response: %v", errDecode)
+	}
+	if len(payload.ProtocolProfiles) != 1 || payload.ProtocolProfiles[0].ID != "openai.responses" {
+		t.Fatalf("protocol profiles = %#v", payload.ProtocolProfiles)
+	}
 }
 
 // ListDefinitions returns one system provider definition view.
@@ -234,6 +254,30 @@ func (staticManagementCommands) UpdateCustomDefinition(context.Context, manageme
 	return providerconfig.ProviderDefinition{}, errors.New("static command fixture")
 }
 
+// ConfigureProvider reports that the static fixture does not execute provider configuration flows.
+// ConfigureProvider 报告静态夹具不执行供应商配置流程。
+func (staticManagementCommands) ConfigureProvider(context.Context, management.ConfigureProviderInput) (management.ProviderConfigurationResult, error) {
+	return management.ProviderConfigurationResult{}, errors.New("static command fixture")
+}
+
+// DeleteProviderConfiguration reports that the static fixture does not execute provider deletion flows.
+// DeleteProviderConfiguration 报告静态夹具不执行供应商删除流程。
+func (staticManagementCommands) DeleteProviderConfiguration(context.Context, string) error {
+	return errors.New("static command fixture")
+}
+
+// DiscoverCustomProviderModels reports that the static fixture does not execute custom discovery flows.
+// DiscoverCustomProviderModels 报告静态夹具不执行自定义发现流程。
+func (staticManagementCommands) DiscoverCustomProviderModels(context.Context, string, string) (catalog.Snapshot, error) {
+	return catalog.Snapshot{}, errors.New("static command fixture")
+}
+
+// SaveCustomProviderModels reports that the static fixture does not execute custom model editing flows.
+// SaveCustomProviderModels 报告静态夹具不执行自定义模型编辑流程。
+func (staticManagementCommands) SaveCustomProviderModels(context.Context, string, []management.InitialProviderModelInput) (catalog.Snapshot, error) {
+	return catalog.Snapshot{}, errors.New("static command fixture")
+}
+
 // CreateInstance reports that the static fixture does not execute mutation flows.
 // CreateInstance 报告静态夹具不执行变更流程。
 func (staticManagementCommands) CreateInstance(context.Context, management.CreateInstanceInput) (providerconfig.ProviderInstance, error) {
@@ -268,6 +312,18 @@ func (staticManagementCommands) UpdateEndpoint(context.Context, management.Updat
 // AddCredential 报告静态夹具不执行变更流程。
 func (staticManagementCommands) AddCredential(context.Context, management.AddCredentialInput) (providerconfig.Credential, error) {
 	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// AttachCredential reports that the static fixture does not execute attachment flows.
+// AttachCredential 报告静态夹具不执行凭据附加流程。
+func (staticManagementCommands) AttachCredential(context.Context, management.AddCredentialInput) (management.CredentialAttachment, error) {
+	return management.CredentialAttachment{}, errors.New("static command fixture")
+}
+
+// AttachAcquiredCredential reports that the static fixture does not execute provider-owned attachment flows.
+// AttachAcquiredCredential 报告静态夹具不执行供应商拥有的凭据附加流程。
+func (staticManagementCommands) AttachAcquiredCredential(context.Context, management.AttachAcquiredCredentialInput) (management.CredentialAttachment, error) {
+	return management.CredentialAttachment{}, errors.New("static command fixture")
 }
 
 // UpdateCredential reports that the static fixture does not execute mutation flows.

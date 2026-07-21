@@ -29,6 +29,14 @@ type MetadataRefresher interface {
 	Refresh(context.Context, string, time.Time) (catalog.Snapshot, error)
 }
 
+// CredentialScopedModelRefresher performs model discovery with one exact provider credential.
+// CredentialScopedModelRefresher 使用一个精确供应商凭据执行模型发现。
+type CredentialScopedModelRefresher interface {
+	// RefreshWithCredential replaces metadata using one explicitly selected same-instance credential.
+	// RefreshWithCredential 使用一个显式选择的同实例凭据替换元数据。
+	RefreshWithCredential(context.Context, string, string, time.Time) (catalog.Snapshot, error)
+}
+
 // CoordinatorOptions controls bounded background refresh scheduling.
 // CoordinatorOptions 控制有界后台刷新调度。
 type CoordinatorOptions struct {
@@ -108,6 +116,16 @@ func NewCoordinator(instances InstanceLister, refresher MetadataRefresher, optio
 // Refresh 通过包装服务执行一次由调用方拥有的同步刷新。
 func (c *Coordinator) Refresh(ctx context.Context, instanceID string, now time.Time) (catalog.Snapshot, error) {
 	return c.refresher.Refresh(ctx, instanceID, now)
+}
+
+// RefreshWithCredential forwards one synchronous credential-scoped model discovery when the wrapped service supports it.
+// RefreshWithCredential 在包装服务支持时转发一次同步的凭据作用域模型发现。
+func (c *Coordinator) RefreshWithCredential(ctx context.Context, instanceID string, credentialID string, now time.Time) (catalog.Snapshot, error) {
+	refresher, supported := c.refresher.(CredentialScopedModelRefresher)
+	if !supported {
+		return catalog.Snapshot{}, errors.New("credential-scoped model discovery is unavailable")
+	}
+	return refresher.RefreshWithCredential(ctx, instanceID, credentialID, now)
 }
 
 // Trigger enqueues one immediate refresh unless that instance is already queued or running.

@@ -913,9 +913,9 @@ describe("ProviderManagementPage", () => {
       id: "custom_acme",
       kind: "custom",
       display_name: "Acme Gateway",
-      protocol_profile_id: "google.aistudio",
+      protocol_profile_id: "openai.chat",
       auth_methods: [
-        { id: "default", type: "header_api_key", refreshable: false },
+        { id: "default", type: "bearer", refreshable: false },
       ],
       features: unavailableFeatures,
     };
@@ -975,11 +975,21 @@ describe("ProviderManagementPage", () => {
           id: "openai.responses",
           version: "1",
           display_name: "OpenAI Responses",
-          user_configurable: false,
+          user_configurable: true,
           runtime_ready: true,
           model_discovery: "unsupported",
           capabilities: [],
-          allowed_auth_methods: null,
+          allowed_auth_methods: ["bearer"],
+        },
+        {
+          id: "anthropic.messages",
+          version: "1",
+          display_name: "Anthropic Messages",
+          user_configurable: true,
+          runtime_ready: true,
+          model_discovery: "unsupported",
+          capabilities: [],
+          allowed_auth_methods: ["header_api_key"],
         },
       ],
     };
@@ -1050,9 +1060,7 @@ describe("ProviderManagementPage", () => {
     fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
     fireEvent.click(screen.getByRole("button", { name: /Custom provider/ }));
 
-    expect(
-      screen.getByText(/Authentication: x-goog-api-key/),
-    ).toBeInTheDocument();
+    expect(screen.getByText(/Authentication: Bearer/)).toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Provider name"), {
       target: { value: "Acme Gateway" },
     });
@@ -1077,7 +1085,7 @@ describe("ProviderManagementPage", () => {
       expect(submittedBody).toEqual({
         display_name: "Acme Gateway",
         handle: "custom-acme",
-        protocol_profile_id: "google.aistudio",
+        protocol_profile_id: "openai.chat",
         base_url: "https://acme.example/v1",
         secret: "acme-private-token",
         upstream_model_id: "acme-model",
@@ -1085,7 +1093,7 @@ describe("ProviderManagementPage", () => {
       });
     });
     expect(await screen.findByText("custom-acme")).toBeInTheDocument();
-    expect(screen.getByText("x-goog-api-key")).toBeInTheDocument();
+    expect(screen.getByText("Bearer")).toBeInTheDocument();
     expect(screen.queryByText("acme-private-token")).not.toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(
       "/vulcan/manage/protocol-profiles",

@@ -6,7 +6,8 @@ import { SectionCards } from "@/components/section-cards"
 import { SiteHeader } from "@/components/site-header"
 import { DiagnosticsPage } from "@/pages/diagnostics-page"
 import { ModelCapabilitiesPage } from "@/pages/model-capabilities-page"
-import { ProviderManagementPage } from "@/pages/provider-management-page"
+import { CredentialManagementPage } from "@/pages/credential-management-page"
+import { ProviderConfigurationPage } from "@/pages/provider-configuration-page"
 import { ServiceCapabilitiesPage } from "@/pages/service-capabilities-page"
 import { SettingsPage } from "@/pages/settings-page"
 import type { TranslationKey } from "@/i18n"
@@ -36,7 +37,9 @@ interface DashboardPageProps {
 function resolvePageTitleKey(currentPath: string): TranslationKey {
   switch (currentPath) {
     case "/providers":
-      return "providers.title"
+      return "providerConfig.title"
+    case "/credentials":
+      return "credentials.title"
     case "/capabilities/models":
       return "capabilities.modelsTitle"
     case "/capabilities/services":
@@ -57,7 +60,9 @@ function resolvePageTitleKey(currentPath: string): TranslationKey {
 function renderAuthenticatedPage(currentPath: string, managementAuthToken: string) {
   switch (currentPath) {
     case "/providers":
-      return <ProviderManagementPage managementAuthToken={managementAuthToken} />
+      return <ProviderConfigurationPage managementAuthToken={managementAuthToken} />
+    case "/credentials":
+      return <CredentialManagementPage managementAuthToken={managementAuthToken} />
     case "/capabilities/models":
       return <ModelCapabilitiesPage managementAuthToken={managementAuthToken} />
     case "/capabilities/services":
@@ -85,7 +90,7 @@ export function DashboardPage({ currentPath, managementAuthToken, onNavigate, on
 
   return (
     <SidebarProvider style={sidebarStyle}>
-      <AppSidebar variant="inset" onNavigate={onNavigate} onLogout={onLogout} />
+      <AppSidebar variant="inset" currentPath={currentPath} onNavigate={onNavigate} onLogout={onLogout} />
       <SidebarInset>
         <SiteHeader titleKey={resolvePageTitleKey(currentPath)} />
         <div className="flex flex-1 flex-col">

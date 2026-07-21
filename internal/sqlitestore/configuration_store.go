@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
 	"sort"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -216,6 +218,87 @@ func (s *ConfigurationStore) ListDefinitions(ctx context.Context) ([]providercon
 		return definitions[left].ID < definitions[right].ID
 	})
 	return definitions, nil
+}
+
+// SaveProviderConfiguration atomically inserts one credential-independent provider instance and endpoint graph.
+// SaveProviderConfiguration 原子插入一个独立于凭据的供应商实例与入口图。
+func (s *ConfigurationStore) SaveProviderConfiguration(ctx context.Context, configuration providerconfig.ProviderConfiguration) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	definition, errDefinition := s.GetDefinition(ctx, configuration.Instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	if errValidate := providerconfig.ValidateProviderConfiguration(configuration, definition); errValidate != nil {
+		return errValidate
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin provider configuration transaction: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	if definition.Kind == providerconfig.DefinitionKindCustom {
+		var matchingDefinition int
+		if errMatch := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM custom_provider_definitions WHERE id = ? AND revision = ?`, definition.ID, configuration.Instance.DefinitionRevision).Scan(&matchingDefinition); errMatch != nil {
+			return fmt.Errorf("check provider configuration custom definition revision: %w", errMatch)
+		}
+		if matchingDefinition != 1 {
+			return invalidConfiguration("provider configuration custom definition changed concurrently")
+		}
+	}
+	if errInsert := insertOnboardingInstance(ctx, transaction, configuration.Instance); errInsert != nil {
+		return errInsert
+	}
+	for _, endpoint := range configuration.Endpoints {
+		if errInsert := insertOnboardingEndpoint(ctx, transaction, endpoint); errInsert != nil {
+			return errInsert
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit provider configuration transaction: %w", errCommit)
+	}
+	return nil
+}
+
+// DeleteProviderConfiguration removes one exact unchanged provider configuration in one compensation transaction.
+// DeleteProviderConfiguration 在一个补偿事务中删除一个精确且未变化的供应商配置。
+func (s *ConfigurationStore) DeleteProviderConfiguration(ctx context.Context, configuration providerconfig.ProviderConfiguration) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return fmt.Errorf("begin provider configuration compensation: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var endpointCount int
+	if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_endpoints WHERE provider_instance_id = ?`, configuration.Instance.ID).Scan(&endpointCount); errCount != nil {
+		return fmt.Errorf("count provider configuration endpoints: %w", errCount)
+	}
+	var credentialCount int
+	if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_credentials WHERE provider_instance_id = ?`, configuration.Instance.ID).Scan(&credentialCount); errCount != nil {
+		return fmt.Errorf("count provider configuration credentials: %w", errCount)
+	}
+	var bindingCount int
+	if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM access_bindings WHERE provider_instance_id = ?`, configuration.Instance.ID).Scan(&bindingCount); errCount != nil {
+		return fmt.Errorf("count provider configuration bindings: %w", errCount)
+	}
+	if endpointCount != len(configuration.Endpoints) || credentialCount != 0 || bindingCount != 0 {
+		return fmt.Errorf("provider configuration compensation target changed")
+	}
+	for _, endpoint := range configuration.Endpoints {
+		if errDelete := deleteCompensationRow(ctx, transaction, "provider endpoint", `DELETE FROM provider_endpoints WHERE id = ? AND provider_instance_id = ? AND revision = ?`, endpoint.ID, configuration.Instance.ID, endpoint.Revision); errDelete != nil {
+			return errDelete
+		}
+	}
+	if errDelete := deleteCompensationRow(ctx, transaction, "provider instance", `DELETE FROM provider_instances WHERE id = ? AND definition_id = ? AND revision = ?`, configuration.Instance.ID, configuration.Instance.DefinitionID, configuration.Instance.Revision); errDelete != nil {
+		return errDelete
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit provider configuration compensation: %w", errCommit)
+	}
+	return nil
 }
 
 // SaveSystemOnboarding atomically inserts one complete system-provider configuration in SQLite.
@@ -758,8 +841,8 @@ func (s *ConfigurationStore) ListCredentials(ctx context.Context, instanceID str
 	})
 }
 
-// DeleteCredentialGraph atomically removes one credential, its bindings, and an instance left without credentials.
-// DeleteCredentialGraph 原子删除一个凭据及其绑定，并删除失去全部凭据的实例。
+// DeleteCredentialGraph atomically removes one credential and its bindings while retaining an empty provider configuration as draft.
+// DeleteCredentialGraph 原子删除一个凭据及其绑定，并将失去全部凭据的供应商配置保留为草稿。
 func (s *ConfigurationStore) DeleteCredentialGraph(ctx context.Context, instanceID string, credentialID string) (providerconfig.CredentialDeletion, error) {
 	if err := validateContext(ctx); err != nil {
 		return providerconfig.CredentialDeletion{}, err
@@ -774,10 +857,6 @@ func (s *ConfigurationStore) DeleteCredentialGraph(ctx context.Context, instance
 	instance, errInstance := s.GetInstance(ctx, instanceID)
 	if errInstance != nil {
 		return providerconfig.CredentialDeletion{}, errInstance
-	}
-	definition, errDefinition := s.GetDefinition(ctx, instance.DefinitionID)
-	if errDefinition != nil {
-		return providerconfig.CredentialDeletion{}, errDefinition
 	}
 	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
 	if errTransaction != nil {
@@ -800,36 +879,21 @@ func (s *ConfigurationStore) DeleteCredentialGraph(ctx context.Context, instance
 	}
 	deletion := providerconfig.CredentialDeletion{Credential: credential}
 	if remainingCredentials == 0 {
-		if _, errBindings := transaction.ExecContext(ctx, `DELETE FROM access_bindings WHERE provider_instance_id = ?`, instanceID); errBindings != nil {
-			return providerconfig.CredentialDeletion{}, fmt.Errorf("delete empty instance bindings: %w", errBindings)
+		instance.Status = providerconfig.LifecycleDraft
+		instance.Revision++
+		instance.UpdatedAt = time.Now().UTC()
+		payload, errPayload := marshalPayload(instance)
+		if errPayload != nil {
+			return providerconfig.CredentialDeletion{}, errPayload
 		}
-		if _, errEndpoints := transaction.ExecContext(ctx, `DELETE FROM provider_endpoints WHERE provider_instance_id = ?`, instanceID); errEndpoints != nil {
-			return providerconfig.CredentialDeletion{}, fmt.Errorf("delete empty instance endpoints: %w", errEndpoints)
+		instanceResult, errUpdateInstance := transaction.ExecContext(ctx, `UPDATE provider_instances SET status = ?, revision = ?, payload = ? WHERE id = ? AND definition_id = ? AND revision = ?`, instance.Status, instance.Revision, payload, instance.ID, instance.DefinitionID, instance.Revision-1)
+		if errUpdateInstance != nil {
+			return providerconfig.CredentialDeletion{}, fmt.Errorf("draft empty provider instance: %w", errUpdateInstance)
 		}
-		instanceResult, errDeleteInstance := transaction.ExecContext(ctx, `DELETE FROM provider_instances WHERE id = ? AND definition_id = ? AND revision = ?`, instance.ID, instance.DefinitionID, instance.Revision)
-		if errDeleteInstance != nil {
-			return providerconfig.CredentialDeletion{}, fmt.Errorf("delete empty provider instance: %w", errDeleteInstance)
-		}
-		if errRows := requireSingleMutation(instanceResult, "empty provider instance deletion"); errRows != nil {
+		if errRows := requireSingleMutation(instanceResult, "empty provider instance draft transition"); errRows != nil {
 			return providerconfig.CredentialDeletion{}, errRows
 		}
-		deletion.InstanceDeleted = true
-		if definition.Kind == providerconfig.DefinitionKindCustom {
-			var remainingInstances int
-			if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_instances WHERE definition_id = ?`, definition.ID).Scan(&remainingInstances); errCount != nil {
-				return providerconfig.CredentialDeletion{}, fmt.Errorf("count remaining custom provider instances: %w", errCount)
-			}
-			if remainingInstances == 0 {
-				definitionResult, errDeleteDefinition := transaction.ExecContext(ctx, `DELETE FROM custom_provider_definitions WHERE id = ? AND revision = ?`, definition.ID, definition.Revision)
-				if errDeleteDefinition != nil {
-					return providerconfig.CredentialDeletion{}, fmt.Errorf("delete orphaned custom provider definition: %w", errDeleteDefinition)
-				}
-				if errRows := requireSingleMutation(definitionResult, "orphaned custom provider definition deletion"); errRows != nil {
-					return providerconfig.CredentialDeletion{}, errRows
-				}
-				deletion.DefinitionDeleted = true
-			}
-		}
+		deletion.InstanceDrafted = true
 	}
 	if errCommit := transaction.Commit(); errCommit != nil {
 		return providerconfig.CredentialDeletion{}, fmt.Errorf("commit credential deletion: %w", errCommit)
@@ -901,6 +965,104 @@ func (s *ConfigurationStore) ListBindings(ctx context.Context, instanceID string
 	return listPayloads[providerconfig.AccessBinding](ctx, s.database.sql, `SELECT payload FROM access_bindings WHERE provider_instance_id = ? ORDER BY priority, id`, []any{instanceID}, func(binding providerconfig.AccessBinding) error {
 		return binding.Validate()
 	})
+}
+
+// ReplaceAccessGraph atomically replaces one instance's complete endpoint and binding graph after exact-state comparison.
+// ReplaceAccessGraph 在精确状态比对后原子替换一个实例的完整入口与 Binding 图。
+func (s *ConfigurationStore) ReplaceAccessGraph(ctx context.Context, replacement providerconfig.AccessGraphReplacement) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	instance, definition, errOwner := s.instanceDefinition(ctx, replacement.ProviderInstanceID)
+	if errOwner != nil {
+		return errOwner
+	}
+	if instance.ID == "" {
+		return invalidConfiguration("access graph provider instance is required")
+	}
+	credentials, errCredentials := s.ListCredentials(ctx, replacement.ProviderInstanceID)
+	if errCredentials != nil {
+		return errCredentials
+	}
+	if errValidate := providerconfig.ValidateAccessGraphReplacement(replacement, definition, credentials); errValidate != nil {
+		return errValidate
+	}
+	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return fmt.Errorf("begin access graph replacement: %w", errBegin)
+	}
+	defer transaction.Rollback()
+	currentEndpoints, errEndpoints := listTransactionPayloads[providerconfig.Endpoint](ctx, transaction, `SELECT payload FROM provider_endpoints WHERE provider_instance_id = ? ORDER BY id`, replacement.ProviderInstanceID)
+	if errEndpoints != nil {
+		return fmt.Errorf("read current endpoints for access graph replacement: %w", errEndpoints)
+	}
+	currentBindings, errBindings := listTransactionPayloads[providerconfig.AccessBinding](ctx, transaction, `SELECT payload FROM access_bindings WHERE provider_instance_id = ? ORDER BY id`, replacement.ProviderInstanceID)
+	if errBindings != nil {
+		return fmt.Errorf("read current bindings for access graph replacement: %w", errBindings)
+	}
+	if !equalPersistedAccessGraphs(currentEndpoints, currentBindings, replacement.ExpectedEndpoints, replacement.ExpectedBindings) {
+		return invalidConfiguration("provider access graph changed before replacement")
+	}
+	if _, errDeleteBindings := transaction.ExecContext(ctx, `DELETE FROM access_bindings WHERE provider_instance_id = ?`, replacement.ProviderInstanceID); errDeleteBindings != nil {
+		return fmt.Errorf("delete replaced access bindings: %w", errDeleteBindings)
+	}
+	if _, errDeleteEndpoints := transaction.ExecContext(ctx, `DELETE FROM provider_endpoints WHERE provider_instance_id = ?`, replacement.ProviderInstanceID); errDeleteEndpoints != nil {
+		return fmt.Errorf("delete replaced provider endpoints: %w", errDeleteEndpoints)
+	}
+	for _, endpoint := range replacement.Endpoints {
+		if errInsert := insertOnboardingEndpoint(ctx, transaction, endpoint); errInsert != nil {
+			return fmt.Errorf("insert replacement endpoint: %w", errInsert)
+		}
+	}
+	for _, binding := range replacement.Bindings {
+		if errInsert := insertOnboardingBinding(ctx, transaction, binding); errInsert != nil {
+			return fmt.Errorf("insert replacement binding: %w", errInsert)
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit access graph replacement: %w", errCommit)
+	}
+	return nil
+}
+
+// listTransactionPayloads reads typed JSON payloads through one caller-owned transaction.
+// listTransactionPayloads 通过一个由调用方拥有的事务读取强类型 JSON 载荷。
+func listTransactionPayloads[T any](ctx context.Context, transaction *sql.Tx, query string, arguments ...any) ([]T, error) {
+	rows, errQuery := transaction.QueryContext(ctx, query, arguments...)
+	if errQuery != nil {
+		return nil, errQuery
+	}
+	defer rows.Close()
+	values := make([]T, 0)
+	for rows.Next() {
+		var payload []byte
+		if errScan := rows.Scan(&payload); errScan != nil {
+			return nil, errScan
+		}
+		var value T
+		if errDecode := unmarshalPayload(payload, &value); errDecode != nil {
+			return nil, errDecode
+		}
+		values = append(values, value)
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return nil, errRows
+	}
+	return values, nil
+}
+
+// equalPersistedAccessGraphs compares complete endpoint and binding sets in deterministic identifier order.
+// equalPersistedAccessGraphs 按确定性标识顺序比较完整入口与 Binding 集合。
+func equalPersistedAccessGraphs(leftEndpoints []providerconfig.Endpoint, leftBindings []providerconfig.AccessBinding, rightEndpoints []providerconfig.Endpoint, rightBindings []providerconfig.AccessBinding) bool {
+	leftEndpoints = append([]providerconfig.Endpoint(nil), leftEndpoints...)
+	rightEndpoints = append([]providerconfig.Endpoint(nil), rightEndpoints...)
+	leftBindings = append([]providerconfig.AccessBinding(nil), leftBindings...)
+	rightBindings = append([]providerconfig.AccessBinding(nil), rightBindings...)
+	sort.Slice(leftEndpoints, func(left int, right int) bool { return leftEndpoints[left].ID < leftEndpoints[right].ID })
+	sort.Slice(rightEndpoints, func(left int, right int) bool { return rightEndpoints[left].ID < rightEndpoints[right].ID })
+	sort.Slice(leftBindings, func(left int, right int) bool { return leftBindings[left].ID < leftBindings[right].ID })
+	sort.Slice(rightBindings, func(left int, right int) bool { return rightBindings[left].ID < rightBindings[right].ID })
+	return reflect.DeepEqual(leftEndpoints, rightEndpoints) && reflect.DeepEqual(leftBindings, rightBindings)
 }
 
 // instanceDefinition resolves the exact persisted instance and its current definition.

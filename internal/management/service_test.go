@@ -3,12 +3,15 @@ package management
 import (
 	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
-	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
+	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	protocolresponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
@@ -24,6 +27,56 @@ type onboardingDeleteFailureStore struct {
 	deleteError error
 }
 
+// TestDiscoverCustomProviderModelsUsesExplicitCredential verifies standard discovery neither guesses an account nor loses known model metadata.
+// TestDiscoverCustomProviderModelsUsesExplicitCredential 验证标准发现既不猜测账号也不丢失已知模型元数据。
+func TestDiscoverCustomProviderModelsUsesExplicitCredential(t *testing.T) {
+	ctx := context.Background()
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodGet || request.URL.Path != "/v1/models" || request.Header.Get("Authorization") != "Bearer discovery-secret" {
+			t.Fatalf("unexpected discovery request method=%s path=%s authorization=%q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"data":[{"id":"known-model","object":"model"},{"id":"new-model","owned_by":"provider"}]}`))
+	}))
+	defer server.Close()
+	service, _, _ := managementTestService(t)
+	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
+		ID: "custom_discovery", DisplayName: "Discovery", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
+	})
+	if errDefinition != nil {
+		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
+	}
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
+		DefinitionID: definition.ID, Handle: "discovery", DisplayName: "Discovery", BaseURL: server.URL + "/v1",
+		InitialModel: &InitialProviderModelInput{UpstreamModelID: "known-model", DisplayName: "Known Model", ContextWindow: 131072, ToolCalling: catalog.CapabilityNative},
+	})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
+	}
+	attachment, errAttach := service.AttachCredential(ctx, AddCredentialInput{
+		ProviderInstanceID: configured.Configuration.Instance.ID, AuthMethodID: "default", Label: "Discovery Key", Secret: []byte("discovery-secret"),
+	})
+	if errAttach != nil {
+		t.Fatalf("AttachCredential() error = %v", errAttach)
+	}
+	discovered, errDiscover := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
+	if errDiscover != nil {
+		t.Fatalf("DiscoverCustomProviderModels() error = %v", errDiscover)
+	}
+	if len(discovered.Models) != 2 || discovered.Models[0].DisplayName != "Known Model" || discovered.Models[1].Source != catalog.ModelSourceProviderAPI {
+		t.Fatalf("discovered models = %#v", discovered.Models)
+	}
+	edited, errEdit := service.SaveCustomProviderModels(ctx, configured.Configuration.Instance.ID, []InitialProviderModelInput{
+		{UpstreamModelID: "known-model", DisplayName: "Renamed Model", ContextWindow: 262144, MaxOutputTokens: 16384, ToolCalling: catalog.CapabilityUnsupported, Reasoning: catalog.CapabilityNative},
+	})
+	if errEdit != nil {
+		t.Fatalf("SaveCustomProviderModels() error = %v", errEdit)
+	}
+	if len(edited.Models) != 1 || edited.Models[0].DisplayName != "Renamed Model" || edited.Offerings[0].Capabilities.Tokens.ContextWindow.Value != 262144 || edited.Offerings[0].Capabilities.Reasoning != catalog.CapabilityNative {
+		t.Fatalf("edited custom models = %#v offerings=%#v", edited.Models, edited.Offerings)
+	}
+}
+
 // Delete returns the configured compensation failure without removing the secret.
 // Delete 返回配置的补偿失败且不删除秘密。
 func (s *onboardingDeleteFailureStore) Delete(context.Context, string) error {
@@ -36,13 +89,14 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 	t.Helper()
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
-		ID:                 protocolchat.ProfileID,
-		Version:            "1",
-		DisplayName:        "OpenAI Chat Completions",
-		UserConfigurable:   true,
-		RuntimeReady:       true,
-		ModelDiscovery:     providerconfig.SupportUnsupported,
-		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
+		ID:                         protocolchat.ProfileID,
+		Version:                    "1",
+		DisplayName:                "OpenAI Chat Completions",
+		UserConfigurable:           true,
+		CustomDefinitionCompatible: true,
+		RuntimeReady:               true,
+		ModelDiscovery:             providerconfig.SupportUnsupported,
+		AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
 	}
@@ -86,6 +140,54 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 		t.Fatalf("create management service: %v", errService)
 	}
 	return service, configurations, secrets
+}
+
+// TestConfigureProviderThenAttachCredentialSeparatesProviderAndAccountLifecycles verifies the new two-stage management workflow.
+// TestConfigureProviderThenAttachCredentialSeparatesProviderAndAccountLifecycles 验证新的两阶段管理流程。
+func TestConfigureProviderThenAttachCredentialSeparatesProviderAndAccountLifecycles(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := managementTestService(t)
+	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
+		ID: "custom_separated_lifecycle", DisplayName: "Separated Lifecycle", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
+	})
+	if errDefinition != nil {
+		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
+	}
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
+		DefinitionID: definition.ID, Handle: "separated-lifecycle", DisplayName: "Separated Lifecycle", BaseURL: "https://separated.example/v1",
+		InitialModel: &InitialProviderModelInput{UpstreamModelID: "separated-model", DisplayName: "Separated Model", ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: catalog.CapabilityNative, Reasoning: catalog.CapabilityUnknown},
+	})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
+	}
+	if configured.Configuration.Instance.Status != providerconfig.LifecycleDraft || len(configured.Configuration.Endpoints) != 1 || len(configured.Catalog.Models) != 1 || !configured.Catalog.Offerings[0].Capabilities.Tokens.ContextWindow.Known || configured.Catalog.Offerings[0].Capabilities.Tokens.ContextWindow.Value != 131072 {
+		t.Fatalf("configured provider = %#v catalog=%#v", configured.Configuration, configured.Catalog)
+	}
+	credentials, errCredentials := configurations.ListCredentials(ctx, configured.Configuration.Instance.ID)
+	if errCredentials != nil || len(credentials) != 0 {
+		t.Fatalf("credentials before attachment=%#v error=%v", credentials, errCredentials)
+	}
+	attached, errAttach := service.AttachCredential(ctx, AddCredentialInput{
+		ProviderInstanceID: configured.Configuration.Instance.ID, AuthMethodID: "default", Label: "Primary", Secret: []byte("separated-secret"),
+	})
+	if errAttach != nil {
+		t.Fatalf("AttachCredential() error = %v", errAttach)
+	}
+	if len(attached.Bindings) != 1 || attached.Bindings[0].CredentialID != attached.Credential.ID {
+		t.Fatalf("credential attachment = %#v", attached)
+	}
+	instance, errInstance := configurations.GetInstance(ctx, configured.Configuration.Instance.ID)
+	if errInstance != nil || instance.Status != providerconfig.LifecycleReady {
+		t.Fatalf("activated instance=%#v error=%v", instance, errInstance)
+	}
+	deletion, errDelete := service.DeleteCredential(ctx, instance.ID, attached.Credential.ID)
+	if errDelete != nil || !deletion.InstanceDrafted {
+		t.Fatalf("DeleteCredential() deletion=%#v error=%v", deletion, errDelete)
+	}
+	retained, errRetained := configurations.GetInstance(ctx, instance.ID)
+	if errRetained != nil || retained.Status != providerconfig.LifecycleDraft {
+		t.Fatalf("retained provider=%#v error=%v", retained, errRetained)
+	}
 }
 
 // TestSystemOnboardingReportsBuildCompensationFailure verifies a failed graph build never hides an orphaned secret.
@@ -139,12 +241,38 @@ func TestCustomEndpointProfileIDWhitelistsExecutableCompatibilityShapes(t *testi
 		expectedEndpointProfileID string
 	}{
 		{protocolProfileID: protocolchat.ProfileID, expectedEndpointProfileID: providerconfig.CustomEndpointProfileOpenAICompatibility},
-		{protocolProfileID: protocolaistudio.ProfileID, expectedEndpointProfileID: providerconfig.CustomEndpointProfileVertexCompatibility},
-		{protocolProfileID: "anthropic.messages", expectedEndpointProfileID: ""},
+		{protocolProfileID: protocolresponses.ProfileID, expectedEndpointProfileID: providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility},
+		{protocolProfileID: protocolmessages.ProfileID, expectedEndpointProfileID: providerconfig.CustomEndpointProfileAnthropicMessagesCompatibility},
+		{protocolProfileID: "google.interactions", expectedEndpointProfileID: ""},
 	} {
 		if actual := customEndpointProfileID(testCase.protocolProfileID); actual != testCase.expectedEndpointProfileID {
 			t.Fatalf("customEndpointProfileID(%q) = %q, want %q", testCase.protocolProfileID, actual, testCase.expectedEndpointProfileID)
 		}
+	}
+}
+
+// TestCustomProviderAuthMethodRestrictsNewProvidersToThreeStandardProtocols verifies special provider protocols cannot enter generic onboarding.
+// TestCustomProviderAuthMethodRestrictsNewProvidersToThreeStandardProtocols 验证特殊供应商协议无法进入通用录入流程。
+func TestCustomProviderAuthMethodRestrictsNewProvidersToThreeStandardProtocols(t *testing.T) {
+	for _, testCase := range []struct {
+		// protocolProfileID is the exact selectable protocol identifier.
+		// protocolProfileID 是精确的可选协议标识。
+		protocolProfileID string
+		// expectedAuthMethod is the protocol-owned secret carrier.
+		// expectedAuthMethod 是协议拥有的 Secret 载体。
+		expectedAuthMethod providerconfig.AuthMethodType
+	}{
+		{protocolProfileID: protocolchat.ProfileID, expectedAuthMethod: providerconfig.AuthMethodBearer},
+		{protocolProfileID: protocolresponses.ProfileID, expectedAuthMethod: providerconfig.AuthMethodBearer},
+		{protocolProfileID: protocolmessages.ProfileID, expectedAuthMethod: providerconfig.AuthMethodHeaderKey},
+	} {
+		actualAuthMethod, errAuthMethod := customProviderAuthMethod(testCase.protocolProfileID)
+		if errAuthMethod != nil || actualAuthMethod != testCase.expectedAuthMethod {
+			t.Fatalf("customProviderAuthMethod(%q) = %q, %v; want %q", testCase.protocolProfileID, actualAuthMethod, errAuthMethod, testCase.expectedAuthMethod)
+		}
+	}
+	if _, errAuthMethod := customProviderAuthMethod("google.aistudio"); errAuthMethod == nil {
+		t.Fatal("customProviderAuthMethod(google.aistudio) error = nil")
 	}
 }
 

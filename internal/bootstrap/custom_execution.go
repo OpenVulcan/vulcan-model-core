@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"strings"
 
+	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	protocolresponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -20,8 +23,8 @@ var (
 	ErrInvalidCustomExecutionDefinition = errors.New("invalid custom execution definition")
 )
 
-// customExecutionDriverFactory owns CLIProxyAPI's exact OpenAICompatibility and VertexCompat runtime whitelist.
-// customExecutionDriverFactory 拥有 CLIProxyAPI 精确的 OpenAICompatibility 与 VertexCompat 运行时白名单。
+// customExecutionDriverFactory owns the exact standard custom-provider runtime whitelist and legacy Vertex compatibility.
+// customExecutionDriverFactory 拥有精确的标准自定义供应商运行时白名单与旧版 Vertex 兼容能力。
 type customExecutionDriverFactory struct {
 	// client owns raw custom-provider secrets and immutable-target HTTP execution.
 	// client 管理自定义供应商原始 Secret 与不可变 Target HTTP 执行。
@@ -53,6 +56,18 @@ func (f *customExecutionDriverFactory) BuildCustomDriver(definition providerconf
 			return nil, fmt.Errorf("%w: create OpenAICompatibility driver: %v", ErrInvalidCustomExecutionDefinition, errDriver)
 		}
 		return driver, nil
+	case protocolresponses.ProfileID:
+		driver, errDriver := provideropenai.NewOpenAIResponsesCompatibilityDriver(definition.ID, f.client, standardCompatibilityCapabilities())
+		if errDriver != nil {
+			return nil, fmt.Errorf("%w: create OpenAI Responses compatibility driver: %v", ErrInvalidCustomExecutionDefinition, errDriver)
+		}
+		return driver, nil
+	case protocolmessages.ProfileID:
+		driver, errDriver := provideranthropic.NewMessagesDriver(definition.ID, f.client, standardCompatibilityCapabilities())
+		if errDriver != nil {
+			return nil, fmt.Errorf("%w: create Anthropic Messages compatibility driver: %v", ErrInvalidCustomExecutionDefinition, errDriver)
+		}
+		return driver, nil
 	case protocolaistudio.ProfileID:
 		driver, errDriver := providergoogle.NewVertexCompatDriver(definition.ID, f.client, vertexCompatibilityCapabilities())
 		if errDriver != nil {
@@ -78,6 +93,14 @@ func validateCustomExecutionShape(definition providerconfig.ProviderDefinition) 
 		if definition.EndpointProfileID != providerconfig.CustomEndpointProfileOpenAICompatibility || definition.AuthMethods[0].Type != providerconfig.AuthMethodBearer {
 			return fmt.Errorf("%w: OpenAICompatibility requires endpoint profile %q and bearer authentication", ErrInvalidCustomExecutionDefinition, providerconfig.CustomEndpointProfileOpenAICompatibility)
 		}
+	case protocolresponses.ProfileID:
+		if definition.EndpointProfileID != providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility || definition.AuthMethods[0].Type != providerconfig.AuthMethodBearer {
+			return fmt.Errorf("%w: OpenAI Responses compatibility requires endpoint profile %q and bearer authentication", ErrInvalidCustomExecutionDefinition, providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility)
+		}
+	case protocolmessages.ProfileID:
+		if definition.EndpointProfileID != providerconfig.CustomEndpointProfileAnthropicMessagesCompatibility || definition.AuthMethods[0].Type != providerconfig.AuthMethodHeaderKey {
+			return fmt.Errorf("%w: Anthropic Messages compatibility requires endpoint profile %q and header API-key authentication", ErrInvalidCustomExecutionDefinition, providerconfig.CustomEndpointProfileAnthropicMessagesCompatibility)
+		}
 	case protocolaistudio.ProfileID:
 		if definition.EndpointProfileID != providerconfig.CustomEndpointProfileVertexCompatibility || definition.AuthMethods[0].Type != providerconfig.AuthMethodHeaderKey {
 			return fmt.Errorf("%w: VertexCompat requires endpoint profile %q and header API-key authentication", ErrInvalidCustomExecutionDefinition, providerconfig.CustomEndpointProfileVertexCompatibility)
@@ -92,6 +115,12 @@ func validateCustomExecutionShape(definition providerconfig.ProviderDefinition) 
 // openAICompatibilityCapabilities 返回 CLIProxyAPI OpenAI 兼容执行器显式转换的 Wire 行为。
 func openAICompatibilityCapabilities() protocolchat.ProfileCapabilities {
 	return protocolchat.ProfileCapabilities{NativeSystemPreamble: true, NativeInlineSystem: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, Reasoning: true, ReasoningContent: true}
+}
+
+// standardCompatibilityCapabilities returns only broadly implemented standard conversation behaviors for custom providers.
+// standardCompatibilityCapabilities 仅返回自定义供应商普遍实现的标准会话行为。
+func standardCompatibilityCapabilities() protocolresponses.ProfileCapabilities {
+	return protocolresponses.ProfileCapabilities{NativeSystemPreamble: true, StructuredTools: true, ParallelTools: true, StreamingToolArguments: true, StrictJSONSchema: true, Reasoning: true}
 }
 
 // vertexCompatibilityCapabilities returns the Gemini behaviors CLIProxyAPI's VertexCompat executor translates explicitly.

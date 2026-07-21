@@ -14,6 +14,12 @@ import { CirclePlusIcon, MailIcon } from "lucide-react"
 // NavMainProps defines the localized primary navigation items rendered in the dashboard sidebar.
 // NavMainProps 定义仪表盘侧栏中渲染的本地化主导航项。
 interface NavMainProps {
+	// currentPath identifies the primary destination selected by the route shell.
+	// currentPath 标识路由外壳选择的主导航目标。
+	currentPath: string
+	// onNavigate changes one authenticated route without reloading the application.
+	// onNavigate 在不重新加载应用的情况下切换一个已认证路由。
+	onNavigate: (path: string) => void
   // items contains primary navigation destinations with already-resolved display titles.
   // items 包含已解析显示标题的主导航目标。
   items: {
@@ -33,6 +39,8 @@ interface NavMainProps {
 // NavMain 为管理侧栏渲染本地化的主导航控件。
 export function NavMain({
   items,
+  currentPath,
+  onNavigate,
 }: NavMainProps) {
   // t resolves authored static sidebar actions into the current interface language.
   // t 将已编写的静态侧栏操作解析为当前界面语言。
@@ -65,7 +73,21 @@ export function NavMain({
         <SidebarMenu>
           {items.map((item) => (
             <SidebarMenuItem key={item.title}>
-              <SidebarMenuButton tooltip={item.title}>
+              <SidebarMenuButton
+                tooltip={item.title}
+                isActive={currentPath === item.url}
+                className="data-active:bg-primary data-active:text-primary-foreground data-active:font-semibold data-active:hover:bg-primary data-active:hover:text-primary-foreground"
+                render={
+                  <a
+                    href={item.url}
+                    aria-current={currentPath === item.url ? "page" : undefined}
+                    onClick={(event) => {
+                      event.preventDefault()
+                      onNavigate(item.url)
+                    }}
+                  />
+                }
+              >
                 {item.icon}
                 <span>{item.title}</span>
               </SidebarMenuButton>

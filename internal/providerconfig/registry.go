@@ -238,8 +238,8 @@ func ValidateCustomDefinition(definition ProviderDefinition, protocols *Protocol
 	if !exists {
 		return invalid("custom provider references unknown protocol profile %q", definition.ProtocolProfileID)
 	}
-	if !profile.UserConfigurable || !profile.RuntimeReady || !definition.RuntimeReady {
-		return invalid("custom provider protocol profile %q is not user configurable and runtime ready", profile.ID)
+	if !profile.CustomDefinitionCompatible || !profile.RuntimeReady || !definition.RuntimeReady {
+		return invalid("custom provider protocol profile %q is not custom-definition compatible and runtime ready", profile.ID)
 	}
 	allowedAuthTypes := make(map[AuthMethodType]struct{}, len(profile.AllowedAuthMethods))
 	for _, authMethodType := range profile.AllowedAuthMethods {

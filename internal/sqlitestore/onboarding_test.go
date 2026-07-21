@@ -58,9 +58,9 @@ func TestSaveSystemOnboardingRollsBackEveryRowOnLateConflict(t *testing.T) {
 	}
 }
 
-// TestDeleteCredentialGraphRemovesFinalSQLiteInstance verifies production persistence deletes the complete empty graph.
-// TestDeleteCredentialGraphRemovesFinalSQLiteInstance 验证生产持久化会删除完整的空实例图。
-func TestDeleteCredentialGraphRemovesFinalSQLiteInstance(t *testing.T) {
+// TestDeleteCredentialGraphRetainsFinalSQLiteInstance verifies production persistence keeps provider configuration after its last credential is removed.
+// TestDeleteCredentialGraphRetainsFinalSQLiteInstance 验证生产持久化会在删除最后凭据后保留供应商配置。
+func TestDeleteCredentialGraphRetainsFinalSQLiteInstance(t *testing.T) {
 	ctx := context.Background()
 	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "delete-credential.db"))
 	if errDatabase != nil {
@@ -87,15 +87,62 @@ func TestDeleteCredentialGraphRemovesFinalSQLiteInstance(t *testing.T) {
 		t.Fatalf("SaveSystemOnboarding() error = %v", errSave)
 	}
 	deletion, errDelete := store.DeleteCredentialGraph(ctx, onboarding.Instance.ID, onboarding.Credential.ID)
-	if errDelete != nil || !deletion.InstanceDeleted {
+	if errDelete != nil || deletion.InstanceDeleted || !deletion.InstanceDrafted {
 		t.Fatalf("DeleteCredentialGraph() deletion=%#v error=%v", deletion, errDelete)
 	}
-	if _, errInstance := store.GetInstance(ctx, onboarding.Instance.ID); !errors.Is(errInstance, providerconfig.ErrNotFound) {
-		t.Fatalf("deleted instance error = %v", errInstance)
+	retainedInstance, errInstance := store.GetInstance(ctx, onboarding.Instance.ID)
+	if errInstance != nil || retainedInstance.Status != providerconfig.LifecycleDraft {
+		t.Fatalf("retained instance=%#v error=%v", retainedInstance, errInstance)
 	}
 	bindings, errBindings := store.ListBindings(ctx, onboarding.Instance.ID)
 	if errBindings != nil || len(bindings) != 0 {
 		t.Fatalf("deleted bindings=%#v error=%v", bindings, errBindings)
+	}
+	endpoints, errEndpoints := store.ListEndpoints(ctx, onboarding.Instance.ID)
+	if errEndpoints != nil || len(endpoints) != 1 || endpoints[0].ID != onboarding.Endpoints[0].ID {
+		t.Fatalf("retained endpoints=%#v error=%v", endpoints, errEndpoints)
+	}
+}
+
+// TestProviderConfigurationLifecycleIsCredentialIndependent verifies SQLite atomically creates and compensates an instance-endpoint graph without accounts.
+// TestProviderConfigurationLifecycleIsCredentialIndependent 验证 SQLite 原子创建并补偿不含账号的实例入口图。
+func TestProviderConfigurationLifecycleIsCredentialIndependent(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "provider-configuration.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	store, errStore := NewConfigurationStore(database, protocols, systems)
+	if errStore != nil {
+		t.Fatalf("NewConfigurationStore() error = %v", errStore)
+	}
+	onboarding := sqliteKimiOnboarding("pvi_configuration", "kimi-configuration", "ep_configuration", "cred_unused", "bind_unused")
+	onboarding.Instance.Status = providerconfig.LifecycleDraft
+	configuration := providerconfig.ProviderConfiguration{Instance: onboarding.Instance, Endpoints: onboarding.Endpoints}
+	if errSave := store.SaveProviderConfiguration(ctx, configuration); errSave != nil {
+		t.Fatalf("SaveProviderConfiguration() error = %v", errSave)
+	}
+	credentials, errCredentials := store.ListCredentials(ctx, configuration.Instance.ID)
+	if errCredentials != nil || len(credentials) != 0 {
+		t.Fatalf("credential-independent configuration credentials=%#v error=%v", credentials, errCredentials)
+	}
+	if errDelete := store.DeleteProviderConfiguration(ctx, configuration); errDelete != nil {
+		t.Fatalf("DeleteProviderConfiguration() error = %v", errDelete)
+	}
+	if _, errInstance := store.GetInstance(ctx, configuration.Instance.ID); !errors.Is(errInstance, providerconfig.ErrNotFound) {
+		t.Fatalf("compensated provider instance error = %v", errInstance)
 	}
 }
 
@@ -416,6 +463,53 @@ func TestSaveCustomDefinitionMigrationRollsBackEveryRow(t *testing.T) {
 	storedSecond, errSecond := store.GetInstance(ctx, second.ID)
 	if errDefinition != nil || errFirst != nil || errSecond != nil || storedDefinition.Revision != onboarding.Definition.Revision || storedFirst.Revision != onboarding.Instance.Revision || storedSecond.Revision != second.Revision || storedFirst.Status != providerconfig.LifecycleReady || storedSecond.Status != providerconfig.LifecycleReady {
 		t.Fatalf("rolled-back migration definition=%+v instances=%+v/%+v errors=%v/%v/%v", storedDefinition, storedFirst, storedSecond, errDefinition, errFirst, errSecond)
+	}
+}
+
+// TestSQLiteReplaceAccessGraphCommitsCompleteReplacement verifies durable graph replacement and stale-state rejection.
+// TestSQLiteReplaceAccessGraphCommitsCompleteReplacement 验证持久图的完整替换与过期状态拒绝。
+func TestSQLiteReplaceAccessGraphCommitsCompleteReplacement(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "access-graph.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	store, errStore := NewConfigurationStore(database, protocols, systems)
+	if errStore != nil {
+		t.Fatalf("NewConfigurationStore() error = %v", errStore)
+	}
+	onboarding := sqliteKimiOnboarding("pvi_access_graph", "kimi-access-graph", "ep_access_legacy", "cred_access_graph", "bind_access_legacy")
+	if errSave := store.SaveSystemOnboarding(ctx, onboarding); errSave != nil {
+		t.Fatalf("SaveSystemOnboarding() error = %v", errSave)
+	}
+	replacementEndpoint := onboarding.Endpoints[0]
+	replacementEndpoint.ID = "ep_access_current"
+	replacementBinding := onboarding.Bindings[0]
+	replacementBinding.ID = "bind_access_current"
+	replacementBinding.EndpointID = replacementEndpoint.ID
+	replacement := providerconfig.AccessGraphReplacement{ProviderInstanceID: onboarding.Instance.ID, ExpectedEndpoints: onboarding.Endpoints, ExpectedBindings: onboarding.Bindings, Endpoints: []providerconfig.Endpoint{replacementEndpoint}, Bindings: []providerconfig.AccessBinding{replacementBinding}}
+	if errReplace := store.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		t.Fatalf("ReplaceAccessGraph() error = %v", errReplace)
+	}
+	endpoints, errEndpoints := store.ListEndpoints(ctx, onboarding.Instance.ID)
+	bindings, errBindings := store.ListBindings(ctx, onboarding.Instance.ID)
+	if errEndpoints != nil || errBindings != nil || len(endpoints) != 1 || endpoints[0].ID != replacementEndpoint.ID || len(bindings) != 1 || bindings[0].ID != replacementBinding.ID {
+		t.Fatalf("replaced endpoints=%#v bindings=%#v errors=%v/%v", endpoints, bindings, errEndpoints, errBindings)
+	}
+	if errReplace := store.ReplaceAccessGraph(ctx, replacement); errReplace == nil {
+		t.Fatal("ReplaceAccessGraph() accepted stale expected graph")
 	}
 }
 

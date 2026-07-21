@@ -416,8 +416,8 @@ func kimiOpenPlatformModels() []systemModelTemplate {
 	allBound := catalog.EntitlementAllBoundCredentials
 	return []systemModelTemplate{
 		{upstreamID: "kimi-k3", displayName: "Kimi K3", contextWindow: 1048576, inputModalities: []string{"text", "image", "video"}, reasoning: catalog.CapabilityNative, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityNative, entitlementMode: allBound},
-		{upstreamID: "kimi-k2.7-code", displayName: "Kimi K2.7 Code", contextWindow: 262144, inputModalities: []string{"text", "image", "video"}, reasoning: catalog.CapabilityUnknown, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: allBound},
-		{upstreamID: "kimi-k2.7-code-highspeed", displayName: "Kimi K2.7 Code HighSpeed", contextWindow: 262144, inputModalities: []string{"text", "image", "video"}, reasoning: catalog.CapabilityUnknown, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: allBound},
+		{upstreamID: "kimi-k2.7-code", displayName: "Kimi K2.7 Code", contextWindow: 262144, inputModalities: []string{"text", "image", "video"}, reasoning: catalog.CapabilityNative, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: allBound},
+		{upstreamID: "kimi-k2.7-code-highspeed", displayName: "Kimi K2.7 Code HighSpeed", contextWindow: 262144, inputModalities: []string{"text", "image", "video"}, reasoning: catalog.CapabilityNative, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: allBound},
 		{upstreamID: "kimi-k2.6", displayName: "Kimi K2.6", contextWindow: 262144, inputModalities: []string{"text", "image"}, reasoning: catalog.CapabilityUnknown, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: allBound},
 		{upstreamID: "kimi-k2.5", displayName: "Kimi K2.5", contextWindow: 262144, inputModalities: []string{"text", "image"}, reasoning: catalog.CapabilityUnknown, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: catalog.EntitlementExplicit},
 		{upstreamID: "moonshot-v1-8k", displayName: "Moonshot V1 8K", contextWindow: 8192, inputModalities: []string{"text"}, reasoning: catalog.CapabilityUnsupported, toolCalling: catalog.CapabilityUnknown, parallelTools: catalog.CapabilityUnknown, streamingTools: catalog.CapabilityUnknown, strictSchema: catalog.CapabilityUnknown, entitlementMode: catalog.EntitlementExplicit},
@@ -429,10 +429,10 @@ func kimiOpenPlatformModels() []systemModelTemplate {
 	}
 }
 
-// kimiCodingModels returns CLIProxyAPI's exact Kimi executor model set at the pinned source baseline.
-// kimiCodingModels 返回 CLIProxyAPI 在固定源码基线上的精确 Kimi Executor 模型集合。
+// kimiCodingModels returns the confirmed Kimi Coding aliases with current official thinking semantics.
+// kimiCodingModels 返回采用当前官方思考语义的已确认 Kimi Coding 别名。
 func kimiCodingModels() []systemModelTemplate {
-	common := systemModelTemplate{inputModalities: []string{"text"}, reasoning: catalog.CapabilityUnknown, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: catalog.EntitlementExplicit}
+	common := systemModelTemplate{inputModalities: []string{"text"}, reasoning: catalog.CapabilityNative, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: catalog.EntitlementExplicit}
 	k27 := common
 	k27.upstreamID = "kimi-for-coding"
 	k27.displayName = "Kimi K2.7 Code"

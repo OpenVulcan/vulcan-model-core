@@ -27,6 +27,9 @@ export interface ProviderEndpointPreset {
   // user_editable reports whether the address may be changed during onboarding.
   // user_editable 表示录入期间是否可以修改地址。
   user_editable: boolean;
+  // region_editable reports whether the server accepts a provider-owned regional origin selection.
+  // region_editable 表示服务端是否接受供应商拥有的区域 Origin 选择。
+  region_editable: boolean;
   // parameters declares the exact non-secret values required to materialize this endpoint.
   // parameters 声明实例化此端点所需的精确非秘密值。
   parameters: ProviderEndpointParameter[];
@@ -228,6 +231,100 @@ export interface SystemOnboardingInput {
   endpoint_parameters?: Array<{ id: string; value: string }>;
 }
 
+// ProviderConfigurationInput contains one credential-independent provider configuration.
+// ProviderConfigurationInput 包含一个独立于凭据的供应商配置。
+export interface ProviderConfigurationInput {
+  // provider_definition_id selects one exact provider definition.
+  // provider_definition_id 选择一个精确供应商定义。
+  provider_definition_id: string;
+  // handle is the stable call-plane routing identifier.
+  // handle 是稳定的调用面路由标识。
+  handle: string;
+  // display_name is the management-facing provider instance name.
+  // display_name 是管理界面显示的供应商实例名称。
+  display_name: string;
+  // base_url supplies the endpoint only for a custom provider definition.
+  // base_url 仅为自定义供应商定义提供入口地址。
+  base_url?: string;
+  // region supplies optional custom-provider regional metadata.
+  // region 提供可选的自定义供应商区域元数据。
+  region?: string;
+  // endpoint_parameters contains exact non-secret preset values.
+  // endpoint_parameters 包含精确的非秘密预设参数值。
+  endpoint_parameters?: Array<{ id: string; value: string }>;
+  // initial_model optionally declares one exact custom-provider model and known limits.
+  // initial_model 可选声明一个精确自定义供应商模型及已知限制。
+  initial_model?: SimpleCustomModelInput;
+}
+
+// SimpleCustomModelInput contains one editable user-declared model and its known text capabilities.
+// SimpleCustomModelInput 包含一个可编辑用户声明模型及其已知文本能力。
+export interface SimpleCustomModelInput {
+  // upstream_model_id is the exact provider wire model identifier.
+  // upstream_model_id 是精确的供应商 Wire 模型标识。
+  upstream_model_id: string;
+  // display_name is the management-facing model name.
+  // display_name 是管理界面显示的模型名称。
+  display_name: string;
+  // context_window is omitted only when unknown.
+  // context_window 仅在未知时省略。
+  context_window?: number;
+  // max_output_tokens is omitted only when unknown.
+  // max_output_tokens 仅在未知时省略。
+  max_output_tokens?: number;
+  // tool_calling is the explicit declared tool capability.
+  // tool_calling 是显式声明的工具能力。
+  tool_calling: "native" | "unsupported" | "unknown";
+  // reasoning is the explicit declared reasoning capability.
+  // reasoning 是显式声明的推理能力。
+  reasoning: "native" | "unsupported" | "unknown";
+}
+
+// ProviderConfigurationResponse contains identifiers created without credential material.
+// ProviderConfigurationResponse 包含未携带凭据材料时创建的标识。
+export interface ProviderConfigurationResponse {
+  // provider_instance_id identifies the provider configuration root.
+  // provider_instance_id 标识供应商配置根。
+  provider_instance_id: string;
+  // endpoint_ids identifies every created endpoint.
+  // endpoint_ids 标识创建的全部入口。
+  endpoint_ids: string[];
+}
+
+// CredentialAttachmentInput contains one direct credential attached to an existing provider configuration.
+// CredentialAttachmentInput 包含一个附加到既有供应商配置的直接凭据。
+export interface CredentialAttachmentInput {
+  // auth_method_id selects one definition-owned direct authentication method.
+  // auth_method_id 选择一个定义拥有的直接认证方式。
+  auth_method_id: string;
+  // label is the sole management-facing credential name.
+  // label 是唯一的管理界面凭据名称。
+  label: string;
+  // secret contains transient credential material.
+  // secret 包含临时凭据材料。
+  secret: string;
+  // priority orders the account within its provider instance.
+  // priority 在供应商实例内排列账号。
+  priority?: number;
+  // plan_option_id selects a code-owned manual plan when required.
+  // plan_option_id 在需要时选择一个代码拥有的人工套餐。
+  plan_option_id?: string;
+}
+
+// CustomProviderDefinitionInput contains the editable non-secret shape of one custom provider definition.
+// CustomProviderDefinitionInput 包含一个自定义供应商定义可编辑的非秘密形态。
+export interface CustomProviderDefinitionInput {
+  // display_name is the management-facing provider name.
+  // display_name 是管理界面显示的供应商名称。
+  display_name: string;
+  // protocol_profile_id selects one server-approved executable protocol.
+  // protocol_profile_id 选择一个服务端批准的可执行协议。
+  protocol_profile_id: string;
+  // auth_method is the protocol-approved direct credential carrier.
+  // auth_method 是协议批准的直接凭据载体。
+  auth_method: "bearer" | "header_api_key";
+}
+
 // VertexServiceAccountOnboardingInput contains one transient typed JSON document whose identity is derived server-side.
 // VertexServiceAccountOnboardingInput 包含一个临时类型化 JSON 文档，其身份由服务端派生。
 export interface VertexServiceAccountOnboardingInput
@@ -282,6 +379,14 @@ export interface CustomProtocolProfile {
   // allowed_auth_methods 包含此 Profile 精确且固定的 Secret 载体。
   allowed_auth_methods: Array<"bearer" | "header_api_key">;
 }
+
+// selectableCustomProviderProtocolIDs is the closed generic-provider protocol set; special native protocols remain system-owned.
+// selectableCustomProviderProtocolIDs 是封闭的通用供应商协议集合；特殊原生协议继续由系统拥有。
+const selectableCustomProviderProtocolIDs = new Set([
+  "openai.chat",
+  "openai.responses",
+  "anthropic.messages",
+]);
 
 // CustomProviderOnboardingInput contains the complete one-request custom compatibility configuration.
 // CustomProviderOnboardingInput 包含完整的单请求自定义兼容供应商配置。
@@ -426,6 +531,32 @@ export interface ProviderInstance {
   revision: number;
 }
 
+// ProviderEndpoint describes one management-safe endpoint owned by a provider instance.
+// ProviderEndpoint 描述一个供应商实例拥有的管理安全入口。
+export interface ProviderEndpoint {
+  // id is the immutable endpoint identifier.
+  // id 是不可变入口标识。
+  id: string;
+  // provider_instance_id identifies the exact endpoint owner.
+  // provider_instance_id 标识精确入口所有者。
+  provider_instance_id: string;
+  // base_url is the validated upstream destination.
+  // base_url 是经过校验的上游目标地址。
+  base_url: string;
+  // region is the provider-defined site or region label.
+  // region 是供应商定义的站点或区域标签。
+  region: string;
+  // parameters contains non-secret values used to derive the endpoint.
+  // parameters 包含用于派生入口的非秘密参数值。
+  parameters: Array<{ id: string; value: string }>;
+  // status is the local endpoint lifecycle state.
+  // status 是本地入口生命周期状态。
+  status: string;
+  // revision is the persisted endpoint revision.
+  // revision 是持久化入口修订号。
+  revision: number;
+}
+
 // ProviderCredential describes one management-safe authorization entry.
 // ProviderCredential 描述一个管理安全的授权条目。
 export interface ProviderCredential {
@@ -508,6 +639,25 @@ export interface ProviderCatalogModel {
   // authorization_status preserves authorized, denied, and unknown evidence.
   // authorization_status 保留已授权、已拒绝与未知证据。
   authorization_status: "authorized" | "denied" | "unknown";
+  // offerings contains channel-specific selectable capability profiles when returned by the catalog endpoint.
+  // offerings 包含目录接口返回的通道专属可选择能力规格。
+  offerings?: Array<{
+    id: string;
+    upstream_model_id: string;
+    profiles: Array<{
+      id: string;
+      display_name: string;
+      default: boolean;
+      capabilities: {
+        context_window: { known: boolean; value?: number };
+        max_output_tokens: { known: boolean; value?: number };
+        tool_calling: string;
+        reasoning: string;
+        input_modalities: string[];
+        output_modalities: string[];
+      };
+    }>;
+  }>;
 }
 
 // ProviderPlan contains one identity-free commercial plan aggregate.
@@ -653,6 +803,7 @@ const providerEndpointPresetSchema = z
     base_url: z.union([z.literal(""), httpURLSchema]),
     region: z.string().min(1),
     user_editable: z.boolean(),
+    region_editable: z.boolean().optional().default(false),
     parameters: z
       .array(endpointParameterDefinitionSchema)
       .optional()
@@ -855,6 +1006,32 @@ const systemOnboardingResponseSchema = z.object({
   binding_ids: z.array(z.string().min(1)),
 });
 
+// providerConfigurationResponseSchema validates credential-independent configuration identifiers.
+// providerConfigurationResponseSchema 校验独立于凭据的配置标识。
+const providerConfigurationResponseSchema = z.object({
+  provider_instance_id: z.string().min(1),
+  endpoint_ids: z.array(z.string().min(1)).min(1),
+});
+
+// providerEndpointListResponseSchema validates one instance-owned endpoint envelope.
+// providerEndpointListResponseSchema 校验一个实例拥有的入口响应信封。
+const providerEndpointListResponseSchema = z.object({
+  endpoints: z.array(
+    z.object({
+      id: z.string().min(1),
+      provider_instance_id: z.string().min(1),
+      base_url: httpURLSchema,
+      region: z.string(),
+      parameters: z
+        .array(z.object({ id: z.string().min(1), value: z.string() }))
+        .optional()
+        .default([]),
+      status: z.string().min(1),
+      revision: z.number().int().positive(),
+    }),
+  ),
+});
+
 // customProviderOnboardingResponseSchema validates every identifier returned after the atomic custom commit.
 // customProviderOnboardingResponseSchema 校验自定义原子提交后返回的每个标识。
 const customProviderOnboardingResponseSchema = z.object({
@@ -907,6 +1084,35 @@ const providerCatalogMetadataSchema = z.object({
       entitlement_mode: z.enum(["all_bound_credentials", "explicit"]),
       enabled: z.boolean(),
       authorization_status: z.enum(["authorized", "denied", "unknown"]),
+      offerings: z
+        .array(
+          z.object({
+            id: z.string().min(1),
+            upstream_model_id: z.string().min(1),
+            profiles: z.array(
+              z.object({
+                id: z.string().min(1),
+                display_name: z.string().min(1),
+                default: z.boolean(),
+                capabilities: z.object({
+                  context_window: z.object({
+                    known: z.boolean(),
+                    value: z.number().int().positive().optional(),
+                  }),
+                  max_output_tokens: z.object({
+                    known: z.boolean(),
+                    value: z.number().int().positive().optional(),
+                  }),
+                  tool_calling: z.string().min(1),
+                  reasoning: z.string().min(1),
+                  input_modalities: z.array(z.string().min(1)),
+                  output_modalities: z.array(z.string().min(1)),
+                }),
+              }),
+            ),
+          }),
+        )
+        .optional(),
     }),
   ),
   plans: z.array(
@@ -1147,7 +1353,10 @@ export async function fetchCustomProtocolProfiles(
     await response.json(),
   );
   return payload.protocol_profiles.filter(
-    (profile) => profile.user_configurable && profile.runtime_ready,
+    (profile) =>
+      profile.user_configurable &&
+      profile.runtime_ready &&
+      selectableCustomProviderProtocolIDs.has(profile.id),
   );
 }
 
@@ -1171,8 +1380,263 @@ export async function fetchProviderGroups(
   return payload.provider_groups;
 }
 
-// fetchAuthorizedProviders loads configured instances and their redacted credentials, excluding incomplete instances without authorization.
-// fetchAuthorizedProviders 加载已配置实例及其脱敏凭据，并排除没有授权的不完整实例。
+// fetchProviderInstances loads every configured provider, including draft instances without credentials.
+// fetchProviderInstances 加载全部已配置供应商，包括没有凭据的草稿实例。
+export async function fetchProviderInstances(
+  managementAuthToken: string,
+  signal?: AbortSignal,
+): Promise<ProviderInstance[]> {
+  const response = await fetch("/vulcan/manage/provider-instances", {
+    method: "GET",
+    headers: { Authorization: `Bearer ${managementAuthToken}` },
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(
+      `provider instances request failed with status ${response.status}`,
+    );
+  }
+  return providerInstanceListResponseSchema.parse(await response.json())
+    .provider_instances;
+}
+
+// fetchProviderEndpoints loads the non-secret endpoint graph for one exact provider instance.
+// fetchProviderEndpoints 加载一个精确供应商实例的非秘密入口图。
+export async function fetchProviderEndpoints(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  signal?: AbortSignal,
+): Promise<ProviderEndpoint[]> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/endpoints`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `provider endpoints request failed with status ${response.status}`,
+    );
+  }
+  const endpoints = providerEndpointListResponseSchema.parse(
+    await response.json(),
+  ).endpoints;
+  if (
+    endpoints.some(
+      (endpoint) => endpoint.provider_instance_id !== providerInstanceID,
+    )
+  ) {
+    throw new Error("provider endpoint response contains a mismatched owner");
+  }
+  return endpoints;
+}
+
+// fetchProviderCredentials loads redacted credential metadata for one exact provider instance.
+// fetchProviderCredentials 加载一个精确供应商实例的脱敏凭据元数据。
+export async function fetchProviderCredentials(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  signal?: AbortSignal,
+): Promise<ProviderCredential[]> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `provider credentials request failed with status ${response.status}`,
+    );
+  }
+  const credentials = providerCredentialListResponseSchema.parse(
+    await response.json(),
+  ).credentials;
+  if (
+    credentials.some(
+      (credential) => credential.provider_instance_id !== providerInstanceID,
+    )
+  ) {
+    throw new Error("provider credential response contains a mismatched owner");
+  }
+  return credentials;
+}
+
+// fetchProviderCatalog loads one management-safe provider catalog without refreshing upstream state.
+// fetchProviderCatalog 加载一个管理安全供应商目录，且不刷新上游状态。
+export async function fetchProviderCatalog(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  signal?: AbortSignal,
+): Promise<ProviderCatalogMetadata> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/catalog`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `provider catalog request failed with status ${response.status}`,
+    );
+  }
+  return providerCatalogMetadataSchema.parse(await response.json());
+}
+
+// discoverCustomProviderModels refreshes one custom catalog with an explicitly selected same-instance credential.
+// discoverCustomProviderModels 使用一个显式选择的同实例凭据刷新自定义目录。
+export async function discoverCustomProviderModels(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+): Promise<ProviderCatalogMetadata> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/custom-catalog/discover`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ credential_id: credentialID }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `custom provider model discovery failed with status ${response.status}`,
+    );
+  }
+  return providerCatalogMetadataSchema.parse(await response.json());
+}
+
+// saveCustomProviderModels replaces one complete simplified custom model set.
+// saveCustomProviderModels 替换一个完整的简化自定义模型集合。
+export async function saveCustomProviderModels(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  models: SimpleCustomModelInput[],
+): Promise<ProviderCatalogMetadata> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/custom-models`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ models }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `custom provider model update failed with status ${response.status}`,
+    );
+  }
+  return providerCatalogMetadataSchema.parse(await response.json());
+}
+
+// configureProvider creates one provider instance, endpoint graph, and catalog without credentials.
+// configureProvider 创建一个不含凭据的供应商实例、入口图及目录。
+export async function configureProvider(
+  managementAuthToken: string,
+  input: ProviderConfigurationInput,
+): Promise<ProviderConfigurationResponse> {
+  const response = await fetch("/vulcan/manage/provider-configurations", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${managementAuthToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `provider configuration failed with status ${response.status}`,
+    );
+  }
+  return providerConfigurationResponseSchema.parse(await response.json());
+}
+
+// updateProviderInstance replaces editable provider identity fields without touching credentials or endpoints.
+// updateProviderInstance 替换可编辑供应商身份字段且不触碰凭据或入口。
+export async function updateProviderInstance(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  input: { handle: string; display_name: string },
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`provider instance update failed with status ${response.status}`);
+  }
+  z.object({ id: z.literal(providerInstanceID) }).parse(await response.json());
+}
+
+// createCustomProviderDefinition creates one user-owned provider definition without an instance or credential.
+// createCustomProviderDefinition 创建一个不含实例或凭据的用户拥有供应商定义。
+export async function createCustomProviderDefinition(
+  managementAuthToken: string,
+  input: CustomProviderDefinitionInput,
+): Promise<string> {
+  const response = await fetch("/vulcan/manage/provider-definitions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${managementAuthToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `custom provider definition failed with status ${response.status}`,
+    );
+  }
+  return z.object({ id: z.string().min(1) }).parse(await response.json()).id;
+}
+
+// attachProviderCredential creates one complete direct-credential access path for an existing provider.
+// attachProviderCredential 为既有供应商创建一条完整的直接凭据访问路径。
+export async function attachProviderCredential(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  input: CredentialAttachmentInput,
+): Promise<SystemOnboardingResponse> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/attach`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `provider credential attachment failed with status ${response.status}`,
+    );
+  }
+  return systemOnboardingResponseSchema.parse(await response.json());
+}
+
+// fetchAuthorizedProviders loads every configured instance and its redacted credential list.
+// fetchAuthorizedProviders 加载每个已配置实例及其脱敏凭据列表。
 export async function fetchAuthorizedProviders(
   managementAuthToken: string,
   signal?: AbortSignal,
@@ -1217,7 +1681,7 @@ export async function fetchAuthorizedProviders(
       return { instance, credentials: credentialPayload.credentials };
     }),
   );
-  return providers.filter((provider) => provider.credentials.length > 0);
+  return providers;
 }
 
 // onboardSystemProvider submits one API-key variant to the server-owned atomic onboarding command.

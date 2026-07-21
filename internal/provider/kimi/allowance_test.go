@@ -116,11 +116,21 @@ func TestReadCredentialMetadataDetectsAllegrettoAndSendsProvenHeaders(t *testing
 func TestMembershipMetadataFromProviderCoversConfirmedTierMatrix(t *testing.T) {
 	observedAt := time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)
 	tests := []struct {
-		name          string
+		// name identifies the confirmed provider tier test case.
+		// name 标识已确认的供应商档位测试用例。
+		name string
+		// providerLevel is the exact membership value returned by Kimi.
+		// providerLevel 是 Kimi 返回的精确会员值。
 		providerLevel string
-		planCode      string
-		k3Profiles    []string
-		highSpeed     catalog.AvailabilityStatus
+		// planCode is the normalized Router plan identifier.
+		// planCode 是规范化的 Router 套餐标识。
+		planCode string
+		// k3Profiles lists the exact K3 profiles authorized by the tier.
+		// k3Profiles 列出该档位授权的精确 K3 规格。
+		k3Profiles []string
+		// highSpeed is the expected K2.7 HighSpeed authorization state.
+		// highSpeed 是预期的 K2.7 HighSpeed 授权状态。
+		highSpeed catalog.AvailabilityStatus
 	}{
 		{name: "Andante", providerLevel: ProviderMembershipAndante, planCode: PlanOptionAndante, highSpeed: catalog.AvailabilityDenied},
 		{name: "Moderato", providerLevel: ProviderMembershipModerato, planCode: PlanOptionModerato, k3Profiles: []string{ProfileK3256KID}, highSpeed: catalog.AvailabilityDenied},

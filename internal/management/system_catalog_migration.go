@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"sort"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
@@ -46,18 +47,25 @@ func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providercon
 		if errDefinition != nil {
 			return changedInstances, fmt.Errorf("get Kimi definition %s: %w", instance.DefinitionID, errDefinition)
 		}
+		credentials, errCredentials := configurations.ListCredentials(ctx, instance.ID)
+		if errCredentials != nil {
+			return changedInstances, fmt.Errorf("list Kimi credentials %s: %w", instance.ID, errCredentials)
+		}
+		accessGraphChanged, errAccessGraph := reconcileKimiAccessGraph(ctx, configurations, instance, definition, credentials)
+		if errAccessGraph != nil {
+			return changedInstances, fmt.Errorf("migrate Kimi access graph %s: %w", instance.ID, errAccessGraph)
+		}
 		current, errCatalog := catalogs.Get(ctx, instance.ID)
 		if errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
+			if accessGraphChanged {
+				changedInstances++
+			}
 			continue
 		}
 		if errCatalog != nil {
 			return changedInstances, fmt.Errorf("get Kimi catalog %s: %w", instance.ID, errCatalog)
 		}
-		credentials, errCredentials := configurations.ListCredentials(ctx, instance.ID)
-		if errCredentials != nil {
-			return changedInstances, fmt.Errorf("list Kimi credentials %s: %w", instance.ID, errCredentials)
-		}
-		migrated, changed, errMigrate := rebuildKimiSystemCatalog(ctx, configurations, catalogs, instance, definition, credentials, current, time.Now().UTC())
+		migrated, changed, errMigrate := rebuildKimiSystemCatalog(ctx, configurations, catalogs, instance, definition, credentials, current, time.Now().UTC(), accessGraphChanged)
 		if errMigrate != nil {
 			return changedInstances, fmt.Errorf("migrate Kimi catalog %s: %w", instance.ID, errMigrate)
 		}
@@ -70,6 +78,110 @@ func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providercon
 		changedInstances++
 	}
 	return changedInstances, nil
+}
+
+// reconcileKimiAccessGraph converges legacy Chat and Anthropic paths to one exact current Chat endpoint and one binding per associated credential.
+// reconcileKimiAccessGraph 将旧 Chat 与 Anthropic 路径收敛为唯一精确当前 Chat 入口及每个已关联凭据的唯一 Binding。
+func reconcileKimiAccessGraph(ctx context.Context, configurations providerconfig.Store, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition, credentials []providerconfig.Credential) (bool, error) {
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return false, errEndpoints
+	}
+	bindings, errBindings := configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return false, errBindings
+	}
+	currentChannelID := definition.ProtocolProfileID
+	endpointCandidates := make([]providerconfig.Endpoint, 0)
+	for _, endpoint := range endpoints {
+		if endpoint.ChannelID == currentChannelID || endpoint.ChannelID == legacyKimiChatChannelID {
+			endpointCandidates = append(endpointCandidates, endpoint)
+		}
+	}
+	if len(endpointCandidates) == 0 {
+		return false, nil
+	}
+	sort.Slice(endpointCandidates, func(left int, right int) bool {
+		leftCurrent := endpointCandidates[left].ChannelID == currentChannelID
+		rightCurrent := endpointCandidates[right].ChannelID == currentChannelID
+		if leftCurrent != rightCurrent {
+			return leftCurrent
+		}
+		return endpointCandidates[left].ID < endpointCandidates[right].ID
+	})
+	replacementEndpoint := endpointCandidates[0]
+	if replacementEndpoint.ChannelID != currentChannelID {
+		if replacementEndpoint.Revision == math.MaxUint64 {
+			return false, errors.New("Kimi endpoint revision is exhausted")
+		}
+		replacementEndpoint.ChannelID = currentChannelID
+		replacementEndpoint.Revision++
+	}
+	credentialByID := make(map[string]providerconfig.Credential, len(credentials))
+	for _, credential := range credentials {
+		credentialByID[credential.ID] = credential
+	}
+	bindingCandidates := make(map[string][]providerconfig.AccessBinding)
+	for _, binding := range bindings {
+		if _, exists := credentialByID[binding.CredentialID]; !exists || (binding.ChannelID != currentChannelID && binding.ChannelID != legacyKimiChatChannelID) {
+			continue
+		}
+		bindingCandidates[binding.CredentialID] = append(bindingCandidates[binding.CredentialID], binding)
+	}
+	replacementBindings := make([]providerconfig.AccessBinding, 0, len(bindingCandidates))
+	for credentialID, candidates := range bindingCandidates {
+		sort.Slice(candidates, func(left int, right int) bool {
+			leftCurrent := candidates[left].ChannelID == currentChannelID
+			rightCurrent := candidates[right].ChannelID == currentChannelID
+			if leftCurrent != rightCurrent {
+				return leftCurrent
+			}
+			if candidates[left].Priority != candidates[right].Priority {
+				return candidates[left].Priority < candidates[right].Priority
+			}
+			return candidates[left].ID < candidates[right].ID
+		})
+		replacementBinding := candidates[0]
+		if replacementBinding.ChannelID != currentChannelID || replacementBinding.EndpointID != replacementEndpoint.ID {
+			if replacementBinding.Revision == math.MaxUint64 {
+				return false, fmt.Errorf("Kimi binding revision is exhausted for credential %s", credentialID)
+			}
+			replacementBinding.ChannelID = currentChannelID
+			replacementBinding.EndpointID = replacementEndpoint.ID
+			replacementBinding.Revision++
+		}
+		replacementBindings = append(replacementBindings, replacementBinding)
+	}
+	sort.Slice(replacementBindings, func(left int, right int) bool { return replacementBindings[left].ID < replacementBindings[right].ID })
+	replacementEndpoints := []providerconfig.Endpoint{replacementEndpoint}
+	if accessGraphEquivalent(endpoints, bindings, replacementEndpoints, replacementBindings) {
+		return false, nil
+	}
+	replacement := providerconfig.AccessGraphReplacement{
+		ProviderInstanceID: instance.ID,
+		ExpectedEndpoints:  endpoints,
+		ExpectedBindings:   bindings,
+		Endpoints:          replacementEndpoints,
+		Bindings:           replacementBindings,
+	}
+	if errReplace := configurations.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		return false, errReplace
+	}
+	return true, nil
+}
+
+// accessGraphEquivalent compares complete graph values without relying on persistence ordering.
+// accessGraphEquivalent 比较完整图值且不依赖持久化顺序。
+func accessGraphEquivalent(leftEndpoints []providerconfig.Endpoint, leftBindings []providerconfig.AccessBinding, rightEndpoints []providerconfig.Endpoint, rightBindings []providerconfig.AccessBinding) bool {
+	leftEndpoints = append([]providerconfig.Endpoint(nil), leftEndpoints...)
+	rightEndpoints = append([]providerconfig.Endpoint(nil), rightEndpoints...)
+	leftBindings = append([]providerconfig.AccessBinding(nil), leftBindings...)
+	rightBindings = append([]providerconfig.AccessBinding(nil), rightBindings...)
+	sort.Slice(leftEndpoints, func(left int, right int) bool { return leftEndpoints[left].ID < leftEndpoints[right].ID })
+	sort.Slice(rightEndpoints, func(left int, right int) bool { return rightEndpoints[left].ID < rightEndpoints[right].ID })
+	sort.Slice(leftBindings, func(left int, right int) bool { return leftBindings[left].ID < leftBindings[right].ID })
+	sort.Slice(rightBindings, func(left int, right int) bool { return rightBindings[left].ID < rightBindings[right].ID })
+	return reflect.DeepEqual(leftEndpoints, rightEndpoints) && reflect.DeepEqual(leftBindings, rightBindings)
 }
 
 // ReconcileCodexUnknownPlanEntitlements removes historical privilege-bearing entitlements from missing, expired, or unknown Codex plans.
@@ -146,7 +258,7 @@ func ReconcileCodexUnknownPlanEntitlements(ctx context.Context, configurations p
 
 // rebuildKimiSystemCatalog converges historical model, profile, and API-key entitlement data to the current code-owned template.
 // rebuildKimiSystemCatalog 将历史模型、规格与 API Key 权益数据收敛到当前代码拥有模板。
-func rebuildKimiSystemCatalog(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition, credentials []providerconfig.Credential, current catalog.Snapshot, now time.Time) (catalog.Snapshot, bool, error) {
+func rebuildKimiSystemCatalog(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition, credentials []providerconfig.Credential, current catalog.Snapshot, now time.Time, force bool) (catalog.Snapshot, bool, error) {
 	desired, errDesired := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: instance}, definition, now)
 	if errDesired != nil {
 		return catalog.Snapshot{}, false, errDesired
@@ -165,23 +277,24 @@ func rebuildKimiSystemCatalog(ctx context.Context, configurations providerconfig
 	if definition.ID == bootstrap.KimiCodingDefinitionID {
 		preserveDetectedKimiMetadata(&desired, current, credentialByID, now)
 	}
-	if kimiCatalogEquivalent(current, desired) {
-		return current, false, nil
-	}
 	if current.Revision == math.MaxUint64 {
 		return catalog.Snapshot{}, false, errors.New("Kimi catalog revision is exhausted")
 	}
-	desired.Revision = current.Revision + 1
-	desired.ObservedAt = now
 	targetResolver, errResolver := resolve.New(configurations, catalogs)
 	if errResolver != nil {
 		return catalog.Snapshot{}, false, errResolver
 	}
-	pools, errPools := targetResolver.SummarizeSnapshot(ctx, desired, now, desired.Revision)
+	desiredRevision := current.Revision + 1
+	pools, errPools := targetResolver.SummarizeSnapshot(ctx, desired, now, desiredRevision)
 	if errPools != nil {
 		return catalog.Snapshot{}, false, errPools
 	}
 	desired.Pools = pools
+	if !force && kimiCatalogEquivalent(current, desired) {
+		return current, false, nil
+	}
+	desired.Revision = desiredRevision
+	desired.ObservedAt = now
 	if errValidate := desired.Validate(); errValidate != nil {
 		return catalog.Snapshot{}, false, errValidate
 	}
@@ -247,8 +360,8 @@ func catalogMetadataCurrent(observedAt time.Time, expiresAt time.Time, now time.
 	return !observedAt.IsZero() && !observedAt.After(now) && (expiresAt.IsZero() || expiresAt.After(now))
 }
 
-// kimiCatalogEquivalent compares semantic catalog data while ignoring storage revisions, observation time, and derived pools.
-// kimiCatalogEquivalent 比较语义目录数据，同时忽略存储修订、观测时间与派生账号池。
+// kimiCatalogEquivalent compares semantic catalog and derived pool data while ignoring persistence counters and observation time.
+// kimiCatalogEquivalent 比较语义目录与派生账号池数据，同时忽略持久化计数器与观测时间。
 func kimiCatalogEquivalent(current catalog.Snapshot, desired catalog.Snapshot) bool {
 	return reflect.DeepEqual(normalizedKimiCatalog(current), normalizedKimiCatalog(desired))
 }
@@ -262,9 +375,9 @@ func normalizedKimiCatalog(snapshot catalog.Snapshot) catalog.Snapshot {
 	snapshot.Plans = append([]catalog.PlanSnapshot(nil), snapshot.Plans...)
 	snapshot.Entitlements = append([]catalog.ModelEntitlement(nil), snapshot.Entitlements...)
 	snapshot.Allowances = append([]catalog.AllowanceSnapshot(nil), snapshot.Allowances...)
+	snapshot.Pools = append([]catalog.PoolSummary(nil), snapshot.Pools...)
 	snapshot.Revision = 0
 	snapshot.ObservedAt = time.Time{}
-	snapshot.Pools = nil
 	for index := range snapshot.Models {
 		snapshot.Models[index].Revision = 0
 	}
@@ -284,6 +397,13 @@ func normalizedKimiCatalog(snapshot catalog.Snapshot) catalog.Snapshot {
 	}
 	for index := range snapshot.Allowances {
 		snapshot.Allowances[index].Revision = 0
+	}
+	for index := range snapshot.Pools {
+		snapshot.Pools[index].Revision = 0
+		snapshot.Pools[index].ObservedAt = time.Time{}
+		if len(snapshot.Pools[index].BlockingAllowanceKinds) == 0 {
+			snapshot.Pools[index].BlockingAllowanceKinds = nil
+		}
 	}
 	return snapshot
 }

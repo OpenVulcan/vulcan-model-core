@@ -4,8 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"sort"
 	"sync"
+	"time"
 )
 
 // Store defines persistence behavior for custom definitions and provider instance configuration.
@@ -26,6 +28,12 @@ type Store interface {
 	// ListDefinitions returns all visible system and custom provider definitions.
 	// ListDefinitions 返回全部可见的系统和自定义供应商定义。
 	ListDefinitions(context.Context) ([]ProviderDefinition, error)
+	// SaveProviderConfiguration atomically creates one credential-independent provider instance and endpoint graph.
+	// SaveProviderConfiguration 原子创建一个独立于凭据的供应商实例与入口图。
+	SaveProviderConfiguration(context.Context, ProviderConfiguration) error
+	// DeleteProviderConfiguration removes one unchanged newly created provider configuration during compensation.
+	// DeleteProviderConfiguration 在补偿期间删除一个未变化的新建供应商配置。
+	DeleteProviderConfiguration(context.Context, ProviderConfiguration) error
 	// SaveSystemOnboarding atomically creates one complete system-provider configuration.
 	// SaveSystemOnboarding 原子创建一份完整的系统供应商配置。
 	SaveSystemOnboarding(context.Context, SystemOnboarding) error
@@ -59,8 +67,8 @@ type Store interface {
 	// ListCredentials returns credentials owned by one provider instance.
 	// ListCredentials 返回一个供应商实例拥有的凭据。
 	ListCredentials(context.Context, string) ([]Credential, error)
-	// DeleteCredentialGraph atomically removes one credential and its bindings, deleting the empty instance when it was last.
-	// DeleteCredentialGraph 原子删除一个凭据及其绑定，并在它是最后一个凭据时删除空实例。
+	// DeleteCredentialGraph atomically removes one credential and its bindings while retaining its provider configuration.
+	// DeleteCredentialGraph 原子删除一个凭据及其绑定，同时保留其供应商配置。
 	DeleteCredentialGraph(context.Context, string, string) (CredentialDeletion, error)
 	// SaveBinding creates or updates one access binding.
 	// SaveBinding 创建或更新一个访问绑定。
@@ -68,6 +76,9 @@ type Store interface {
 	// ListBindings returns bindings owned by one provider instance.
 	// ListBindings 返回一个供应商实例拥有的访问绑定。
 	ListBindings(context.Context, string) ([]AccessBinding, error)
+	// ReplaceAccessGraph atomically replaces one exact instance access graph after compare-and-swap validation.
+	// ReplaceAccessGraph 在比较并交换校验后原子替换一个精确实例访问图。
+	ReplaceAccessGraph(context.Context, AccessGraphReplacement) error
 }
 
 // CredentialDeletion describes the exact configuration scope removed by one credential deletion.
@@ -76,12 +87,91 @@ type CredentialDeletion struct {
 	// Credential is the deleted non-secret credential metadata needed for secret cleanup.
 	// Credential 是秘密清理所需的已删除非秘密凭据元数据。
 	Credential Credential
-	// InstanceDeleted reports whether the credential was the final account of its instance.
-	// InstanceDeleted 报告该凭据是否为其实例的最后一个账号。
+	// InstanceDeleted is retained for response compatibility and remains false under separated provider lifecycle semantics.
+	// InstanceDeleted 为响应兼容而保留，在供应商生命周期分离语义下始终为 false。
 	InstanceDeleted bool
-	// DefinitionDeleted reports whether an orphaned custom definition was also removed.
-	// DefinitionDeleted 报告是否同时删除了孤立的自定义定义。
+	// DefinitionDeleted is retained for response compatibility and remains false under separated provider lifecycle semantics.
+	// DefinitionDeleted 为响应兼容而保留，在供应商生命周期分离语义下始终为 false。
 	DefinitionDeleted bool
+	// InstanceDrafted reports whether removal of the final credential transitioned the retained instance to draft.
+	// InstanceDrafted 报告删除最后一个凭据是否将保留的实例转换为草稿状态。
+	InstanceDrafted bool
+}
+
+// SaveProviderConfiguration atomically commits one new credential-independent provider configuration in memory.
+// SaveProviderConfiguration 在内存中原子提交一个新的独立于凭据的供应商配置。
+func (s *MemoryStore) SaveProviderConfiguration(ctx context.Context, configuration ProviderConfiguration) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	definition, errDefinition := s.GetDefinition(ctx, configuration.Instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	if errValidate := ValidateProviderConfiguration(configuration, definition); errValidate != nil {
+		return errValidate
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if definition.Kind == DefinitionKindCustom {
+		currentDefinition, exists := s.customDefinitions[definition.ID]
+		if !exists || currentDefinition.Revision != configuration.Instance.DefinitionRevision {
+			return invalid("provider configuration custom definition changed concurrently")
+		}
+	}
+	if _, exists := s.instances[configuration.Instance.ID]; exists {
+		return fmt.Errorf("%w: provider instance %s", ErrAlreadyRegistered, configuration.Instance.ID)
+	}
+	for _, current := range s.instances {
+		if current.Handle == configuration.Instance.Handle {
+			return fmt.Errorf("%w: provider handle %s", ErrAlreadyRegistered, configuration.Instance.Handle)
+		}
+	}
+	for _, endpoint := range configuration.Endpoints {
+		if _, exists := s.endpoints[endpoint.ID]; exists {
+			return fmt.Errorf("%w: provider endpoint %s", ErrAlreadyRegistered, endpoint.ID)
+		}
+	}
+	s.instances[configuration.Instance.ID] = cloneProviderInstance(configuration.Instance)
+	for _, endpoint := range configuration.Endpoints {
+		s.endpoints[endpoint.ID] = endpoint
+	}
+	return nil
+}
+
+// DeleteProviderConfiguration removes one exact unchanged provider configuration in memory.
+// DeleteProviderConfiguration 在内存中删除一个精确且未变化的供应商配置。
+func (s *MemoryStore) DeleteProviderConfiguration(ctx context.Context, configuration ProviderConfiguration) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	instance, exists := s.instances[configuration.Instance.ID]
+	if !exists || instance.DefinitionID != configuration.Instance.DefinitionID || instance.Revision != configuration.Instance.Revision {
+		return fmt.Errorf("provider configuration compensation target changed")
+	}
+	for _, endpoint := range configuration.Endpoints {
+		current, endpointExists := s.endpoints[endpoint.ID]
+		if !endpointExists || current.ProviderInstanceID != configuration.Instance.ID || current.Revision != endpoint.Revision {
+			return fmt.Errorf("provider configuration compensation endpoint %s changed", endpoint.ID)
+		}
+	}
+	for _, credential := range s.credentials {
+		if credential.ProviderInstanceID == configuration.Instance.ID {
+			return fmt.Errorf("provider configuration compensation target gained credentials")
+		}
+	}
+	for _, binding := range s.bindings {
+		if binding.ProviderInstanceID == configuration.Instance.ID {
+			return fmt.Errorf("provider configuration compensation target gained bindings")
+		}
+	}
+	for _, endpoint := range configuration.Endpoints {
+		delete(s.endpoints, endpoint.ID)
+	}
+	delete(s.instances, configuration.Instance.ID)
+	return nil
 }
 
 // SaveSystemOnboarding atomically commits one new system-provider configuration in memory.
@@ -271,33 +361,12 @@ func (s *MemoryStore) DeleteCredentialGraph(ctx context.Context, instanceID stri
 		}
 	}
 	deletion := CredentialDeletion{Credential: cloneCredential(credential)}
-	if remainingCredentials > 0 {
-		return deletion, nil
-	}
-	for bindingID, binding := range s.bindings {
-		if binding.ProviderInstanceID == instanceID {
-			delete(s.bindings, bindingID)
-		}
-	}
-	for endpointID, endpoint := range s.endpoints {
-		if endpoint.ProviderInstanceID == instanceID {
-			delete(s.endpoints, endpointID)
-		}
-	}
-	delete(s.instances, instanceID)
-	deletion.InstanceDeleted = true
-	if definition, custom := s.customDefinitions[instance.DefinitionID]; custom {
-		definitionInUse := false
-		for _, candidate := range s.instances {
-			if candidate.DefinitionID == definition.ID {
-				definitionInUse = true
-				break
-			}
-		}
-		if !definitionInUse {
-			delete(s.customDefinitions, definition.ID)
-			deletion.DefinitionDeleted = true
-		}
+	if remainingCredentials == 0 {
+		instance.Status = LifecycleDraft
+		instance.Revision++
+		instance.UpdatedAt = time.Now().UTC()
+		s.instances[instanceID] = cloneProviderInstance(instance)
+		deletion.InstanceDrafted = true
 	}
 	return deletion, nil
 }
@@ -706,6 +775,82 @@ func (s *MemoryStore) ListBindings(ctx context.Context, instanceID string) ([]Ac
 		return bindings[left].ID < bindings[right].ID
 	})
 	return bindings, nil
+}
+
+// ReplaceAccessGraph atomically replaces one instance's endpoints and bindings after exact-state comparison.
+// ReplaceAccessGraph 在精确状态比对后原子替换一个实例的入口与 Binding。
+func (s *MemoryStore) ReplaceAccessGraph(ctx context.Context, replacement AccessGraphReplacement) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	instance, errInstance := s.GetInstance(ctx, replacement.ProviderInstanceID)
+	if errInstance != nil {
+		return errInstance
+	}
+	definition, errDefinition := s.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if currentInstance, exists := s.instances[replacement.ProviderInstanceID]; !exists || currentInstance.DefinitionID != instance.DefinitionID {
+		return fmt.Errorf("%w: provider instance %s", ErrNotFound, replacement.ProviderInstanceID)
+	}
+	credentials := make([]Credential, 0)
+	for _, credential := range s.credentials {
+		if credential.ProviderInstanceID == replacement.ProviderInstanceID {
+			credentials = append(credentials, cloneCredential(credential))
+		}
+	}
+	if errValidate := ValidateAccessGraphReplacement(replacement, definition, credentials); errValidate != nil {
+		return errValidate
+	}
+	currentEndpoints := make([]Endpoint, 0)
+	for _, endpoint := range s.endpoints {
+		if endpoint.ProviderInstanceID == replacement.ProviderInstanceID {
+			currentEndpoints = append(currentEndpoints, cloneEndpoint(endpoint))
+		}
+	}
+	currentBindings := make([]AccessBinding, 0)
+	for _, binding := range s.bindings {
+		if binding.ProviderInstanceID == replacement.ProviderInstanceID {
+			currentBindings = append(currentBindings, cloneAccessBinding(binding))
+		}
+	}
+	if !equalAccessGraphs(currentEndpoints, currentBindings, replacement.ExpectedEndpoints, replacement.ExpectedBindings) {
+		return invalid("provider access graph changed before replacement")
+	}
+	for endpointID, endpoint := range s.endpoints {
+		if endpoint.ProviderInstanceID == replacement.ProviderInstanceID {
+			delete(s.endpoints, endpointID)
+		}
+	}
+	for bindingID, binding := range s.bindings {
+		if binding.ProviderInstanceID == replacement.ProviderInstanceID {
+			delete(s.bindings, bindingID)
+		}
+	}
+	for _, endpoint := range replacement.Endpoints {
+		s.endpoints[endpoint.ID] = cloneEndpoint(endpoint)
+	}
+	for _, binding := range replacement.Bindings {
+		s.bindings[binding.ID] = cloneAccessBinding(binding)
+	}
+	return nil
+}
+
+// equalAccessGraphs compares endpoint and binding sets by immutable identifier after deterministic ordering.
+// equalAccessGraphs 在确定性排序后按不可变标识比较入口与 Binding 集合。
+func equalAccessGraphs(leftEndpoints []Endpoint, leftBindings []AccessBinding, rightEndpoints []Endpoint, rightBindings []AccessBinding) bool {
+	leftEndpoints = append([]Endpoint(nil), leftEndpoints...)
+	rightEndpoints = append([]Endpoint(nil), rightEndpoints...)
+	leftBindings = append([]AccessBinding(nil), leftBindings...)
+	rightBindings = append([]AccessBinding(nil), rightBindings...)
+	sort.Slice(leftEndpoints, func(left int, right int) bool { return leftEndpoints[left].ID < leftEndpoints[right].ID })
+	sort.Slice(rightEndpoints, func(left int, right int) bool { return rightEndpoints[left].ID < rightEndpoints[right].ID })
+	sort.Slice(leftBindings, func(left int, right int) bool { return leftBindings[left].ID < leftBindings[right].ID })
+	sort.Slice(rightBindings, func(left int, right int) bool { return rightBindings[left].ID < rightBindings[right].ID })
+	return reflect.DeepEqual(leftEndpoints, rightEndpoints) && reflect.DeepEqual(leftBindings, rightBindings)
 }
 
 // cloneCredential returns a mutation-safe credential value.

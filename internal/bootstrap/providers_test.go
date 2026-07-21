@@ -369,6 +369,7 @@ func TestKimiExecutionDriversUseExactDefinitionPathsAndBearerAuthentication(t *t
 	expectedPath := ""
 	expectedAuthorization := "Bearer kimi-test-key"
 	expectedModel := ""
+	expectedThinking := false
 	expectedKimiHeaders := false
 	expectedDeviceID := ""
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
@@ -384,11 +385,17 @@ func TestKimiExecutionDriversUseExactDefinitionPathsAndBearerAuthentication(t *t
 			// Model is the provider-facing model identifier sent on the wire.
 			// Model 是发送到 wire 上的供应商侧模型标识。
 			Model string `json:"model"`
+			// Thinking contains the provider-facing typed routing switch when required.
+			// Thinking 包含需要时发送到供应商侧的类型化路由开关。
+			Thinking *protocolchat.ThinkingConfiguration `json:"thinking"`
 		}{}
 		if errDecode := json.NewDecoder(request.Body).Decode(&payload); errDecode != nil {
 			t.Errorf("decode request body: %v", errDecode)
 		} else if payload.Model != expectedModel {
 			t.Errorf("model = %q, want %q", payload.Model, expectedModel)
+		}
+		if expectedThinking != (payload.Thinking != nil && payload.Thinking.Type == protocolchat.ThinkingEnabled) {
+			t.Errorf("thinking = %#v, expected enabled = %t", payload.Thinking, expectedThinking)
 		}
 		if expectedKimiHeaders {
 			if request.Header.Get("User-Agent") != "CLIProxyAPI/dev" || request.Header.Get("X-Msh-Platform") != "CLIProxyAPI" || request.Header.Get("X-Msh-Version") != "dev" || request.Header.Get("X-Msh-Device-Id") == "" {
@@ -482,11 +489,14 @@ func TestKimiExecutionDriversUseExactDefinitionPathsAndBearerAuthentication(t *t
 		// deviceID is the exact device-flow identity when deterministic.
 		// deviceID 是可确定时的精确设备授权身份。
 		deviceID string
+		// thinking reports whether the exact model must stay on Kimi's thinking route.
+		// thinking 表示精确模型是否必须保持在 Kimi 思考路由。
+		thinking bool
 	}{
 		{name: "CN Chat", definitionID: KimiCNDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key", upstreamModel: "kimi-k2.5", projectedModel: "kimi-k2.5"},
 		{name: "Global Chat", definitionID: KimiGlobalDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key", upstreamModel: "kimi-k2.5", projectedModel: "kimi-k2.5"},
-		{name: "Coding Chat API Key", definitionID: KimiCodingDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key", upstreamModel: "kimi-k2.5", projectedModel: "k2.5", kimiHeaders: true},
-		{name: "Coding Chat Device Flow", definitionID: KimiCodingDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "device_flow", secretRef: deviceTokenReference, authorization: "Bearer kimi-device-access", upstreamModel: "kimi-k2.5", projectedModel: "k2.5", kimiHeaders: true, deviceID: "device-test"},
+		{name: "Coding Chat API Key", definitionID: KimiCodingDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "api_key", secretRef: secretReference, authorization: "Bearer kimi-test-key", upstreamModel: "kimi-for-coding", projectedModel: "kimi-for-coding", kimiHeaders: true, thinking: true},
+		{name: "Coding Chat Device Flow", definitionID: KimiCodingDefinitionID, channelID: protocolchat.ProfileID, profileID: protocolchat.ProfileID, path: "/coding/v1/chat/completions", authMethodID: "device_flow", secretRef: deviceTokenReference, authorization: "Bearer kimi-device-access", upstreamModel: "kimi-for-coding-highspeed", projectedModel: "kimi-for-coding-highspeed", kimiHeaders: true, deviceID: "device-test", thinking: true},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -501,6 +511,7 @@ func TestKimiExecutionDriversUseExactDefinitionPathsAndBearerAuthentication(t *t
 			expectedModel = testCase.projectedModel
 			expectedKimiHeaders = testCase.kimiHeaders
 			expectedDeviceID = testCase.deviceID
+			expectedThinking = testCase.thinking
 			execution := kimiExecutionRequest(definition, testCase.channelID, testCase.profileID, server.URL+upstreamURL.Path, testCase.authMethodID, testCase.secretRef, testCase.upstreamModel)
 			result, errExecute := registry.Execute(context.Background(), execution)
 			if errExecute != nil {

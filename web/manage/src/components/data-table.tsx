@@ -67,14 +67,7 @@ import {
 } from "@/components/ui/dropdown-menu"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
-import {
-  Select,
-  SelectContent,
-  SelectGroup,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select"
+import { ReadonlyCombobox } from "@/components/ui/readonly-combobox"
 import { Separator } from "@/components/ui/separator"
 import {
   Table,
@@ -250,28 +243,16 @@ const columns: ColumnDef<z.infer<typeof schema>>[] = [
           <Label htmlFor={`${row.original.id}-reviewer`} className="sr-only">
             Reviewer
           </Label>
-          <Select
-            items={[
+          <ReadonlyCombobox
+            options={[
               { label: "Eddie Lake", value: "Eddie Lake" },
               { label: "Jamik Tashpulatov", value: "Jamik Tashpulatov" },
             ]}
-          >
-            <SelectTrigger
-              className="w-38 **:data-[slot=select-value]:block **:data-[slot=select-value]:truncate"
-              size="sm"
-              id={`${row.original.id}-reviewer`}
-            >
-              <SelectValue placeholder="Assign reviewer" />
-            </SelectTrigger>
-            <SelectContent align="end">
-              <SelectGroup>
-                <SelectItem value="Eddie Lake">Eddie Lake</SelectItem>
-                <SelectItem value="Jamik Tashpulatov">
-                  Jamik Tashpulatov
-                </SelectItem>
-              </SelectGroup>
-            </SelectContent>
-          </Select>
+            className="h-8 w-38"
+            id={`${row.original.id}-reviewer`}
+            placeholder="Assign reviewer"
+            contentAlign="end"
+          />
         </>
       )
     },
@@ -397,31 +378,18 @@ export function DataTable({
         <Label htmlFor="view-selector" className="sr-only">
           View
         </Label>
-        <Select
+        <ReadonlyCombobox
           defaultValue="outline"
-          items={[
+          options={[
             { label: "Outline", value: "outline" },
             { label: "Past Performance", value: "past-performance" },
             { label: "Key Personnel", value: "key-personnel" },
             { label: "Focus Documents", value: "focus-documents" },
           ]}
-        >
-          <SelectTrigger
-            className="flex w-fit @4xl/main:hidden"
-            size="sm"
-            id="view-selector"
-          >
-            <SelectValue placeholder="Select a view" />
-          </SelectTrigger>
-          <SelectContent>
-            <SelectGroup>
-              <SelectItem value="outline">Outline</SelectItem>
-              <SelectItem value="past-performance">Past Performance</SelectItem>
-              <SelectItem value="key-personnel">Key Personnel</SelectItem>
-              <SelectItem value="focus-documents">Focus Documents</SelectItem>
-            </SelectGroup>
-          </SelectContent>
-        </Select>
+          className="h-8 w-fit @4xl/main:hidden"
+          id="view-selector"
+          placeholder="Select a view"
+        />
         <TabsList className="hidden **:data-[slot=badge]:size-5 **:data-[slot=badge]:rounded-full **:data-[slot=badge]:bg-muted-foreground/30 **:data-[slot=badge]:px-1 @4xl/main:flex">
           <TabsTrigger value="outline">Outline</TabsTrigger>
           <TabsTrigger value="past-performance">
@@ -537,31 +505,20 @@ export function DataTable({
               <Label htmlFor="rows-per-page" className="text-sm font-medium">
                 Rows per page
               </Label>
-              <Select
+              <ReadonlyCombobox
                 value={`${table.getState().pagination.pageSize}`}
                 onValueChange={(value) => {
                   table.setPageSize(Number(value))
                 }}
-                items={[10, 20, 30, 40, 50].map((pageSize) => ({
+                options={[10, 20, 30, 40, 50].map((pageSize) => ({
                   label: `${pageSize}`,
                   value: `${pageSize}`,
                 }))}
-              >
-                <SelectTrigger size="sm" className="w-20" id="rows-per-page">
-                  <SelectValue
-                    placeholder={table.getState().pagination.pageSize}
-                  />
-                </SelectTrigger>
-                <SelectContent side="top">
-                  <SelectGroup>
-                    {[10, 20, 30, 40, 50].map((pageSize) => (
-                      <SelectItem key={pageSize} value={`${pageSize}`}>
-                        {pageSize}
-                      </SelectItem>
-                    ))}
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                className="h-8 w-20"
+                id="rows-per-page"
+                placeholder={`${table.getState().pagination.pageSize}`}
+                contentSide="top"
+              />
             </div>
             <div className="flex w-fit items-center justify-center text-sm font-medium">
               Page {table.getState().pagination.pageIndex + 1} of{" "}
@@ -762,9 +719,9 @@ function TableCellViewer({ item }: { item: z.infer<typeof schema> }) {
             <div className="grid grid-cols-2 gap-4">
               <div className="flex flex-col gap-3">
                 <Label htmlFor="type">Type</Label>
-                <Select
+                <ReadonlyCombobox
                   defaultValue={item.type}
-                  items={[
+                  options={[
                     { label: "Table of Contents", value: "Table of Contents" },
                     { label: "Executive Summary", value: "Executive Summary" },
                     {
@@ -777,53 +734,24 @@ function TableCellViewer({ item }: { item: z.infer<typeof schema> }) {
                     { label: "Narrative", value: "Narrative" },
                     { label: "Cover Page", value: "Cover Page" },
                   ]}
-                >
-                  <SelectTrigger id="type" className="w-full">
-                    <SelectValue placeholder="Select a type" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="Table of Contents">
-                        Table of Contents
-                      </SelectItem>
-                      <SelectItem value="Executive Summary">
-                        Executive Summary
-                      </SelectItem>
-                      <SelectItem value="Technical Approach">
-                        Technical Approach
-                      </SelectItem>
-                      <SelectItem value="Design">Design</SelectItem>
-                      <SelectItem value="Capabilities">Capabilities</SelectItem>
-                      <SelectItem value="Focus Documents">
-                        Focus Documents
-                      </SelectItem>
-                      <SelectItem value="Narrative">Narrative</SelectItem>
-                      <SelectItem value="Cover Page">Cover Page</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
+                  id="type"
+                  className="w-full"
+                  placeholder="Select a type"
+                />
               </div>
               <div className="flex flex-col gap-3">
                 <Label htmlFor="status">Status</Label>
-                <Select
+                <ReadonlyCombobox
                   defaultValue={item.status}
-                  items={[
+                  options={[
                     { label: "Done", value: "Done" },
                     { label: "In Progress", value: "In Progress" },
                     { label: "Not Started", value: "Not Started" },
                   ]}
-                >
-                  <SelectTrigger id="status" className="w-full">
-                    <SelectValue placeholder="Select a status" />
-                  </SelectTrigger>
-                  <SelectContent>
-                    <SelectGroup>
-                      <SelectItem value="Done">Done</SelectItem>
-                      <SelectItem value="In Progress">In Progress</SelectItem>
-                      <SelectItem value="Not Started">Not Started</SelectItem>
-                    </SelectGroup>
-                  </SelectContent>
-                </Select>
+                  id="status"
+                  className="w-full"
+                  placeholder="Select a status"
+                />
               </div>
             </div>
             <div className="grid grid-cols-2 gap-4">
@@ -838,27 +766,17 @@ function TableCellViewer({ item }: { item: z.infer<typeof schema> }) {
             </div>
             <div className="flex flex-col gap-3">
               <Label htmlFor="reviewer">Reviewer</Label>
-              <Select
+              <ReadonlyCombobox
                 defaultValue={item.reviewer}
-                items={[
+                options={[
                   { label: "Eddie Lake", value: "Eddie Lake" },
                   { label: "Jamik Tashpulatov", value: "Jamik Tashpulatov" },
                   { label: "Emily Whalen", value: "Emily Whalen" },
                 ]}
-              >
-                <SelectTrigger id="reviewer" className="w-full">
-                  <SelectValue placeholder="Select a reviewer" />
-                </SelectTrigger>
-                <SelectContent>
-                  <SelectGroup>
-                    <SelectItem value="Eddie Lake">Eddie Lake</SelectItem>
-                    <SelectItem value="Jamik Tashpulatov">
-                      Jamik Tashpulatov
-                    </SelectItem>
-                    <SelectItem value="Emily Whalen">Emily Whalen</SelectItem>
-                  </SelectGroup>
-                </SelectContent>
-              </Select>
+                id="reviewer"
+                className="w-full"
+                placeholder="Select a reviewer"
+              />
             </div>
           </form>
         </div>

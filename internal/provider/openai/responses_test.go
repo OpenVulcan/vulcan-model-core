@@ -61,6 +61,42 @@ func TestResponsesDriverExecutesBoundNonStreamingRequest(t *testing.T) {
 	}
 }
 
+// TestOpenAIResponsesCompatibilityDriverUsesVersionedBaseURL verifies custom Responses providers append only the protocol resource path.
+// TestOpenAIResponsesCompatibilityDriverUsesVersionedBaseURL 验证自定义 Responses 供应商仅向带版本 Base URL 追加协议资源路径。
+func TestOpenAIResponsesCompatibilityDriverUsesVersionedBaseURL(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Method != http.MethodPost || request.URL.Path != "/compatible/v1/responses" {
+			t.Errorf("request = %s %s", request.Method, request.URL.Path)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"upstream-compatible","status":"completed","output":[]}`)
+	}))
+	defer server.Close()
+	_, execution := newResponsesDriverExecution(t, server.URL+"/compatible/v1", false)
+	execution.Definition.Kind = providerconfig.DefinitionKindCustom
+	execution.Definition.EndpointProfileID = providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility
+	execution.Definition.AuthMethods[0].Type = providerconfig.AuthMethodBearer
+	// fixtureSecretStore owns the replacement credential used by the compatibility transport.
+	// fixtureSecretStore 拥有兼容传输使用的替换凭据。
+	fixtureSecretStore := secret.NewMemoryStore()
+	secretReference, errPut := fixtureSecretStore.Put(context.Background(), []byte("test-secret"))
+	if errPut != nil {
+		t.Fatalf("Put() error = %v", errPut)
+	}
+	execution.Binding.Credential.SecretRef = secretReference
+	compatibleClient, errCompatibleClient := transport.NewClient(http.DefaultClient, fixtureSecretStore, transport.RetryPolicy{})
+	if errCompatibleClient != nil {
+		t.Fatalf("NewClient() error = %v", errCompatibleClient)
+	}
+	driver, errDriver := NewOpenAIResponsesCompatibilityDriver("definition-1", compatibleClient, openAIResponsesCapabilities())
+	if errDriver != nil {
+		t.Fatalf("NewOpenAIResponsesCompatibilityDriver() error = %v", errDriver)
+	}
+	if _, errExecute := driver.Execute(context.Background(), execution); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+}
+
 // TestResponsesDriverExecutesBoundStream verifies the stream path requests SSE and yields the same VCP completion semantics.
 // TestResponsesDriverExecutesBoundStream 验证流式路径请求 SSE 并产生相同的 VCP 完成语义。
 func TestResponsesDriverExecutesBoundStream(t *testing.T) {

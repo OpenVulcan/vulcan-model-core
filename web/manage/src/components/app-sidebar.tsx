@@ -16,19 +16,16 @@ import {
   SidebarMenuItem,
 } from "@/components/ui/sidebar"
 import {
-  ChartBarIcon,
   CircleHelpIcon,
   CpuIcon,
   DatabaseIcon,
   FileClockIcon,
-  FolderIcon,
   LayoutDashboardIcon,
-  ListIcon,
+  KeyRoundIcon,
   SearchIcon,
   ServerCogIcon,
   SparklesIcon,
   Settings2Icon,
-  UsersIcon,
 } from "lucide-react"
 
 // SidebarUserData defines the non-secret identity shown in the management sidebar footer.
@@ -97,41 +94,9 @@ const data: SidebarData = {
   navMain: [
     {
       titleKey: "sidebar.dashboard",
-      url: "#",
+      url: "/",
       icon: (
         <LayoutDashboardIcon
-        />
-      ),
-    },
-    {
-      titleKey: "sidebar.lifecycle",
-      url: "#",
-      icon: (
-        <ListIcon
-        />
-      ),
-    },
-    {
-      titleKey: "sidebar.analytics",
-      url: "#",
-      icon: (
-        <ChartBarIcon
-        />
-      ),
-    },
-    {
-      titleKey: "sidebar.projects",
-      url: "#",
-      icon: (
-        <FolderIcon
-        />
-      ),
-    },
-    {
-      titleKey: "sidebar.team",
-      url: "#",
-      icon: (
-        <UsersIcon
         />
       ),
     },
@@ -168,6 +133,14 @@ const data: SidebarData = {
       url: "/providers",
       icon: (
         <ServerCogIcon
+        />
+      ),
+    },
+    {
+      nameKey: "sidebar.credentialManagement",
+      url: "/credentials",
+      icon: (
+        <KeyRoundIcon
         />
       ),
     },
@@ -226,6 +199,9 @@ function localizeNavigationEntries(
 // AppSidebarProps extends the sidebar primitives with the application logout operation.
 // AppSidebarProps 在侧栏基础属性上扩展应用退出登录操作。
 interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
+	// currentPath identifies the route whose sidebar node receives the selected state.
+	// currentPath 标识应获得选中状态的侧栏节点路由。
+	currentPath: string
 	// onNavigate changes authenticated routes without reloading the Vite application.
 	// onNavigate 在不重新加载 Vite 应用的情况下切换已认证路由。
 	onNavigate: (path: string) => void
@@ -236,7 +212,7 @@ interface AppSidebarProps extends React.ComponentProps<typeof Sidebar> {
 
 // AppSidebar renders the dashboard-01 sidebar with the VulcanModelRouter brand mark.
 // AppSidebar 使用 VulcanModelRouter 品牌标识渲染 dashboard-01 侧栏。
-export function AppSidebar({ onNavigate, onLogout, ...props }: AppSidebarProps) {
+export function AppSidebar({ currentPath, onNavigate, onLogout, ...props }: AppSidebarProps) {
   // t resolves all authored sidebar chrome into the current interface language.
   // t 将所有已编写侧栏界面元素解析为当前界面语言。
   const { t } = useI18n()
@@ -275,9 +251,9 @@ export function AppSidebar({ onNavigate, onLogout, ...props }: AppSidebarProps) 
         </SidebarMenu>
       </SidebarHeader>
       <SidebarContent>
-        <NavMain items={localizedMainItems} />
-        <NavDocuments items={localizedDocumentItems} onNavigate={onNavigate} />
-        <NavSecondary items={localizedSecondaryItems} onNavigate={onNavigate} className="mt-auto" />
+        <NavMain items={localizedMainItems} currentPath={currentPath} onNavigate={onNavigate} />
+        <NavDocuments items={localizedDocumentItems} currentPath={currentPath} onNavigate={onNavigate} />
+        <NavSecondary items={localizedSecondaryItems} currentPath={currentPath} onNavigate={onNavigate} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={localizedUser} onLogout={onLogout} />

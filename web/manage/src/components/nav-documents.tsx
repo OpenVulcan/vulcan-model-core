@@ -24,6 +24,9 @@ import { MoreHorizontalIcon, FolderIcon, ShareIcon, Trash2Icon } from "lucide-re
 // NavDocumentsProps defines localized document shortcuts rendered in the management sidebar.
 // NavDocumentsProps 定义管理侧栏中渲染的本地化文档快捷方式。
 interface NavDocumentsProps {
+	// currentPath identifies the document destination selected by the route shell.
+	// currentPath 标识路由外壳选择的文档目标。
+	currentPath: string
 	// onNavigate changes one authenticated route without reloading the application.
 	// onNavigate 在不重新加载应用的情况下切换一个已认证路由。
 	onNavigate: (path: string) => void
@@ -46,6 +49,7 @@ interface NavDocumentsProps {
 // NavDocuments 渲染本地化文档快捷方式及其上下文菜单控件。
 export function NavDocuments({
   items,
+  currentPath,
   onNavigate,
 }: NavDocumentsProps) {
   // isMobile selects the menu placement prescribed by the responsive sidebar primitive.
@@ -62,9 +66,12 @@ export function NavDocuments({
         {items.map((item) => (
           <SidebarMenuItem key={item.name}>
             <SidebarMenuButton
+              isActive={currentPath === item.url}
+              className="data-active:bg-primary data-active:text-primary-foreground data-active:font-semibold data-active:hover:bg-primary data-active:hover:text-primary-foreground"
               render={
                 <a
                   href={item.url}
+                  aria-current={currentPath === item.url ? "page" : undefined}
                   onClick={(event) => {
                     if (item.url === "#") {
                       return

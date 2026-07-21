@@ -138,6 +138,18 @@ func TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership(t *testin
 			t.Fatalf("Coding model[%d] = %#v, want upstream %q with explicit entitlement", index, coding.Models[index], modelID)
 		}
 	}
+	for _, snapshot := range []catalog.Snapshot{cn, global, coding} {
+		modelIDs := make(map[string]string, len(snapshot.Models))
+		for _, model := range snapshot.Models {
+			modelIDs[model.ID] = model.UpstreamModelID
+		}
+		for _, offering := range snapshot.Offerings {
+			upstreamID := modelIDs[offering.ProviderModelID]
+			if (upstreamID == "kimi-k2.7-code" || upstreamID == "kimi-k2.7-code-highspeed" || upstreamID == "kimi-for-coding" || upstreamID == "kimi-for-coding-highspeed") && offering.Capabilities.Reasoning != catalog.CapabilityNative {
+				t.Fatalf("Kimi K2.7 offering %q reasoning = %q, want native", upstreamID, offering.Capabilities.Reasoning)
+			}
+		}
+	}
 }
 
 // TestBuildSystemCatalogSeparatesCodexKeyAndAccountEntitlements verifies one shared model union keeps product-specific authorization semantics.

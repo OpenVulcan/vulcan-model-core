@@ -6,16 +6,20 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
 	"slices"
 	"strings"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
-	protocolaistudio "github.com/OpenVulcan/vulcan-model-core/internal/protocol/google/aistudio"
+	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
+	protocolresponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
@@ -503,6 +507,9 @@ type Service struct {
 	// now returns the authoritative lifecycle timestamp.
 	// now 返回权威生命周期时间戳。
 	now func() time.Time
+	// httpClient performs bounded custom-provider model discovery without forwarding redirects.
+	// httpClient 执行有界自定义供应商模型发现且不转发重定向。
+	httpClient *http.Client
 }
 
 // NewService creates one provider configuration application service.
@@ -511,7 +518,15 @@ func NewService(configurations providerconfig.Store, secrets secret.Store, catal
 	if dependency.IsNil(configurations) || dependency.IsNil(secrets) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration, secret, and catalog stores are required")
 	}
-	return &Service{configurations: configurations, secrets: secrets, catalogs: catalogs, now: time.Now}, nil
+	return &Service{
+		configurations: configurations,
+		secrets:        secrets,
+		catalogs:       catalogs,
+		now:            time.Now,
+		httpClient: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}},
+	}, nil
 }
 
 // CreateCustomDefinitionInput contains the editable portion of one generic custom provider.
@@ -689,9 +704,9 @@ func generateCustomOnboardingIdentifiers() (customOnboardingIdentifiers, error) 
 // customProviderAuthMethod 返回白名单自定义协议实现的唯一固定 Secret 载体。
 func customProviderAuthMethod(protocolProfileID string) (providerconfig.AuthMethodType, error) {
 	switch protocolProfileID {
-	case protocolchat.ProfileID:
+	case protocolchat.ProfileID, protocolresponses.ProfileID:
 		return providerconfig.AuthMethodBearer, nil
-	case protocolaistudio.ProfileID:
+	case protocolmessages.ProfileID:
 		return providerconfig.AuthMethodHeaderKey, nil
 	default:
 		return "", fmt.Errorf("custom provider protocol profile %q has no registered execution factory", protocolProfileID)
@@ -797,6 +812,11 @@ func (s *Service) UpdateCustomDefinition(ctx context.Context, input UpdateCustom
 		ProtocolProfileID: input.ProtocolProfileID,
 		AuthMethod:        input.AuthMethod,
 	})
+	// Legacy Vertex definitions remain editable only when the protocol and code-owned endpoint shape stay unchanged.
+	// 旧版 Vertex 定义仅在协议与代码拥有的 Endpoint 形态保持不变时继续允许编辑。
+	if input.ProtocolProfileID == current.ProtocolProfileID && current.EndpointProfileID == providerconfig.CustomEndpointProfileVertexCompatibility {
+		updated.EndpointProfileID = current.EndpointProfileID
+	}
 	instances, errInstances := s.configurations.ListInstances(ctx, current.ID)
 	if errInstances != nil {
 		return providerconfig.ProviderDefinition{}, errInstances
@@ -849,8 +869,10 @@ func customEndpointProfileID(protocolProfileID string) string {
 	switch protocolProfileID {
 	case protocolchat.ProfileID:
 		return providerconfig.CustomEndpointProfileOpenAICompatibility
-	case protocolaistudio.ProfileID:
-		return providerconfig.CustomEndpointProfileVertexCompatibility
+	case protocolresponses.ProfileID:
+		return providerconfig.CustomEndpointProfileOpenAIResponsesCompatibility
+	case protocolmessages.ProfileID:
+		return providerconfig.CustomEndpointProfileAnthropicMessagesCompatibility
 	default:
 		return ""
 	}
@@ -871,6 +893,505 @@ type CreateInstanceInput struct {
 	// DisplayName is the editable management-facing instance name.
 	// DisplayName 是管理界面可编辑的实例名称。
 	DisplayName string
+}
+
+// ConfigureProviderInput contains one credential-independent provider configuration request.
+// ConfigureProviderInput 包含一个独立于凭据的供应商配置请求。
+type ConfigureProviderInput struct {
+	// DefinitionID selects one exact system or custom provider definition.
+	// DefinitionID 选择一个精确的系统或自定义供应商定义。
+	DefinitionID string
+	// Handle is the stable workspace-visible routing identifier.
+	// Handle 是工作区可见的稳定路由标识。
+	Handle string
+	// DisplayName is the management-facing provider instance name.
+	// DisplayName 是管理界面显示的供应商实例名称。
+	DisplayName string
+	// BaseURL supplies the operator-owned endpoint only for custom definitions.
+	// BaseURL 仅为自定义定义提供操作员拥有的入口地址。
+	BaseURL string
+	// Region supplies optional custom-provider regional metadata.
+	// Region 提供可选的自定义供应商区域元数据。
+	Region string
+	// EndpointParameters contains exact non-secret values declared by a system endpoint preset.
+	// EndpointParameters 包含系统入口预设声明的精确非秘密参数值。
+	EndpointParameters []providerconfig.EndpointParameterValue
+	// InitialModel optionally declares one evidence-honest custom-provider model.
+	// InitialModel 可选声明一个证据诚实的自定义供应商模型。
+	InitialModel *InitialProviderModelInput
+}
+
+// InitialProviderModelInput contains one user-declared custom model and its known capability limits.
+// InitialProviderModelInput 包含一个用户声明的自定义模型及其已知能力限制。
+type InitialProviderModelInput struct {
+	// UpstreamModelID is the exact model identifier sent to the provider.
+	// UpstreamModelID 是发送给供应商的精确模型标识。
+	UpstreamModelID string
+	// DisplayName is the management-facing model name.
+	// DisplayName 是管理界面显示的模型名称。
+	DisplayName string
+	// ContextWindow is zero only when the total context limit is unknown.
+	// ContextWindow 仅在总上下文限制未知时为零。
+	ContextWindow int64
+	// MaxOutputTokens is zero only when the output limit is unknown.
+	// MaxOutputTokens 仅在输出限制未知时为零。
+	MaxOutputTokens int64
+	// ToolCalling is an explicit user-declared capability level.
+	// ToolCalling 是显式的用户声明能力级别。
+	ToolCalling catalog.CapabilityLevel
+	// Reasoning is an explicit user-declared capability level.
+	// Reasoning 是显式的用户声明能力级别。
+	Reasoning catalog.CapabilityLevel
+}
+
+// ProviderConfigurationResult contains the committed provider configuration and its credential-independent catalog.
+// ProviderConfigurationResult 包含已提交的供应商配置及其独立于凭据的目录。
+type ProviderConfigurationResult struct {
+	// Configuration is the atomically persisted instance and endpoint graph.
+	// Configuration 是原子持久化的实例与入口图。
+	Configuration providerconfig.ProviderConfiguration
+	// Catalog is the initial system or empty custom provider catalog.
+	// Catalog 是初始系统目录或空的自定义供应商目录。
+	Catalog catalog.Snapshot
+}
+
+// ConfigureProvider creates one provider instance, its endpoints, and its catalog without accepting a credential.
+// ConfigureProvider 创建一个供应商实例、入口及目录，且不接收凭据。
+func (s *Service) ConfigureProvider(ctx context.Context, input ConfigureProviderInput) (ProviderConfigurationResult, error) {
+	definition, errDefinition := s.configurations.GetDefinition(ctx, strings.TrimSpace(input.DefinitionID))
+	if errDefinition != nil {
+		return ProviderConfigurationResult{}, errDefinition
+	}
+	configuration, errConfiguration := s.buildProviderConfiguration(definition, input)
+	if errConfiguration != nil {
+		return ProviderConfigurationResult{}, errConfiguration
+	}
+	if errSave := s.configurations.SaveProviderConfiguration(ctx, configuration); errSave != nil {
+		return ProviderConfigurationResult{}, errSave
+	}
+	observedAt := s.now().UTC()
+	snapshot := catalog.Snapshot{ProviderInstanceID: configuration.Instance.ID, Revision: 1, ObservedAt: observedAt}
+	var errCatalog error
+	if definition.Kind == providerconfig.DefinitionKindSystem {
+		snapshot, errCatalog = buildSystemCatalog(providerconfig.SystemOnboarding{Instance: configuration.Instance, Endpoints: configuration.Endpoints}, definition, observedAt)
+	} else if input.InitialModel != nil {
+		snapshot, errCatalog = buildInitialProviderCatalog(configuration.Instance, definition.ProtocolProfileID, *input.InitialModel, observedAt)
+	}
+	if errCatalog == nil {
+		errCatalog = s.catalogs.Save(ctx, snapshot)
+	}
+	if errCatalog != nil {
+		compensationContext := context.WithoutCancel(ctx)
+		errConfigurationCleanup := s.configurations.DeleteProviderConfiguration(compensationContext, configuration)
+		if errConfigurationCleanup != nil {
+			return ProviderConfigurationResult{}, fmt.Errorf("save provider configuration catalog: %w; compensate configuration: %v", errCatalog, errConfigurationCleanup)
+		}
+		return ProviderConfigurationResult{}, errCatalog
+	}
+	return ProviderConfigurationResult{Configuration: configuration, Catalog: snapshot}, nil
+}
+
+// buildInitialProviderCatalog builds one user-declared text model while preserving every unknown capability explicitly.
+// buildInitialProviderCatalog 构建一个用户声明文本模型，同时显式保留每个未知能力。
+func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, channelID string, input InitialProviderModelInput, observedAt time.Time) (catalog.Snapshot, error) {
+	input.UpstreamModelID = strings.TrimSpace(input.UpstreamModelID)
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	if input.UpstreamModelID == "" {
+		return catalog.Snapshot{}, errors.New("initial custom-provider model ID is required")
+	}
+	if input.DisplayName == "" {
+		input.DisplayName = input.UpstreamModelID
+	}
+	if input.ContextWindow < 0 || input.MaxOutputTokens < 0 {
+		return catalog.Snapshot{}, errors.New("initial custom-provider token limits cannot be negative")
+	}
+	if input.ToolCalling == "" {
+		input.ToolCalling = catalog.CapabilityUnknown
+	}
+	if input.Reasoning == "" {
+		input.Reasoning = catalog.CapabilityUnknown
+	}
+	identifiers := make([]string, 3)
+	for index, prefix := range []string{"model_", "offer_", "profile_"} {
+		identifier, errIdentifier := generateID(prefix)
+		if errIdentifier != nil {
+			return catalog.Snapshot{}, errIdentifier
+		}
+		identifiers[index] = identifier
+	}
+	capabilities := catalog.ModelCapabilities{
+		ToolCalling: input.ToolCalling, ParallelToolCalls: catalog.CapabilityUnknown,
+		StreamingToolArguments: catalog.CapabilityUnknown, StrictJSONSchema: catalog.CapabilityUnknown,
+		Reasoning: input.Reasoning, InputModalities: []string{"text"}, OutputModalities: []string{"text"},
+	}
+	if input.ContextWindow > 0 {
+		capabilities.Tokens.ContextWindow = catalog.OptionalTokenLimit{Known: true, Value: input.ContextWindow}
+	}
+	if input.MaxOutputTokens > 0 {
+		capabilities.Tokens.MaxOutputTokens = catalog.OptionalTokenLimit{Known: true, Value: input.MaxOutputTokens}
+	}
+	snapshot := catalog.Snapshot{
+		ProviderInstanceID: instance.ID,
+		Models:             []catalog.ProviderModel{{ID: identifiers[0], ProviderInstanceID: instance.ID, UpstreamModelID: input.UpstreamModelID, DisplayName: input.DisplayName, Source: catalog.ModelSourceUserDeclared, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1}},
+		Offerings:          []catalog.ModelOffering{{ID: identifiers[1], ProviderInstanceID: instance.ID, ProviderModelID: identifiers[0], ChannelID: channelID, UpstreamModelID: input.UpstreamModelID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1}},
+		Profiles:           []catalog.ExecutionProfile{{ID: identifiers[2], ProviderInstanceID: instance.ID, OfferingID: identifiers[1], DisplayName: "Default", Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchSeamless, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1}},
+		Revision:           1, ObservedAt: observedAt,
+	}
+	if errValidate := snapshot.Validate(); errValidate != nil {
+		return catalog.Snapshot{}, errValidate
+	}
+	return snapshot, nil
+}
+
+// DiscoverCustomProviderModels reads a standard OpenAI-compatible model list with one explicit same-instance credential.
+// DiscoverCustomProviderModels 使用一个显式同实例凭据读取标准 OpenAI 兼容模型清单。
+func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInstanceID string, credentialID string) (catalog.Snapshot, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, providerInstanceID)
+	if errInstance != nil {
+		return catalog.Snapshot{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return catalog.Snapshot{}, errDefinition
+	}
+	if definition.Kind != providerconfig.DefinitionKindCustom || (definition.ProtocolProfileID != protocolchat.ProfileID && definition.ProtocolProfileID != protocolresponses.ProfileID) {
+		return catalog.Snapshot{}, errors.New("standard model discovery is supported only for custom OpenAI Chat or Responses providers")
+	}
+	endpoints, errEndpoints := s.configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return catalog.Snapshot{}, errEndpoints
+	}
+	if len(endpoints) != 1 || endpoints[0].Status != providerconfig.EndpointReady {
+		return catalog.Snapshot{}, errors.New("custom model discovery requires exactly one ready endpoint")
+	}
+	credential, errCredential := s.credential(ctx, instance.ID, credentialID)
+	if errCredential != nil {
+		return catalog.Snapshot{}, errCredential
+	}
+	authMethod, authExists := definition.AuthMethod(credential.AuthMethodID)
+	if !authExists || authMethod.Type != providerconfig.AuthMethodBearer || credential.Status != providerconfig.CredentialActive {
+		return catalog.Snapshot{}, errors.New("custom model discovery requires one active Bearer credential")
+	}
+	protectedSecret, errSecret := s.secrets.Get(ctx, credential.SecretRef)
+	if errSecret != nil {
+		return catalog.Snapshot{}, errSecret
+	}
+	defer clear(protectedSecret)
+	request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoints[0].BaseURL, "/")+"/models", nil)
+	if errRequest != nil {
+		return catalog.Snapshot{}, errRequest
+	}
+	request.Header.Set("Authorization", "Bearer "+string(protectedSecret))
+	request.Header.Set("Accept", "application/json")
+	response, errDo := s.httpClient.Do(request)
+	if errDo != nil {
+		return catalog.Snapshot{}, fmt.Errorf("discover custom provider models: %w", errDo)
+	}
+	defer response.Body.Close()
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		return catalog.Snapshot{}, fmt.Errorf("custom provider model discovery returned status %d", response.StatusCode)
+	}
+	// modelListPayload intentionally decodes only the standard data[].id contract and ignores provider extensions.
+	// modelListPayload 有意仅解码标准 data[].id 合同并忽略供应商扩展。
+	var modelListPayload struct {
+		// Data contains standard OpenAI-compatible model objects.
+		// Data 包含标准 OpenAI 兼容模型对象。
+		Data []struct {
+			// ID is the exact upstream wire model identifier.
+			// ID 是精确的上游 Wire 模型标识。
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
+	if errDecode := decoder.Decode(&modelListPayload); errDecode != nil {
+		return catalog.Snapshot{}, errors.New("custom provider returned an invalid model list")
+	}
+	if modelListPayload.Data == nil {
+		return catalog.Snapshot{}, errors.New("custom provider model list omitted the standard data array")
+	}
+	// trailing detects ambiguous concatenated JSON values after the standard response document.
+	// trailing 检测标准响应文档之后含义不明确的拼接 JSON 值。
+	var trailing json.RawMessage
+	if errTrailing := decoder.Decode(&trailing); !errors.Is(errTrailing, io.EOF) {
+		return catalog.Snapshot{}, errors.New("custom provider model list contains trailing JSON values")
+	}
+	current, errCurrent := s.catalogs.Get(ctx, instance.ID)
+	if errCurrent != nil {
+		return catalog.Snapshot{}, errCurrent
+	}
+	modelsByUpstreamID := make(map[string]catalog.ProviderModel, len(current.Models))
+	for _, model := range current.Models {
+		modelsByUpstreamID[model.UpstreamModelID] = model
+	}
+	offeringsByModelID := make(map[string][]catalog.ModelOffering, len(current.Models))
+	for _, offering := range current.Offerings {
+		offeringsByModelID[offering.ProviderModelID] = append(offeringsByModelID[offering.ProviderModelID], offering)
+	}
+	profilesByOfferingID := make(map[string][]catalog.ExecutionProfile, len(current.Offerings))
+	for _, profile := range current.Profiles {
+		profilesByOfferingID[profile.OfferingID] = append(profilesByOfferingID[profile.OfferingID], profile)
+	}
+	updated := catalog.Snapshot{
+		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
+		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances,
+		Revision: current.Revision + 1, ObservedAt: s.now().UTC(),
+	}
+	seen := make(map[string]struct{}, len(modelListPayload.Data))
+	for _, discovered := range modelListPayload.Data {
+		upstreamModelID := strings.TrimSpace(discovered.ID)
+		if upstreamModelID == "" {
+			return catalog.Snapshot{}, errors.New("custom provider model list contains an empty model ID")
+		}
+		if _, duplicate := seen[upstreamModelID]; duplicate {
+			return catalog.Snapshot{}, errors.New("custom provider model list contains duplicate model IDs")
+		}
+		seen[upstreamModelID] = struct{}{}
+		if existing, exists := modelsByUpstreamID[upstreamModelID]; exists {
+			updated.Models = append(updated.Models, existing)
+			for _, offering := range offeringsByModelID[existing.ID] {
+				updated.Offerings = append(updated.Offerings, offering)
+				updated.Profiles = append(updated.Profiles, profilesByOfferingID[offering.ID]...)
+			}
+			continue
+		}
+		initial, errInitial := buildInitialProviderCatalog(instance, definition.ProtocolProfileID, InitialProviderModelInput{UpstreamModelID: upstreamModelID, DisplayName: upstreamModelID}, updated.ObservedAt)
+		if errInitial != nil {
+			return catalog.Snapshot{}, errInitial
+		}
+		initial.Models[0].Source = catalog.ModelSourceProviderAPI
+		updated.Models = append(updated.Models, initial.Models[0])
+		updated.Offerings = append(updated.Offerings, initial.Offerings[0])
+		updated.Profiles = append(updated.Profiles, initial.Profiles[0])
+	}
+	resolver, errResolver := resolve.New(s.configurations, s.catalogs)
+	if errResolver != nil {
+		return catalog.Snapshot{}, errResolver
+	}
+	updated.Pools, errResolver = resolver.SummarizeSnapshot(ctx, updated, updated.ObservedAt, updated.Revision)
+	if errResolver != nil {
+		return catalog.Snapshot{}, errResolver
+	}
+	if errSave := s.catalogs.Save(ctx, updated); errSave != nil {
+		return catalog.Snapshot{}, errSave
+	}
+	return updated, nil
+}
+
+// SaveCustomProviderModels replaces a custom provider's simplified model set with explicit user-declared capabilities.
+// SaveCustomProviderModels 使用显式用户声明能力替换自定义供应商的简化模型集合。
+func (s *Service) SaveCustomProviderModels(ctx context.Context, providerInstanceID string, inputs []InitialProviderModelInput) (catalog.Snapshot, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, providerInstanceID)
+	if errInstance != nil {
+		return catalog.Snapshot{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return catalog.Snapshot{}, errDefinition
+	}
+	if definition.Kind != providerconfig.DefinitionKindCustom {
+		return catalog.Snapshot{}, errors.New("simplified model editing is supported only for custom providers")
+	}
+	current, errCurrent := s.catalogs.Get(ctx, instance.ID)
+	if errCurrent != nil {
+		return catalog.Snapshot{}, errCurrent
+	}
+	existingModels := make(map[string]catalog.ProviderModel, len(current.Models))
+	existingOfferings := make(map[string]catalog.ModelOffering, len(current.Models))
+	existingProfiles := make(map[string]catalog.ExecutionProfile, len(current.Models))
+	for _, model := range current.Models {
+		existingModels[model.UpstreamModelID] = model
+	}
+	for _, offering := range current.Offerings {
+		model, exists := existingModelsByID(current.Models, offering.ProviderModelID)
+		if exists {
+			existingOfferings[model.UpstreamModelID] = offering
+		}
+	}
+	for _, profile := range current.Profiles {
+		for upstreamModelID, offering := range existingOfferings {
+			if profile.OfferingID == offering.ID && (profile.Default || existingProfiles[upstreamModelID].ID == "") {
+				existingProfiles[upstreamModelID] = profile
+			}
+		}
+	}
+	updated := catalog.Snapshot{
+		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
+		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances,
+		Revision: current.Revision + 1, ObservedAt: s.now().UTC(),
+	}
+	seen := make(map[string]struct{}, len(inputs))
+	for _, input := range inputs {
+		input.UpstreamModelID = strings.TrimSpace(input.UpstreamModelID)
+		if _, duplicate := seen[input.UpstreamModelID]; input.UpstreamModelID != "" && duplicate {
+			return catalog.Snapshot{}, errors.New("custom provider model editor contains duplicate upstream model IDs")
+		}
+		seen[input.UpstreamModelID] = struct{}{}
+		modelSnapshot, errModel := buildInitialProviderCatalog(instance, definition.ProtocolProfileID, input, updated.ObservedAt)
+		if errModel != nil {
+			return catalog.Snapshot{}, errModel
+		}
+		if existing, exists := existingModels[input.UpstreamModelID]; exists {
+			modelSnapshot.Models[0].ID = existing.ID
+			modelSnapshot.Models[0].Revision = existing.Revision + 1
+			if offering, offeringExists := existingOfferings[input.UpstreamModelID]; offeringExists {
+				modelSnapshot.Offerings[0].ID = offering.ID
+				modelSnapshot.Offerings[0].ProviderModelID = existing.ID
+				modelSnapshot.Offerings[0].Revision = offering.Revision + 1
+				modelSnapshot.Offerings[0].CapabilityRevision = offering.CapabilityRevision + 1
+				modelSnapshot.Profiles[0].OfferingID = offering.ID
+				if profile, profileExists := existingProfiles[input.UpstreamModelID]; profileExists {
+					modelSnapshot.Profiles[0].ID = profile.ID
+					modelSnapshot.Profiles[0].Revision = profile.Revision + 1
+					modelSnapshot.Profiles[0].CapabilityRevision = profile.CapabilityRevision + 1
+				}
+			}
+		}
+		updated.Models = append(updated.Models, modelSnapshot.Models[0])
+		updated.Offerings = append(updated.Offerings, modelSnapshot.Offerings[0])
+		updated.Profiles = append(updated.Profiles, modelSnapshot.Profiles[0])
+	}
+	resolver, errResolver := resolve.New(s.configurations, s.catalogs)
+	if errResolver != nil {
+		return catalog.Snapshot{}, errResolver
+	}
+	updated.Pools, errResolver = resolver.SummarizeSnapshot(ctx, updated, updated.ObservedAt, updated.Revision)
+	if errResolver != nil {
+		return catalog.Snapshot{}, errResolver
+	}
+	if errSave := s.catalogs.Save(ctx, updated); errSave != nil {
+		return catalog.Snapshot{}, errSave
+	}
+	return updated, nil
+}
+
+// existingModelsByID resolves one exact model identifier from a complete custom model slice.
+// existingModelsByID 从完整自定义模型切片中解析一个精确模型标识。
+func existingModelsByID(models []catalog.ProviderModel, modelID string) (catalog.ProviderModel, bool) {
+	for _, model := range models {
+		if model.ID == modelID {
+			return model, true
+		}
+	}
+	return catalog.ProviderModel{}, false
+}
+
+// DeleteProviderConfiguration removes one provider configuration only when it owns no credentials or bindings.
+// DeleteProviderConfiguration 仅在供应商配置不拥有凭据或绑定时删除该配置。
+func (s *Service) DeleteProviderConfiguration(ctx context.Context, providerInstanceID string) error {
+	instance, errInstance := s.configurations.GetInstance(ctx, providerInstanceID)
+	if errInstance != nil {
+		return errInstance
+	}
+	credentials, errCredentials := s.configurations.ListCredentials(ctx, instance.ID)
+	if errCredentials != nil {
+		return errCredentials
+	}
+	bindings, errBindings := s.configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return errBindings
+	}
+	if len(credentials) != 0 || len(bindings) != 0 {
+		return errors.New("provider configuration must not contain credentials or bindings before deletion")
+	}
+	endpoints, errEndpoints := s.configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return errEndpoints
+	}
+	snapshot, errSnapshot := s.catalogs.Get(ctx, instance.ID)
+	if errSnapshot != nil {
+		return errSnapshot
+	}
+	if errDeleteCatalog := s.catalogs.Delete(ctx, instance.ID); errDeleteCatalog != nil {
+		return errDeleteCatalog
+	}
+	configuration := providerconfig.ProviderConfiguration{Instance: instance, Endpoints: endpoints}
+	if errDeleteConfiguration := s.configurations.DeleteProviderConfiguration(ctx, configuration); errDeleteConfiguration != nil {
+		if errRestore := s.catalogs.Save(context.WithoutCancel(ctx), snapshot); errRestore != nil {
+			return fmt.Errorf("delete provider configuration: %v; restore catalog: %w", errDeleteConfiguration, errRestore)
+		}
+		return errDeleteConfiguration
+	}
+	return nil
+}
+
+// buildProviderConfiguration materializes one exact endpoint per definition-owned channel.
+// buildProviderConfiguration 为每个定义拥有的通道实例化一个精确入口。
+func (s *Service) buildProviderConfiguration(definition providerconfig.ProviderDefinition, input ConfigureProviderInput) (providerconfig.ProviderConfiguration, error) {
+	input.Handle = strings.TrimSpace(input.Handle)
+	input.DisplayName = strings.TrimSpace(input.DisplayName)
+	input.BaseURL = strings.TrimSpace(input.BaseURL)
+	input.Region = strings.TrimSpace(input.Region)
+	if input.Handle == "" || input.DisplayName == "" {
+		return providerconfig.ProviderConfiguration{}, errors.New("provider handle and display name are required")
+	}
+	instanceID, errInstanceID := generateID("pvi_")
+	if errInstanceID != nil {
+		return providerconfig.ProviderConfiguration{}, errInstanceID
+	}
+	baseURL := input.BaseURL
+	region := input.Region
+	parameters := []providerconfig.EndpointParameterValue(nil)
+	if definition.Kind == providerconfig.DefinitionKindSystem {
+		if input.BaseURL != "" {
+			return providerconfig.ProviderConfiguration{}, errors.New("system provider endpoint addresses are code-owned and cannot be overridden")
+		}
+		if len(definition.EndpointPresets) != 1 {
+			return providerconfig.ProviderConfiguration{}, errors.New("provider definition requires exactly one endpoint preset")
+		}
+		preset := definition.EndpointPresets[0]
+		baseURL = preset.BaseURL
+		region = preset.Region
+		if input.Region != "" {
+			materialized, errMaterialize := preset.MaterializeRegionalBaseURL(input.Region)
+			if errMaterialize != nil {
+				return providerconfig.ProviderConfiguration{}, errMaterialize
+			}
+			baseURL = materialized
+			region = input.Region
+		}
+		if preset.BaseURLTemplate != "" {
+			if input.Region != "" {
+				return providerconfig.ProviderConfiguration{}, errors.New("parameterized system endpoint cannot also select a region")
+			}
+			materialized, errMaterialize := preset.MaterializeBaseURL(input.EndpointParameters)
+			if errMaterialize != nil {
+				return providerconfig.ProviderConfiguration{}, errMaterialize
+			}
+			baseURL = materialized
+			valuesByID := make(map[string]string, len(input.EndpointParameters))
+			for _, parameter := range input.EndpointParameters {
+				valuesByID[parameter.ID] = parameter.Value
+			}
+			for _, parameter := range preset.Parameters {
+				parameters = append(parameters, providerconfig.EndpointParameterValue{ID: parameter.ID, Value: valuesByID[parameter.ID]})
+			}
+		} else if len(input.EndpointParameters) != 0 {
+			return providerconfig.ProviderConfiguration{}, errors.New("selected provider endpoint does not accept parameters")
+		}
+	} else {
+		if input.BaseURL == "" || len(input.EndpointParameters) != 0 {
+			return providerconfig.ProviderConfiguration{}, errors.New("custom provider base URL is required and endpoint parameters are unsupported")
+		}
+	}
+	now := s.now().UTC()
+	configuration := providerconfig.ProviderConfiguration{Instance: providerconfig.ProviderInstance{
+		ID: instanceID, DefinitionID: definition.ID, Handle: input.Handle, DisplayName: input.DisplayName,
+		Status: providerconfig.LifecycleDraft, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now,
+	}}
+	for _, channelID := range definition.ChannelIDs() {
+		endpointID, errEndpointID := generateID("ep_")
+		if errEndpointID != nil {
+			return providerconfig.ProviderConfiguration{}, errEndpointID
+		}
+		configuration.Endpoints = append(configuration.Endpoints, providerconfig.Endpoint{
+			ID: endpointID, ProviderInstanceID: instanceID, ChannelID: channelID, BaseURL: baseURL,
+			Region: region, Parameters: append([]providerconfig.EndpointParameterValue(nil), parameters...), Status: providerconfig.EndpointReady, Revision: 1,
+		})
+	}
+	if errValidate := providerconfig.ValidateProviderConfiguration(configuration, definition); errValidate != nil {
+		return providerconfig.ProviderConfiguration{}, errValidate
+	}
+	return configuration, nil
 }
 
 // CreateInstance persists one provider instance in draft state.
@@ -1064,6 +1585,15 @@ type AddCredentialInput struct {
 	// ScopeRefs lists shared commercial and organizational scopes.
 	// ScopeRefs 列出共享商业与组织作用域。
 	ScopeRefs []providerconfig.ScopeReference
+	// Priority orders this account within the provider instance.
+	// Priority 在供应商实例内排列该账号。
+	Priority int
+	// PlanOptionID selects one code-owned manual plan when the authentication method requires it.
+	// PlanOptionID 在认证方式要求时选择一个代码拥有的人工套餐。
+	PlanOptionID string
+	// ExpiresAt is accepted only from a server-owned provider authorization workflow.
+	// ExpiresAt 仅接受由服务端拥有的供应商授权流程提供的值。
+	ExpiresAt *time.Time
 	// Secret contains transient credential bytes and is never persisted in configuration storage.
 	// Secret 包含临时凭据字节且绝不持久化到配置存储。
 	Secret []byte
@@ -1072,7 +1602,20 @@ type AddCredentialInput struct {
 // AddCredential stores a secret first and compensates it if metadata persistence fails.
 // AddCredential 先保存 Secret，并在元数据持久化失败时进行补偿删除。
 func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (providerconfig.Credential, error) {
-	if errAuth := s.validateDirectSecretAuthMethod(ctx, input.ProviderInstanceID, input.AuthMethodID); errAuth != nil {
+	return s.addCredential(ctx, input, false)
+}
+
+// addCredential persists credential metadata after enforcing either direct or provider-owned acquisition boundaries.
+// addCredential 在强制执行直接或供应商拥有的获取边界后持久化凭据元数据。
+func (s *Service) addCredential(ctx context.Context, input AddCredentialInput, providerOwned bool) (providerconfig.Credential, error) {
+	if !providerOwned {
+		if input.ExpiresAt != nil {
+			return providerconfig.Credential{}, errors.New("direct credentials cannot declare provider-owned expiry metadata")
+		}
+		if errAuth := s.validateDirectSecretAuthMethod(ctx, input.ProviderInstanceID, input.AuthMethodID); errAuth != nil {
+			return providerconfig.Credential{}, errAuth
+		}
+	} else if errAuth := s.validateProviderOwnedAuthMethod(ctx, input.ProviderInstanceID, input.AuthMethodID); errAuth != nil {
 		return providerconfig.Credential{}, errAuth
 	}
 	if len(input.Secret) == 0 {
@@ -1090,6 +1633,13 @@ func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (
 	if errSecret != nil {
 		return providerconfig.Credential{}, errSecret
 	}
+	declaredPlan, errPlan := s.declaredPlanForCredential(ctx, input.ProviderInstanceID, input.AuthMethodID, input.PlanOptionID)
+	if errPlan != nil {
+		if errDelete := s.secrets.Delete(context.WithoutCancel(ctx), secretReference); errDelete != nil {
+			return providerconfig.Credential{}, fmt.Errorf("validate credential plan: %v; compensate secret: %w", errPlan, errDelete)
+		}
+		return providerconfig.Credential{}, errPlan
+	}
 	credential := providerconfig.Credential{
 		ID:                 credentialID,
 		ProviderInstanceID: input.ProviderInstanceID,
@@ -1100,6 +1650,9 @@ func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (
 		Fingerprint:        credentialFingerprint(input.Secret),
 		Status:             providerconfig.CredentialActive,
 		ScopeRefs:          append([]providerconfig.ScopeReference(nil), input.ScopeRefs...),
+		Priority:           input.Priority,
+		DeclaredPlan:       declaredPlan,
+		ExpiresAt:          input.ExpiresAt,
 		Revision:           1,
 	}
 	if errSave := s.configurations.SaveCredential(ctx, credential); errSave != nil {
@@ -1109,6 +1662,290 @@ func (s *Service) AddCredential(ctx context.Context, input AddCredentialInput) (
 		return providerconfig.Credential{}, errSave
 	}
 	return credential, nil
+}
+
+// CredentialAttachment contains one newly attached credential and every generated endpoint binding.
+// CredentialAttachment 包含一个新附加的凭据及其全部生成的入口绑定。
+type CredentialAttachment struct {
+	// Credential is the newly persisted non-secret credential metadata.
+	// Credential 是新持久化的非秘密凭据元数据。
+	Credential providerconfig.Credential
+	// Bindings closes every definition-authorized endpoint path for the credential.
+	// Bindings 为该凭据闭合全部定义允许的入口路径。
+	Bindings []providerconfig.AccessBinding
+}
+
+// AttachCredential adds one direct-secret credential to an existing provider configuration and activates its access graph.
+// AttachCredential 向既有供应商配置添加一个直接 Secret 凭据并激活其访问图。
+func (s *Service) AttachCredential(ctx context.Context, input AddCredentialInput) (CredentialAttachment, error) {
+	return s.attachCredential(ctx, input, false)
+}
+
+// attachCredential closes one credential access graph after its acquisition boundary has been selected explicitly.
+// attachCredential 在显式选择凭据获取边界后闭合一个凭据访问图。
+func (s *Service) attachCredential(ctx context.Context, input AddCredentialInput, providerOwned bool) (CredentialAttachment, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, input.ProviderInstanceID)
+	if errInstance != nil {
+		return CredentialAttachment{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return CredentialAttachment{}, errDefinition
+	}
+	endpoints, errEndpoints := s.configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return CredentialAttachment{}, errEndpoints
+	}
+	if len(endpoints) == 0 {
+		return CredentialAttachment{}, fmt.Errorf("%w: provider configuration has no endpoint", ErrConfigurationIncomplete)
+	}
+	expectedBindings, errBindings := s.configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return CredentialAttachment{}, errBindings
+	}
+	originalSnapshot, errSnapshot := s.catalogs.Get(ctx, instance.ID)
+	if errSnapshot != nil {
+		return CredentialAttachment{}, errSnapshot
+	}
+	credential, errCredential := s.addCredential(ctx, input, providerOwned)
+	if errCredential != nil {
+		return CredentialAttachment{}, errCredential
+	}
+	bindings := make([]providerconfig.AccessBinding, 0, len(endpoints))
+	for _, endpoint := range endpoints {
+		if !definition.ChannelAllowsAuth(endpoint.ChannelID, credential.AuthMethodID) {
+			continue
+		}
+		bindingID, errBindingID := generateID("bind_")
+		if errBindingID != nil {
+			return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errBindingID)
+		}
+		bindings = append(bindings, providerconfig.AccessBinding{
+			ID: bindingID, ProviderInstanceID: instance.ID, ChannelID: endpoint.ChannelID, EndpointID: endpoint.ID,
+			CredentialID: credential.ID, Priority: definition.Priority, Enabled: true, Revision: 1,
+		})
+	}
+	if len(bindings) == 0 {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errors.New("credential authentication method is not allowed by any configured channel"))
+	}
+	replacement := providerconfig.AccessGraphReplacement{
+		ProviderInstanceID: instance.ID, ExpectedEndpoints: endpoints, ExpectedBindings: expectedBindings,
+		Endpoints: endpoints, Bindings: append(append([]providerconfig.AccessBinding(nil), expectedBindings...), bindings...),
+	}
+	if errReplace := s.configurations.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errReplace)
+	}
+	updatedSnapshot, errUpdatedSnapshot := s.catalogs.Get(ctx, instance.ID)
+	if errUpdatedSnapshot != nil {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errUpdatedSnapshot)
+	}
+	mutationTime := s.now().UTC()
+	updatedSnapshot.Revision++
+	updatedSnapshot.ObservedAt = mutationTime
+	updatedSnapshot.Pools = nil
+	if definition.ID == "system_kimi_coding_plan" && credential.DeclaredPlan != nil {
+		updatedSnapshot, errUpdatedSnapshot = providerkimi.ApplyDeclaredMembership(updatedSnapshot, credential)
+		if errUpdatedSnapshot != nil {
+			return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errUpdatedSnapshot)
+		}
+	}
+	if definition.DriverID == "codex" && providerOwned {
+		metadata, errMetadata := provideropenai.CodexCredentialMetadataFromToken(input.Secret, instance, credential, mutationTime)
+		if errMetadata != nil {
+			return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errMetadata)
+		}
+		if metadata.Plan == nil {
+			return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errors.New("Codex credential metadata omitted its plan"))
+		}
+		updatedSnapshot.Plans = append(updatedSnapshot.Plans, *metadata.Plan)
+		updatedSnapshot.Entitlements = append(updatedSnapshot.Entitlements, metadata.Entitlements...)
+	}
+	resolver, errResolver := resolve.New(s.configurations, s.catalogs)
+	if errResolver != nil {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errResolver)
+	}
+	pools, errPools := resolver.SummarizeSnapshot(ctx, updatedSnapshot, mutationTime, updatedSnapshot.Revision)
+	if errPools != nil {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errPools)
+	}
+	updatedSnapshot.Pools = pools
+	if errSaveCatalog := s.catalogs.Save(ctx, updatedSnapshot); errSaveCatalog != nil {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errSaveCatalog)
+	}
+	if _, errActivate := s.ActivateInstance(ctx, instance.ID); errActivate != nil {
+		return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errActivate)
+	}
+	return CredentialAttachment{Credential: credential, Bindings: bindings}, nil
+}
+
+// AttachAcquiredCredentialInput contains provider-owned credential material and its exact existing instance target.
+// AttachAcquiredCredentialInput 包含供应商拥有的凭据材料及其精确既有实例目标。
+type AttachAcquiredCredentialInput struct {
+	// ProviderInstanceID identifies the existing provider configuration.
+	// ProviderInstanceID 标识既有供应商配置。
+	ProviderInstanceID string
+	// AuthMethodID identifies the completed definition-owned authorization method.
+	// AuthMethodID 标识已完成的定义拥有授权方式。
+	AuthMethodID string
+	// Label is used only when the provider does not expose a safe account label.
+	// Label 仅在供应商不提供安全账号标签时使用。
+	Label string
+	// Secret contains transient server-acquired credential material.
+	// Secret 包含临时的服务端获取凭据材料。
+	Secret []byte
+}
+
+// AttachAcquiredCredential derives provider identity from protected material and attaches it to an existing instance.
+// AttachAcquiredCredential 从受保护材料派生供应商身份并将其附加到既有实例。
+func (s *Service) AttachAcquiredCredential(ctx context.Context, input AttachAcquiredCredentialInput) (CredentialAttachment, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, input.ProviderInstanceID)
+	if errInstance != nil {
+		return CredentialAttachment{}, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return CredentialAttachment{}, errDefinition
+	}
+	credentialInput := AddCredentialInput{ProviderInstanceID: instance.ID, AuthMethodID: input.AuthMethodID, Label: strings.TrimSpace(input.Label), Secret: input.Secret}
+	switch definition.DriverID {
+	case "kimi":
+		token, errToken := providerkimi.UnmarshalToken(input.Secret)
+		if errToken != nil {
+			return CredentialAttachment{}, errToken
+		}
+		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "xai":
+		token, errToken := providerxai.UnmarshalToken(input.Secret)
+		if errToken != nil {
+			return CredentialAttachment{}, errToken
+		}
+		credentialInput.PrincipalKey = token.Subject
+		if credentialInput.PrincipalKey == "" {
+			credentialInput.PrincipalKey = token.Email
+		}
+		if token.Email != "" {
+			credentialInput.Label = token.Email
+		} else if credentialInput.Label == "" {
+			credentialInput.Label = token.Subject
+		}
+		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "codex":
+		token, errToken := provideropenai.UnmarshalCodexToken(input.Secret)
+		if errToken != nil {
+			return CredentialAttachment{}, errToken
+		}
+		if strings.TrimSpace(token.AccountID) == "" {
+			return CredentialAttachment{}, errors.New("Codex account credential requires the provider-reported account ID")
+		}
+		credentialInput.PrincipalKey = token.AccountID
+		credentialInput.ScopeRefs = []providerconfig.ScopeReference{{Kind: "account", ID: token.AccountID}}
+		credentialInput.Label = token.Email
+		if credentialInput.Label == "" {
+			credentialInput.Label = token.AccountID
+		}
+		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt.Unix())
+	case "claude":
+		token, errToken := provideranthropic.UnmarshalClaudeToken(input.Secret)
+		if errToken != nil {
+			return CredentialAttachment{}, errToken
+		}
+		credentialInput.PrincipalKey = token.AccountID
+		if credentialInput.PrincipalKey == "" {
+			credentialInput.PrincipalKey = token.Email
+		}
+		if token.OrganizationID != "" {
+			credentialInput.ScopeRefs = []providerconfig.ScopeReference{{Kind: string(catalog.ScopeOrganization), ID: token.OrganizationID}}
+		}
+		credentialInput.Label = token.Email
+		if credentialInput.Label == "" {
+			credentialInput.Label = token.AccountID
+		}
+		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "antigravity":
+		token, errToken := providergoogle.UnmarshalAntigravityToken(input.Secret)
+		if errToken != nil {
+			return CredentialAttachment{}, errToken
+		}
+		credentialInput.PrincipalKey = token.Email
+		credentialInput.ScopeRefs = []providerconfig.ScopeReference{{Kind: "project", ID: token.ProjectID}}
+		credentialInput.Label = token.Email
+		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "vertex":
+		credential, errCredential := providergoogle.UnmarshalVertexCredential(input.Secret)
+		if errCredential != nil {
+			return CredentialAttachment{}, errCredential
+		}
+		endpoints, errEndpoints := s.configurations.ListEndpoints(ctx, instance.ID)
+		if errEndpoints != nil {
+			return CredentialAttachment{}, errEndpoints
+		}
+		if len(endpoints) != 1 || endpoints[0].Region != credential.Location || endpoints[0].BaseURL != providergoogle.VertexBaseURL(credential.Location) {
+			return CredentialAttachment{}, errors.New("Vertex credential location does not match the configured provider endpoint")
+		}
+		credentialInput.PrincipalKey = credential.Email
+		credentialInput.ScopeRefs = []providerconfig.ScopeReference{{Kind: "project", ID: credential.ProjectID}}
+		credentialInput.Label = credential.Email
+	default:
+		return CredentialAttachment{}, errors.New("provider-owned credential attachment is not registered for this provider")
+	}
+	if strings.TrimSpace(credentialInput.Label) == "" {
+		credentialInput.Label = instance.DisplayName
+	}
+	return s.attachCredential(ctx, credentialInput, true)
+}
+
+// declaredPlanForCredential validates one manual plan selection against the exact instance authentication method.
+// declaredPlanForCredential 根据精确实例认证方式校验一个人工套餐选择。
+func (s *Service) declaredPlanForCredential(ctx context.Context, instanceID string, authMethodID string, planOptionID string) (*providerconfig.DeclaredPlanSelection, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return nil, errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return nil, errDefinition
+	}
+	authMethod, exists := definition.AuthMethod(authMethodID)
+	if !exists {
+		return nil, errors.New("credential authentication method is not declared by its provider definition")
+	}
+	acquisition := authMethod.PlanAcquisition
+	if acquisition == "" {
+		acquisition = providerconfig.PlanAcquisitionUnavailable
+	}
+	planOptionID = strings.TrimSpace(planOptionID)
+	if planOptionID == "" {
+		if acquisition == providerconfig.PlanAcquisitionManualRequired {
+			return nil, errors.New("credential authentication method requires a manual plan selection")
+		}
+		return nil, nil
+	}
+	if acquisition != providerconfig.PlanAcquisitionManualRequired && acquisition != providerconfig.PlanAcquisitionManualOptional {
+		return nil, errors.New("credential authentication method does not accept a manual plan selection")
+	}
+	planOption, planExists := definition.PlanOption(planOptionID)
+	if !planExists || !planOption.ManuallySelectable || !definition.AuthMethodAllowsPlan(authMethod.ID, planOptionID) {
+		return nil, errors.New("credential plan option is not valid for its authentication method")
+	}
+	return &providerconfig.DeclaredPlanSelection{PlanOptionID: planOptionID, DeclaredAt: s.now().UTC(), Revision: 1}, nil
+}
+
+// compensateCredentialAttachment removes a partially attached credential and restores the previous catalog content at a newer revision.
+// compensateCredentialAttachment 删除部分附加的凭据，并以更高修订恢复先前目录内容。
+func (s *Service) compensateCredentialAttachment(ctx context.Context, instance providerconfig.ProviderInstance, credential providerconfig.Credential, originalSnapshot catalog.Snapshot, cause error) error {
+	compensationContext := context.WithoutCancel(ctx)
+	_, errDelete := s.DeleteCredential(compensationContext, instance.ID, credential.ID)
+	currentSnapshot, errCurrent := s.catalogs.Get(compensationContext, instance.ID)
+	var errCatalog error
+	if errCurrent == nil && currentSnapshot.Revision > originalSnapshot.Revision {
+		originalSnapshot.Revision = currentSnapshot.Revision + 1
+		originalSnapshot.ObservedAt = s.now().UTC()
+		errCatalog = s.catalogs.Save(compensationContext, originalSnapshot)
+	}
+	if errDelete != nil || (errCurrent != nil && !errors.Is(errCurrent, catalog.ErrSnapshotNotFound)) || errCatalog != nil {
+		return fmt.Errorf("attach credential: %w; compensate credential: %v; inspect catalog: %v; compensate catalog: %v", cause, errDelete, errCurrent, errCatalog)
+	}
+	return cause
 }
 
 // UpdateCredentialInput contains editable non-secret fields of one existing credential.
@@ -1340,23 +2177,82 @@ func (s *Service) ReauthorizeCredential(ctx context.Context, input ReauthorizeCr
 	return persistCredentialSecretReplacement(ctx, s.configurations, s.secrets, credential, input.Secret)
 }
 
-// DeleteCredential removes one credential graph and its protected secret, deleting an empty instance catalog.
-// DeleteCredential 删除一个凭据图及其受保护 Secret，并删除空实例目录。
+// DeleteCredential removes one credential graph and its protected secret while retaining provider configuration and catalog state.
+// DeleteCredential 删除一个凭据图及其受保护 Secret，同时保留供应商配置与目录状态。
 func (s *Service) DeleteCredential(ctx context.Context, providerInstanceID string, credentialID string) (providerconfig.CredentialDeletion, error) {
+	instance, errInstance := s.configurations.GetInstance(ctx, providerInstanceID)
+	if errInstance != nil {
+		return providerconfig.CredentialDeletion{}, errInstance
+	}
+	bindings, errBindings := s.configurations.ListBindings(ctx, providerInstanceID)
+	if errBindings != nil {
+		return providerconfig.CredentialDeletion{}, errBindings
+	}
+	credentialBindings := make([]providerconfig.AccessBinding, 0)
+	for _, binding := range bindings {
+		if binding.CredentialID == credentialID {
+			credentialBindings = append(credentialBindings, binding)
+		}
+	}
+	snapshot, errSnapshot := s.catalogs.Get(ctx, providerInstanceID)
+	if errSnapshot != nil && !errors.Is(errSnapshot, catalog.ErrSnapshotNotFound) {
+		return providerconfig.CredentialDeletion{}, errSnapshot
+	}
 	deletion, errDelete := s.configurations.DeleteCredentialGraph(ctx, providerInstanceID, credentialID)
 	if errDelete != nil {
 		return providerconfig.CredentialDeletion{}, errDelete
 	}
-	cleanupContext := context.WithoutCancel(ctx)
-	if deletion.InstanceDeleted {
-		if errCatalog := s.catalogs.Delete(cleanupContext, providerInstanceID); errCatalog != nil && !errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
-			return deletion, fmt.Errorf("deleted credential configuration but could not delete provider catalog: %w", errCatalog)
+	if errSnapshot == nil {
+		mutationTime := s.now().UTC()
+		updatedSnapshot := removeCredentialCommercialMetadata(snapshot, credentialID)
+		updatedSnapshot.Revision++
+		updatedSnapshot.ObservedAt = mutationTime
+		updatedSnapshot.Pools = nil
+		resolver, errResolver := resolve.New(s.configurations, s.catalogs)
+		if errResolver == nil {
+			updatedSnapshot.Pools, errResolver = resolver.SummarizeSnapshot(ctx, updatedSnapshot, mutationTime, updatedSnapshot.Revision)
+		}
+		if errResolver == nil {
+			errResolver = s.catalogs.Save(ctx, updatedSnapshot)
+		}
+		if errResolver != nil {
+			errRestore := s.restoreDeletedCredentialConfiguration(context.WithoutCancel(ctx), instance, deletion.Credential, credentialBindings)
+			if errRestore != nil {
+				return deletion, fmt.Errorf("update credential-deletion catalog: %v; restore configuration: %w", errResolver, errRestore)
+			}
+			return deletion, errResolver
 		}
 	}
+	cleanupContext := context.WithoutCancel(ctx)
 	if errSecret := s.secrets.Delete(cleanupContext, deletion.Credential.SecretRef); errSecret != nil {
 		return deletion, fmt.Errorf("deleted credential configuration but could not delete protected secret: %w", errSecret)
 	}
 	return deletion, nil
+}
+
+// restoreDeletedCredentialConfiguration restores one credential graph after catalog mutation failure.
+// restoreDeletedCredentialConfiguration 在目录变更失败后恢复一个凭据图。
+func (s *Service) restoreDeletedCredentialConfiguration(ctx context.Context, originalInstance providerconfig.ProviderInstance, credential providerconfig.Credential, bindings []providerconfig.AccessBinding) error {
+	currentInstance, errCurrent := s.configurations.GetInstance(ctx, originalInstance.ID)
+	if errCurrent != nil {
+		return errCurrent
+	}
+	if errCredential := s.configurations.SaveCredential(ctx, credential); errCredential != nil {
+		return errCredential
+	}
+	for _, binding := range bindings {
+		if errBinding := s.configurations.SaveBinding(ctx, binding); errBinding != nil {
+			return errBinding
+		}
+	}
+	if currentInstance.Status != originalInstance.Status {
+		originalInstance.Revision = currentInstance.Revision + 1
+		originalInstance.UpdatedAt = s.now().UTC()
+		if errInstance := s.configurations.SaveInstance(ctx, originalInstance); errInstance != nil {
+			return errInstance
+		}
+	}
+	return nil
 }
 
 // validateDirectSecretAuthMethod permits operator-supplied bytes only for operator-managed authentication methods declared by the exact instance definition.
@@ -1376,6 +2272,24 @@ func (s *Service) validateDirectSecretAuthMethod(ctx context.Context, instanceID
 	}
 	if providerOwnsCredentialMaterial(authMethod.Type) {
 		return fmt.Errorf("provider-owned credentials require their server-owned authorization workflow")
+	}
+	return nil
+}
+
+// validateProviderOwnedAuthMethod permits only interactive or service-account methods completed by server-owned workflows.
+// validateProviderOwnedAuthMethod 仅允许由服务端拥有流程完成的交互式或服务账号认证方式。
+func (s *Service) validateProviderOwnedAuthMethod(ctx context.Context, instanceID string, authMethodID string) error {
+	instance, errInstance := s.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return errInstance
+	}
+	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return errDefinition
+	}
+	authMethod, exists := definition.AuthMethod(authMethodID)
+	if !exists || !providerOwnsCredentialMaterial(authMethod.Type) {
+		return errors.New("provider-owned credential requires a definition-owned interactive or service-account authentication method")
 	}
 	return nil
 }

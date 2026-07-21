@@ -30,13 +30,7 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
-import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
+import { ReadonlyCombobox } from "@/components/ui/readonly-combobox";
 import {
   Dialog,
   DialogClose,
@@ -60,6 +54,7 @@ import {
   cancelKimiDeviceFlow,
   cancelCodexDeviceFlow,
   cancelXAIDeviceFlow,
+  attachProviderCredential,
   deleteProviderCredential,
   fetchAuthorizedProviders,
   fetchCustomProtocolProfiles,
@@ -110,6 +105,9 @@ interface ProviderManagementPageProps {
   // managementAuthToken is the active in-memory management credential.
   // managementAuthToken 是当前内存管理凭证。
   managementAuthToken: string;
+  // mode preserves the legacy onboarding-catalog test surface while the credential route selects the separated workspace.
+  // mode 保留旧录入目录测试表面，同时允许凭据路由选择拆分后的工作区。
+  mode?: "provider" | "credential";
 }
 
 // CredentialReauthorizationSelection binds one local credential to its immutable provider definition.
@@ -123,12 +121,24 @@ interface CredentialReauthorizationSelection {
   credential: ProviderCredential;
 }
 
+// CredentialAttachmentSelection identifies an existing provider configuration receiving a new credential.
+// CredentialAttachmentSelection 标识接收新凭据的既有供应商配置。
+interface CredentialAttachmentSelection {
+  // providerInstanceID is the credential-independent provider configuration root.
+  // providerInstanceID 是独立于凭据的供应商配置根。
+  providerInstanceID: string;
+}
+
 // ProviderManagementPage renders grouped system providers and exact site or plan selection.
 // ProviderManagementPage 渲染已分组系统供应商及精确站点或套餐选择。
 export function ProviderManagementPage({
   managementAuthToken,
+  mode = "provider",
 }: ProviderManagementPageProps) {
   const { t } = useI18n();
+  // credentialMode enables the separated provider-tree and credential-card workspace.
+  // credentialMode 启用拆分后的供应商树与凭据卡片工作区。
+  const credentialMode = mode === "credential";
   // groups contains the authenticated management catalog returned by the core service.
   // groups 包含核心服务返回的已认证管理目录。
   const [groups, setGroups] = useState<ProviderGroup[]>([]);
@@ -142,11 +152,15 @@ export function ProviderManagementPage({
   const [customProtocolProfiles, setCustomProtocolProfiles] = useState<
     CustomProtocolProfile[]
   >([]);
-  // authorizedProviders contains only configured instances with at least one redacted credential.
-  // authorizedProviders 仅包含至少拥有一个脱敏凭据的已配置实例。
+  // authorizedProviders contains every configured instance and its redacted credential list.
+  // authorizedProviders 包含每个已配置实例及其脱敏凭据列表。
   const [authorizedProviders, setAuthorizedProviders] = useState<
     AuthorizedProvider[]
   >([]);
+  // selectedProviderInstanceID identifies the provider shown in the right-side credential workspace.
+  // selectedProviderInstanceID 标识右侧凭据工作区显示的供应商。
+  const [selectedProviderInstanceID, setSelectedProviderInstanceID] =
+    useState("");
   // adding reports whether the explicit two-level provider creation workflow is open.
   // adding 表示显式的两级供应商新增流程是否打开。
   const [adding, setAdding] = useState(false);
@@ -206,6 +220,10 @@ export function ProviderManagementPage({
   // reauthorizationTarget 标识通过新增 Dialog 外壳进行替换的既有凭据。
   const [reauthorizationTarget, setReauthorizationTarget] =
     useState<CredentialReauthorizationSelection | null>(null);
+  // attachmentTarget identifies an existing provider configuration receiving a new credential.
+  // attachmentTarget 标识接收新凭据的既有供应商配置。
+  const [attachmentTarget, setAttachmentTarget] =
+    useState<CredentialAttachmentSelection | null>(null);
   // deletingCredentialIDs prevents duplicate destructive requests.
   // deletingCredentialIDs 防止重复的破坏性请求。
   const [deletingCredentialIDs, setDeletingCredentialIDs] = useState<
@@ -240,6 +258,13 @@ export function ProviderManagementPage({
         }
         if (configuredProvidersResult.status === "fulfilled") {
           setAuthorizedProviders(configuredProvidersResult.value);
+          setSelectedProviderInstanceID((current) =>
+            configuredProvidersResult.value.some(
+              (provider) => provider.instance.id === current,
+            )
+              ? current
+              : (configuredProvidersResult.value[0]?.instance.id ?? ""),
+          );
         } else {
           setAuthorizedFailed(true);
         }
@@ -274,6 +299,11 @@ export function ProviderManagementPage({
     .flatMap((group) => group.provider_definitions)
     .find((definition) => definition.id === selectedDefinitionID) ??
     definitions.find((definition) => definition.id === selectedDefinitionID);
+  // selectedAuthorizedProvider is the exact provider instance selected in the credential tree.
+  // selectedAuthorizedProvider 是凭据树中选择的精确供应商实例。
+  const selectedAuthorizedProvider = authorizedProviders.find(
+    (provider) => provider.instance.id === selectedProviderInstanceID,
+  );
   // normalizedSearch is compared only with locale-neutral provider identifiers and authored names.
   // normalizedSearch 仅与区域无关的供应商标识和编写名称比较。
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
@@ -303,6 +333,18 @@ export function ProviderManagementPage({
     setSelectedDefinitionID("");
     setConfiguringCustom(false);
     setReauthorizationTarget(null);
+    setAttachmentTarget(null);
+  }
+
+  // beginCredentialAttachment opens the authorization workflow for the selected existing provider configuration.
+  // beginCredentialAttachment 为所选既有供应商配置打开授权流程。
+  function beginCredentialAttachment(): void {
+    if (!selectedAuthorizedProvider) return;
+    setAttachmentTarget({
+      providerInstanceID: selectedAuthorizedProvider.instance.id,
+    });
+    setSelectedDefinitionID(selectedAuthorizedProvider.instance.definition_id);
+    setAdding(true);
   }
 
   // beginCredentialReauthorization opens the exact provider workflow for one existing credential.
@@ -313,6 +355,7 @@ export function ProviderManagementPage({
     credential: ProviderCredential,
   ) {
     setReauthorizationTarget({ providerInstanceID, credential });
+    setAttachmentTarget(null);
     setSelectedDefinitionID(definitionID);
     setAdding(true);
   }
@@ -498,21 +541,62 @@ export function ProviderManagementPage({
     setRefreshRevision((revision) => revision + 1);
   }
 
+  // renderAuthorizedProviderCard binds one exact provider instance to shared credential operations.
+  // renderAuthorizedProviderCard 将一个精确供应商实例绑定到共用凭据操作。
+  function renderAuthorizedProviderCard(provider: AuthorizedProvider) {
+    const definition =
+      definitions.find(
+        (candidate) => candidate.id === provider.instance.definition_id,
+      ) ??
+      groups
+        .flatMap((group) => group.provider_definitions)
+        .find((candidate) => candidate.id === provider.instance.definition_id);
+    return (
+      <AuthorizedProviderCard
+        key={provider.instance.id}
+        provider={provider}
+        definition={definition}
+        metadata={providerMetadata[provider.instance.id]}
+        refreshingMetadata={refreshingMetadataIDs.has(provider.instance.id)}
+        metadataErrorCode={metadataErrors[provider.instance.id]}
+        onRefreshMetadata={refreshAccountMetadata}
+        refreshingCredentialIDs={refreshingCredentialIDs}
+        credentialRefreshErrors={credentialRefreshErrors}
+        onRefreshCredential={refreshAccountCredential}
+        onChangeRouting={changeProviderRouting}
+        onChangeCredentialPriority={changeCredentialPriority}
+        onChangeCredentialPlan={changeCredentialPlan}
+        onReauthorizeCredential={beginCredentialReauthorization}
+        onDeleteCredential={deleteCredential}
+        deletingCredentialIDs={deletingCredentialIDs}
+      />
+    );
+  }
+
   return (
     <div className="flex flex-col gap-6 p-4 lg:p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
         <div>
           <h2 className="text-2xl font-semibold tracking-tight">
-            {t("providers.title")}
+            {t(credentialMode ? "credentials.title" : "providers.title")}
           </h2>
           <p className="text-muted-foreground mt-1 text-sm">
             {t("providers.authorizedDescription")}
           </p>
         </div>
-        {!adding && !loading && !catalogFailed ? (
-          <Button onClick={() => setAdding(true)}>
+        {!adding &&
+        !loading &&
+        !catalogFailed &&
+        (!credentialMode || selectedAuthorizedProvider) ? (
+          <Button
+            onClick={
+              credentialMode
+                ? beginCredentialAttachment
+                : () => setAdding(true)
+            }
+          >
             <PlusIcon className="size-4" />
-            {t("providers.add")}
+            {t(credentialMode ? "providers.addCredential" : "providers.add")}
           </Button>
         ) : null}
       </div>
@@ -535,41 +619,37 @@ export function ProviderManagementPage({
 
       {!loading && !authorizedFailed ? (
         authorizedProviders.length > 0 ? (
-          <div className="grid gap-4 lg:grid-cols-2">
-            {authorizedProviders.map((provider) => (
-              <AuthorizedProviderCard
-                key={provider.instance.id}
-                provider={provider}
-                definition={
-                  definitions.find(
-                    (candidate) =>
-                      candidate.id === provider.instance.definition_id,
-                  ) ??
-                  groups
-                    .flatMap((group) => group.provider_definitions)
-                    .find(
-                      (candidate) =>
-                        candidate.id === provider.instance.definition_id,
-                    )
-                }
-                metadata={providerMetadata[provider.instance.id]}
-                refreshingMetadata={refreshingMetadataIDs.has(
-                  provider.instance.id,
-                )}
-                metadataErrorCode={metadataErrors[provider.instance.id]}
-                onRefreshMetadata={refreshAccountMetadata}
-                refreshingCredentialIDs={refreshingCredentialIDs}
-                credentialRefreshErrors={credentialRefreshErrors}
-                onRefreshCredential={refreshAccountCredential}
-                onChangeRouting={changeProviderRouting}
-                onChangeCredentialPriority={changeCredentialPriority}
-                onChangeCredentialPlan={changeCredentialPlan}
-                onReauthorizeCredential={beginCredentialReauthorization}
-                onDeleteCredential={deleteCredential}
-                deletingCredentialIDs={deletingCredentialIDs}
-              />
-            ))}
-          </div>
+          credentialMode && selectedAuthorizedProvider ? (
+            <div className="grid min-h-[32rem] overflow-hidden rounded-xl border lg:grid-cols-[16rem_minmax(0,1fr)]">
+              <aside className="border-b bg-muted/20 p-2 lg:border-b-0 lg:border-r">
+                <div className="space-y-1" role="tree" aria-label={t("credentials.title")}>
+                  {authorizedProviders.map((provider) => (
+                    <button
+                      key={provider.instance.id}
+                      type="button"
+                      role="treeitem"
+                      aria-selected={provider.instance.id === selectedProviderInstanceID}
+                      className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${provider.instance.id === selectedProviderInstanceID ? "bg-foreground text-background" : "hover:bg-muted"}`}
+                      onClick={() => setSelectedProviderInstanceID(provider.instance.id)}
+                    >
+                      <span className="min-w-0">
+                        <span className="block truncate font-medium">{provider.instance.display_name}</span>
+                        <span className="block truncate text-xs opacity-70">{provider.instance.handle}</span>
+                      </span>
+                      <Badge variant="secondary">{provider.credentials.length}</Badge>
+                    </button>
+                  ))}
+                </div>
+              </aside>
+              <main className="p-3 lg:p-4">
+                {renderAuthorizedProviderCard(selectedAuthorizedProvider)}
+              </main>
+            </div>
+          ) : (
+            <div className="grid gap-4 lg:grid-cols-2">
+              {authorizedProviders.map(renderAuthorizedProviderCard)}
+            </div>
+          )
         ) : (
           <Card>
             <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
@@ -590,7 +670,9 @@ export function ProviderManagementPage({
         {!catalogFailed ? (
           <DialogContent className="h-[min(80vh,600px)] max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
             <DialogHeader>
-              {selectedDefinition || configuringCustom ? (
+              {(selectedDefinition || configuringCustom) &&
+              !attachmentTarget &&
+              !reauthorizationTarget ? (
                 <Button
                   type="button"
                   variant="ghost"
@@ -605,6 +687,8 @@ export function ProviderManagementPage({
                 <DialogTitle>
                   {reauthorizationTarget
                     ? t("providers.reauthorizeCredential")
+                    : attachmentTarget
+                      ? t("providers.addCredential")
                     : selectedDefinition || configuringCustom
                     ? t("providers.configureProvider")
                     : t("providers.add")}
@@ -686,6 +770,7 @@ export function ProviderManagementPage({
                     managementAuthToken={managementAuthToken}
                     onComplete={completeOnboarding}
                     reauthorizationTarget={reauthorizationTarget}
+                    attachmentTarget={attachmentTarget}
                   />
                 ) : null}
               </div>
@@ -1145,7 +1230,7 @@ function AuthorizedProviderCard({
               {t("providers.routingStrategyHelp")}
             </p>
           </div>
-          <Select
+          <ReadonlyCombobox
             value={provider.instance.routing_strategy || "inherit"}
             disabled={routingMutationPending}
             onValueChange={(value) => {
@@ -1164,16 +1249,13 @@ function AuthorizedProviderCard({
                 .catch(() => setRoutingMutationFailed(true))
                 .finally(() => setRoutingMutationPending(false));
             }}
-          >
-            <SelectTrigger className="w-full">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="inherit">{t("providers.routingInherit")}</SelectItem>
-              <SelectItem value="round_robin">{t("settings.roundRobin")}</SelectItem>
-              <SelectItem value="fill_first">{t("settings.fillFirst")}</SelectItem>
-            </SelectContent>
-          </Select>
+            options={[
+              { value: "inherit", label: t("providers.routingInherit") },
+              { value: "round_robin", label: t("settings.roundRobin") },
+              { value: "fill_first", label: t("settings.fillFirst") },
+            ]}
+            className="w-full"
+          />
         </div>
         {routingMutationFailed ? (
           <p className="text-destructive text-xs" role="alert">
@@ -1184,6 +1266,11 @@ function AuthorizedProviderCard({
           <h4 className="mb-2 text-sm font-medium">
             {t("providers.authorizations")}
           </h4>
+          {provider.credentials.length === 0 ? (
+            <div className="rounded-md border border-dashed px-3 py-6 text-center text-sm text-muted-foreground">
+              {t("providers.noCredentialsForProvider")}
+            </div>
+          ) : (
           <ul className="divide-y rounded-md border">
             {provider.credentials.map((credential) => {
               const authMethod = definition?.auth_methods.find(
@@ -1342,10 +1429,10 @@ function AuthorizedProviderCard({
                     {authMethod?.plan_acquisition === "manual_required" ? (
                       <div className="space-y-1">
                         <Label>{t("providers.membershipPlan")}</Label>
-                        <Select
+                        <ReadonlyCombobox
                           value={credential.declared_plan?.plan_option_id ?? ""}
                           onValueChange={(value) => {
-                            if (value !== null && value !== credential.declared_plan?.plan_option_id) {
+                            if (value !== credential.declared_plan?.plan_option_id) {
                               void onChangeCredentialPlan(
                                 provider.instance.id,
                                 credential.id,
@@ -1353,24 +1440,19 @@ function AuthorizedProviderCard({
                               );
                             }
                           }}
-                        >
-                          <SelectTrigger className="w-full">
-                            <SelectValue placeholder={t("providers.selectMembershipPlan")} />
-                          </SelectTrigger>
-                          <SelectContent>
-                            {(definition?.plan_options ?? [])
-                              .filter(
-                                (option) =>
-                                  option.manually_selectable &&
-                                  option.auth_method_ids.includes(credential.auth_method_id),
-                              )
-                              .map((option) => (
-                                <SelectItem key={option.id} value={option.id}>
-                                  {option.display_name}
-                                </SelectItem>
-                              ))}
-                          </SelectContent>
-                        </Select>
+                          options={(definition?.plan_options ?? [])
+                            .filter(
+                              (option) =>
+                                option.manually_selectable &&
+                                option.auth_method_ids.includes(credential.auth_method_id),
+                            )
+                            .map((option) => ({
+                              value: option.id,
+                              label: option.display_name,
+                            }))}
+                          placeholder={t("providers.selectMembershipPlan")}
+                          className="w-full"
+                        />
                       </div>
                     ) : null}
                   </div>
@@ -1386,6 +1468,7 @@ function AuthorizedProviderCard({
               );
             })}
           </ul>
+          )}
         </div>
       </CardContent>
     </Card>
@@ -1991,29 +2074,25 @@ function CustomProviderOnboardingPanel({
           <CableIcon className="size-3.5" aria-hidden="true" />
           {t("providers.protocol")}
         </Label>
-        <Select
+        <ReadonlyCombobox
           value={protocolProfileID}
           onValueChange={(value) => {
-            if (value !== null) setProtocolProfileID(value);
+            setProtocolProfileID(value);
           }}
-        >
-          <SelectTrigger id="custom-provider-protocol" className="w-full">
-            <SelectValue placeholder={t("providers.selectProtocol")} />
-          </SelectTrigger>
-          <SelectContent>
-            {profiles.map((profile) => (
-              <SelectItem key={profile.id} value={profile.id}>
-                {profile.display_name}
-              </SelectItem>
-            ))}
-          </SelectContent>
-        </Select>
+          options={profiles.map((profile) => ({
+            value: profile.id,
+            label: profile.display_name,
+          }))}
+          id="custom-provider-protocol"
+          className="w-full"
+          placeholder={t("providers.selectProtocol")}
+        />
         {selectedProfile ? (
           <p className="text-muted-foreground text-xs">
             {t("providers.authentication")}:{" "}
             {selectedProfile.allowed_auth_methods[0] === "bearer"
               ? "Bearer"
-              : "x-goog-api-key"}
+              : "x-api-key"}
           </p>
         ) : null}
       </div>
@@ -2030,7 +2109,11 @@ function CustomProviderOnboardingPanel({
           type="url"
           value={baseURL}
           onChange={(event) => setBaseURL(event.target.value)}
-          placeholder="https://api.example.com/v1"
+          placeholder={
+            protocolProfileID === "anthropic.messages"
+              ? "https://api.example.com"
+              : "https://api.example.com/v1"
+          }
           autoComplete="url"
           required
         />
@@ -2089,12 +2172,24 @@ function CustomProviderOnboardingPanel({
   );
 }
 
+// ProviderWorkflowDefinition contains the common credential contract and optional system-only presentation metadata.
+// ProviderWorkflowDefinition 包含共用凭据合同与可选的仅系统展示元数据。
+type ProviderWorkflowDefinition = ProviderDefinitionIdentity &
+  Partial<
+    Pick<
+      ProviderDefinition,
+      | "variant_description"
+      | "variant_description_key"
+      | "endpoint_presets"
+    >
+  >;
+
 // ProviderOnboardingPanelProps binds one exact definition and active management credential to its real workflow.
 // ProviderOnboardingPanelProps 将一个精确定义和当前管理凭证绑定到真实工作流。
 interface ProviderOnboardingPanelProps {
   // definition is the exact selected site or commercial plan.
   // definition 是精确选择的站点或商业套餐。
-  definition: ProviderDefinition;
+  definition: ProviderWorkflowDefinition;
   // managementAuthToken authenticates only the management-plane workflow.
   // managementAuthToken 仅认证管理面工作流。
   managementAuthToken: string;
@@ -2104,6 +2199,9 @@ interface ProviderOnboardingPanelProps {
   // reauthorizationTarget selects an existing credential instead of creating an instance.
   // reauthorizationTarget 选择一个既有凭据而不是创建实例。
   reauthorizationTarget?: CredentialReauthorizationSelection | null;
+  // attachmentTarget selects an existing provider configuration for a new credential.
+  // attachmentTarget 为新凭据选择一个既有供应商配置。
+  attachmentTarget?: CredentialAttachmentSelection | null;
 }
 
 // ProviderOnboardingPanel performs API-key, service-account, or server-confidential interactive onboarding.
@@ -2113,6 +2211,7 @@ function ProviderOnboardingPanel({
   managementAuthToken,
   onComplete,
   reauthorizationTarget,
+  attachmentTarget,
 }: ProviderOnboardingPanelProps) {
   const { t } = useI18n();
   const [authMethodID, setAuthMethodID] = useState(
@@ -2180,7 +2279,7 @@ function ProviderOnboardingPanel({
   const [secret, setSecret] = useState("");
   // endpointPreset is the exact code-owned destination selected by this definition.
   // endpointPreset 是此 Definition 选择的精确代码拥有目标。
-  const endpointPreset = definition.endpoint_presets[0];
+  const endpointPreset = definition.endpoint_presets?.[0];
   // endpointParameterValues stores only declared non-secret values keyed by their immutable identifiers.
   // endpointParameterValues 仅按不可变标识存储已声明的非秘密值。
   const [endpointParameterValues, setEndpointParameterValues] = useState<
@@ -2193,7 +2292,7 @@ function ProviderOnboardingPanel({
   // vertexLocation starts from the code-owned default and remains a normalized provider location string.
   // vertexLocation 从代码拥有的默认值开始，并始终表示规范化供应商区域字符串。
   const [vertexLocation, setVertexLocation] = useState(
-    definition.endpoint_presets[0]?.region ?? "us-central1",
+    definition.endpoint_presets?.[0]?.region ?? "us-central1",
   );
   const [deviceFlow, setDeviceFlow] = useState<KimiDeviceFlow | null>(null);
   // deviceFlowRef retains the exact unfinished session for unmount cleanup without duplicating completed cancellation.
@@ -2222,6 +2321,16 @@ function ProviderOnboardingPanel({
   const credentialWorkflowFailureKey: TranslationKey = reauthorizationTarget
     ? "providers.reauthorizationFailed"
     : "providers.onboardingFailed";
+  // authorizationTargetPayload distinguishes new-instance, existing-instance attachment, and exact credential replacement.
+  // authorizationTargetPayload 区分新实例、既有实例附加与精确凭据替换。
+  const authorizationTargetPayload = reauthorizationTarget
+    ? {
+        provider_instance_id: reauthorizationTarget.providerInstanceID,
+        credential_id: reauthorizationTarget.credential.id,
+      }
+    : attachmentTarget
+      ? { provider_instance_id: attachmentTarget.providerInstanceID }
+      : {};
 
   useEffect(() => {
     // cleanup releases the exact unfinished server session when this definition panel unmounts.
@@ -2321,12 +2430,7 @@ function ProviderOnboardingPanel({
       await onboardProviderOAuthFlow(managementAuthToken, oauthFlow.id, {
         provider_definition_id: definition.id,
         callback_url: oauthCallbackURL.trim(),
-        ...(reauthorizationTarget
-          ? {
-              provider_instance_id: reauthorizationTarget.providerInstanceID,
-              credential_id: reauthorizationTarget.credential.id,
-            }
-          : {}),
+        ...authorizationTargetPayload,
       });
       oauthFlowRef.current = null;
       setOAuthFlow(null);
@@ -2392,6 +2496,21 @@ function ProviderOnboardingPanel({
           reauthorizationTarget.credential.id,
           secret,
         );
+      } else if (attachmentTarget) {
+        await attachProviderCredential(
+          managementAuthToken,
+          attachmentTarget.providerInstanceID,
+          {
+            auth_method_id: authMethodID,
+            label: name.trim(),
+            secret,
+            ...(planOptionID &&
+            (authMethod.plan_acquisition === "manual_required" ||
+              authMethod.plan_acquisition === "manual_optional")
+              ? { plan_option_id: planOptionID }
+              : {}),
+          },
+        );
       } else {
         await onboardSystemProvider(managementAuthToken, {
           provider_definition_id: definition.id,
@@ -2447,12 +2566,7 @@ function ProviderOnboardingPanel({
         provider_definition_id: definition.id,
         location: vertexLocation.trim(),
         service_account: serviceAccount as Record<string, unknown>,
-        ...(reauthorizationTarget
-          ? {
-              provider_instance_id: reauthorizationTarget.providerInstanceID,
-              credential_id: reauthorizationTarget.credential.id,
-            }
-          : {}),
+        ...authorizationTargetPayload,
       });
       setSecret("");
       onComplete();
@@ -2515,12 +2629,7 @@ function ProviderOnboardingPanel({
       const result = await onboardFlow(managementAuthToken, deviceFlow.id, {
         provider_definition_id: definition.id,
         name: requiresOperatorName ? name.trim() : "",
-        ...(reauthorizationTarget
-          ? {
-              provider_instance_id: reauthorizationTarget.providerInstanceID,
-              credential_id: reauthorizationTarget.credential.id,
-            }
-          : {}),
+        ...authorizationTargetPayload,
       });
       if (result === null) {
         setMessageKey("providers.authorizationPending");
@@ -2617,13 +2726,13 @@ function ProviderOnboardingPanel({
         ]),
       ),
     );
-    setVertexLocation(definition.endpoint_presets[0]?.region ?? "us-central1");
+    setVertexLocation(definition.endpoint_presets?.[0]?.region ?? "us-central1");
     setMessageKey(null);
   }
 
   if (
     !authMethod ||
-    (authMethod.type !== "api_key" &&
+    (!isDirectSecretAuth &&
       authMethod.type !== "device_flow" &&
       !isBrowserOAuth &&
       !isVertexServiceAccount)
@@ -2643,7 +2752,7 @@ function ProviderOnboardingPanel({
           {localizedDescription(
             t,
             definition.variant_description_key,
-            definition.variant_description,
+            definition.variant_description ?? definition.display_name,
           )}
         </CardDescription>
       </CardHeader>
@@ -2681,7 +2790,9 @@ function ProviderOnboardingPanel({
           ) : null}
           {requiresOperatorName ? (
             <div className="space-y-2">
-              <Label htmlFor="provider-name">{t("providers.name")}</Label>
+              <Label htmlFor="provider-name">
+                {t(attachmentTarget ? "providers.credentialName" : "providers.name")}
+              </Label>
               <Input
                 id="provider-name"
                 value={name}
@@ -2738,7 +2849,9 @@ function ProviderOnboardingPanel({
               />
             </div>
           ) : null}
-          {authMethod?.type === "api_key" && !reauthorizationTarget
+          {authMethod?.type === "api_key" &&
+          !reauthorizationTarget &&
+          !attachmentTarget
             ? (endpointPreset?.parameters ?? []).map((parameter) => (
                 <div className="space-y-2" key={parameter.id}>
                   <Label htmlFor={`endpoint-parameter-${parameter.id}`}>
@@ -2776,25 +2889,19 @@ function ProviderOnboardingPanel({
               <Label htmlFor="provider-membership-plan">
                 {t("providers.membershipPlan")}
               </Label>
-              <Select
+              <ReadonlyCombobox
                 value={planOptionID}
                 onValueChange={(value) => {
-                  if (value !== null) setPlanOptionID(value);
+                  setPlanOptionID(value);
                 }}
-              >
-                <SelectTrigger id="provider-membership-plan" className="w-full">
-                  <SelectValue
-                    placeholder={t("providers.selectMembershipPlan")}
-                  />
-                </SelectTrigger>
-                <SelectContent>
-                  {selectablePlanOptions.map((option) => (
-                    <SelectItem key={option.id} value={option.id}>
-                      {option.display_name}
-                    </SelectItem>
-                  ))}
-                </SelectContent>
-              </Select>
+                options={selectablePlanOptions.map((option) => ({
+                  value: option.id,
+                  label: option.display_name,
+                }))}
+                id="provider-membership-plan"
+                className="w-full"
+                placeholder={t("providers.selectMembershipPlan")}
+              />
               <p className="text-muted-foreground text-xs">
                 {t("providers.membershipPlanHelp")}
               </p>
@@ -2813,7 +2920,9 @@ function ProviderOnboardingPanel({
               >
                 {reauthorizationTarget
                   ? t("providers.replaceCredential")
-                  : t("providers.onboard")}
+                  : attachmentTarget
+                    ? t("providers.addCredential")
+                    : t("providers.onboard")}
               </Button>
             ) : isDeviceFlow && deviceFlow ? (
               <div className="space-y-3">

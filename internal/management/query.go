@@ -167,6 +167,9 @@ type EndpointPresetView struct {
 	// UserEditable reports whether management clients may replace the address.
 	// UserEditable 表示管理客户端是否可以替换该地址。
 	UserEditable bool `json:"user_editable"`
+	// RegionEditable reports whether management may select a provider-owned regional origin.
+	// RegionEditable 表示管理端是否可以选择供应商拥有的区域 Origin。
+	RegionEditable bool `json:"region_editable"`
 	// Parameters declares the exact non-secret values required during onboarding.
 	// Parameters 声明录入时所需的精确非秘密值。
 	Parameters []EndpointParameterDefinitionView `json:"parameters,omitempty"`
@@ -1282,11 +1285,12 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 			parameters = append(parameters, EndpointParameterDefinitionView{ID: parameter.ID, Kind: parameter.Kind, Required: parameter.Required})
 		}
 		endpointPresets = append(endpointPresets, EndpointPresetView{
-			ID:           preset.ID,
-			BaseURL:      preset.BaseURL,
-			Region:       preset.Region,
-			UserEditable: preset.UserEditable,
-			Parameters:   parameters,
+			ID:             preset.ID,
+			BaseURL:        preset.BaseURL,
+			Region:         preset.Region,
+			UserEditable:   preset.UserEditable,
+			RegionEditable: preset.RegionalBaseURLTemplate != "",
+			Parameters:     parameters,
 		})
 	}
 	return ProviderDefinitionView{

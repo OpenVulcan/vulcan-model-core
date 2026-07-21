@@ -99,6 +99,18 @@ type ManagementCommands interface {
 	// UpdateCustomDefinition replaces one user-owned provider definition.
 	// UpdateCustomDefinition 替换一个用户拥有的供应商定义。
 	UpdateCustomDefinition(context.Context, management.UpdateCustomDefinitionInput) (providerconfig.ProviderDefinition, error)
+	// ConfigureProvider creates one credential-independent provider configuration and catalog.
+	// ConfigureProvider 创建一个独立于凭据的供应商配置与目录。
+	ConfigureProvider(context.Context, management.ConfigureProviderInput) (management.ProviderConfigurationResult, error)
+	// DeleteProviderConfiguration removes one credential-free provider configuration.
+	// DeleteProviderConfiguration 删除一个不含凭据的供应商配置。
+	DeleteProviderConfiguration(context.Context, string) error
+	// DiscoverCustomProviderModels reads a standard model list with one explicit same-instance credential.
+	// DiscoverCustomProviderModels 使用一个显式同实例凭据读取标准模型清单。
+	DiscoverCustomProviderModels(context.Context, string, string) (catalog.Snapshot, error)
+	// SaveCustomProviderModels replaces one custom provider's simplified model catalog.
+	// SaveCustomProviderModels 替换一个自定义供应商的简化模型目录。
+	SaveCustomProviderModels(context.Context, string, []management.InitialProviderModelInput) (catalog.Snapshot, error)
 	// CreateInstance creates one provider instance.
 	// CreateInstance 创建一个供应商实例。
 	CreateInstance(context.Context, management.CreateInstanceInput) (providerconfig.ProviderInstance, error)
@@ -117,6 +129,12 @@ type ManagementCommands interface {
 	// AddCredential creates one provider credential from transient secret bytes.
 	// AddCredential 根据临时 Secret 字节创建一个供应商凭据。
 	AddCredential(context.Context, management.AddCredentialInput) (providerconfig.Credential, error)
+	// AttachCredential creates one credential, closes its access bindings, and activates the provider configuration.
+	// AttachCredential 创建一个凭据、闭合其访问绑定并激活供应商配置。
+	AttachCredential(context.Context, management.AddCredentialInput) (management.CredentialAttachment, error)
+	// AttachAcquiredCredential attaches one server-acquired provider credential to an existing configuration.
+	// AttachAcquiredCredential 将一个服务端获取的供应商凭据附加到既有配置。
+	AttachAcquiredCredential(context.Context, management.AttachAcquiredCredentialInput) (management.CredentialAttachment, error)
 	// UpdateCredential replaces one credential's non-secret metadata.
 	// UpdateCredential 替换一个凭据的非秘密元数据。
 	UpdateCredential(context.Context, management.UpdateCredentialInput) (providerconfig.Credential, error)
@@ -126,8 +144,8 @@ type ManagementCommands interface {
 	// ReauthorizeCredential replaces one provider-owned token after exact account validation.
 	// ReauthorizeCredential 在精确账号校验后替换一个供应商拥有的 Token。
 	ReauthorizeCredential(context.Context, management.ReauthorizeCredentialInput) (providerconfig.Credential, error)
-	// DeleteCredential removes one credential graph and reports whether its instance was deleted.
-	// DeleteCredential 删除一个凭据图并报告其实例是否已删除。
+	// DeleteCredential removes one credential graph while retaining its provider configuration.
+	// DeleteCredential 删除一个凭据图，同时保留其供应商配置。
 	DeleteCredential(context.Context, string, string) (providerconfig.CredentialDeletion, error)
 	// SetCredentialStatus changes one credential lifecycle state.
 	// SetCredentialStatus 更改一个凭据生命周期状态。
@@ -307,6 +325,14 @@ type ProviderMetadataRefresh interface {
 	// Refresh atomically replaces metadata for one exact provider instance.
 	// Refresh 原子替换一个精确供应商实例的元数据。
 	Refresh(context.Context, string, time.Time) (catalog.Snapshot, error)
+}
+
+// ProviderCredentialModelDiscovery refreshes model metadata with one explicitly selected provider credential.
+// ProviderCredentialModelDiscovery 使用一个显式选择的供应商凭据刷新模型元数据。
+type ProviderCredentialModelDiscovery interface {
+	// RefreshWithCredential atomically discovers models with a same-instance credential.
+	// RefreshWithCredential 使用同实例凭据原子发现模型。
+	RefreshWithCredential(context.Context, string, string, time.Time) (catalog.Snapshot, error)
 }
 
 // ProviderMetadataRefreshScheduler accepts deduplicated immediate refresh triggers.
@@ -864,6 +890,63 @@ type createInstanceRequest struct {
 	DisplayName string `json:"display_name"`
 }
 
+// configureProviderRequest decodes one credential-independent provider configuration.
+// configureProviderRequest 解码一个独立于凭据的供应商配置。
+type configureProviderRequest struct {
+	// DefinitionID selects one exact provider definition.
+	// DefinitionID 选择一个精确的供应商定义。
+	DefinitionID string `json:"provider_definition_id"`
+	// Handle is the stable call-plane routing identifier.
+	// Handle 是稳定的调用面路由标识。
+	Handle string `json:"handle"`
+	// DisplayName is the management-facing provider instance name.
+	// DisplayName 是管理界面显示的供应商实例名称。
+	DisplayName string `json:"display_name"`
+	// BaseURL supplies the endpoint only for custom providers.
+	// BaseURL 仅为自定义供应商提供入口地址。
+	BaseURL string `json:"base_url,omitempty"`
+	// Region supplies optional custom-provider regional metadata.
+	// Region 提供可选的自定义供应商区域元数据。
+	Region string `json:"region,omitempty"`
+	// EndpointParameters contains exact values declared by a system endpoint preset.
+	// EndpointParameters 包含系统入口预设声明的精确参数值。
+	EndpointParameters []endpointParameterValueRequest `json:"endpoint_parameters,omitempty"`
+	// InitialModel optionally declares one exact custom-provider model and known limits.
+	// InitialModel 可选声明一个精确自定义供应商模型及已知限制。
+	InitialModel *initialProviderModelRequest `json:"initial_model,omitempty"`
+}
+
+// initialProviderModelRequest decodes one user-declared custom model without inferred capability values.
+// initialProviderModelRequest 解码一个不推断能力值的用户声明自定义模型。
+type initialProviderModelRequest struct {
+	// UpstreamModelID is the exact provider wire model identifier.
+	// UpstreamModelID 是精确的供应商 Wire 模型标识。
+	UpstreamModelID string `json:"upstream_model_id"`
+	// DisplayName is the management-facing model name.
+	// DisplayName 是管理界面显示的模型名称。
+	DisplayName string `json:"display_name"`
+	// ContextWindow is zero only when unknown.
+	// ContextWindow 仅在未知时为零。
+	ContextWindow int64 `json:"context_window,omitempty"`
+	// MaxOutputTokens is zero only when unknown.
+	// MaxOutputTokens 仅在未知时为零。
+	MaxOutputTokens int64 `json:"max_output_tokens,omitempty"`
+	// ToolCalling is one explicit normalized capability level.
+	// ToolCalling 是一个显式规范化能力级别。
+	ToolCalling catalog.CapabilityLevel `json:"tool_calling"`
+	// Reasoning is one explicit normalized capability level.
+	// Reasoning 是一个显式规范化能力级别。
+	Reasoning catalog.CapabilityLevel `json:"reasoning"`
+}
+
+// customProviderModelsRequest decodes one complete simplified custom model replacement.
+// customProviderModelsRequest 解码一个完整的简化自定义模型替换请求。
+type customProviderModelsRequest struct {
+	// Models contains the exact desired custom model set; an empty array deletes every model.
+	// Models 包含精确期望的自定义模型集合；空数组会删除全部模型。
+	Models []initialProviderModelRequest `json:"models"`
+}
+
 // endpointParameterValueRequest decodes one declared non-secret system endpoint parameter.
 // endpointParameterValueRequest 解码一个已声明的非秘密系统端点参数。
 type endpointParameterValueRequest struct {
@@ -961,6 +1044,14 @@ type credentialPlanRequest struct {
 	// PlanOptionID selects one exact system plan.
 	// PlanOptionID 选择一个精确系统套餐。
 	PlanOptionID string `json:"plan_option_id"`
+}
+
+// credentialModelDiscoveryRequest selects one exact same-instance credential for provider model discovery.
+// credentialModelDiscoveryRequest 为供应商模型发现选择一个精确同实例凭据。
+type credentialModelDiscoveryRequest struct {
+	// CredentialID identifies the account used by the upstream model-list operation.
+	// CredentialID 标识上游模型清单操作使用的账号。
+	CredentialID string `json:"credential_id"`
 }
 
 // routingSettingsResponse exposes Router-wide scheduling settings.
@@ -1061,6 +1152,17 @@ type onboardSystemProviderResponse struct {
 	BindingIDs []string `json:"binding_ids"`
 }
 
+// providerConfigurationResponse returns only identifiers created by credential-independent provider configuration.
+// providerConfigurationResponse 仅返回独立于凭据的供应商配置所创建的标识。
+type providerConfigurationResponse struct {
+	// ProviderInstanceID identifies the created provider configuration root.
+	// ProviderInstanceID 标识创建的供应商配置根。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// EndpointIDs identify the created non-secret upstream endpoints.
+	// EndpointIDs 标识创建的非秘密上游入口。
+	EndpointIDs []string `json:"endpoint_ids"`
+}
+
 // credentialReplacementResponse returns stable empty collection fields for a credential-only replacement.
 // credentialReplacementResponse 为仅替换凭据的响应返回稳定的空集合字段。
 func credentialReplacementResponse(credential providerconfig.Credential) onboardSystemProviderResponse {
@@ -1137,6 +1239,12 @@ type createCredentialRequest struct {
 	// ScopeRefs contains explicit commercial and organizational scope references.
 	// ScopeRefs 包含显式商业和组织作用域引用。
 	ScopeRefs []providerconfig.ScopeReference `json:"scope_refs"`
+	// Priority orders this account within its provider instance.
+	// Priority 在供应商实例内排列该账号。
+	Priority int `json:"priority,omitempty"`
+	// PlanOptionID selects one code-owned manual plan when required.
+	// PlanOptionID 在需要时选择一个代码拥有的人工套餐。
+	PlanOptionID string `json:"plan_option_id,omitempty"`
 	// Secret is transient upstream credential material and is never returned.
 	// Secret 是临时上游凭据材料且绝不返回。
 	Secret string `json:"secret"`
@@ -1391,6 +1499,9 @@ func (s *Server) handleProtocolProfiles(writer http.ResponseWriter, _ *http.Requ
 	// views 仅包含管理面创建或编辑供应商定义所需的数据。
 	views := make([]protocolProfileView, 0, len(profiles))
 	for _, profile := range profiles {
+		if !profile.UserConfigurable || !profile.RuntimeReady {
+			continue
+		}
 		views = append(views, protocolProfileViewFrom(profile))
 	}
 	writeJSON(writer, http.StatusOK, protocolProfileListResponse{ProtocolProfiles: views})
@@ -1528,6 +1639,51 @@ func (s *Server) handleCreateInstance(writer http.ResponseWriter, request *http.
 	writeJSON(writer, http.StatusCreated, identifierResponse{ID: instance.ID})
 }
 
+// handleConfigureProvider creates one complete provider configuration without accepting credential material.
+// handleConfigureProvider 创建一份完整供应商配置，且不接收凭据材料。
+func (s *Server) handleConfigureProvider(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[configureProviderRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	parameters := make([]providerconfig.EndpointParameterValue, 0, len(payload.EndpointParameters))
+	for _, parameter := range payload.EndpointParameters {
+		parameters = append(parameters, providerconfig.EndpointParameterValue{ID: parameter.ID, Value: parameter.Value})
+	}
+	var initialModel *management.InitialProviderModelInput
+	if payload.InitialModel != nil {
+		initialModel = &management.InitialProviderModelInput{
+			UpstreamModelID: payload.InitialModel.UpstreamModelID, DisplayName: payload.InitialModel.DisplayName,
+			ContextWindow: payload.InitialModel.ContextWindow, MaxOutputTokens: payload.InitialModel.MaxOutputTokens,
+			ToolCalling: payload.InitialModel.ToolCalling, Reasoning: payload.InitialModel.Reasoning,
+		}
+	}
+	result, errConfigure := s.control.Commands.ConfigureProvider(request.Context(), management.ConfigureProviderInput{
+		DefinitionID: payload.DefinitionID, Handle: payload.Handle, DisplayName: payload.DisplayName,
+		BaseURL: payload.BaseURL, Region: payload.Region, EndpointParameters: parameters, InitialModel: initialModel,
+	})
+	if errConfigure != nil {
+		writeControlError(writer, errConfigure)
+		return
+	}
+	response := providerConfigurationResponse{ProviderInstanceID: result.Configuration.Instance.ID}
+	for _, endpoint := range result.Configuration.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleDeleteProviderConfiguration deletes one provider configuration after the service proves it owns no credentials.
+// handleDeleteProviderConfiguration 在服务证明供应商配置不拥有凭据后删除该配置。
+func (s *Server) handleDeleteProviderConfiguration(writer http.ResponseWriter, request *http.Request) {
+	if errDelete := s.control.Commands.DeleteProviderConfiguration(request.Context(), request.PathValue("provider_instance_id")); errDelete != nil {
+		writeControlError(writer, errDelete)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 // handleOnboardSystemProvider creates one complete system-provider configuration without exposing its secret.
 // handleOnboardSystemProvider 创建一份完整系统供应商配置且不暴露其秘密。
 func (s *Server) handleOnboardSystemProvider(writer http.ResponseWriter, request *http.Request) {
@@ -1579,7 +1735,7 @@ func (s *Server) handleOnboardVertexServiceAccount(writer http.ResponseWriter, r
 			return
 		}
 		defer clear(protectedValue)
-		credential, _, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "service_account", protectedValue)
+		credential, _, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "service_account", "", protectedValue)
 		if errReauthorize != nil {
 			writeControlError(writer, errReauthorize)
 			return
@@ -1617,14 +1773,20 @@ func (s *Server) handleStartKimiDeviceFlow(writer http.ResponseWriter, request *
 	writeJSON(writer, http.StatusCreated, flow)
 }
 
-// reauthorizeCredential replaces an existing target when both target identifiers are present.
-// reauthorizeCredential 在两个目标标识均存在时替换既有目标凭据。
-func (s *Server) reauthorizeCredential(ctx context.Context, target credentialReauthorizationTarget, authMethodID string, secretValue []byte) (providerconfig.Credential, bool, error) {
+// reauthorizeCredential attaches to an instance-only target or replaces an exact existing credential target.
+// reauthorizeCredential 向仅实例目标附加凭据，或替换一个精确既有凭据目标。
+func (s *Server) reauthorizeCredential(ctx context.Context, target credentialReauthorizationTarget, authMethodID string, label string, secretValue []byte) (providerconfig.Credential, bool, error) {
 	if target.ProviderInstanceID == "" && target.CredentialID == "" {
 		return providerconfig.Credential{}, false, nil
 	}
-	if target.ProviderInstanceID == "" || target.CredentialID == "" {
-		return providerconfig.Credential{}, true, errors.New("reauthorization requires both provider instance and credential identifiers")
+	if target.ProviderInstanceID == "" {
+		return providerconfig.Credential{}, true, errors.New("credential authorization target requires a provider instance identifier")
+	}
+	if target.CredentialID == "" {
+		attachment, errAttach := s.control.Commands.AttachAcquiredCredential(ctx, management.AttachAcquiredCredentialInput{
+			ProviderInstanceID: target.ProviderInstanceID, AuthMethodID: authMethodID, Label: label, Secret: secretValue,
+		})
+		return attachment.Credential, true, errAttach
 	}
 	credential, errReauthorize := s.control.Commands.ReauthorizeCredential(ctx, management.ReauthorizeCredentialInput{ProviderInstanceID: target.ProviderInstanceID, CredentialID: target.CredentialID, AuthMethodID: authMethodID, Secret: secretValue})
 	return credential, true, errReauthorize
@@ -1655,7 +1817,7 @@ func (s *Server) handleOnboardKimiDeviceFlow(writer http.ResponseWriter, request
 		return
 	}
 	defer clear(secretValue)
-	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", body.Name, secretValue)
 	if errReauthorize != nil {
 		writeControlError(writer, errReauthorize)
 		return
@@ -1729,7 +1891,7 @@ func (s *Server) handleOnboardXAIDeviceFlow(writer http.ResponseWriter, request 
 		return
 	}
 	defer clear(secretValue)
-	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", body.Name, secretValue)
 	if errReauthorize != nil {
 		writeControlError(writer, errReauthorize)
 		return
@@ -1803,7 +1965,7 @@ func (s *Server) handleOnboardCodexDeviceFlow(writer http.ResponseWriter, reques
 		return
 	}
 	defer clear(secretValue)
-	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", body.Name, secretValue)
 	if errReauthorize != nil {
 		writeControlError(writer, errReauthorize)
 		return
@@ -1873,7 +2035,7 @@ func (s *Server) handleOnboardCodexOAuthFlow(writer http.ResponseWriter, request
 		return
 	}
 	defer clear(secretValue)
-	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", "", secretValue)
 	if errReauthorize != nil {
 		writeControlError(writer, errReauthorize)
 		return
@@ -1942,7 +2104,7 @@ func (s *Server) handleOnboardClaudeOAuthFlow(writer http.ResponseWriter, reques
 		return
 	}
 	defer clear(secretValue)
-	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", "", secretValue)
 	if errReauthorize != nil {
 		writeControlError(writer, errReauthorize)
 		return
@@ -2011,7 +2173,7 @@ func (s *Server) handleOnboardAntigravityOAuthFlow(writer http.ResponseWriter, r
 		return
 	}
 	defer clear(secretValue)
-	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", "", secretValue)
 	if errReauthorize != nil {
 		writeControlError(writer, errReauthorize)
 		return
@@ -2122,6 +2284,82 @@ func (s *Server) handleRefreshProviderMetadata(writer http.ResponseWriter, reque
 	instanceID := request.PathValue("provider_instance_id")
 	if _, errRefresh := s.control.MetadataRefresh.Refresh(request.Context(), instanceID, time.Now().UTC()); errRefresh != nil {
 		writeControlError(writer, errRefresh)
+		return
+	}
+	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
+	if errView != nil {
+		writeControlError(writer, errView)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+// handleDiscoverProviderModels performs credential-scoped discovery without allowing implicit account selection.
+// handleDiscoverProviderModels 执行凭据作用域发现且不允许隐式选择账号。
+func (s *Server) handleDiscoverProviderModels(writer http.ResponseWriter, request *http.Request) {
+	discovery, supported := s.control.MetadataRefresh.(ProviderCredentialModelDiscovery)
+	if !supported {
+		writeJSON(writer, http.StatusNotImplemented, errorResponse{Error: "provider_model_discovery_unavailable"})
+		return
+	}
+	payload, errDecode := decodeControlJSON[credentialModelDiscoveryRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	instanceID := request.PathValue("provider_instance_id")
+	if _, errDiscover := discovery.RefreshWithCredential(request.Context(), instanceID, payload.CredentialID, time.Now().UTC()); errDiscover != nil {
+		writeControlError(writer, errDiscover)
+		return
+	}
+	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
+	if errView != nil {
+		writeControlError(writer, errView)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+// handleDiscoverCustomProviderModels reads a standard custom-provider model list without implicit credential selection.
+// handleDiscoverCustomProviderModels 读取标准自定义供应商模型清单且不隐式选择凭据。
+func (s *Server) handleDiscoverCustomProviderModels(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[credentialModelDiscoveryRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	instanceID := request.PathValue("provider_instance_id")
+	if _, errDiscover := s.control.Commands.DiscoverCustomProviderModels(request.Context(), instanceID, payload.CredentialID); errDiscover != nil {
+		writeControlError(writer, errDiscover)
+		return
+	}
+	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
+	if errView != nil {
+		writeControlError(writer, errView)
+		return
+	}
+	writeJSON(writer, http.StatusOK, view)
+}
+
+// handleSaveCustomProviderModels replaces one simplified custom model set with explicit capability declarations.
+// handleSaveCustomProviderModels 使用显式能力声明替换一个简化自定义模型集合。
+func (s *Server) handleSaveCustomProviderModels(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[customProviderModelsRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	models := make([]management.InitialProviderModelInput, 0, len(payload.Models))
+	for _, model := range payload.Models {
+		models = append(models, management.InitialProviderModelInput{
+			UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName,
+			ContextWindow: model.ContextWindow, MaxOutputTokens: model.MaxOutputTokens,
+			ToolCalling: model.ToolCalling, Reasoning: model.Reasoning,
+		})
+	}
+	instanceID := request.PathValue("provider_instance_id")
+	if _, errSave := s.control.Commands.SaveCustomProviderModels(request.Context(), instanceID, models); errSave != nil {
+		writeControlError(writer, errSave)
 		return
 	}
 	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
@@ -2531,7 +2769,7 @@ func (s *Server) handleCreateCredential(writer http.ResponseWriter, request *htt
 	}
 	credential, errCreate := s.control.Commands.AddCredential(request.Context(), management.AddCredentialInput{
 		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), AuthMethodID: payload.AuthMethodID, Label: payload.Label,
-		PrincipalKey: payload.PrincipalKey, ScopeRefs: payload.ScopeRefs, Secret: []byte(payload.Secret),
+		PrincipalKey: payload.PrincipalKey, ScopeRefs: payload.ScopeRefs, Priority: payload.Priority, PlanOptionID: payload.PlanOptionID, Secret: []byte(payload.Secret),
 	})
 	if errCreate != nil {
 		writeControlError(writer, errCreate)
@@ -2539,6 +2777,30 @@ func (s *Server) handleCreateCredential(writer http.ResponseWriter, request *htt
 	}
 	s.triggerMetadataRefresh(credential.ProviderInstanceID)
 	writeJSON(writer, http.StatusCreated, identifierResponse{ID: credential.ID})
+}
+
+// handleAttachCredential creates one complete credential access path for an existing provider configuration.
+// handleAttachCredential 为既有供应商配置创建一条完整凭据访问路径。
+func (s *Server) handleAttachCredential(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[createCredentialRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	attachment, errCreate := s.control.Commands.AttachCredential(request.Context(), management.AddCredentialInput{
+		ID: payload.ID, ProviderInstanceID: request.PathValue("provider_instance_id"), AuthMethodID: payload.AuthMethodID, Label: payload.Label,
+		PrincipalKey: payload.PrincipalKey, ScopeRefs: payload.ScopeRefs, Priority: payload.Priority, PlanOptionID: payload.PlanOptionID, Secret: []byte(payload.Secret),
+	})
+	if errCreate != nil {
+		writeControlError(writer, errCreate)
+		return
+	}
+	s.triggerMetadataRefresh(attachment.Credential.ProviderInstanceID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: attachment.Credential.ProviderInstanceID, CredentialID: attachment.Credential.ID, EndpointIDs: []string{}}
+	for _, binding := range attachment.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	writeJSON(writer, http.StatusCreated, response)
 }
 
 // handleUpdateCredential replaces non-secret metadata and never reads secret bytes.
@@ -2584,14 +2846,12 @@ func (s *Server) handleRotateCredentialSecret(writer http.ResponseWriter, reques
 // handleDeleteCredential 删除一个凭据图及其受保护 Secret。
 func (s *Server) handleDeleteCredential(writer http.ResponseWriter, request *http.Request) {
 	instanceID := request.PathValue("provider_instance_id")
-	deletion, errDelete := s.control.Commands.DeleteCredential(request.Context(), instanceID, request.PathValue("credential_id"))
+	_, errDelete := s.control.Commands.DeleteCredential(request.Context(), instanceID, request.PathValue("credential_id"))
 	if errDelete != nil {
 		writeControlError(writer, errDelete)
 		return
 	}
-	if !deletion.InstanceDeleted {
-		s.triggerMetadataRefresh(instanceID)
-	}
+	s.triggerMetadataRefresh(instanceID)
 	writer.WriteHeader(http.StatusNoContent)
 }
 

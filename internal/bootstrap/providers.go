@@ -79,8 +79,11 @@ func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlat
 	if registry == nil || openPlatformClient == nil || codingClient == nil || dependency.IsNil(secrets) {
 		return fmt.Errorf("Kimi execution registry, transport clients, and protected secret store are required")
 	}
+	// openPlatformAdapter owns only Moonshot's current typed thinking projection and is safe to share because it is stateless.
+	// openPlatformAdapter 仅负责 Moonshot 当前的类型化思考投影，且因无状态可安全共享。
+	openPlatformAdapter := providerkimi.NewOpenPlatformChatAdapter()
 	for _, definitionID := range []string{KimiCNDefinitionID, KimiGlobalDefinitionID} {
-		driver, errDriver := provideropenai.NewChatDriver(definitionID, protocolchat.ProfileID, openPlatformClient, kimiChatCapabilities())
+		driver, errDriver := provideropenai.NewBearerChatDriverWithRequestAdapter(definitionID, protocolchat.ProfileID, openPlatformClient, kimiChatCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey}, openPlatformAdapter)
 		if errDriver != nil {
 			return fmt.Errorf("create Kimi Chat driver %s: %w", definitionID, errDriver)
 		}
@@ -88,8 +91,8 @@ func RegisterKimiExecutionDrivers(registry *provider.ExecutionRegistry, openPlat
 			return fmt.Errorf("register Kimi Chat driver %s: %w", definitionID, errRegister)
 		}
 	}
-	// codingAdapter owns only the Kimi Coding model-name and non-secret device-header wire adaptation.
-	// codingAdapter 仅负责 Kimi Coding 模型名及非秘密设备请求头的 wire 适配。
+	// codingAdapter owns the Kimi Coding thinking route and non-secret device-header wire adaptation.
+	// codingAdapter 负责 Kimi Coding 思考路由及非秘密设备请求头的 wire 适配。
 	codingAdapter, errCodingAdapter := providerkimi.NewCodingChatAdapter(secrets)
 	if errCodingAdapter != nil {
 		return fmt.Errorf("create Kimi Coding request adapter: %w", errCodingAdapter)
