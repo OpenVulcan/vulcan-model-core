@@ -47,6 +47,9 @@ type systemModelTemplate struct {
 	// reasoning records the verified reasoning capability level.
 	// reasoning 记录已验证的推理能力等级。
 	reasoning catalog.CapabilityLevel
+	// reasoningEfforts lists exact accepted reasoning controls.
+	// reasoningEfforts 列出精确接受的推理控制值。
+	reasoningEfforts []string
 	// toolCalling records the verified tool-call capability level.
 	// toolCalling 记录已验证的工具调用能力等级。
 	toolCalling catalog.CapabilityLevel
@@ -89,6 +92,26 @@ type systemModelTemplate struct {
 	// usageMetrics contains independently observable billing dimensions.
 	// usageMetrics 包含可独立观测的计费维度。
 	usageMetrics []catalog.UsageMetricCapability
+	// profiles contains explicit capability shapes when one offering has multiple entitlement tiers.
+	// profiles 在一个产品具有多个权益档位时包含显式能力形态。
+	profiles []systemProfileTemplate
+}
+
+// systemProfileTemplate describes one explicit code-owned profile below an offering ceiling.
+// systemProfileTemplate 描述一个低于产品能力上限的显式代码拥有规格。
+type systemProfileTemplate struct {
+	// suffix is appended to the stable profile identifier.
+	// suffix 追加到稳定规格标识。
+	suffix string
+	// displayName is the client-visible capability shape name.
+	// displayName 是客户端可见的能力形态名称。
+	displayName string
+	// contextWindow is the exact total context limit for this profile.
+	// contextWindow 是该规格精确的总上下文限制。
+	contextWindow int64
+	// defaultProfile reports whether clients may omit this profile selection.
+	// defaultProfile 表示客户端是否可以省略该规格选择。
+	defaultProfile bool
 }
 
 // buildSystemCatalog materializes one immutable template into records owned only by the new instance.
@@ -117,7 +140,15 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 		offeringID := "offer_" + modelSuffix + "_" + protocolSuffix
 		capabilities := systemModelCapabilities(template, action.Delivery)
 		snapshot.Offerings = append(snapshot.Offerings, catalog.ModelOffering{ID: offeringID, ProviderInstanceID: onboarding.Instance.ID, ProviderModelID: modelID, ChannelID: action.ProtocolProfileID, UpstreamModelID: template.upstreamID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
-		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, Operation: operation, ActionBindingID: action.ID, DisplayName: template.displayName, Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
+		if len(template.profiles) == 0 {
+			snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, Operation: operation, ActionBindingID: action.ID, DisplayName: template.displayName, Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
+			continue
+		}
+		for _, profileTemplate := range template.profiles {
+			profileCapabilities := catalog.CloneModelCapabilities(capabilities)
+			profileCapabilities.Tokens.ContextWindow = catalog.OptionalTokenLimit{Known: true, Value: profileTemplate.contextWindow}
+			snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + profileTemplate.suffix + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, Operation: operation, ActionBindingID: action.ID, DisplayName: profileTemplate.displayName, Default: profileTemplate.defaultProfile, Capabilities: profileCapabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1})
+		}
 	}
 	if definition.ModelCatalogID == "tavily_search_api" {
 		action, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
@@ -401,7 +432,24 @@ func kimiOpenPlatformModels() []systemModelTemplate {
 // kimiCodingModels returns CLIProxyAPI's exact Kimi executor model set at the pinned source baseline.
 // kimiCodingModels 返回 CLIProxyAPI 在固定源码基线上的精确 Kimi Executor 模型集合。
 func kimiCodingModels() []systemModelTemplate {
-	return copiedTextModels("kimi", []systemModelIdentity{{"kimi-k2", "Kimi K2", 131072}, {"kimi-k2-thinking", "Kimi K2 Thinking", 131072}, {"kimi-k2.5", "Kimi K2.5", 262144}, {"kimi-k2.6", "Kimi K2.6", 262144}, {"kimi-k2.7-code", "Kimi K2.7 Code", 262144}, {"kimi-k2.7-code-highspeed", "Kimi K2.7 Code HighSpeed", 262144}, {"kimi-k3", "Kimi K3", 1048576}})
+	common := systemModelTemplate{inputModalities: []string{"text"}, reasoning: catalog.CapabilityUnknown, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityNative, streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: catalog.EntitlementExplicit}
+	k27 := common
+	k27.upstreamID = "kimi-for-coding"
+	k27.displayName = "Kimi K2.7 Code"
+	k27.contextWindow = 262144
+	highSpeed := common
+	highSpeed.upstreamID = "kimi-for-coding-highspeed"
+	highSpeed.displayName = "Kimi K2.7 Code HighSpeed"
+	highSpeed.contextWindow = 262144
+	k3 := common
+	k3.upstreamID = "k3"
+	k3.displayName = "Kimi K3"
+	k3.contextWindow = 1048576
+	k3.reasoning = catalog.CapabilityNative
+	k3.reasoningEfforts = []string{"low", "high", "max"}
+	k3.strictSchema = catalog.CapabilityNative
+	k3.profiles = []systemProfileTemplate{{suffix: "256k", displayName: "Kimi K3 256K", contextWindow: 262144, defaultProfile: true}, {suffix: "1m", displayName: "Kimi K3 1M", contextWindow: 1048576}}
+	return []systemModelTemplate{k27, k3, highSpeed}
 }
 
 // systemModelCapabilities constructs one closed capability set without inferring undocumented output limits.
@@ -439,6 +487,7 @@ func systemModelCapabilities(template systemModelTemplate, delivery providerconf
 		StreamingToolArguments: template.streamingTools,
 		StrictJSONSchema:       template.strictSchema,
 		Reasoning:              template.reasoning,
+		ReasoningEfforts:       append([]string(nil), template.reasoningEfforts...),
 		InputModalities:        append([]string(nil), template.inputModalities...),
 		OutputModalities:       systemOutputModalities(template),
 		Delivery:               catalog.DeliveryCapabilities{Synchronous: delivery.Synchronous, Streaming: delivery.Streaming, Asynchronous: delivery.Asynchronous},

@@ -154,6 +154,7 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 func cloneCapabilities(capabilities ModelCapabilities) ModelCapabilities {
 	capabilities.InputModalities = append([]string(nil), capabilities.InputModalities...)
 	capabilities.OutputModalities = append([]string(nil), capabilities.OutputModalities...)
+	capabilities.ReasoningEfforts = append([]string(nil), capabilities.ReasoningEfforts...)
 	capabilities.MediaInputs = append([]MediaInputCapability(nil), capabilities.MediaInputs...)
 	for index := range capabilities.MediaInputs {
 		capabilities.MediaInputs[index] = cloneMediaInputCapability(capabilities.MediaInputs[index])

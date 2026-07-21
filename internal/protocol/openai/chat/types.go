@@ -158,19 +158,39 @@ type Message struct {
 func (m Message) MarshalJSON() ([]byte, error) {
 	if len(m.ContentParts) > 0 {
 		return json.Marshal(struct {
-			Role             string        `json:"role"`
-			Content          []ContentPart `json:"content"`
-			ReasoningContent string        `json:"reasoning_content,omitempty"`
-			ToolCalls        []ToolCall    `json:"tool_calls,omitempty"`
-			ToolCallID       string        `json:"tool_call_id,omitempty"`
+			// Role is the upstream Chat role.
+			// Role 是上游 Chat 角色。
+			Role string `json:"role"`
+			// Content contains typed multimodal parts.
+			// Content 包含类型化多模态内容块。
+			Content []ContentPart `json:"content"`
+			// ReasoningContent contains provider-visible reasoning content when supported.
+			// ReasoningContent 包含支持时的供应商可见推理内容。
+			ReasoningContent string `json:"reasoning_content,omitempty"`
+			// ToolCalls contains structured assistant tool calls.
+			// ToolCalls 包含结构化助手工具调用。
+			ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+			// ToolCallID binds a tool result to its call.
+			// ToolCallID 将工具结果绑定到其调用。
+			ToolCallID string `json:"tool_call_id,omitempty"`
 		}{Role: m.Role, Content: m.ContentParts, ReasoningContent: m.ReasoningContent, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID})
 	}
 	return json.Marshal(struct {
-		Role             string     `json:"role"`
-		Content          string     `json:"content,omitempty"`
-		ReasoningContent string     `json:"reasoning_content,omitempty"`
-		ToolCalls        []ToolCall `json:"tool_calls,omitempty"`
-		ToolCallID       string     `json:"tool_call_id,omitempty"`
+		// Role is the upstream Chat role.
+		// Role 是上游 Chat 角色。
+		Role string `json:"role"`
+		// Content contains plain text content.
+		// Content 包含纯文本内容。
+		Content string `json:"content,omitempty"`
+		// ReasoningContent contains provider-visible reasoning content when supported.
+		// ReasoningContent 包含支持时的供应商可见推理内容。
+		ReasoningContent string `json:"reasoning_content,omitempty"`
+		// ToolCalls contains structured assistant tool calls.
+		// ToolCalls 包含结构化助手工具调用。
+		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+		// ToolCallID binds a tool result to its call.
+		// ToolCallID 将工具结果绑定到其调用。
+		ToolCallID string `json:"tool_call_id,omitempty"`
 	}{Role: m.Role, Content: m.Content, ReasoningContent: m.ReasoningContent, ToolCalls: m.ToolCalls, ToolCallID: m.ToolCallID})
 }
 
@@ -181,11 +201,21 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 		return errors.New("cannot unmarshal OpenAI Chat message into nil receiver")
 	}
 	var wire struct {
-		Role             string          `json:"role"`
-		Content          json.RawMessage `json:"content"`
-		ReasoningContent string          `json:"reasoning_content,omitempty"`
-		ToolCalls        []ToolCall      `json:"tool_calls,omitempty"`
-		ToolCallID       string          `json:"tool_call_id,omitempty"`
+		// Role is the decoded upstream Chat role.
+		// Role 是解码后的上游 Chat 角色。
+		Role string `json:"role"`
+		// Content preserves the text-or-parts wire union for exact decoding.
+		// Content 为精确解码保留文本或内容块 Wire 联合。
+		Content json.RawMessage `json:"content"`
+		// ReasoningContent contains provider-visible reasoning content when present.
+		// ReasoningContent 包含存在时的供应商可见推理内容。
+		ReasoningContent string `json:"reasoning_content,omitempty"`
+		// ToolCalls contains decoded structured tool calls.
+		// ToolCalls 包含解码后的结构化工具调用。
+		ToolCalls []ToolCall `json:"tool_calls,omitempty"`
+		// ToolCallID binds a decoded tool result to its call.
+		// ToolCallID 将解码后的工具结果绑定到其调用。
+		ToolCallID string `json:"tool_call_id,omitempty"`
 	}
 	if errDecode := json.Unmarshal(data, &wire); errDecode != nil {
 		return errDecode

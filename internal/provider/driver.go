@@ -90,6 +90,9 @@ type CredentialMetadataResult struct {
 	// Entitlements contains account-specific model authorization observations.
 	// Entitlements 包含账号特定模型授权观测。
 	Entitlements []catalog.ModelEntitlement
+	// ServiceEntitlements contains account-specific special-service authorization observations.
+	// ServiceEntitlements 包含账号特定特殊服务授权观测。
+	ServiceEntitlements []catalog.ServiceEntitlement
 	// Allowances contains quota, balance, or credit observations from the same response.
 	// Allowances 包含来自同一响应的额度、余额或积分观测。
 	Allowances []catalog.AllowanceSnapshot

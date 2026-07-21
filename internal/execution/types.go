@@ -8,6 +8,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
@@ -111,6 +112,35 @@ type Failure struct {
 	// Retryable reports only a known safe retry classification.
 	// Retryable 仅表示已知且安全的重试分类。
 	Retryable bool `json:"retryable"`
+}
+
+// Attempt records one private exact-target provider dispatch within a logical execution.
+// Attempt 记录一个逻辑执行中的一次私有精确 Target 供应商分派。
+type Attempt struct {
+	// Sequence is the one-based stable attempt order.
+	// Sequence 是从一开始的稳定尝试顺序。
+	Sequence uint32 `json:"sequence"`
+	// Target is the immutable provider affinity used by this attempt.
+	// Target 是该尝试使用的不可变供应商亲和性。
+	Target resolve.Target `json:"target"`
+	// StartedAt records dispatch start.
+	// StartedAt 记录分派开始时间。
+	StartedAt time.Time `json:"started_at"`
+	// EndedAt records provider return time.
+	// EndedAt 记录供应商返回时间。
+	EndedAt time.Time `json:"ended_at"`
+	// Succeeded reports a validated provider result.
+	// Succeeded 表示获得经过校验的供应商结果。
+	Succeeded bool `json:"succeeded"`
+	// FailureCategory is the safe classified category when failed.
+	// FailureCategory 是失败时的安全分类类别。
+	FailureCategory string `json:"failure_category,omitempty"`
+	// RetryAction is the trusted recovery action selected after failure.
+	// RetryAction 是失败后选择的可信恢复动作。
+	RetryAction provider.RetryAction `json:"retry_action,omitempty"`
+	// SemanticOutput reports whether any provider semantic output was observed before failure.
+	// SemanticOutput 表示失败前是否已观测到任何供应商语义输出。
+	SemanticOutput bool `json:"semantic_output"`
 }
 
 // ProviderTaskSnapshot freezes the private upstream task affinity needed for restart recovery.
@@ -227,6 +257,9 @@ type Record struct {
 	// ProviderPreparation contains private prepared-workflow affinity after successful preprocessing.
 	// ProviderPreparation 在成功预处理后包含私有准备工作流亲和性。
 	ProviderPreparation *ProviderPreparationSnapshot `json:"-"`
+	// Attempts contains private exact-target dispatch audit records.
+	// Attempts 包含私有精确 Target 分派审计记录。
+	Attempts []Attempt `json:"-"`
 	// CreatedAt records durable admission time.
 	// CreatedAt 记录持久化接收时间。
 	CreatedAt time.Time `json:"created_at"`
@@ -261,6 +294,9 @@ const (
 	// EventExecutionRunning records provider execution start.
 	// EventExecutionRunning 记录供应商执行开始。
 	EventExecutionRunning EventType = "execution.running"
+	// EventExecutionAttemptCompleted records one private provider attempt without exposing its target.
+	// EventExecutionAttemptCompleted 记录一次私有供应商尝试且不暴露其 Target。
+	EventExecutionAttemptCompleted EventType = "execution.attempt.completed"
 	// EventProgressUpdated records only provider-reported bounded progress facts.
 	// EventProgressUpdated 仅记录供应商报告的有界进度事实。
 	EventProgressUpdated EventType = "progress.updated"
@@ -326,6 +362,14 @@ type LifecycleEvent struct {
 	// Failure contains a safe classification only for failure events.
 	// Failure 仅在失败事件中包含安全分类。
 	Failure *Failure `json:"failure,omitempty"`
+}
+
+// AttemptEvent exposes only the stable ordinal of one completed private provider attempt.
+// AttemptEvent 仅公开一次已完成私有供应商尝试的稳定序号。
+type AttemptEvent struct {
+	// Sequence is the one-based provider attempt order within the logical execution.
+	// Sequence 是逻辑执行中从一开始的供应商尝试顺序。
+	Sequence uint32 `json:"sequence"`
 }
 
 // ProgressEvent contains provider-reported progress without fabricating a percentage.
@@ -418,6 +462,9 @@ type Event struct {
 	// Lifecycle contains lifecycle payload for Router-owned events.
 	// Lifecycle 包含 Router 所有事件的生命周期载荷。
 	Lifecycle *LifecycleEvent `json:"lifecycle,omitempty"`
+	// Attempt contains a safe completed-attempt ordinal without private target details.
+	// Attempt 包含不带私有 Target 详情的安全已完成尝试序号。
+	Attempt *AttemptEvent `json:"attempt,omitempty"`
 	// ProviderEvent contains one typed provider conversation event.
 	// ProviderEvent 包含一个类型化供应商会话事件。
 	ProviderEvent *vcp.Event `json:"provider_event,omitempty"`
@@ -462,7 +509,7 @@ func (e Event) Validate() error {
 	// payloadCount enforces a closed exact-one union across every semantic payload family.
 	// payloadCount 在每个语义载荷类别之间强制封闭唯一联合体。
 	payloadCount := 0
-	for _, present := range []bool{e.Lifecycle != nil, e.ProviderEvent != nil, e.Progress != nil, e.Resource != nil, e.Transcript != nil, e.Embedding != nil, e.Rerank != nil, e.SearchQuery != nil, e.SearchResult != nil, e.SearchAnswer != nil, e.Citation != nil, e.Usage != nil} {
+	for _, present := range []bool{e.Lifecycle != nil, e.Attempt != nil, e.ProviderEvent != nil, e.Progress != nil, e.Resource != nil, e.Transcript != nil, e.Embedding != nil, e.Rerank != nil, e.SearchQuery != nil, e.SearchResult != nil, e.SearchAnswer != nil, e.Citation != nil, e.Usage != nil} {
 		if present {
 			payloadCount++
 		}
@@ -473,6 +520,12 @@ func (e Event) Validate() error {
 	if e.Type == EventProviderSemantic {
 		if e.ProviderEvent == nil {
 			return fmt.Errorf("%w: provider event requires exactly one provider payload", ErrInvalidExecution)
+		}
+		return nil
+	}
+	if e.Type == EventExecutionAttemptCompleted {
+		if e.Attempt == nil || e.Attempt.Sequence == 0 {
+			return fmt.Errorf("%w: execution attempt payload is invalid", ErrInvalidExecution)
 		}
 		return nil
 	}
@@ -593,6 +646,14 @@ func (r Record) Validate() error {
 		preparation := r.ProviderPreparation
 		if r.Operation != vcp.OperationMusicCoverPrepare || r.Status != StatusSucceeded || r.Result == nil || r.Result.MusicCoverPreparation == nil || r.Result.MusicCoverPreparation.PreparationID != r.ID || strings.TrimSpace(preparation.ProviderHandle) == "" || preparation.ExpiresAt.IsZero() || preparation.Target.ProviderDefinitionID != r.Target.ProviderDefinitionID || preparation.Target.ProviderInstanceID != r.Target.ProviderInstanceID || preparation.Target.EndpointID != r.Target.EndpointID || preparation.Target.EndpointRegion != r.Target.EndpointRegion || preparation.Target.CredentialID != r.Target.CredentialID || preparation.Target.UpstreamModelID != r.Target.UpstreamModelID {
 			return fmt.Errorf("%w: provider preparation affinity does not match the successful cover preparation", ErrInvalidExecution)
+		}
+	}
+	for index, attempt := range r.Attempts {
+		if attempt.Sequence != uint32(index+1) || attempt.StartedAt.IsZero() || attempt.EndedAt.Before(attempt.StartedAt) || attempt.Target.ProviderDefinitionID != r.Target.ProviderDefinitionID || attempt.Target.ProviderInstanceID != r.Target.ProviderInstanceID || attempt.Target.ProviderModelID != r.Target.ProviderModelID || attempt.Target.ProviderServiceID != r.Target.ProviderServiceID || attempt.Target.ExecutionProfileID != r.Target.ExecutionProfileID || attempt.Target.Operation != r.Operation {
+			return fmt.Errorf("%w: provider execution attempt is invalid", ErrInvalidExecution)
+		}
+		if attempt.Succeeded && (attempt.FailureCategory != "" || attempt.RetryAction != "") {
+			return fmt.Errorf("%w: successful provider attempt cannot carry failure classification", ErrInvalidExecution)
 		}
 	}
 	return nil

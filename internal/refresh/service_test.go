@@ -28,6 +28,59 @@ type fakeKimiDriver struct {
 	// metadataReads counts complete per-credential observations performed by the aggregate contract.
 	// metadataReads 统计聚合合同执行的完整逐凭据观测次数。
 	metadataReads *int
+	// failCredentialID optionally injects one isolated account metadata failure.
+	// failCredentialID 可选注入一个隔离账号元数据失败。
+	failCredentialID *string
+}
+
+// separateKimiDriver exposes independent metadata readers and can fail one entitlement read.
+// separateKimiDriver 暴露独立元数据读取器，并可使一次权益读取失败。
+type separateKimiDriver struct {
+	// base owns deterministic metadata values and model discovery.
+	// base 管理确定性元数据值与模型发现。
+	base fakeKimiDriver
+	// failCredentialID identifies the account whose entitlement read fails.
+	// failCredentialID 标识权益读取失败的账号。
+	failCredentialID string
+}
+
+// Definition returns the immutable integration definition.
+// Definition 返回不可变集成 Definition。
+func (d separateKimiDriver) Definition() providerconfig.ProviderDefinition {
+	return d.base.Definition()
+}
+
+// ClassifyError reports no runtime error classification.
+// ClassifyError 表示没有运行时错误分类。
+func (d separateKimiDriver) ClassifyError(observation provider.ErrorObservation) (provider.ClassifiedError, bool) {
+	return d.base.ClassifyError(observation)
+}
+
+// DiscoverModels forwards deterministic model discovery.
+// DiscoverModels 转发确定性模型发现。
+func (d separateKimiDriver) DiscoverModels(ctx context.Context, request provider.DiscoveryRequest) (provider.ModelDiscoveryResult, error) {
+	return d.base.DiscoverModels(ctx, request)
+}
+
+// ReadPlan forwards one independent plan read.
+// ReadPlan 转发一次独立套餐读取。
+func (d separateKimiDriver) ReadPlan(ctx context.Context, instance providerconfig.ProviderInstance, credential providerconfig.Credential) (catalog.PlanSnapshot, error) {
+	return d.base.ReadPlan(ctx, instance, credential)
+}
+
+// ReadEntitlements fails only the configured account and forwards every other read.
+// ReadEntitlements 仅使已配置账号失败，并转发其他读取。
+func (d separateKimiDriver) ReadEntitlements(ctx context.Context, instance providerconfig.ProviderInstance, credential providerconfig.Credential) ([]catalog.ModelEntitlement, error) {
+	if credential.ID == d.failCredentialID {
+		return nil, errors.New("injected separate entitlement failure")
+	}
+	return d.base.ReadEntitlements(ctx, instance, credential)
+}
+
+// ReadAllowances forwards one independent allowance read.
+// ReadAllowances 转发一次独立额度读取。
+func (d separateKimiDriver) ReadAllowances(ctx context.Context, instance providerconfig.ProviderInstance, credential providerconfig.Credential) ([]catalog.AllowanceSnapshot, error) {
+	return d.base.ReadAllowances(ctx, instance, credential)
 }
 
 // metadataReaderlessDriver declares metadata capabilities without implementing any reader.
@@ -36,6 +89,27 @@ type metadataReaderlessDriver struct {
 	// definition contains the intentionally inconsistent feature contract.
 	// definition 包含故意不一致的功能合同。
 	definition providerconfig.ProviderDefinition
+}
+
+// fakeCredentialRefresher records exact refresh ownership and returns one configured replacement.
+// fakeCredentialRefresher 记录精确刷新归属并返回一个已配置的替换凭据。
+type fakeCredentialRefresher struct {
+	// calls records the exact provider-instance and credential pairs requested by the service.
+	// calls 记录服务请求的精确供应商实例与凭据组合。
+	calls []string
+	// replacement is the persisted credential metadata returned after protected token replacement.
+	// replacement 是受保护令牌替换后返回的已持久化凭据元数据。
+	replacement providerconfig.Credential
+	// err injects one protected refresh failure.
+	// err 注入一次受保护刷新失败。
+	err error
+}
+
+// RefreshCredential records one exact refresh request and returns the configured result.
+// RefreshCredential 记录一次精确刷新请求并返回已配置结果。
+func (r *fakeCredentialRefresher) RefreshCredential(_ context.Context, instanceID string, credentialID string) (providerconfig.Credential, error) {
+	r.calls = append(r.calls, instanceID+"\x00"+credentialID)
+	return r.replacement, r.err
 }
 
 // Definition returns the intentionally inconsistent test definition.
@@ -216,6 +290,9 @@ func (d fakeKimiDriver) ReadCredentialMetadata(ctx context.Context, instance pro
 	if d.metadataReads != nil {
 		(*d.metadataReads)++
 	}
+	if d.failCredentialID != nil && credential.ID == *d.failCredentialID {
+		return provider.CredentialMetadataResult{}, errors.New("injected account metadata failure")
+	}
 	plan, errPlan := d.ReadPlan(ctx, instance, credential)
 	if errPlan != nil {
 		return provider.CredentialMetadataResult{}, errPlan
@@ -265,6 +342,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	// metadataReads proves the coordinator chooses one aggregate observation per credential.
 	// metadataReads 证明协调器为每个凭据选择一次聚合观测。
 	metadataReads := 0
+	failingCredentialID := ""
 	driver := fakeKimiDriver{definition: providerconfig.ProviderDefinition{
 		ID: "system_kimi_coding_plan", Kind: providerconfig.DefinitionKindSystem, DisplayName: "Kimi Coding Plan",
 		DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ConfigSchemaVersion: "1",
@@ -277,7 +355,7 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 			EntitlementReader: providerconfig.SupportSupported, AllowanceReader: providerconfig.SupportSupported,
 		},
 		Revision: 1,
-	}, observedAt: observedAt, metadataReads: &metadataReads}
+	}, observedAt: observedAt, metadataReads: &metadataReads, failCredentialID: &failingCredentialID}
 	drivers, errDrivers := provider.NewRegistry(systems)
 	if errDrivers != nil {
 		t.Fatalf("create provider registry: %v", errDrivers)
@@ -393,8 +471,39 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	if errDisabledRefresh != nil {
 		t.Fatalf("refresh with disabled credential: %v", errDisabledRefresh)
 	}
-	if metadataReads != 1 || len(disabledSnapshot.Plans) != 1 || disabledSnapshot.Plans[0].CredentialID != "cred_kimi_256k" {
+	if metadataReads != 1 || len(disabledSnapshot.Plans) != 2 {
 		t.Fatalf("disabled refresh reads=%d plans=%+v", metadataReads, disabledSnapshot.Plans)
+	}
+	if _, errEnable := configurationService.SetCredentialStatus(ctx, management.SetCredentialStatusInput{ProviderInstanceID: instance.ID, CredentialID: "cred_kimi_1m", Status: providerconfig.CredentialActive}); errEnable != nil {
+		t.Fatalf("enable Kimi credential: %v", errEnable)
+	}
+	failingCredentialID = "cred_kimi_1m"
+	metadataReads = 0
+	partialSnapshot, errPartialRefresh := refreshService.Refresh(ctx, instance.ID, observedAt.Add(2*time.Minute))
+	if errPartialRefresh != nil {
+		t.Fatalf("partial account refresh: %v", errPartialRefresh)
+	}
+	if metadataReads != 2 || len(partialSnapshot.Plans) != 2 || len(partialSnapshot.Entitlements) != 2 || len(partialSnapshot.Allowances) != 2 {
+		t.Fatalf("partial refresh reads=%d plans=%d entitlements=%d allowances=%d", metadataReads, len(partialSnapshot.Plans), len(partialSnapshot.Entitlements), len(partialSnapshot.Allowances))
+	}
+	separateDrivers, errSeparateDrivers := provider.NewRegistry(systems)
+	if errSeparateDrivers != nil {
+		t.Fatalf("create separate-reader registry: %v", errSeparateDrivers)
+	}
+	separateDriver := separateKimiDriver{base: fakeKimiDriver{definition: driver.definition, observedAt: observedAt}, failCredentialID: "cred_kimi_1m"}
+	if errRegisterSeparate := separateDrivers.Register(separateDriver); errRegisterSeparate != nil {
+		t.Fatalf("register separate-reader driver: %v", errRegisterSeparate)
+	}
+	separateRefreshService, errSeparateService := NewService(configurations, catalogs, separateDrivers)
+	if errSeparateService != nil {
+		t.Fatalf("create separate-reader refresh service: %v", errSeparateService)
+	}
+	separateSnapshot, errSeparateRefresh := separateRefreshService.Refresh(ctx, instance.ID, observedAt.Add(3*time.Minute))
+	if errSeparateRefresh != nil {
+		t.Fatalf("separate-reader partial account refresh: %v", errSeparateRefresh)
+	}
+	if len(separateSnapshot.Plans) != 2 || len(separateSnapshot.Entitlements) != 2 || len(separateSnapshot.Allowances) != 2 {
+		t.Fatalf("separate-reader partial refresh plans=%d entitlements=%d allowances=%d", len(separateSnapshot.Plans), len(separateSnapshot.Entitlements), len(separateSnapshot.Allowances))
 	}
 }
 
@@ -423,6 +532,41 @@ func TestValidateDeclaredMetadataReadersRejectsMissingImplementations(t *testing
 	}
 }
 
+// TestRemoveCredentialServiceEntitlementsAppliesAuthoritativeEmptyObservation verifies a successful empty service observation revokes only the observed account.
+// TestRemoveCredentialServiceEntitlementsAppliesAuthoritativeEmptyObservation 验证成功的空服务观测仅撤销被观测账号的授权。
+func TestRemoveCredentialServiceEntitlementsAppliesAuthoritativeEmptyObservation(t *testing.T) {
+	current := []catalog.ServiceEntitlement{
+		{ID: "service_ent_first", CredentialID: "cred_first"},
+		{ID: "service_ent_second", CredentialID: "cred_second"},
+	}
+	indexed := map[string]catalog.ServiceEntitlement{
+		"service_ent_first":  current[0],
+		"service_ent_second": current[1],
+	}
+	filtered := removeCredentialServiceEntitlements(current, indexed, "cred_first")
+	if len(filtered) != 1 || filtered[0].CredentialID != "cred_second" {
+		t.Fatalf("filtered service entitlements=%+v", filtered)
+	}
+	if _, exists := indexed["service_ent_first"]; exists {
+		t.Fatal("revoked service entitlement remained indexed")
+	}
+	if _, exists := indexed["service_ent_second"]; !exists {
+		t.Fatal("unrelated service entitlement was removed")
+	}
+}
+
+// TestMetadataCurrentRejectsExpiredEvidence verifies last-known-good preservation cannot retain stale service authorization.
+// TestMetadataCurrentRejectsExpiredEvidence 验证最后可信数据保留不会留下过期服务授权。
+func TestMetadataCurrentRejectsExpiredEvidence(t *testing.T) {
+	observedAt := time.Date(2026, 7, 20, 20, 0, 0, 0, time.UTC)
+	if metadataCurrent(observedAt, observedAt.Add(time.Minute), observedAt.Add(2*time.Minute)) {
+		t.Fatal("expired metadata was reported current")
+	}
+	if !metadataCurrent(observedAt, time.Time{}, observedAt.Add(2*time.Minute)) {
+		t.Fatal("non-expiring operator or system metadata was reported stale")
+	}
+}
+
 // TestNewServiceRejectsTypedNilDependencies verifies refresh orchestration cannot retain boxed nil stores or registries.
 // TestNewServiceRejectsTypedNilDependencies 验证刷新编排不会保留装箱后的 nil Store 或 Registry。
 func TestNewServiceRejectsTypedNilDependencies(t *testing.T) {
@@ -430,6 +574,86 @@ func TestNewServiceRejectsTypedNilDependencies(t *testing.T) {
 	var drivers *provider.Registry
 	if _, errService := NewService(configurations, catalog.NewMemoryStore(), drivers); errService == nil {
 		t.Fatal("NewService() error = nil")
+	}
+}
+
+// TestPrepareCredentialRefreshesOnlyEligibleExpiringTokens verifies metadata refresh cannot strand a refreshable account at token expiry.
+// TestPrepareCredentialRefreshesOnlyEligibleExpiringTokens 验证元数据刷新不会在令牌到期时搁置可刷新账号。
+func TestPrepareCredentialRefreshesOnlyEligibleExpiringTokens(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	expiresSoon := now.Add(30 * time.Second)
+	refreshedExpiry := now.Add(time.Hour)
+	credential := providerconfig.Credential{
+		ID:                 "cred_refreshable",
+		ProviderInstanceID: "pvi_refreshable",
+		AuthMethodID:       "device_flow",
+		Status:             providerconfig.CredentialActive,
+		ExpiresAt:          &expiresSoon,
+		Revision:           1,
+	}
+	replacement := credential
+	replacement.ExpiresAt = &refreshedExpiry
+	replacement.Revision = 2
+	refresher := &fakeCredentialRefresher{replacement: replacement}
+	service := &Service{credentialRefreshers: map[string]CredentialRefresher{"system_refreshable": refresher}}
+	definition := providerconfig.ProviderDefinition{
+		ID: "system_refreshable",
+		AuthMethods: []providerconfig.AuthMethodDefinition{{
+			ID:          "device_flow",
+			Type:        providerconfig.AuthMethodDeviceFlow,
+			Refreshable: true,
+		}},
+	}
+
+	prepared, errPrepare := service.prepareCredential(context.Background(), definition, credential, now)
+	if errPrepare != nil {
+		t.Fatalf("prepareCredential() error = %v", errPrepare)
+	}
+	if len(refresher.calls) != 1 || refresher.calls[0] != "pvi_refreshable\x00cred_refreshable" {
+		t.Fatalf("refresh calls = %#v", refresher.calls)
+	}
+	if prepared.Revision != 2 || prepared.ExpiresAt == nil || !prepared.ExpiresAt.Equal(refreshedExpiry) {
+		t.Fatalf("prepared credential = %+v", prepared)
+	}
+
+	refresher.calls = nil
+	notExpiring := credential
+	laterExpiry := now.Add(2 * credentialRefreshLeadTime)
+	notExpiring.ExpiresAt = &laterExpiry
+	prepared, errPrepare = service.prepareCredential(context.Background(), definition, notExpiring, now)
+	if errPrepare != nil {
+		t.Fatalf("prepareCredential() non-expiring error = %v", errPrepare)
+	}
+	if len(refresher.calls) != 0 || prepared.Revision != notExpiring.Revision {
+		t.Fatalf("non-expiring credential unexpectedly refreshed: calls=%#v credential=%+v", refresher.calls, prepared)
+	}
+}
+
+// TestPrepareCredentialRejectsRefresherOwnershipChanges verifies protected refresh cannot reassign an account.
+// TestPrepareCredentialRejectsRefresherOwnershipChanges 验证受保护刷新不能重新分配账号归属。
+func TestPrepareCredentialRejectsRefresherOwnershipChanges(t *testing.T) {
+	now := time.Date(2026, 7, 21, 12, 0, 0, 0, time.UTC)
+	expiredAt := now.Add(-time.Second)
+	credential := providerconfig.Credential{
+		ID:                 "cred_owner",
+		ProviderInstanceID: "pvi_owner",
+		AuthMethodID:       "oauth",
+		Status:             providerconfig.CredentialActive,
+		ExpiresAt:          &expiredAt,
+	}
+	replacement := credential
+	replacement.ProviderInstanceID = "pvi_foreign"
+	replacementExpiry := now.Add(time.Hour)
+	replacement.ExpiresAt = &replacementExpiry
+	refresher := &fakeCredentialRefresher{replacement: replacement}
+	service := &Service{credentialRefreshers: map[string]CredentialRefresher{"system_owner": refresher}}
+	definition := providerconfig.ProviderDefinition{
+		ID:          "system_owner",
+		AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "oauth", Type: providerconfig.AuthMethodOAuth, Refreshable: true}},
+	}
+
+	if _, errPrepare := service.prepareCredential(context.Background(), definition, credential, now); errPrepare == nil {
+		t.Fatal("prepareCredential() accepted changed credential ownership")
 	}
 }
 
@@ -445,7 +669,7 @@ func TestValidateCredentialMetadataOwnershipRejectsForeignRecords(t *testing.T) 
 	entitlement := catalog.ModelEntitlement{ID: "ent_owner", ProviderInstanceID: credential.ProviderInstanceID, CredentialID: credential.ID}
 	credentialAllowance := catalog.AllowanceSnapshot{ID: "allow_owner", ProviderInstanceID: credential.ProviderInstanceID, Scope: catalog.ScopeCredential, ScopeID: credential.ID}
 	sharedAllowance := catalog.AllowanceSnapshot{ID: "allow_shared", ProviderInstanceID: credential.ProviderInstanceID, Scope: catalog.ScopeOrganization, ScopeID: "organization-owner"}
-	if errValid := validateCredentialMetadataOwnership(credential, &plan, []catalog.ModelEntitlement{entitlement}, []catalog.AllowanceSnapshot{credentialAllowance, sharedAllowance}); errValid != nil {
+	if errValid := validateCredentialMetadataOwnership(credential, &plan, []catalog.ModelEntitlement{entitlement}, nil, []catalog.AllowanceSnapshot{credentialAllowance, sharedAllowance}); errValid != nil {
 		t.Fatalf("validateCredentialMetadataOwnership() valid metadata error = %v", errValid)
 	}
 	testCases := []struct {
@@ -470,7 +694,7 @@ func TestValidateCredentialMetadataOwnershipRejectsForeignRecords(t *testing.T) 
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
-			if errOwnership := validateCredentialMetadataOwnership(credential, testCase.plan, testCase.entitlements, testCase.allowances); errOwnership == nil {
+			if errOwnership := validateCredentialMetadataOwnership(credential, testCase.plan, testCase.entitlements, nil, testCase.allowances); errOwnership == nil {
 				t.Fatal("validateCredentialMetadataOwnership() error = nil")
 			}
 		})

@@ -258,7 +258,7 @@ Channel 至少关联：
 - 可选的 Channel 级错误覆盖；
 - 稳定优先级和运行时状态。
 
-例如 Kimi Coding Plan 可以同时声明 Anthropic Channel 和 OpenAI Channel。Credential 是否能使用某个 Channel 由 Access Binding 明确表达，不能运行时猜测。
+例如同一供应商产品即使上游声称兼容多个协议，系统 Definition 仍只选择一个经过完整验证的优势 Channel。Kimi Coding Plan 固定使用 OpenAI Chat；Credential 是否能使用该 Channel 由 Access Binding 明确表达，不能运行时猜测或动态切换协议。
 
 自定义供应商第一阶段只有一个 Channel，其 Channel 由所选协议 Profile 自动形成。
 

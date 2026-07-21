@@ -83,7 +83,7 @@ export function ModelCapabilitiesPage({ managementAuthToken }: ModelCapabilities
               <CardTitle>{model.display_name}</CardTitle>
               <Badge variant="outline">{provider.instance.display_name}</Badge>
               <Badge variant={model.enabled ? "default" : "secondary"}>{model.enabled ? t("capabilities.enabled") : t("capabilities.disabled")}</Badge>
-              <Badge variant={model.provider_authorized ? "default" : "destructive"}>{model.provider_authorized ? t("capabilities.authorized") : t("capabilities.unauthorized")}</Badge>
+              <Badge variant={model.authorization_status === "authorized" ? "default" : model.authorization_status === "denied" ? "destructive" : "secondary"}>{model.authorization_status === "authorized" ? t("capabilities.authorized") : model.authorization_status === "denied" ? t("capabilities.unauthorized") : t("capabilities.unknown")}</Badge>
             </div>
             <CardDescription>{model.upstream_model_id}</CardDescription>
           </CardHeader>

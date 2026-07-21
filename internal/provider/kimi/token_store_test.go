@@ -38,6 +38,10 @@ func TestAccessTokenStoreDistinguishesArbitraryAPIKeysFromVersionedTokens(t *tes
 	if errResolveToken != nil || string(resolvedToken) != "access-only" {
 		t.Fatalf("Get(token) value=%q error=%v", resolvedToken, errResolveToken)
 	}
+	resolvedAccessToken, resolvedDeviceID, deviceDocument, errResolveDocument := store.resolve(ctx, tokenReference)
+	if errResolveDocument != nil || string(resolvedAccessToken) != "access-only" || resolvedDeviceID != "device-one" || !deviceDocument {
+		t.Fatalf("resolve(token) access=%q device=%q document=%t error=%v", resolvedAccessToken, resolvedDeviceID, deviceDocument, errResolveDocument)
+	}
 }
 
 // TestAccessTokenStoreClearsDecodedDeviceDocument verifies the projection clears the complete decrypted refreshable document after copying its access token.

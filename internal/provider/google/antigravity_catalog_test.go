@@ -66,9 +66,16 @@ func TestAntigravityCatalogDriverRefusesRedirectsWithoutMutatingCaller(t *testin
 // TestAntigravityCatalogDriverReadsTierAndCredits verifies the copied loadCodeAssist request and typed response mapping.
 // TestAntigravityCatalogDriverReadsTierAndCredits 验证复制的 loadCodeAssist 请求与强类型响应映射。
 func TestAntigravityCatalogDriverReadsTierAndCredits(t *testing.T) {
-	requestCount := 0
+	loadRequestCount := 0
+	quotaRequestCount := 0
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
+		if request.URL.Path == "/v1internal:retrieveUserQuotaSummary" {
+			quotaRequestCount++
+			writer.Header().Set("Content-Type", "application/json")
+			_, _ = io.WriteString(writer, `{"groups":[{"displayName":"Gemini models","buckets":[{"bucketId":"weekly","displayName":"Weekly limit","remainingFraction":0.75,"resetTime":"2026-08-01T00:00:00Z"}]}]}`)
+			return
+		}
+		loadRequestCount++
 		if request.URL.Path != antigravityLoadCodeAssistPath || request.Header.Get("Authorization") != "Bearer access-token" || request.Header.Get("User-Agent") != AntigravityLoadCodeAssistUserAgent("") {
 			t.Errorf("request = %s headers=%v", request.URL.Path, request.Header)
 		}
@@ -78,7 +85,7 @@ func TestAntigravityCatalogDriverReadsTierAndCredits(t *testing.T) {
 		}
 		writer.Header().Set("Content-Type", "application/json")
 		remaining := "42.5"
-		if requestCount > 1 {
+		if loadRequestCount > 1 {
 			remaining = "17.25"
 		}
 		_, _ = io.WriteString(writer, `{"paidTier":{"id":"google-one-ai-premium","availableCredits":[{"creditType":"GOOGLE_ONE_AI","creditAmount":"`+remaining+`","minimumCreditAmountForUsage":"1"}]}}`)
@@ -104,7 +111,7 @@ func TestAntigravityCatalogDriverReadsTierAndCredits(t *testing.T) {
 	if errMetadata != nil || metadata.Plan == nil || metadata.Plan.PlanCode != "google-one-ai-premium" || metadata.Plan.CredentialID != credential.ID {
 		t.Fatalf("ReadCredentialMetadata() plan = %#v error=%v", metadata.Plan, errMetadata)
 	}
-	if len(metadata.Allowances) != 1 || metadata.Allowances[0].Metric != antigravityGoogleOneCreditType || metadata.Allowances[0].Remaining == nil || *metadata.Allowances[0].Remaining != "42.5" || metadata.Allowances[0].Status != catalog.AllowanceAvailable || metadata.Allowances[0].Mandatory {
+	if len(metadata.Allowances) != 2 || metadata.Allowances[0].Metric != antigravityGoogleOneCreditType || metadata.Allowances[0].Remaining == nil || *metadata.Allowances[0].Remaining != "42.5" || metadata.Allowances[0].Status != catalog.AllowanceAvailable || metadata.Allowances[0].Mandatory || metadata.Allowances[1].RemainingRatio == nil || *metadata.Allowances[1].RemainingRatio != 0.75 {
 		t.Fatalf("ReadCredentialMetadata() allowances = %#v", metadata.Allowances)
 	}
 	if errPlanValidation := metadata.Plan.Validate(); errPlanValidation != nil {
@@ -119,18 +126,18 @@ func TestAntigravityCatalogDriverReadsTierAndCredits(t *testing.T) {
 	if errSnapshotValidation := metadataSnapshot.Validate(); errSnapshotValidation != nil {
 		t.Fatalf("ReadCredentialMetadata() snapshot validation error = %v", errSnapshotValidation)
 	}
-	if requestCount != 1 {
-		t.Fatalf("loadCodeAssist request count = %d, want 1", requestCount)
+	if loadRequestCount != 1 || quotaRequestCount != 1 {
+		t.Fatalf("request counts load=%d quota=%d, want 1 each", loadRequestCount, quotaRequestCount)
 	}
 	refreshedMetadata, errRefreshedMetadata := driver.ReadCredentialMetadata(context.Background(), instance, credential)
 	if errRefreshedMetadata != nil || refreshedMetadata.Plan == nil || refreshedMetadata.Plan.PlanCode != "google-one-ai-premium" {
 		t.Fatalf("refreshed ReadCredentialMetadata() plan = %#v error=%v", refreshedMetadata.Plan, errRefreshedMetadata)
 	}
-	if len(refreshedMetadata.Allowances) != 1 || refreshedMetadata.Allowances[0].Remaining == nil || *refreshedMetadata.Allowances[0].Remaining != "17.25" {
+	if len(refreshedMetadata.Allowances) != 2 || refreshedMetadata.Allowances[0].Remaining == nil || *refreshedMetadata.Allowances[0].Remaining != "17.25" {
 		t.Fatalf("refreshed ReadCredentialMetadata() allowances = %#v", refreshedMetadata.Allowances)
 	}
-	if requestCount != 2 {
-		t.Fatalf("loadCodeAssist request count after explicit refresh = %d, want 2", requestCount)
+	if loadRequestCount != 2 || quotaRequestCount != 2 {
+		t.Fatalf("request counts after refresh load=%d quota=%d, want 2 each", loadRequestCount, quotaRequestCount)
 	}
 }
 

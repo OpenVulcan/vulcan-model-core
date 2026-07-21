@@ -22,6 +22,12 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
+const (
+	// maxSameProviderExecutionAttempts bounds credential and endpoint failover for one logical execution.
+	// maxSameProviderExecutionAttempts 限制一次逻辑执行中的凭据与入口故障切换次数。
+	maxSameProviderExecutionAttempts = 8
+)
+
 // TargetResolver resolves one exact provider-scoped destination.
 // TargetResolver 解析一个精确供应商作用域目的地。
 type TargetResolver interface {
@@ -68,6 +74,25 @@ type ProviderExecutor interface {
 	Execute(context.Context, provider.ExecutionRequest) (provider.ExecutionResult, error)
 }
 
+// ProviderErrorClassifier exposes trusted body-free same-provider retry semantics.
+// ProviderErrorClassifier 暴露可信且不含正文的同供应商重试语义。
+type ProviderErrorClassifier interface {
+	// ClassifyExecutionError classifies one exact failed provider attempt.
+	// ClassifyExecutionError 对一次精确失败的供应商尝试进行分类。
+	ClassifyExecutionError(provider.ExecutionRequest, error) (provider.ClassifiedError, bool)
+}
+
+// RuntimeFeedback persists classified model state without exposing it to callers.
+// RuntimeFeedback 持久化分类后的模型状态且不向调用方暴露。
+type RuntimeFeedback interface {
+	// RecordFailure applies one classified failure to its exact target scope.
+	// RecordFailure 将一个分类失败应用到其精确 Target 作用域。
+	RecordFailure(context.Context, provider.ExecutionRequest, provider.ClassifiedError, time.Time) error
+	// RecordSuccess clears temporary state for the exact successful target.
+	// RecordSuccess 清除精确成功 Target 的临时状态。
+	RecordSuccess(context.Context, provider.ExecutionRequest, time.Time) error
+}
+
 // ProviderTaskExecutor dispatches exact asynchronous start, poll, and cancel operations.
 // ProviderTaskExecutor 分派精确异步创建、轮询与取消操作。
 type ProviderTaskExecutor interface {
@@ -108,6 +133,9 @@ type ServiceOptions struct {
 	// OutputResources owns generated media ingestion when media output actions are enabled.
 	// OutputResources 在启用媒体输出动作时拥有生成媒体接收。
 	OutputResources OutputResourceWriter
+	// RuntimeFeedback receives trusted classified execution outcomes.
+	// RuntimeFeedback 接收可信的分类执行结果。
+	RuntimeFeedback RuntimeFeedback
 }
 
 // Service orchestrates durable admission, exact target execution, replay, and cancellation.
@@ -236,6 +264,7 @@ func (s *Service) Cancel(ctx context.Context, ownerAPIKeyID string, executionID 
 		providerRequest := taskExecutionRequest(record)
 		result, errCancel := taskExecutor.CancelTask(ctx, providerRequest, record.ProviderTask.ProviderTaskID)
 		if errCancel != nil {
+			s.classifyAndRecordFailure(ctx, providerRequest, errCancel)
 			return Record{}, errCancel
 		}
 		return s.applyTaskResult(ctx, record, result)
@@ -290,31 +319,77 @@ func (s *Service) execute(ctx context.Context, record Record) (Record, bool, err
 	if errRunning != nil {
 		return Record{}, false, errRunning
 	}
-	providerRequest := providerRequestForRecord(running, binding, definition, materialized, preparedWorkflow)
-	providerResult, errExecute := s.providers.Execute(ctx, providerRequest)
-	if errExecute != nil {
-		failed, errFail := s.fail(ctx, running, stableFailureCode(errExecute), retryableFailure(errExecute))
-		if errFail != nil {
-			return Record{}, false, errFail
+	return s.executeSynchronous(ctx, running, binding, definition, materialized, preparedWorkflow)
+}
+
+// executeSynchronous dispatches a bounded sequence of same-provider attempts before any semantic output is committed.
+// executeSynchronous 在提交任何语义输出前分派有界的同供应商尝试序列。
+func (s *Service) executeSynchronous(ctx context.Context, record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, preparedWorkflow *provider.PreparedWorkflowBinding) (Record, bool, error) {
+	excludedCredentials := make([]string, 0, maxSameProviderExecutionAttempts)
+	excludedEndpoints := make([]string, 0, maxSameProviderExecutionAttempts)
+	for attemptIndex := 0; attemptIndex < maxSameProviderExecutionAttempts; attemptIndex++ {
+		providerRequest := providerRequestForRecord(record, binding, definition, materialized, preparedWorkflow)
+		startedAt := s.options.Now().UTC()
+		providerResult, errExecute := s.providers.Execute(ctx, providerRequest)
+		endedAt := s.options.Now().UTC()
+		semanticOutput := providerResultHasSemanticOutput(providerResult)
+		attempt := Attempt{Sequence: uint32(len(record.Attempts) + 1), Target: record.Target, StartedAt: startedAt, EndedAt: endedAt, SemanticOutput: semanticOutput}
+		if errExecute != nil {
+			classified, classifiedOK := s.classifyAndRecordFailure(ctx, providerRequest, errExecute)
+			if classifiedOK {
+				attempt.FailureCategory = classified.Category
+				attempt.RetryAction = classified.Action
+			}
+			nextTarget, retry := s.resolveRetryTarget(ctx, record, classified, classifiedOK, semanticOutput, materialized, preparedWorkflow, &excludedCredentials, &excludedEndpoints)
+			if retry && attemptIndex+1 < maxSameProviderExecutionAttempts {
+				updated, errPersist := s.persistAttempt(ctx, record, attempt, &nextTarget)
+				if errPersist != nil {
+					return Record{}, false, errPersist
+				}
+				binding, definition, errExecute = s.loadBinding(ctx, nextTarget)
+				if errExecute != nil {
+					failed, errFail := s.fail(ctx, updated, stableFailureCode(errExecute), retryableFailure(errExecute))
+					return failed, false, errFail
+				}
+				record = updated
+				continue
+			}
+			updated, errPersist := s.persistAttempt(ctx, record, attempt, nil)
+			if errPersist != nil {
+				return Record{}, false, errPersist
+			}
+			failed, errFail := s.fail(ctx, updated, stableFailureCode(errExecute), retryableFailure(errExecute) || classifiedRetryable(classified, classifiedOK))
+			if errFail != nil {
+				return Record{}, false, errFail
+			}
+			return failed, false, nil
 		}
-		return failed, false, nil
-	}
-	if errResult := validateProviderResult(running.Request, providerResult, true); errResult != nil {
-		failed, errFail := s.fail(ctx, running, stableFailureCode(errResult), false)
-		if errFail != nil {
-			return Record{}, false, errFail
+		if errResult := validateProviderResult(record.Request, providerResult, true); errResult != nil {
+			attempt.FailureCategory = "invalid_provider_result"
+			updated, errPersist := s.persistAttempt(ctx, record, attempt, nil)
+			if errPersist != nil {
+				return Record{}, false, errPersist
+			}
+			failed, errFail := s.fail(ctx, updated, stableFailureCode(errResult), false)
+			if errFail != nil {
+				return Record{}, false, errFail
+			}
+			return failed, false, nil
 		}
-		return failed, false, nil
-	}
-	generatedResources, errResources := s.ingestGeneratedResources(ctx, running, providerResult.GeneratedResources)
-	if errResources != nil {
-		failed, errFail := s.fail(ctx, running, stableFailureCode(errResources), retryableFailure(errResources))
-		if errFail != nil {
-			return Record{}, false, errFail
+		attempt.Succeeded = true
+		record.Attempts = append(record.Attempts, attempt)
+		s.recordSuccessfulRequest(ctx, providerRequest)
+		generatedResources, errResources := s.ingestGeneratedResources(ctx, record, providerResult.GeneratedResources)
+		if errResources != nil {
+			failed, errFail := s.fail(ctx, record, stableFailureCode(errResources), retryableFailure(errResources))
+			if errFail != nil {
+				return Record{}, false, errFail
+			}
+			return failed, false, nil
 		}
-		return failed, false, nil
+		return s.succeed(ctx, record, providerResult, generatedResources)
 	}
-	return s.succeed(ctx, running, providerResult, generatedResources)
+	return Record{}, false, fmt.Errorf("%w: same-provider attempt limit reached", ErrInvalidExecution)
 }
 
 // resolvePreparedWorkflow resolves one owner-scoped cover preparation without exposing its provider handle.
@@ -856,15 +931,64 @@ func (s *Service) startTask(ctx context.Context, record Record, binding transpor
 		failed, errFail := s.fail(ctx, record, "provider_task_driver_unavailable", false)
 		return failed, false, errFail
 	}
-	providerRequest := providerRequestForRecord(record, binding, definition, materialized, nil)
-	result, errStart := taskExecutor.StartTask(ctx, providerRequest)
-	if errStart != nil {
-		failed, errFail := s.fail(ctx, record, stableFailureCode(errStart), retryableFailure(errStart))
-		return failed, false, errFail
+	excludedCredentials := make([]string, 0, maxSameProviderExecutionAttempts)
+	excludedEndpoints := make([]string, 0, maxSameProviderExecutionAttempts)
+	for attemptIndex := 0; attemptIndex < maxSameProviderExecutionAttempts; attemptIndex++ {
+		providerRequest := providerRequestForRecord(record, binding, definition, materialized, nil)
+		startedAt := s.options.Now().UTC()
+		result, errStart := taskExecutor.StartTask(ctx, providerRequest)
+		endedAt := s.options.Now().UTC()
+		acceptedByProvider := taskResultHasAcceptedState(result)
+		attempt := Attempt{Sequence: uint32(len(record.Attempts) + 1), Target: record.Target, StartedAt: startedAt, EndedAt: endedAt, SemanticOutput: acceptedByProvider}
+		if errStart != nil {
+			classified, classifiedOK := s.classifyAndRecordFailure(ctx, providerRequest, errStart)
+			if classifiedOK {
+				attempt.FailureCategory = classified.Category
+				attempt.RetryAction = classified.Action
+			}
+			nextTarget, retry := s.resolveRetryTarget(ctx, record, classified, classifiedOK, acceptedByProvider, materialized, nil, &excludedCredentials, &excludedEndpoints)
+			if retry && attemptIndex+1 < maxSameProviderExecutionAttempts {
+				updated, errPersist := s.persistAttempt(ctx, record, attempt, &nextTarget)
+				if errPersist != nil {
+					return Record{}, false, errPersist
+				}
+				binding, definition, errStart = s.loadBinding(ctx, nextTarget)
+				if errStart != nil {
+					failed, errFail := s.fail(ctx, updated, stableFailureCode(errStart), retryableFailure(errStart))
+					return failed, false, errFail
+				}
+				record = updated
+				continue
+			}
+			updated, errPersist := s.persistAttempt(ctx, record, attempt, nil)
+			if errPersist != nil {
+				return Record{}, false, errPersist
+			}
+			failed, errFail := s.fail(ctx, updated, stableFailureCode(errStart), retryableFailure(errStart) || classifiedRetryable(classified, classifiedOK))
+			return failed, false, errFail
+		}
+		if errResult := result.Validate(); errResult != nil {
+			attempt.FailureCategory = "invalid_provider_task_result"
+			updated, errPersist := s.persistAttempt(ctx, record, attempt, nil)
+			if errPersist != nil {
+				return Record{}, false, errPersist
+			}
+			failed, errFail := s.fail(ctx, updated, stableFailureCode(errResult), false)
+			return failed, false, errFail
+		}
+		attempt.Succeeded = true
+		record.Attempts = append(record.Attempts, attempt)
+		record.ProviderTask = &ProviderTaskSnapshot{ProviderTaskID: result.ProviderTaskID, Target: binding.Target, Definition: definition, Endpoint: binding.Endpoint, Credential: binding.Credential, PollAfter: result.PollAfter}
+		updated, errApply := s.applyTaskResult(ctx, record, result)
+		return updated, false, errApply
 	}
-	record.ProviderTask = &ProviderTaskSnapshot{ProviderTaskID: result.ProviderTaskID, Target: binding.Target, Definition: definition, Endpoint: binding.Endpoint, Credential: binding.Credential, PollAfter: result.PollAfter}
-	updated, errApply := s.applyTaskResult(ctx, record, result)
-	return updated, false, errApply
+	return Record{}, false, fmt.Errorf("%w: same-provider task-attempt limit reached", ErrInvalidExecution)
+}
+
+// taskResultHasAcceptedState reports whether an errored task start already exposed provider-owned state.
+// taskResultHasAcceptedState 表示失败的任务创建是否已经暴露供应商拥有状态。
+func taskResultHasAcceptedState(result provider.TaskResult) bool {
+	return strings.TrimSpace(result.ProviderTaskID) != "" || result.State != "" || !result.PollAfter.IsZero() || result.Result != nil || result.ErrorCode != ""
 }
 
 // RunRecovery polls due persisted provider tasks until shutdown without changing their target affinity.
@@ -915,8 +1039,10 @@ func (s *Service) RecoverOnce(ctx context.Context) error {
 		if record.ProviderTask.PollAfter.After(now) {
 			continue
 		}
-		result, errPoll := taskExecutor.PollTask(ctx, taskExecutionRequest(record), record.ProviderTask.ProviderTaskID)
+		providerRequest := taskExecutionRequest(record)
+		result, errPoll := taskExecutor.PollTask(ctx, providerRequest, record.ProviderTask.ProviderTaskID)
 		if errPoll != nil {
+			s.classifyAndRecordFailure(ctx, providerRequest, errPoll)
 			record.ProviderTask.PollAttempts++
 			record.ProviderTask.PollAfter = now.Add(taskPollBackoff(record.ProviderTask.PollAttempts))
 			if _, errSave := s.saveTaskObservation(ctx, record); errSave != nil && !errors.Is(errSave, ErrRevisionConflict) {
@@ -961,6 +1087,7 @@ func (s *Service) applyTaskResult(ctx context.Context, record Record, result pro
 		}
 		return s.transition(ctx, record, StatusRunning, EventExecutionRunning, nil)
 	case provider.TaskSucceeded:
+		s.recordSuccessfulRequest(ctx, taskExecutionRequest(record))
 		if record.Status != StatusRunning {
 			var errRunning error
 			record, errRunning = s.transition(ctx, record, StatusRunning, EventExecutionRunning, nil)
@@ -978,6 +1105,7 @@ func (s *Service) applyTaskResult(ctx context.Context, record Record, result pro
 		completed, _, errSuccess := s.succeedWithStatus(ctx, record, *result.Result, resources, StatusSucceeded, EventExecutionSucceeded)
 		return completed, errSuccess
 	case provider.TaskPartiallySucceeded:
+		s.recordSuccessfulRequest(ctx, taskExecutionRequest(record))
 		if record.Status != StatusRunning {
 			var errRunning error
 			record, errRunning = s.transition(ctx, record, StatusRunning, EventExecutionRunning, nil)
@@ -1042,8 +1170,14 @@ func requiresProviderTask(target resolve.Target) bool {
 
 // resolveTarget maps the exact closed target selection into one resolver request.
 // resolveTarget 将精确封闭 Target 选择映射为一个解析请求。
-func (s *Service) resolveTarget(ctx context.Context, request vcp.ExecutionRequest, now time.Time) (resolve.Target, error) {
-	resolution := resolve.Request{Operation: request.Operation, Now: now}
+func (s *Service) resolveTarget(ctx context.Context, request vcp.ExecutionRequest, now time.Time, excludedCredentialIDs ...string) (resolve.Target, error) {
+	resolution := resolve.Request{Operation: request.Operation, Now: now, ExcludedCredentialIDs: append([]string(nil), excludedCredentialIDs...)}
+	return s.resolveTargetWithRequest(ctx, request, resolution)
+}
+
+// resolveTargetWithRequest completes one constrained same-provider resolution request from the immutable VCP selection.
+// resolveTargetWithRequest 从不可变 VCP 选择补全一次受约束的同供应商解析请求。
+func (s *Service) resolveTargetWithRequest(ctx context.Context, request vcp.ExecutionRequest, resolution resolve.Request) (resolve.Target, error) {
 	if request.Target.Model != nil {
 		resolution.ProviderInstanceID = request.Target.Model.ProviderInstanceID
 		resolution.ProviderModelID = request.Target.Model.ProviderModelID
@@ -1056,6 +1190,101 @@ func (s *Service) resolveTarget(ctx context.Context, request vcp.ExecutionReques
 	}
 	target, _, errResolve := s.resolver.Resolve(ctx, resolution)
 	return target, errResolve
+}
+
+// resolveRetryTarget chooses another endpoint or credential only within the original provider instance and subject.
+// resolveRetryTarget 仅在原始供应商实例与主体内选择另一个入口或凭据。
+func (s *Service) resolveRetryTarget(ctx context.Context, record Record, classified provider.ClassifiedError, classifiedOK bool, semanticOutput bool, materialized []resource.MaterializedInput, preparedWorkflow *provider.PreparedWorkflowBinding, excludedCredentials *[]string, excludedEndpoints *[]string) (resolve.Target, bool) {
+	if !classifiedOK || semanticOutput || len(materialized) != 0 || preparedWorkflow != nil {
+		return resolve.Target{}, false
+	}
+	request := resolve.Request{Operation: record.Operation, Now: s.options.Now().UTC()}
+	switch classified.Action {
+	case provider.RetryOtherCredential:
+		*excludedCredentials = appendUniqueString(*excludedCredentials, record.Target.CredentialID)
+		*excludedEndpoints = (*excludedEndpoints)[:0]
+		request.ExcludedCredentialIDs = append([]string(nil), (*excludedCredentials)...)
+	case provider.RetryOtherEndpoint:
+		*excludedEndpoints = appendUniqueString(*excludedEndpoints, record.Target.EndpointID)
+		request.RequiredCredentialID = record.Target.CredentialID
+		request.ExcludedEndpointIDs = append([]string(nil), (*excludedEndpoints)...)
+	default:
+		return resolve.Target{}, false
+	}
+	target, errResolve := s.resolveTargetWithRequest(ctx, record.Request, request)
+	if errResolve != nil || !sameExecutionSubject(record.Target, target) {
+		return resolve.Target{}, false
+	}
+	if errCapabilities := validateRequestAgainstTarget(record.Request, target); errCapabilities != nil {
+		return resolve.Target{}, false
+	}
+	return target, true
+}
+
+// persistAttempt atomically records one completed attempt and an optional next same-provider target.
+// persistAttempt 原子记录一次已结束尝试以及可选的下一个同供应商 Target。
+func (s *Service) persistAttempt(ctx context.Context, record Record, attempt Attempt, nextTarget *resolve.Target) (Record, error) {
+	expectedRevision := record.Revision
+	record.Attempts = append(record.Attempts, attempt)
+	if nextTarget != nil {
+		record.Target = *nextTarget
+	}
+	record.UpdatedAt = s.options.Now().UTC()
+	record.Revision++
+	event := attemptCompletedEvent(record.ID, expectedRevision+1, record.UpdatedAt, attempt.Sequence)
+	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
+		return Record{}, errSave
+	}
+	return record, nil
+}
+
+// classifyAndRecordFailure returns one trusted classification and persists its runtime-state effect when configured.
+// classifyAndRecordFailure 返回可信分类，并在已配置时持久化其运行状态影响。
+func (s *Service) classifyAndRecordFailure(ctx context.Context, request provider.ExecutionRequest, executionError error) (provider.ClassifiedError, bool) {
+	classifier, supportsClassification := s.providers.(ProviderErrorClassifier)
+	if !supportsClassification {
+		return provider.ClassifiedError{}, false
+	}
+	classified, classifiedOK := classifier.ClassifyExecutionError(request, executionError)
+	if !classifiedOK {
+		return provider.ClassifiedError{}, false
+	}
+	if s.options.RuntimeFeedback != nil {
+		_ = s.options.RuntimeFeedback.RecordFailure(context.WithoutCancel(ctx), request, classified, s.options.Now().UTC())
+	}
+	return classified, true
+}
+
+// classifiedRetryable reports whether a trusted classification recommends a future or alternate-target retry.
+// classifiedRetryable 表示可信分类是否建议未来或更换 Target 后重试。
+func classifiedRetryable(classified provider.ClassifiedError, classifiedOK bool) bool {
+	return classifiedOK && classified.Action != provider.RetryStop
+}
+
+// providerResultHasSemanticOutput reports whether an errored dispatch already returned any provider-accepted state or client-visible result.
+// providerResultHasSemanticOutput 表示失败分派是否已经返回任何供应商接收状态或客户端可见结果。
+func providerResultHasSemanticOutput(result provider.ExecutionResult) bool {
+	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Transcript != nil || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
+}
+
+// appendUniqueString appends one exact identifier only when it has not already been recorded.
+// appendUniqueString 仅在尚未记录时追加一个精确标识。
+func appendUniqueString(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
+// recordSuccessfulRequest clears temporary exact-target runtime state after provider success.
+// recordSuccessfulRequest 在供应商成功后清除精确 Target 的临时运行状态。
+func (s *Service) recordSuccessfulRequest(ctx context.Context, request provider.ExecutionRequest) {
+	if s.options.RuntimeFeedback == nil {
+		return
+	}
+	_ = s.options.RuntimeFeedback.RecordSuccess(context.WithoutCancel(ctx), request, s.options.Now().UTC())
 }
 
 // loadBinding loads exact endpoint, credential, and definition snapshots selected by the target.
@@ -1260,6 +1489,12 @@ func lifecycleEvent(executionID string, sequence uint64, at time.Time, eventType
 	return Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: eventType, Lifecycle: &LifecycleEvent{Status: status, Failure: failure}}
 }
 
+// attemptCompletedEvent builds one safe event for a durably audited private provider attempt.
+// attemptCompletedEvent 为一次已持久审计的私有供应商尝试构建安全事件。
+func attemptCompletedEvent(executionID string, sequence uint64, at time.Time, attemptSequence uint32) Event {
+	return Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventExecutionAttemptCompleted, Attempt: &AttemptEvent{Sequence: attemptSequence}}
+}
+
 // canonicalRequestHash hashes canonical JSON after removing the transport idempotency key itself.
 // canonicalRequestHash 在移除传输幂等键本身后对规范 JSON 计算 Hash。
 func canonicalRequestHash(request vcp.ExecutionRequest) (string, error) {
@@ -1286,6 +1521,12 @@ func randomExecutionID() (string, error) {
 // sameTarget 比较约束执行与供应商资产所有权的每个不可变身份。
 func sameTarget(first resolve.Target, second resolve.Target) bool {
 	return first.ProviderDefinitionID == second.ProviderDefinitionID && first.ProviderInstanceID == second.ProviderInstanceID && first.ChannelID == second.ChannelID && first.EndpointID == second.EndpointID && first.EndpointRegion == second.EndpointRegion && first.CredentialID == second.CredentialID && first.SubjectKind == second.SubjectKind && first.ProviderModelID == second.ProviderModelID && first.ProviderServiceID == second.ProviderServiceID && first.OfferingID == second.OfferingID && first.ServiceOfferingID == second.ServiceOfferingID && first.Operation == second.Operation && first.ActionBindingID == second.ActionBindingID && first.ExecutionProfileID == second.ExecutionProfileID && first.UpstreamModelID == second.UpstreamModelID && first.UpstreamServiceID == second.UpstreamServiceID && first.CapabilityRevision == second.CapabilityRevision && first.ProviderConfigRevision == second.ProviderConfigRevision && first.CatalogRevision == second.CatalogRevision
+}
+
+// sameExecutionSubject verifies that failover changes only endpoint, region, credential, and evidence revisions.
+// sameExecutionSubject 校验故障切换只改变入口、区域、凭据和证据修订。
+func sameExecutionSubject(first resolve.Target, second resolve.Target) bool {
+	return first.ProviderDefinitionID == second.ProviderDefinitionID && first.ProviderInstanceID == second.ProviderInstanceID && first.ChannelID == second.ChannelID && first.SubjectKind == second.SubjectKind && first.ProviderModelID == second.ProviderModelID && first.ProviderServiceID == second.ProviderServiceID && first.OfferingID == second.OfferingID && first.ServiceOfferingID == second.ServiceOfferingID && first.Operation == second.Operation && first.ActionBindingID == second.ActionBindingID && first.ExecutionProfileID == second.ExecutionProfileID && first.UpstreamModelID == second.UpstreamModelID && first.UpstreamServiceID == second.UpstreamServiceID
 }
 
 // stableFailureCode maps internal errors to content-safe machine codes.

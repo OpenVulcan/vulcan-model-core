@@ -115,10 +115,21 @@ func kimiChatCapabilities() protocolchat.ProfileCapabilities {
 func kimiProviderDefinitions() []providerconfig.ProviderDefinition {
 	// apiKey is shared as immutable value input across the returned definitions.
 	// apiKey 作为不可变值输入在返回的定义之间共享。
-	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true}
+	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	// codingAPIKey requires an explicit membership tier because Kimi cannot derive it from a static key.
+	// codingAPIKey 要求显式选择会员档位，因为 Kimi 无法从静态密钥推导该档位。
+	codingAPIKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionManualRequired}
 	// deviceFlow describes the refreshable Coding Plan authorization lifecycle copied from the proven Kimi integration.
 	// deviceFlow 描述从已验证 Kimi 集成复制而来的可刷新 Coding Plan 授权生命周期。
-	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true}
+	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionProviderDetected}
+	// codingPlans freezes the user-confirmed Kimi membership vocabulary and exact provider codes.
+	// codingPlans 固化用户确认的 Kimi 会员词汇表与精确供应商代码。
+	codingPlans := []providerconfig.PlanOptionDefinition{
+		{ID: "kimi_andante", DisplayName: "Andante", DisplayNameKey: "providers.kimi.plans.andante", AuthMethodIDs: []string{"api_key", "device_flow"}, ManuallySelectable: true, ProviderPlanCodes: []string{"andante"}, SortOrder: 10, Revision: 1, EvidenceRevision: 1},
+		{ID: "kimi_moderato", DisplayName: "Moderato", DisplayNameKey: "providers.kimi.plans.moderato", AuthMethodIDs: []string{"api_key", "device_flow"}, ManuallySelectable: true, ProviderPlanCodes: []string{"moderato"}, SortOrder: 20, Revision: 1, EvidenceRevision: 1},
+		{ID: "kimi_allegretto", DisplayName: "Allegretto", DisplayNameKey: "providers.kimi.plans.allegretto", AuthMethodIDs: []string{"api_key", "device_flow"}, ManuallySelectable: true, ProviderPlanCodes: []string{"allegretto"}, SortOrder: 30, Revision: 1, EvidenceRevision: 1},
+		{ID: "kimi_allegro", DisplayName: "Allegro", DisplayNameKey: "providers.kimi.plans.allegro", AuthMethodIDs: []string{"api_key", "device_flow"}, ManuallySelectable: true, ProviderPlanCodes: []string{"allegro"}, SortOrder: 40, Revision: 1, EvidenceRevision: 1},
+	}
 	// unsupportedFeatures explicitly records management capabilities that do not yet have trusted implementations.
 	// unsupportedFeatures 显式记录尚无受信任实现的管理能力。
 	unsupportedFeatures := providerconfig.ProviderFeatureSet{
@@ -127,6 +138,12 @@ func kimiProviderDefinitions() []providerconfig.ProviderDefinition {
 		EntitlementReader: providerconfig.SupportUnsupported,
 		AllowanceReader:   providerconfig.SupportUnsupported,
 	}
+	// codingFeatures expose the account API's proven plan, entitlement, and usage observation.
+	// codingFeatures 暴露账号接口已验证的套餐、授权与用量观测能力。
+	codingFeatures := unsupportedFeatures
+	codingFeatures.PlanReader = providerconfig.SupportSupported
+	codingFeatures.EntitlementReader = providerconfig.SupportSupported
+	codingFeatures.AllowanceReader = providerconfig.SupportSupported
 	return []providerconfig.ProviderDefinition{
 		{
 			ID: KimiCNDefinitionID, Kind: providerconfig.DefinitionKindSystem, DisplayName: "Kimi CN",
@@ -147,9 +164,10 @@ func kimiProviderDefinitions() []providerconfig.ProviderDefinition {
 			GroupID: KimiGroupID, VariantName: "Coding Plan", VariantDescription: "Membership-based coding service with dedicated models and credentials.", VariantDescriptionKey: "providers.kimi.codingDescription", ModelCatalogID: "kimi_coding", SortOrder: 30,
 			DriverID: "kimi", DriverVersion: "1", ConfigSchemaVersion: "1",
 			ProtocolProfileID: protocolchat.ProfileID, EndpointProfileID: "kimi_coding_chat", AuthMethodIDs: []string{"api_key", "device_flow"}, Priority: 10, RuntimeReady: true,
-			AuthMethods:     []providerconfig.AuthMethodDefinition{apiKey, deviceFlow},
+			AuthMethods:     []providerconfig.AuthMethodDefinition{codingAPIKey, deviceFlow},
+			PlanOptions:     codingPlans,
 			EndpointPresets: []providerconfig.EndpointPreset{{ID: "coding_chat", BaseURL: "https://api.kimi.com/coding", Region: "Coding Plan", UserEditable: false}},
-			Features:        unsupportedFeatures, Revision: 1,
+			Features:        codingFeatures, Revision: 1,
 		},
 	}
 }

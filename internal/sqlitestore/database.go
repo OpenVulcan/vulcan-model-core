@@ -18,7 +18,7 @@ import (
 const (
 	// currentSchemaVersion is the latest schema migration understood by this binary.
 	// currentSchemaVersion 是当前程序理解的最新 Schema 迁移版本。
-	currentSchemaVersion = 6
+	currentSchemaVersion = 9
 )
 
 var (
@@ -300,6 +300,43 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 		statements = []string{
 			`ALTER TABLE executions ADD COLUMN provider_task_secret_ref TEXT`,
 			`ALTER TABLE executions ADD COLUMN provider_preparation_secret_ref TEXT`,
+		}
+	case 7:
+		statements = []string{
+			`CREATE TABLE router_settings (
+				id INTEGER PRIMARY KEY CHECK (id = 1),
+				default_routing_strategy TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				updated_at TEXT NOT NULL
+			)`,
+			`INSERT INTO router_settings(id, default_routing_strategy, revision, updated_at) VALUES (1, 'round_robin', 1, CURRENT_TIMESTAMP)`,
+			`CREATE TABLE credential_model_states (
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
+				credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE RESTRICT,
+				provider_model_id TEXT NOT NULL,
+				status TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				payload BLOB NOT NULL,
+				PRIMARY KEY(provider_instance_id, credential_id, provider_model_id)
+			)`,
+			`CREATE INDEX credential_model_states_instance_idx ON credential_model_states(provider_instance_id, credential_id, status, provider_model_id)`,
+		}
+	case 8:
+		statements = []string{
+			`ALTER TABLE executions ADD COLUMN attempts_payload BLOB`,
+		}
+	case 9:
+		statements = []string{
+			`CREATE TABLE runtime_scope_states (
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
+				scope TEXT NOT NULL,
+				scope_id TEXT NOT NULL,
+				status TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				payload BLOB NOT NULL,
+				PRIMARY KEY(provider_instance_id, scope, scope_id)
+			)`,
+			`CREATE INDEX runtime_scope_states_instance_idx ON runtime_scope_states(provider_instance_id, scope, status, scope_id)`,
 		}
 	default:
 		return fmt.Errorf("unknown sqlite migration version %d", version)

@@ -3,6 +3,7 @@ package sqlitestore
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
 	"testing"
@@ -14,6 +15,69 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestDatabaseMigratesVersionSixToRoutingAndAttemptState verifies append-only upgrades preserve an existing database.
+// TestDatabaseMigratesVersionSixToRoutingAndAttemptState 验证追加式升级会保留现有数据库。
+func TestDatabaseMigratesVersionSixToRoutingAndAttemptState(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "version-six.db")
+	absolutePath, errAbsolute := filepath.Abs(databasePath)
+	if errAbsolute != nil {
+		t.Fatalf("filepath.Abs() error = %v", errAbsolute)
+	}
+	rawDatabase, errOpen := sql.Open("sqlite", sqliteDSN(absolutePath))
+	if errOpen != nil {
+		t.Fatalf("sql.Open() error = %v", errOpen)
+	}
+	if _, errSchema := rawDatabase.ExecContext(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); errSchema != nil {
+		t.Fatalf("create schema migrations: %v", errSchema)
+	}
+	transaction, errBegin := rawDatabase.BeginTx(ctx, nil)
+	if errBegin != nil {
+		t.Fatalf("BeginTx() error = %v", errBegin)
+	}
+	for version := 1; version <= 6; version++ {
+		if errMigration := applyMigration(ctx, transaction, version); errMigration != nil {
+			t.Fatalf("apply migration %d: %v", version, errMigration)
+		}
+		if _, errRecord := transaction.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, version); errRecord != nil {
+			t.Fatalf("record migration %d: %v", version, errRecord)
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		t.Fatalf("commit version-six fixture: %v", errCommit)
+	}
+	if errClose := rawDatabase.Close(); errClose != nil {
+		t.Fatalf("close version-six fixture: %v", errClose)
+	}
+	database, errDatabase := Open(ctx, databasePath)
+	if errDatabase != nil {
+		t.Fatalf("Open() migrated database error = %v", errDatabase)
+	}
+	defer database.Close()
+	version, errVersion := database.SchemaVersion(ctx)
+	if errVersion != nil || version != currentSchemaVersion {
+		t.Fatalf("schema version=%d error=%v", version, errVersion)
+	}
+	var strategy string
+	if errSettings := database.sql.QueryRowContext(ctx, `SELECT default_routing_strategy FROM router_settings WHERE id = 1`).Scan(&strategy); errSettings != nil || strategy != "round_robin" {
+		t.Fatalf("routing strategy=%q error=%v", strategy, errSettings)
+	}
+	var attemptsColumnCount int
+	if errColumn := database.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM pragma_table_info('executions') WHERE name = 'attempts_payload'`).Scan(&attemptsColumnCount); errColumn != nil || attemptsColumnCount != 1 {
+		t.Fatalf("attempts column count=%d error=%v", attemptsColumnCount, errColumn)
+	}
+	var modelStateTableCount int
+	if errTable := database.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'credential_model_states'`).Scan(&modelStateTableCount); errTable != nil || modelStateTableCount != 1 {
+		t.Fatalf("model state table count=%d error=%v", modelStateTableCount, errTable)
+	}
+	// runtimeScopeStateTableCount proves the version-nine non-model cooldown migration was applied.
+	// runtimeScopeStateTableCount 证明版本九的非模型冷却迁移已应用。
+	var runtimeScopeStateTableCount int
+	if errTable := database.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'runtime_scope_states'`).Scan(&runtimeScopeStateTableCount); errTable != nil || runtimeScopeStateTableCount != 1 {
+		t.Fatalf("runtime scope state table count=%d error=%v", runtimeScopeStateTableCount, errTable)
+	}
+}
 
 // sqliteTestRegistries returns executable protocol metadata and one system definition.
 // sqliteTestRegistries 返回可执行协议元数据与一个系统定义。

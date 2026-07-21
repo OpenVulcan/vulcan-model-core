@@ -11,10 +11,22 @@ import {
   SearchIcon,
   ServerIcon,
   ShieldCheckIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+  AlertDialogTrigger,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -48,6 +60,7 @@ import {
   cancelKimiDeviceFlow,
   cancelCodexDeviceFlow,
   cancelXAIDeviceFlow,
+  deleteProviderCredential,
   fetchAuthorizedProviders,
   fetchCustomProtocolProfiles,
   fetchProviderDefinitions,
@@ -63,12 +76,16 @@ import {
   onboardVertexServiceAccount,
   refreshProviderCredential,
   refreshProviderMetadata,
+  rotateProviderCredentialSecret,
   startAntigravityOAuthFlow,
   startClaudeOAuthFlow,
   startCodexOAuthFlow,
   startKimiDeviceFlow,
   startCodexDeviceFlow,
   startXAIDeviceFlow,
+  updateProviderCredentialPlan,
+  updateProviderCredentialPriority,
+  updateProviderRoutingStrategy,
   type AuthorizedProvider,
   type AntigravityOAuthFlow,
   type ClaudeOAuthFlow,
@@ -78,6 +95,7 @@ import {
   type ProviderDefinitionIdentity,
   type ProviderDefinitionSummary,
   type ProviderDefinition,
+  type ProviderCredential,
   type ProviderAllowance,
   type ProviderAllowanceWindow,
   type ProviderCatalogMetadata,
@@ -92,6 +110,17 @@ interface ProviderManagementPageProps {
   // managementAuthToken is the active in-memory management credential.
   // managementAuthToken 是当前内存管理凭证。
   managementAuthToken: string;
+}
+
+// CredentialReauthorizationSelection binds one local credential to its immutable provider definition.
+// CredentialReauthorizationSelection 将一个本地凭据绑定到其不可变供应商定义。
+interface CredentialReauthorizationSelection {
+  // providerInstanceID owns the credential.
+  // providerInstanceID 拥有该凭据。
+  providerInstanceID: string;
+  // credential is the exact management-safe credential.
+  // credential 是精确的管理端安全凭据。
+  credential: ProviderCredential;
 }
 
 // ProviderManagementPage renders grouped system providers and exact site or plan selection.
@@ -173,6 +202,15 @@ export function ProviderManagementPage({
   const [credentialRefreshErrors, setCredentialRefreshErrors] = useState<
     Record<string, string>
   >({});
+  // reauthorizationTarget identifies an existing credential being replaced through the creation dialog shell.
+  // reauthorizationTarget 标识通过新增 Dialog 外壳进行替换的既有凭据。
+  const [reauthorizationTarget, setReauthorizationTarget] =
+    useState<CredentialReauthorizationSelection | null>(null);
+  // deletingCredentialIDs prevents duplicate destructive requests.
+  // deletingCredentialIDs 防止重复的破坏性请求。
+  const [deletingCredentialIDs, setDeletingCredentialIDs] = useState<
+    Set<string>
+  >(new Set());
 
   useEffect(() => {
     // controller cancels only this page-owned catalog request when the route unmounts.
@@ -234,7 +272,8 @@ export function ProviderManagementPage({
   // selectedDefinition 是传递给录入命令的精确不可变变体。
   const selectedDefinition = groups
     .flatMap((group) => group.provider_definitions)
-    .find((definition) => definition.id === selectedDefinitionID);
+    .find((definition) => definition.id === selectedDefinitionID) ??
+    definitions.find((definition) => definition.id === selectedDefinitionID);
   // normalizedSearch is compared only with locale-neutral provider identifiers and authored names.
   // normalizedSearch 仅与区域无关的供应商标识和编写名称比较。
   const normalizedSearch = searchQuery.trim().toLocaleLowerCase();
@@ -263,6 +302,55 @@ export function ProviderManagementPage({
     setExpandedGroupID("");
     setSelectedDefinitionID("");
     setConfiguringCustom(false);
+    setReauthorizationTarget(null);
+  }
+
+  // beginCredentialReauthorization opens the exact provider workflow for one existing credential.
+  // beginCredentialReauthorization 为一个既有凭据打开精确供应商工作流。
+  function beginCredentialReauthorization(
+    providerInstanceID: string,
+    definitionID: string,
+    credential: ProviderCredential,
+  ) {
+    setReauthorizationTarget({ providerInstanceID, credential });
+    setSelectedDefinitionID(definitionID);
+    setAdding(true);
+  }
+
+  // deleteCredential removes one confirmed credential and reloads authoritative provider state.
+  // deleteCredential 删除一个已确认凭据并重新加载权威供应商状态。
+  async function deleteCredential(
+    providerInstanceID: string,
+    credentialID: string,
+  ) {
+    setDeletingCredentialIDs((current) => new Set(current).add(credentialID));
+    try {
+      await deleteProviderCredential(
+        managementAuthToken,
+        providerInstanceID,
+        credentialID,
+      );
+      setProviderMetadata((current) => {
+        const next = { ...current };
+        delete next[providerInstanceID];
+        return next;
+      });
+      setRefreshRevision((revision) => revision + 1);
+    } catch {
+      setCredentialRefreshErrors((current) => ({
+        ...current,
+        [credentialID]: "provider_credential_delete_failed",
+      }));
+      // A cleanup-stage server error can occur after configuration deletion, so always reload authoritative state.
+      // 服务端清理阶段错误可能发生在配置已删除之后，因此始终重新加载权威状态。
+      setRefreshRevision((revision) => revision + 1);
+    } finally {
+      setDeletingCredentialIDs((current) => {
+        const next = new Set(current);
+        next.delete(credentialID);
+        return next;
+      });
+    }
   }
 
   // returnToProviderCatalog leaves configuration while preserving the expanded parent provider card.
@@ -359,6 +447,57 @@ export function ProviderManagementPage({
     }
   }
 
+  // changeProviderRouting persists one instance override and reloads the authoritative provider list.
+  // changeProviderRouting 持久化一个实例覆盖策略并重新加载权威供应商列表。
+  async function changeProviderRouting(
+    providerInstanceID: string,
+    strategy: "" | "round_robin" | "fill_first",
+  ) {
+    await updateProviderRoutingStrategy(
+      managementAuthToken,
+      providerInstanceID,
+      strategy,
+    );
+    setRefreshRevision((revision) => revision + 1);
+  }
+
+  // changeCredentialPriority persists account ordering and reloads redacted credential metadata.
+  // changeCredentialPriority 持久化账号顺序并重新加载脱敏凭据元数据。
+  async function changeCredentialPriority(
+    providerInstanceID: string,
+    credentialID: string,
+    priority: number,
+  ) {
+    await updateProviderCredentialPriority(
+      managementAuthToken,
+      providerInstanceID,
+      credentialID,
+      priority,
+    );
+    setRefreshRevision((revision) => revision + 1);
+  }
+
+  // changeCredentialPlan replaces one manual plan and discards the stale browser catalog projection.
+  // changeCredentialPlan 替换一个人工套餐并丢弃浏览器中的过期目录投影。
+  async function changeCredentialPlan(
+    providerInstanceID: string,
+    credentialID: string,
+    planOptionID: string,
+  ) {
+    await updateProviderCredentialPlan(
+      managementAuthToken,
+      providerInstanceID,
+      credentialID,
+      planOptionID,
+    );
+    setProviderMetadata((current) => {
+      const next = { ...current };
+      delete next[providerInstanceID];
+      return next;
+    });
+    setRefreshRevision((revision) => revision + 1);
+  }
+
   return (
     <div className="flex flex-col gap-6 p-4 lg:p-6">
       <div className="flex flex-wrap items-start justify-between gap-4">
@@ -422,6 +561,12 @@ export function ProviderManagementPage({
                 refreshingCredentialIDs={refreshingCredentialIDs}
                 credentialRefreshErrors={credentialRefreshErrors}
                 onRefreshCredential={refreshAccountCredential}
+                onChangeRouting={changeProviderRouting}
+                onChangeCredentialPriority={changeCredentialPriority}
+                onChangeCredentialPlan={changeCredentialPlan}
+                onReauthorizeCredential={beginCredentialReauthorization}
+                onDeleteCredential={deleteCredential}
+                deletingCredentialIDs={deletingCredentialIDs}
               />
             ))}
           </div>
@@ -458,7 +603,9 @@ export function ProviderManagementPage({
               ) : null}
               <div className="min-w-0 flex-1">
                 <DialogTitle>
-                  {selectedDefinition || configuringCustom
+                  {reauthorizationTarget
+                    ? t("providers.reauthorizeCredential")
+                    : selectedDefinition || configuringCustom
                     ? t("providers.configureProvider")
                     : t("providers.add")}
                 </DialogTitle>
@@ -534,10 +681,11 @@ export function ProviderManagementPage({
                   />
                 ) : selectedDefinition ? (
                   <ProviderOnboardingPanel
-                    key={selectedDefinition.id}
+                    key={`${selectedDefinition.id}:${reauthorizationTarget?.credential.id ?? "new"}`}
                     definition={selectedDefinition}
                     managementAuthToken={managementAuthToken}
                     onComplete={completeOnboarding}
+                    reauthorizationTarget={reauthorizationTarget}
                   />
                 ) : null}
               </div>
@@ -787,6 +935,42 @@ interface AuthorizedProviderCardProps {
     providerInstanceID: string,
     credentialID: string,
   ) => void;
+  // onChangeRouting persists one instance scheduling override.
+  // onChangeRouting 持久化一个实例调度覆盖值。
+  onChangeRouting: (
+    providerInstanceID: string,
+    strategy: "" | "round_robin" | "fill_first",
+  ) => Promise<void>;
+  // onChangeCredentialPriority persists one nonnegative account priority.
+  // onChangeCredentialPriority 持久化一个非负账号优先级。
+  onChangeCredentialPriority: (
+    providerInstanceID: string,
+    credentialID: string,
+    priority: number,
+  ) => Promise<void>;
+  // onChangeCredentialPlan replaces one manual code-owned plan.
+  // onChangeCredentialPlan 替换一个人工代码拥有套餐。
+  onChangeCredentialPlan: (
+    providerInstanceID: string,
+    credentialID: string,
+    planOptionID: string,
+  ) => Promise<void>;
+  // onReauthorizeCredential opens the exact credential acquisition workflow.
+  // onReauthorizeCredential 打开精确的凭据获取流程。
+  onReauthorizeCredential: (
+    providerInstanceID: string,
+    definitionID: string,
+    credential: ProviderCredential,
+  ) => void;
+  // onDeleteCredential deletes one confirmed credential.
+  // onDeleteCredential 删除一个已确认凭据。
+  onDeleteCredential: (
+    providerInstanceID: string,
+    credentialID: string,
+  ) => Promise<void>;
+  // deletingCredentialIDs identifies credentials with an active delete request.
+  // deletingCredentialIDs 标识正在执行删除请求的凭据。
+  deletingCredentialIDs: ReadonlySet<string>;
 }
 
 // AuthorizedProviderCard renders one configured provider and its complete redacted authorization list.
@@ -801,6 +985,12 @@ function AuthorizedProviderCard({
   refreshingCredentialIDs,
   credentialRefreshErrors,
   onRefreshCredential,
+  onChangeRouting,
+  onChangeCredentialPriority,
+  onChangeCredentialPlan,
+  onReauthorizeCredential,
+  onDeleteCredential,
+  deletingCredentialIDs,
 }: AuthorizedProviderCardProps) {
   const { t } = useI18n();
   // accountMetadataStatuses is the complete server-authored capability state set relevant to account refresh.
@@ -819,6 +1009,8 @@ function AuthorizedProviderCard({
   const accountMetadataTemporarilyUnavailable =
     !supportsAccountMetadata &&
     accountMetadataStatuses.includes("temporarily_unavailable");
+  const [routingMutationPending, setRoutingMutationPending] = useState(false);
+  const [routingMutationFailed, setRoutingMutationFailed] = useState(false);
   return (
     <Card>
       <CardHeader>
@@ -883,9 +1075,11 @@ function AuthorizedProviderCard({
                   <div className="flex items-center gap-2">
                     {model.entitlement_mode === "explicit" ? (
                       <Badge variant="outline">
-                        {model.provider_authorized
+                        {model.authorization_status === "authorized"
                           ? t("providers.modelAuthorized")
-                          : t("providers.modelUnauthorized")}
+                          : model.authorization_status === "denied"
+                            ? t("providers.modelUnauthorized")
+                            : t("providers.modelAuthorizationUnknown")}
                       </Badge>
                     ) : null}
                     <Badge variant="outline">
@@ -910,6 +1104,11 @@ function AuthorizedProviderCard({
                 >
                   <span>{plan.plan_name || plan.plan_code}</span>
                   <Badge variant="outline">{plan.status}</Badge>
+                  <Badge variant="secondary">
+                    {plan.evidence_source === "operator_declared"
+                      ? t("providers.operatorDeclared")
+                      : t("providers.providerDetected")}
+                  </Badge>
                 </li>
               ))}
             </ul>
@@ -922,39 +1121,11 @@ function AuthorizedProviderCard({
             </h4>
             <ul className="divide-y rounded-md border">
               {metadata.allowances.map((allowance, allowanceIndex) => (
-                <li
+                <AllowanceDisplay
                   key={`${allowance.kind}\u0000${allowance.metric}\u0000${allowance.scope}\u0000${allowanceIndex}`}
-                  className="space-y-1 px-3 py-2 text-sm"
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <span className="font-medium">{allowance.metric}</span>
-                    <Badge variant="outline">{allowance.status}</Badge>
-                  </div>
-                  <p className="text-muted-foreground text-xs">
-                    {allowance.remaining !== undefined
-                      ? `${t("providers.remaining")}: ${allowance.remaining} ${allowanceDisplayUnit(allowance)}`
-                      : null}
-                    {allowance.remaining === undefined &&
-                    allowance.remaining_ratio !== undefined
-                      ? `${t("providers.remainingRatio")}: ${allowance.remaining_ratio * 100}%`
-                      : null}
-                    {allowance.used !== undefined
-                      ? ` · ${t("providers.used")}: ${allowance.used}`
-                      : null}
-                    {allowance.limit !== undefined
-                      ? ` · ${t("providers.limit")}: ${allowance.limit}`
-                      : null}
-                  </p>
-                  {allowance.window ? (
-                    <p className="text-muted-foreground text-xs">
-                      {t("providers.window")}:{" "}
-                      {allowanceWindowLabel(allowance.window)}
-                      {allowance.window.reset_at
-                        ? ` · ${t("providers.resetAt")}: ${allowance.window.reset_at}`
-                        : null}
-                    </p>
-                  ) : null}
-                </li>
+                  allowance={allowance}
+                  t={t}
+                />
               ))}
             </ul>
           </div>
@@ -967,6 +1138,48 @@ function AuthorizedProviderCard({
             {provider.instance.handle}
           </span>
         </div>
+        <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,16rem)] sm:items-center">
+          <div>
+            <p className="text-sm font-medium">{t("providers.routingStrategy")}</p>
+            <p className="text-muted-foreground text-xs">
+              {t("providers.routingStrategyHelp")}
+            </p>
+          </div>
+          <Select
+            value={provider.instance.routing_strategy || "inherit"}
+            disabled={routingMutationPending}
+            onValueChange={(value) => {
+              if (
+                value !== "inherit" &&
+                value !== "round_robin" &&
+                value !== "fill_first"
+              )
+                return;
+              setRoutingMutationPending(true);
+              setRoutingMutationFailed(false);
+              void onChangeRouting(
+                provider.instance.id,
+                value === "inherit" ? "" : value,
+              )
+                .catch(() => setRoutingMutationFailed(true))
+                .finally(() => setRoutingMutationPending(false));
+            }}
+          >
+            <SelectTrigger className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent>
+              <SelectItem value="inherit">{t("providers.routingInherit")}</SelectItem>
+              <SelectItem value="round_robin">{t("settings.roundRobin")}</SelectItem>
+              <SelectItem value="fill_first">{t("settings.fillFirst")}</SelectItem>
+            </SelectContent>
+          </Select>
+        </div>
+        {routingMutationFailed ? (
+          <p className="text-destructive text-xs" role="alert">
+            {t("providers.routingUpdateFailed")}
+          </p>
+        ) : null}
         <div>
           <h4 className="mb-2 text-sm font-medium">
             {t("providers.authorizations")}
@@ -1000,9 +1213,40 @@ function AuthorizedProviderCard({
                             credential.auth_method_id,
                           )}
                         </p>
+                        <p className="text-muted-foreground text-xs">
+                          {t("providers.priority")}: {credential.priority}
+                        </p>
                       </div>
                     </div>
                     <div className="flex items-center gap-2">
+                      {definition &&
+                      (authMethod?.type === "api_key" ||
+                        authMethod?.type === "bearer" ||
+                        authMethod?.type === "header_api_key" ||
+                        authMethod?.type === "device_flow" ||
+                        authMethod?.type === "oauth" ||
+                        authMethod?.type === "service_account") ? (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() =>
+                            onReauthorizeCredential(
+                              provider.instance.id,
+                              provider.instance.definition_id,
+                              credential,
+                            )
+                          }
+                        >
+                          <KeyRoundIcon className="size-3.5" />
+                          {authMethod.type === "api_key" ||
+                          authMethod.type === "bearer" ||
+                          authMethod.type === "header_api_key" ||
+                          authMethod.type === "service_account"
+                            ? t("providers.replaceCredential")
+                            : t("providers.reauthorizeCredential")}
+                        </Button>
+                      ) : null}
                       {authMethod?.refreshable ? (
                         <Button
                           type="button"
@@ -1027,7 +1271,108 @@ function AuthorizedProviderCard({
                       <Badge variant="outline">
                         {providerStatusLabel(t, credential.status)}
                       </Badge>
+                      <AlertDialog>
+                        <AlertDialogTrigger
+                          render={
+                            <Button
+                              type="button"
+                              variant="ghost"
+                              size="icon-sm"
+                              aria-label={t("providers.deleteCredential")}
+                              disabled={deletingCredentialIDs.has(credential.id)}
+                            />
+                          }
+                        >
+                          <Trash2Icon className="text-destructive size-3.5" />
+                        </AlertDialogTrigger>
+                        <AlertDialogContent>
+                          <AlertDialogHeader>
+                            <AlertDialogTitle>
+                              {t("providers.deleteCredentialTitle")}
+                            </AlertDialogTitle>
+                            <AlertDialogDescription>
+                              {t("providers.deleteCredentialDescription")}
+                            </AlertDialogDescription>
+                          </AlertDialogHeader>
+                          <AlertDialogFooter>
+                            <AlertDialogCancel>
+                              {t("providers.cancel")}
+                            </AlertDialogCancel>
+                            <AlertDialogAction
+                              onClick={() =>
+                                void onDeleteCredential(
+                                  provider.instance.id,
+                                  credential.id,
+                                )
+                              }
+                            >
+                              {t("providers.deleteCredential")}
+                            </AlertDialogAction>
+                          </AlertDialogFooter>
+                        </AlertDialogContent>
+                      </AlertDialog>
                     </div>
+                  </div>
+                  <div className="grid gap-2 sm:grid-cols-2">
+                    <div className="space-y-1">
+                      <Label htmlFor={`credential-priority-${credential.id}`}>
+                        {t("providers.priority")}
+                      </Label>
+                      <Input
+                        id={`credential-priority-${credential.id}`}
+                        type="number"
+                        min={0}
+                        defaultValue={credential.priority}
+                        onBlur={(event) => {
+                          const priority = Number.parseInt(event.currentTarget.value, 10);
+                          if (
+                            Number.isInteger(priority) &&
+                            priority >= 0 &&
+                            priority !== credential.priority
+                          ) {
+                            void onChangeCredentialPriority(
+                              provider.instance.id,
+                              credential.id,
+                              priority,
+                            );
+                          }
+                        }}
+                      />
+                    </div>
+                    {authMethod?.plan_acquisition === "manual_required" ? (
+                      <div className="space-y-1">
+                        <Label>{t("providers.membershipPlan")}</Label>
+                        <Select
+                          value={credential.declared_plan?.plan_option_id ?? ""}
+                          onValueChange={(value) => {
+                            if (value !== null && value !== credential.declared_plan?.plan_option_id) {
+                              void onChangeCredentialPlan(
+                                provider.instance.id,
+                                credential.id,
+                                value,
+                              );
+                            }
+                          }}
+                        >
+                          <SelectTrigger className="w-full">
+                            <SelectValue placeholder={t("providers.selectMembershipPlan")} />
+                          </SelectTrigger>
+                          <SelectContent>
+                            {(definition?.plan_options ?? [])
+                              .filter(
+                                (option) =>
+                                  option.manually_selectable &&
+                                  option.auth_method_ids.includes(credential.auth_method_id),
+                              )
+                              .map((option) => (
+                                <SelectItem key={option.id} value={option.id}>
+                                  {option.display_name}
+                                </SelectItem>
+                              ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                    ) : null}
                   </div>
                   {credentialRefreshErrors[credential.id] ? (
                     <p className="text-destructive text-xs" role="status">
@@ -1045,6 +1390,182 @@ function AuthorizedProviderCard({
       </CardContent>
     </Card>
   );
+}
+
+// AllowanceDisplay renders window quotas, monetary balances, credits, and provider-defined values with distinct visual modes.
+// AllowanceDisplay 使用不同视觉模式渲染窗口额度、货币余额、积分与供应商自定义值。
+function AllowanceDisplay({
+  allowance,
+  t,
+}: {
+  // allowance is one validated management-safe resource observation.
+  // allowance 是一条经过校验且管理端安全的资源观测。
+  allowance: ProviderAllowance;
+  // t resolves the current simplified-Chinese or English label.
+  // t 解析当前简体中文或英文标签。
+  t: (key: TranslationKey) => string;
+}) {
+  const ratio = allowance.remaining_ratio;
+  const progress =
+    ratio === undefined ? undefined : Math.max(0, Math.min(100, ratio * 100));
+  const isMoney = allowance.unit === "minor_currency_units";
+  const displayValue = (value: string | undefined) =>
+    isMoney
+      ? formatMinorCurrency(value, allowance.currency)
+      : value === undefined
+        ? undefined
+        : `${value} ${allowanceDisplayUnit(allowance)}`;
+  const remaining = displayValue(allowance.remaining);
+  const used = displayValue(allowance.used);
+  const limit = displayValue(allowance.limit);
+
+  if (allowance.kind === "window_quota") {
+    return (
+      <li className="space-y-2 px-3 py-3 text-sm">
+        <div className="flex items-center justify-between gap-3">
+          <span className="flex min-w-0 items-center gap-2">
+            <span className="truncate font-medium">
+              {allowanceMetricLabel(t, allowance.metric)}
+            </span>
+            <AllowanceCredentialBadge allowance={allowance} />
+          </span>
+          <Badge variant="outline">
+            {allowanceStatusLabel(t, allowance.status)}
+          </Badge>
+        </div>
+        {progress !== undefined ? (
+          <div className="space-y-1">
+            <div
+              className="bg-muted h-2 overflow-hidden rounded-full"
+              role="progressbar"
+              aria-label={allowanceMetricLabel(t, allowance.metric)}
+              aria-valuemin={0}
+              aria-valuemax={100}
+              aria-valuenow={Math.round(progress)}
+            >
+              <div
+                className={`h-full rounded-full transition-[width] ${progress <= 10 ? "bg-destructive" : progress <= 30 ? "bg-amber-500" : "bg-emerald-500"}`}
+                style={{ width: `${progress}%` }}
+              />
+            </div>
+            <div className="text-muted-foreground flex justify-between gap-3 text-xs">
+              <span>
+                {t("providers.remaining")}:{" "}
+                {remaining ?? `${progress.toFixed(0)}%`}
+              </span>
+              {used !== undefined && limit !== undefined ? (
+                <span>
+                  {used} / {limit}
+                </span>
+              ) : null}
+            </div>
+          </div>
+        ) : (
+          <AllowanceValueSummary allowance={allowance} t={t} />
+        )}
+        {allowance.window ? (
+          <p className="text-muted-foreground text-xs">
+            {t("providers.window")}: {allowanceWindowLabel(allowance.window)}
+            {allowance.window.reset_at
+              ? ` · ${t("providers.resetAt")}: ${formatAllowanceTime(allowance.window.reset_at)}`
+              : null}
+          </p>
+        ) : null}
+      </li>
+    );
+  }
+
+  if (allowance.kind === "balance") {
+    return (
+      <li className="grid gap-2 px-3 py-3 text-sm sm:grid-cols-[minmax(0,1fr)_auto] sm:items-center">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className="font-medium">
+              {allowanceMetricLabel(t, allowance.metric)}
+            </span>
+            <AllowanceCredentialBadge allowance={allowance} />
+            <Badge variant="outline">
+              {allowanceStatusLabel(t, allowance.status)}
+            </Badge>
+          </div>
+          {used !== undefined ? (
+            <p className="text-muted-foreground mt-1 text-xs">
+              {t("providers.used")}: {used}
+            </p>
+          ) : null}
+        </div>
+        <div className="sm:text-right">
+          <p className="text-base font-semibold tabular-nums">
+            {remaining ?? t("providers.unknownAmount")}
+          </p>
+          {limit !== undefined ? (
+            <p className="text-muted-foreground text-xs">
+              {t("providers.limit")}: {limit}
+            </p>
+          ) : null}
+        </div>
+      </li>
+    );
+  }
+
+  return (
+    <li className="flex items-center justify-between gap-4 px-3 py-3 text-sm">
+      <div>
+        <p className="font-medium">
+          {allowanceMetricLabel(t, allowance.metric)}
+        </p>
+        <AllowanceCredentialBadge allowance={allowance} />
+        <AllowanceValueSummary allowance={allowance} t={t} />
+      </div>
+      <Badge
+        variant={allowance.kind === "credit_grant" ? "secondary" : "outline"}
+      >
+        {remaining ?? limit ?? allowanceStatusLabel(t, allowance.status)}
+      </Badge>
+    </li>
+  );
+}
+
+// AllowanceCredentialBadge identifies one local credential without exposing upstream account identity.
+// AllowanceCredentialBadge 标识一个本地凭据且不暴露上游账号身份。
+function AllowanceCredentialBadge({
+  allowance,
+}: {
+  // allowance supplies the optional management-safe credential reference.
+  // allowance 提供可选的管理端安全凭据引用。
+  allowance: ProviderAllowance;
+}) {
+  const label = allowance.credential_label || allowance.credential_id;
+  return label ? (
+    <Badge variant="secondary" className="max-w-48 truncate">
+      {label}
+    </Badge>
+  ) : null;
+}
+
+// AllowanceValueSummary renders compact exact values for modes without a progress representation.
+// AllowanceValueSummary 为没有进度表示的模式渲染紧凑精确数值。
+function AllowanceValueSummary({
+  allowance,
+  t,
+}: {
+  // allowance supplies exact optional quantities.
+  // allowance 提供精确的可选数量。
+  allowance: ProviderAllowance;
+  // t resolves localized field labels.
+  // t 解析本地化字段标签。
+  t: (key: TranslationKey) => string;
+}) {
+  const parts: string[] = [];
+  if (allowance.remaining !== undefined)
+    parts.push(`${t("providers.remaining")}: ${allowance.remaining}`);
+  if (allowance.used !== undefined)
+    parts.push(`${t("providers.used")}: ${allowance.used}`);
+  if (allowance.limit !== undefined)
+    parts.push(`${t("providers.limit")}: ${allowance.limit}`);
+  return parts.length ? (
+    <p className="text-muted-foreground mt-1 text-xs">{parts.join(" · ")}</p>
+  ) : null;
 }
 
 // authorizationTypeLabel maps only definition-owned authentication types and otherwise preserves the exact method identifier.
@@ -1069,16 +1590,113 @@ function allowanceDisplayUnit(allowance: ProviderAllowance): string {
   return allowance.currency ?? allowance.unit;
 }
 
+// formatMinorCurrency converts exact minor units to a localized major-currency label.
+// formatMinorCurrency 将精确货币最小单位转换为本地化主要货币标签。
+function formatMinorCurrency(
+  value: string | undefined,
+  currency: string | undefined,
+): string | undefined {
+  if (value === undefined || currency === undefined) return undefined;
+  const amount = Number(value);
+  if (!Number.isFinite(amount)) return undefined;
+  return new Intl.NumberFormat(undefined, {
+    style: "currency",
+    currency,
+  }).format(amount / 100);
+}
+
+// allowanceMetricLabel maps known provider metrics and safely humanizes dynamic provider labels.
+// allowanceMetricLabel 映射已知供应商指标并安全地将动态供应商标签转为可读形式。
+function allowanceMetricLabel(
+  t: (key: TranslationKey) => string,
+  metric: string,
+): string {
+  const known: Partial<Record<string, TranslationKey>> = {
+    codex_primary: "providers.allowanceMetrics.codexPrimary",
+    codex_secondary: "providers.allowanceMetrics.codexSecondary",
+    code_review_primary: "providers.allowanceMetrics.codeReviewPrimary",
+    code_review_secondary: "providers.allowanceMetrics.codeReviewSecondary",
+    rate_limit_reset_credits: "providers.allowanceMetrics.resetCredits",
+    five_hour: "providers.allowanceMetrics.fiveHour",
+    seven_day: "providers.allowanceMetrics.sevenDay",
+    seven_day_oauth_apps: "providers.allowanceMetrics.sevenDayOAuthApps",
+    seven_day_opus: "providers.allowanceMetrics.sevenDayOpus",
+    seven_day_sonnet: "providers.allowanceMetrics.sevenDaySonnet",
+    seven_day_cowork: "providers.allowanceMetrics.sevenDayCowork",
+    iguana_necktie: "providers.allowanceMetrics.providerSpecial",
+    extra_usage: "providers.allowanceMetrics.extraUsage",
+    weekly_usage: "providers.allowanceMetrics.weeklyUsage",
+    monthly_budget: "providers.allowanceMetrics.monthlyBudget",
+    on_demand_cap: "providers.allowanceMetrics.onDemandCap",
+    GOOGLE_ONE_AI: "providers.allowanceMetrics.googleOneAI",
+  };
+  const translationKey = known[metric];
+  if (translationKey) return t(translationKey);
+  return metric
+    .split("_")
+    .filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(" ");
+}
+
+// allowanceStatusLabel localizes the complete canonical allowance status set.
+// allowanceStatusLabel 本地化完整的规范额度状态集合。
+function allowanceStatusLabel(
+  t: (key: TranslationKey) => string,
+  status: string,
+): string {
+  switch (status) {
+    case "available":
+      return t("providers.allowanceStatus.available");
+    case "low":
+      return t("providers.allowanceStatus.low");
+    case "exhausted":
+      return t("providers.allowanceStatus.exhausted");
+    case "unknown_sufficiency":
+      return t("providers.allowanceStatus.unknown");
+    case "unavailable":
+      return t("providers.allowanceStatus.unavailable");
+    default:
+      return status;
+  }
+}
+
 // allowanceWindowLabel preserves provider-authored window kind, duration, calendar unit, and time zone in one compact label.
 // allowanceWindowLabel 在一个紧凑标签中保留供应商编写的窗口类型、时长、日历单位和时区。
 function allowanceWindowLabel(window: ProviderAllowanceWindow): string {
   // parts retains only window nodes that are present in the validated management response.
   // parts 仅保留已校验管理响应中实际存在的窗口节点。
   const parts = [window.kind];
-  if (window.duration !== "0") parts.push(`${window.duration} ns`);
+  if (window.duration !== "0") parts.push(formatAllowanceDuration(window.duration));
   if (window.calendar_unit) parts.push(window.calendar_unit);
   if (window.time_zone) parts.push(window.time_zone);
   return parts.join(" · ");
+}
+
+// formatAllowanceDuration converts an exact nanosecond string to the largest exact-friendly human unit.
+// formatAllowanceDuration 将精确纳秒字符串转换为最大的易读时间单位。
+function formatAllowanceDuration(duration: string): string {
+  const nanoseconds = BigInt(duration);
+  const units = [
+    { label: "d", value: 86_400_000_000_000n },
+    { label: "h", value: 3_600_000_000_000n },
+    { label: "m", value: 60_000_000_000n },
+    { label: "s", value: 1_000_000_000n },
+  ];
+  for (const unit of units) {
+    if (nanoseconds >= unit.value && nanoseconds % unit.value === 0n)
+      return `${nanoseconds / unit.value}${unit.label}`;
+  }
+  return `${duration} ns`;
+}
+
+// formatAllowanceTime renders one server-validated timestamp in the browser locale.
+// formatAllowanceTime 使用浏览器区域设置渲染一个服务端已校验时间戳。
+function formatAllowanceTime(value: string): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(value));
 }
 
 // metadataRefreshErrorLabel maps stable metadata failure categories to actionable localized feedback.
@@ -1114,6 +1732,8 @@ function credentialRefreshErrorLabel(
       return t("providers.credentialAuthenticationUnavailable");
     case "provider_authentication_invalid_response":
       return t("providers.credentialAuthenticationInvalidResponse");
+    case "provider_credential_delete_failed":
+      return t("providers.credentialDeleteFailed");
     default:
       return t("providers.credentialRefreshFailed");
   }
@@ -1481,6 +2101,9 @@ interface ProviderOnboardingPanelProps {
   // onComplete reloads the authorized list after the server commits onboarding.
   // onComplete 在服务端提交录入后重新加载已授权列表。
   onComplete: () => void;
+  // reauthorizationTarget selects an existing credential instead of creating an instance.
+  // reauthorizationTarget 选择一个既有凭据而不是创建实例。
+  reauthorizationTarget?: CredentialReauthorizationSelection | null;
 }
 
 // ProviderOnboardingPanel performs API-key, service-account, or server-confidential interactive onboarding.
@@ -1489,13 +2112,34 @@ function ProviderOnboardingPanel({
   definition,
   managementAuthToken,
   onComplete,
+  reauthorizationTarget,
 }: ProviderOnboardingPanelProps) {
   const { t } = useI18n();
   const [authMethodID, setAuthMethodID] = useState(
-    definition.auth_methods[0]?.id ?? "",
+    reauthorizationTarget?.credential.auth_method_id ??
+      definition.auth_methods[0]?.id ??
+      "",
   );
   const authMethod = definition.auth_methods.find(
     (method) => method.id === authMethodID,
+  );
+  // selectablePlanOptions contains only server-authored plans valid for the selected manual authentication method.
+  // selectablePlanOptions 仅包含适用于所选人工认证方式且由服务端编写的套餐。
+  const selectablePlanOptions = definition.plan_options
+    .filter(
+      (option) =>
+        option.manually_selectable &&
+        option.auth_method_ids.includes(authMethodID),
+    )
+    .sort((left, right) => left.sort_order - right.sort_order);
+  // planOptionID is submitted only for authentication methods whose contract permits manual plan evidence.
+  // planOptionID 仅在认证方式合同允许人工套餐证据时提交。
+  const [planOptionID, setPlanOptionID] = useState(
+    definition.plan_options.find(
+      (option) =>
+        option.manually_selectable &&
+        option.auth_method_ids.includes(definition.auth_methods[0]?.id ?? ""),
+    )?.id ?? "",
   );
   const isDeviceFlow = authMethod?.type === "device_flow";
   const isAntigravityOAuth =
@@ -1512,18 +2156,27 @@ function ProviderOnboardingPanel({
   const isVertexServiceAccount =
     authMethod?.type === "service_account" &&
     definition.id === "system_google_vertex";
+  // isDirectSecretAuth identifies credential bytes that an administrator may replace directly.
+  // isDirectSecretAuth 标识管理员可以直接替换的凭据字节。
+  const isDirectSecretAuth =
+    authMethod?.type === "api_key" ||
+    authMethod?.type === "bearer" ||
+    authMethod?.type === "header_api_key";
   const isXAIDeviceFlow = definition.id === "system_xai_oauth";
   const isCodexDeviceFlow =
     isDeviceFlow && definition.id === "system_openai_codex";
   // requiresOperatorName is true only when the selected credential carries no provider-issued display identity.
   // requiresOperatorName 仅在所选凭据不携带供应商签发的显示身份时为 true。
   const requiresOperatorName =
-    authMethod?.type === "api_key" ||
-    (isDeviceFlow &&
-      (definition.id === "system_kimi_coding_plan" || isXAIDeviceFlow));
+    !reauthorizationTarget &&
+    (authMethod?.type === "api_key" ||
+      (isDeviceFlow &&
+        (definition.id === "system_kimi_coding_plan" || isXAIDeviceFlow)));
   // name is the sole operator-authored label and is reused by the server for the instance and credential.
   // name 是唯一由操作员填写的标签，并由服务端同时用于实例与凭据。
-  const [name, setName] = useState(definition.display_name);
+  const [name, setName] = useState(
+    reauthorizationTarget?.credential.label ?? definition.display_name,
+  );
   const [secret, setSecret] = useState("");
   // endpointPreset is the exact code-owned destination selected by this definition.
   // endpointPreset 是此 Definition 选择的精确代码拥有目标。
@@ -1564,6 +2217,11 @@ function ProviderOnboardingPanel({
   const [oauthCallbackURL, setOAuthCallbackURL] = useState("");
   const [pending, setPending] = useState(false);
   const [messageKey, setMessageKey] = useState<TranslationKey | null>(null);
+  // credentialWorkflowFailureKey distinguishes replacement failures from new-provider creation failures.
+  // credentialWorkflowFailureKey 区分凭据替换失败与新增供应商失败。
+  const credentialWorkflowFailureKey: TranslationKey = reauthorizationTarget
+    ? "providers.reauthorizationFailed"
+    : "providers.onboardingFailed";
 
   useEffect(() => {
     // cleanup releases the exact unfinished server session when this definition panel unmounts.
@@ -1642,7 +2300,7 @@ function ProviderOnboardingPanel({
       setOAuthFlow(flow);
       setOAuthCallbackURL("");
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       if (flowRequestRevision.current === requestRevision) setPending(false);
     }
@@ -1663,13 +2321,19 @@ function ProviderOnboardingPanel({
       await onboardProviderOAuthFlow(managementAuthToken, oauthFlow.id, {
         provider_definition_id: definition.id,
         callback_url: oauthCallbackURL.trim(),
+        ...(reauthorizationTarget
+          ? {
+              provider_instance_id: reauthorizationTarget.providerInstanceID,
+              credential_id: reauthorizationTarget.credential.id,
+            }
+          : {}),
       });
       oauthFlowRef.current = null;
       setOAuthFlow(null);
       setOAuthCallbackURL("");
       onComplete();
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       setPending(false);
     }
@@ -1692,7 +2356,7 @@ function ProviderOnboardingPanel({
       setOAuthFlow(null);
       setOAuthCallbackURL("");
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       setPending(false);
     }
@@ -1702,8 +2366,12 @@ function ProviderOnboardingPanel({
   // submitAPIKey 仅将一个明文密钥发送到经过认证的原子录入端点。
   async function submitAPIKey(event: FormEvent) {
     event.preventDefault();
-    if (!authMethod || authMethod.type !== "api_key") {
+    if (!authMethod || !isDirectSecretAuth) {
       setMessageKey("providers.unsupportedAuthentication");
+      return;
+    }
+    if (authMethod.plan_acquisition === "manual_required" && !planOptionID) {
+      setMessageKey("providers.selectMembershipPlan");
       return;
     }
     setPending(true);
@@ -1717,19 +2385,33 @@ function ProviderOnboardingPanel({
           value: endpointParameterValues[parameter.id].trim(),
         }),
       );
-      await onboardSystemProvider(managementAuthToken, {
-        provider_definition_id: definition.id,
-        name: name.trim(),
-        auth_method_id: authMethodID,
-        secret,
-        ...(endpointParameters.length > 0
-          ? { endpoint_parameters: endpointParameters }
-          : {}),
-      });
+      if (reauthorizationTarget) {
+        await rotateProviderCredentialSecret(
+          managementAuthToken,
+          reauthorizationTarget.providerInstanceID,
+          reauthorizationTarget.credential.id,
+          secret,
+        );
+      } else {
+        await onboardSystemProvider(managementAuthToken, {
+          provider_definition_id: definition.id,
+          name: name.trim(),
+          auth_method_id: authMethodID,
+          secret,
+          ...(planOptionID &&
+          (authMethod.plan_acquisition === "manual_required" ||
+            authMethod.plan_acquisition === "manual_optional")
+            ? { plan_option_id: planOptionID }
+            : {}),
+          ...(endpointParameters.length > 0
+            ? { endpoint_parameters: endpointParameters }
+            : {}),
+        });
+      }
       setSecret("");
       onComplete();
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       setPending(false);
     }
@@ -1765,11 +2447,17 @@ function ProviderOnboardingPanel({
         provider_definition_id: definition.id,
         location: vertexLocation.trim(),
         service_account: serviceAccount as Record<string, unknown>,
+        ...(reauthorizationTarget
+          ? {
+              provider_instance_id: reauthorizationTarget.providerInstanceID,
+              credential_id: reauthorizationTarget.credential.id,
+            }
+          : {}),
       });
       setSecret("");
       onComplete();
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       setPending(false);
     }
@@ -1806,7 +2494,7 @@ function ProviderOnboardingPanel({
       deviceFlowRef.current = flow;
       setDeviceFlow(flow);
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       if (flowRequestRevision.current === requestRevision) setPending(false);
     }
@@ -1827,6 +2515,12 @@ function ProviderOnboardingPanel({
       const result = await onboardFlow(managementAuthToken, deviceFlow.id, {
         provider_definition_id: definition.id,
         name: requiresOperatorName ? name.trim() : "",
+        ...(reauthorizationTarget
+          ? {
+              provider_instance_id: reauthorizationTarget.providerInstanceID,
+              credential_id: reauthorizationTarget.credential.id,
+            }
+          : {}),
       });
       if (result === null) {
         setMessageKey("providers.authorizationPending");
@@ -1836,7 +2530,7 @@ function ProviderOnboardingPanel({
         onComplete();
       }
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       setPending(false);
     }
@@ -1858,7 +2552,7 @@ function ProviderOnboardingPanel({
       deviceFlowRef.current = null;
       setDeviceFlow(null);
     } catch {
-      setMessageKey("providers.onboardingFailed");
+      setMessageKey(credentialWorkflowFailureKey);
     } finally {
       setPending(false);
     }
@@ -1867,6 +2561,7 @@ function ProviderOnboardingPanel({
   // selectAuthMethod releases any unfinished flow before changing the exact credential acquisition method.
   // selectAuthMethod 在切换精确凭据获取方式前释放任何未完成授权流程。
   function selectAuthMethod(methodID: string) {
+    if (reauthorizationTarget) return;
     // selectedAuthMethod comes from the exact definition-owned button and prevents forged acquisition methods.
     // selectedAuthMethod 来自精确定义拥有的按钮，并阻止伪造凭据获取方式。
     const selectedAuthMethod = definition.auth_methods.find(
@@ -1902,6 +2597,13 @@ function ProviderOnboardingPanel({
     }
     deviceFlowRef.current = null;
     setAuthMethodID(methodID);
+    setPlanOptionID(
+      definition.plan_options.find(
+        (option) =>
+          option.manually_selectable &&
+          option.auth_method_ids.includes(methodID),
+      )?.id ?? "",
+    );
     setDeviceFlow(null);
     oauthFlowRef.current = null;
     setOAuthFlow(null);
@@ -1956,7 +2658,7 @@ function ProviderOnboardingPanel({
                 : submitAPIKey
           }
         >
-          {definition.auth_methods.length > 1 ? (
+          {!reauthorizationTarget && definition.auth_methods.length > 1 ? (
             <div className="flex gap-2 md:col-span-2">
               {definition.auth_methods.map((method) => (
                 <Button
@@ -1990,18 +2692,20 @@ function ProviderOnboardingPanel({
           ) : null}
           {isVertexServiceAccount ? (
             <>
-              <div className="space-y-2">
-                <Label htmlFor="vertex-location">
-                  {t("providers.vertexLocation")}
-                </Label>
-                <Input
-                  id="vertex-location"
-                  value={vertexLocation}
-                  onChange={(event) => setVertexLocation(event.target.value)}
-                  required
-                  autoComplete="off"
-                />
-              </div>
+              {!reauthorizationTarget ? (
+                <div className="space-y-2">
+                  <Label htmlFor="vertex-location">
+                    {t("providers.vertexLocation")}
+                  </Label>
+                  <Input
+                    id="vertex-location"
+                    value={vertexLocation}
+                    onChange={(event) => setVertexLocation(event.target.value)}
+                    required
+                    autoComplete="off"
+                  />
+                </div>
+              ) : null}
               <div className="space-y-2 md:col-span-2">
                 <Label htmlFor="provider-secret">
                   {t("providers.serviceAccountJSON")}
@@ -2034,7 +2738,7 @@ function ProviderOnboardingPanel({
               />
             </div>
           ) : null}
-          {authMethod?.type === "api_key"
+          {authMethod?.type === "api_key" && !reauthorizationTarget
             ? (endpointPreset?.parameters ?? []).map((parameter) => (
                 <div className="space-y-2" key={parameter.id}>
                   <Label htmlFor={`endpoint-parameter-${parameter.id}`}>
@@ -2064,10 +2768,52 @@ function ProviderOnboardingPanel({
                 </div>
               ))
             : null}
+          {authMethod?.type === "api_key" &&
+          !reauthorizationTarget &&
+          (authMethod.plan_acquisition === "manual_required" ||
+            authMethod.plan_acquisition === "manual_optional") ? (
+            <div className="space-y-2">
+              <Label htmlFor="provider-membership-plan">
+                {t("providers.membershipPlan")}
+              </Label>
+              <Select
+                value={planOptionID}
+                onValueChange={(value) => {
+                  if (value !== null) setPlanOptionID(value);
+                }}
+              >
+                <SelectTrigger id="provider-membership-plan" className="w-full">
+                  <SelectValue
+                    placeholder={t("providers.selectMembershipPlan")}
+                  />
+                </SelectTrigger>
+                <SelectContent>
+                  {selectablePlanOptions.map((option) => (
+                    <SelectItem key={option.id} value={option.id}>
+                      {option.display_name}
+                    </SelectItem>
+                  ))}
+                </SelectContent>
+              </Select>
+              <p className="text-muted-foreground text-xs">
+                {t("providers.membershipPlanHelp")}
+              </p>
+            </div>
+          ) : null}
           <div className="md:col-span-2">
             {!isDeviceFlow && !isBrowserOAuth ? (
-              <Button type="submit" disabled={pending}>
-                {t("providers.onboard")}
+              <Button
+                type="submit"
+                disabled={
+                  pending ||
+                  (!reauthorizationTarget &&
+                    authMethod.plan_acquisition === "manual_required" &&
+                    !planOptionID)
+                }
+              >
+                {reauthorizationTarget
+                  ? t("providers.replaceCredential")
+                  : t("providers.onboard")}
               </Button>
             ) : isDeviceFlow && deviceFlow ? (
               <div className="space-y-3">

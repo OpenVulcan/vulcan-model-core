@@ -98,7 +98,11 @@ func (s *Service) Create(ctx context.Context, request Request) (Plan, error) {
 	// aggregateKey isolates limits owned by distinct semantic-role capabilities of the same media kind.
 	// aggregateKey 隔离同一媒体类型下由不同语义角色能力拥有的限制。
 	type aggregateKey struct {
+		// kind identifies the media family.
+		// kind 标识媒体类别。
 		kind vcp.MediaKind
+		// role identifies the semantic limit owner.
+		// role 标识语义限制所有者。
 		role vcp.MediaInputRole
 	}
 	totalBytes := make(map[aggregateKey]int64)

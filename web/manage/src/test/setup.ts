@@ -31,3 +31,32 @@ Object.defineProperty(window, "matchMedia", {
   writable: true,
   value: createMediaQueryList,
 })
+
+// createTestStorage supplies deterministic browser storage when the active Node runtime reserves an unavailable global implementation.
+// createTestStorage 在当前 Node 运行时保留不可用全局实现时提供确定性的浏览器存储。
+function createTestStorage(): Storage {
+  // values owns exact string keys and values for one isolated Vitest worker.
+  // values 为一个隔离 Vitest Worker 保存精确字符串键值。
+  const values = new Map<string, string>()
+  return {
+    get length() {
+      return values.size
+    },
+    clear: () => values.clear(),
+    getItem: (key) => values.get(key) ?? null,
+    key: (index) => Array.from(values.keys())[index] ?? null,
+    removeItem: (key) => {
+      values.delete(key)
+    },
+    setItem: (key, value) => {
+      values.set(key, String(value))
+    },
+  }
+}
+
+// localStorage is installed explicitly because Node 26 may expose an unavailable experimental global ahead of jsdom.
+// localStorage 被显式安装，因为 Node 26 可能在 jsdom 之前暴露一个不可用的实验性全局对象。
+Object.defineProperty(window, "localStorage", {
+  configurable: true,
+  value: createTestStorage(),
+})

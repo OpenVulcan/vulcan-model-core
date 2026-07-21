@@ -35,23 +35,30 @@ func (s *AccessTokenStore) Put(ctx context.Context, value []byte) (string, error
 // Get returns only the access token required by an outbound Bearer header.
 // Get 仅返回出站 Bearer 请求头需要的 Access Token。
 func (s *AccessTokenStore) Get(ctx context.Context, reference string) ([]byte, error) {
+	accessToken, _, _, errResolve := s.resolve(ctx, reference)
+	return accessToken, errResolve
+}
+
+// resolve returns the bearer value, exact device identity, and protected-document kind from one stored credential.
+// resolve 从一个已存储凭据返回 Bearer 值、精确设备身份和受保护文档类型。
+func (s *AccessTokenStore) resolve(ctx context.Context, reference string) ([]byte, string, bool, error) {
 	value, errGet := s.delegate.Get(ctx, reference)
 	if errGet != nil {
-		return nil, errGet
+		return nil, "", false, errGet
 	}
 	// Only the versioned document prefix denotes device-flow material; every other byte sequence remains an API key.
 	// 仅版本化文档前缀表示设备授权材料；其他任意字节序列都保持为 API Key。
 	if !bytes.HasPrefix(value, []byte(tokenDocumentPrefix)) {
-		return value, nil
+		return value, "", false, nil
 	}
 	// The complete refreshable document is no longer needed after the access-token projection is copied.
 	// 完整的可刷新文档在复制 Access Token 投影后不再需要。
 	defer clear(value)
 	token, errToken := UnmarshalToken(value)
 	if errToken != nil {
-		return nil, errToken
+		return nil, "", true, errToken
 	}
-	return []byte(token.AccessToken), nil
+	return []byte(token.AccessToken), token.DeviceID, true, nil
 }
 
 // Delete delegates complete token deletion unchanged.

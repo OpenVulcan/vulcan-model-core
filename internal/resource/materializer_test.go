@@ -16,7 +16,11 @@ import (
 
 // recordingAssetUploader records exact-target uploads and returns deterministic sensitive handles.
 // recordingAssetUploader 记录精确 Target 上传并返回确定性敏感句柄。
-type recordingAssetUploader struct{ uploads int }
+type recordingAssetUploader struct {
+	// uploads counts exact-target provider uploads.
+	// uploads 统计精确 Target 供应商上传次数。
+	uploads int
+}
 
 // Upload consumes the exact stream and returns one provider file handle.
 // Upload 消费精确流并返回一个供应商文件句柄。

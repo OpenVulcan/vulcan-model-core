@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"sort"
 	"strings"
 	"sync"
@@ -745,6 +746,64 @@ func (r *ExecutionRegistry) Execute(ctx context.Context, request ExecutionReques
 		return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	}
 	return driver.Execute(ctx, request)
+}
+
+// ClassifyExecutionError converts safe transport failures into closed same-provider retry semantics.
+// ClassifyExecutionError 将安全传输失败转换为封闭的同供应商重试语义。
+func (r *ExecutionRegistry) ClassifyExecutionError(request ExecutionRequest, executionError error) (ClassifiedError, bool) {
+	if executionError == nil || errors.Is(executionError, context.Canceled) || errors.Is(executionError, context.DeadlineExceeded) {
+		return ClassifiedError{}, false
+	}
+	now := request.Now
+	if now.IsZero() {
+		return ClassifiedError{}, false
+	}
+	var statusError transport.StatusError
+	if errors.As(executionError, &statusError) {
+		return classifyHTTPStatus(request.Binding.Target, statusError, now)
+	}
+	var networkError net.Error
+	if errors.As(executionError, &networkError) {
+		retryAt := now.Add(time.Minute)
+		return ClassifiedError{Category: "network_unavailable", Scope: ErrorScopeEndpoint, Action: RetryOtherEndpoint, RetryAt: &retryAt, RuleID: "transport_network_error"}, true
+	}
+	return ClassifiedError{}, false
+}
+
+// classifyHTTPStatus maps only body-free status evidence and avoids guessing provider message fields.
+// classifyHTTPStatus 仅映射不含正文的状态证据并避免猜测供应商消息字段。
+func classifyHTTPStatus(target resolve.Target, statusError transport.StatusError, now time.Time) (ClassifiedError, bool) {
+	classified := ClassifiedError{}
+	switch statusError.StatusCode {
+	case 401:
+		classified = ClassifiedError{Category: "authentication_rejected", Scope: ErrorScopeCredential, Action: RetryOtherCredential, RuleID: "http_401"}
+	case 402, 403:
+		classified = ClassifiedError{Category: "payment_required", Scope: ErrorScopeCredential, Action: RetryOtherCredential, RuleID: fmt.Sprintf("http_%d", statusError.StatusCode)}
+	case 429:
+		scope := ErrorScopeCredential
+		if target.ProviderModelID != "" {
+			scope = ErrorScopeModel
+		}
+		classified = ClassifiedError{Category: "quota_exhausted", Scope: scope, Action: RetryOtherCredential, RuleID: "http_429"}
+	case 408, 500, 502, 503, 504:
+		classified = ClassifiedError{Category: "transient_upstream", Scope: ErrorScopeEndpoint, Action: RetryOtherEndpoint, RuleID: fmt.Sprintf("http_%d", statusError.StatusCode)}
+	default:
+		return ClassifiedError{}, false
+	}
+	if statusError.RetryAfter != nil {
+		retryAt := now.Add(*statusError.RetryAfter)
+		classified.RetryAt = &retryAt
+	} else {
+		switch classified.Category {
+		case "authentication_rejected", "payment_required":
+			retryAt := now.Add(30 * time.Minute)
+			classified.RetryAt = &retryAt
+		case "transient_upstream":
+			retryAt := now.Add(time.Minute)
+			classified.RetryAt = &retryAt
+		}
+	}
+	return classified, true
 }
 
 // StartTask validates exact ownership and starts one asynchronous provider task.

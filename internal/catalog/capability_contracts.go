@@ -472,7 +472,11 @@ func (c ModelCapabilities) validateExtended() error {
 	// mediaRoleKey makes same-kind capabilities independently addressable when they own disjoint semantic roles.
 	// mediaRoleKey 使拥有不相交语义角色的同类媒体能力可以独立寻址。
 	type mediaRoleKey struct {
+		// kind identifies the media family.
+		// kind 标识媒体类别。
 		kind vcp.MediaKind
+		// role identifies the semantic use within that family.
+		// role 标识该类别中的语义用途。
 		role vcp.MediaInputRole
 	}
 	seenMediaRoles := make(map[mediaRoleKey]struct{}, len(c.MediaInputs))

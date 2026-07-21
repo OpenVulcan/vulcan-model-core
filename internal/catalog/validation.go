@@ -6,6 +6,7 @@ import (
 	"math"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
@@ -395,8 +396,8 @@ func (e ModelEntitlement) Validate() error {
 			return err
 		}
 	}
-	if e.ObservedAt.IsZero() || e.ExpiresAt.IsZero() || e.ExpiresAt.Before(e.ObservedAt) {
-		return invalid("model entitlement timestamps are invalid")
+	if errEvidence := validateMetadataEvidence(e.EvidenceSource, e.ObservedAt, e.ExpiresAt); errEvidence != nil {
+		return fmt.Errorf("model entitlement evidence: %w", errEvidence)
 	}
 	return e.LimitOverrides.Validate()
 }
@@ -416,8 +417,8 @@ func (p PlanSnapshot) Validate() error {
 	if strings.TrimSpace(p.PlanCode) == "" || strings.TrimSpace(p.PlanName) == "" || strings.TrimSpace(p.Status) == "" || p.Revision == 0 {
 		return invalid("plan snapshot code, name, status, and revision are required")
 	}
-	if p.ObservedAt.IsZero() || p.ExpiresAt.IsZero() || p.ExpiresAt.Before(p.ObservedAt) {
-		return invalid("plan snapshot timestamps are invalid")
+	if errEvidence := validateMetadataEvidence(p.EvidenceSource, p.ObservedAt, p.ExpiresAt); errEvidence != nil {
+		return fmt.Errorf("plan snapshot evidence: %w", errEvidence)
 	}
 	return nil
 }
@@ -466,8 +467,8 @@ func (a AllowanceSnapshot) Validate() error {
 	} else if a.Window != nil {
 		return invalid("non-window allowance cannot contain quota window metadata")
 	}
-	if a.ObservedAt.IsZero() || a.ExpiresAt.IsZero() || a.ExpiresAt.Before(a.ObservedAt) {
-		return invalid("allowance timestamps are invalid")
+	if errEvidence := validateMetadataEvidence(a.EvidenceSource, a.ObservedAt, a.ExpiresAt); errEvidence != nil {
+		return fmt.Errorf("allowance evidence: %w", errEvidence)
 	}
 	return nil
 }
@@ -513,6 +514,12 @@ func (c ModelCapabilities) Validate() error {
 		if err := validateID("model modality", modality); err != nil {
 			return err
 		}
+	}
+	if errEfforts := validateUniqueStrings("reasoning effort", c.ReasoningEfforts); errEfforts != nil {
+		return errEfforts
+	}
+	if len(c.ReasoningEfforts) > 0 && c.Reasoning != CapabilityNative && c.Reasoning != CapabilityEmulated && c.Reasoning != CapabilityConditional {
+		return invalid("reasoning efforts require callable reasoning capability")
 	}
 	return c.validateExtended()
 }
@@ -634,6 +641,44 @@ func validAvailability(status AvailabilityStatus) bool {
 func validModelSource(source ModelSource) bool {
 	switch source {
 	case ModelSourceSystem, ModelSourceProviderAPI, ModelSourceCredentialDiscovery, ModelSourceRuntimeEvidence, ModelSourceUserDeclared:
+		return true
+	default:
+		return false
+	}
+}
+
+// validateMetadataEvidence verifies one commercial fact's authority and optional validity window.
+// validateMetadataEvidence 校验一个商业事实的权威来源与可选有效期窗口。
+func validateMetadataEvidence(source MetadataEvidenceSource, observedAt time.Time, expiresAt time.Time) error {
+	if observedAt.IsZero() {
+		return invalid("observed time is required")
+	}
+	if source == "" {
+		if expiresAt.IsZero() || expiresAt.Before(observedAt) {
+			return invalid("legacy evidence requires a valid expiry time")
+		}
+		return nil
+	}
+	if !validMetadataEvidenceSource(source) {
+		return invalid("metadata evidence source %q is invalid", source)
+	}
+	if expiresAt.IsZero() {
+		if source != MetadataEvidenceOperatorDeclared && source != MetadataEvidenceSystemRule {
+			return invalid("expiring provider evidence requires an expiry time")
+		}
+		return nil
+	}
+	if expiresAt.Before(observedAt) {
+		return invalid("expiry time precedes observation time")
+	}
+	return nil
+}
+
+// validMetadataEvidenceSource reports whether one commercial fact source is registered.
+// validMetadataEvidenceSource 报告一个商业事实来源是否已注册。
+func validMetadataEvidenceSource(source MetadataEvidenceSource) bool {
+	switch source {
+	case MetadataEvidenceProviderAPI, MetadataEvidenceProtectedTokenClaim, MetadataEvidenceOperatorDeclared, MetadataEvidenceSystemRule, MetadataEvidenceRuntimeObservation:
 		return true
 	default:
 		return false

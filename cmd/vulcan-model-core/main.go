@@ -33,6 +33,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/runtimefeedback"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/sqlitestore"
 )
@@ -174,6 +175,12 @@ func run(ctx context.Context, args []string) error {
 	if errCatalogs != nil {
 		return fmt.Errorf("create provider catalog store: %w", errCatalogs)
 	}
+	// routingStates persists inherited scheduling policy and exact credential-model cooldowns.
+	// routingStates 持久化继承的调度策略与精确凭据模型冷却状态。
+	routingStates, errRoutingStates := sqlitestore.NewRoutingStateStore(database)
+	if errRoutingStates != nil {
+		return fmt.Errorf("create routing state store: %w", errRoutingStates)
+	}
 	// reconciledKimiCatalogs upgrades historical multi-protocol Kimi snapshots to the current single Chat contract before any resolver reads them.
 	// reconciledKimiCatalogs 在任何 Resolver 读取历史多协议 Kimi 快照前，将其升级到当前唯一 Chat 合同。
 	reconciledKimiCatalogs, errReconcileKimiCatalogs := management.ReconcileKimiSystemCatalogs(ctx, configurations, catalogs)
@@ -182,6 +189,15 @@ func run(ctx context.Context, args []string) error {
 	}
 	if reconciledKimiCatalogs > 0 {
 		log.Printf("reconciled %d persisted Kimi catalog(s) to the single Chat protocol", reconciledKimiCatalogs)
+	}
+	// reconciledCodexCatalogs removes historical unknown-plan privilege before any target can be resolved.
+	// reconciledCodexCatalogs 在任何 Target 可被解析前删除历史未知套餐权限。
+	reconciledCodexCatalogs, errReconcileCodexCatalogs := management.ReconcileCodexUnknownPlanEntitlements(ctx, configurations, catalogs)
+	if errReconcileCodexCatalogs != nil {
+		return fmt.Errorf("reconcile persisted Codex unknown-plan entitlements: %w", errReconcileCodexCatalogs)
+	}
+	if reconciledCodexCatalogs > 0 {
+		log.Printf("reconciled %d persisted Codex catalog(s) with unknown plan entitlements", reconciledCodexCatalogs)
 	}
 	// resourceMetadata persists non-binary lifecycle records in the shared SQLite database.
 	// resourceMetadata 在共享 SQLite 数据库中持久化非二进制生命周期记录。
@@ -215,7 +231,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	// targetResolver combines exact provider configuration and catalog snapshots for planning and execution.
 	// targetResolver 为规划与执行组合精确供应商配置及目录快照。
-	targetResolver, errTargetResolver := resolve.New(configurations, catalogs)
+	targetResolver, errTargetResolver := resolve.NewWithRuntimeState(configurations, catalogs, routingStates)
 	if errTargetResolver != nil {
 		return fmt.Errorf("create provider target resolver: %w", errTargetResolver)
 	}
@@ -267,22 +283,55 @@ func run(ctx context.Context, args []string) error {
 	if !existsCodexDefinition {
 		return errors.New("OpenAI Codex system definition is missing")
 	}
-	codexCatalogDriver, errCodexCatalogDriver := provideropenai.NewCodexCatalogDriver(codexDefinition, secrets)
+	codexCatalogDriver, errCodexCatalogDriver := provideropenai.NewCodexCatalogDriver(codexDefinition, secrets, &http.Client{Timeout: 30 * time.Second})
 	if errCodexCatalogDriver != nil {
 		return fmt.Errorf("create Codex catalog driver: %w", errCodexCatalogDriver)
 	}
 	if errRegisterCodexCatalogDriver := metadataDrivers.Register(codexCatalogDriver); errRegisterCodexCatalogDriver != nil {
 		return fmt.Errorf("register Codex catalog driver: %w", errRegisterCodexCatalogDriver)
 	}
-	// metadataRefresh atomically persists provider-native account metadata without requiring model discovery.
-	// metadataRefresh 在不要求模型发现的情况下原子持久化供应商原生账号元数据。
-	metadataRefresh, errMetadataRefresh := refresh.NewService(configurations, catalogs, metadataDrivers)
-	if errMetadataRefresh != nil {
-		return fmt.Errorf("create provider metadata refresh service: %w", errMetadataRefresh)
+	kimiCodingDefinition, existsKimiCodingDefinition := systemDefinitions.Lookup(bootstrap.KimiCodingDefinitionID)
+	if !existsKimiCodingDefinition {
+		return errors.New("Kimi Coding Plan system definition is missing")
+	}
+	// kimiAllowanceDriver reads the proven Coding Plan account endpoint for plan, entitlement, and usage facts.
+	// kimiAllowanceDriver 读取已验证的 Coding Plan 账号入口以获得套餐、授权与用量事实。
+	kimiAllowanceDriver, errKimiAllowanceDriver := providerkimi.NewAllowanceDriver(kimiCodingDefinition, secrets, &http.Client{Timeout: 30 * time.Second})
+	if errKimiAllowanceDriver != nil {
+		return fmt.Errorf("create Kimi allowance driver: %w", errKimiAllowanceDriver)
+	}
+	if errRegisterKimiAllowance := metadataDrivers.Register(kimiAllowanceDriver); errRegisterKimiAllowance != nil {
+		return fmt.Errorf("register Kimi allowance driver: %w", errRegisterKimiAllowance)
+	}
+	claudeCodeDefinition, existsClaudeCodeDefinition := systemDefinitions.Lookup(bootstrap.AnthropicClaudeCodeDefinitionID)
+	if !existsClaudeCodeDefinition {
+		return errors.New("Claude Code system definition is missing")
+	}
+	// claudeAllowanceDriver reads the proven OAuth usage windows and extra-use balance.
+	// claudeAllowanceDriver 读取已验证的 OAuth 用量窗口与额外用量余额。
+	claudeAllowanceDriver, errClaudeAllowanceDriver := provideranthropic.NewAllowanceDriver(claudeCodeDefinition, secrets, &http.Client{Timeout: 30 * time.Second})
+	if errClaudeAllowanceDriver != nil {
+		return fmt.Errorf("create Claude allowance driver: %w", errClaudeAllowanceDriver)
+	}
+	if errRegisterClaudeAllowance := metadataDrivers.Register(claudeAllowanceDriver); errRegisterClaudeAllowance != nil {
+		return fmt.Errorf("register Claude allowance driver: %w", errRegisterClaudeAllowance)
+	}
+	xaiAccountDefinition, existsXAIAccountDefinition := systemDefinitions.Lookup(bootstrap.XAIOAuthDefinitionID)
+	if !existsXAIAccountDefinition {
+		return errors.New("xAI account system definition is missing")
+	}
+	// xaiAllowanceDriver reads the proven Grok CLI monthly billing data.
+	// xaiAllowanceDriver 读取已验证的 Grok CLI 月度计费数据。
+	xaiAllowanceDriver, errXAIAllowanceDriver := providerxai.NewAllowanceDriver(xaiAccountDefinition, secrets, &http.Client{Timeout: 30 * time.Second})
+	if errXAIAllowanceDriver != nil {
+		return fmt.Errorf("create xAI allowance driver: %w", errXAIAllowanceDriver)
+	}
+	if errRegisterXAIAllowance := metadataDrivers.Register(xaiAllowanceDriver); errRegisterXAIAllowance != nil {
+		return fmt.Errorf("register xAI allowance driver: %w", errRegisterXAIAllowance)
 	}
 	// managementQueries builds client-safe VulcanCode discovery views.
 	// managementQueries 构建客户端安全的 VulcanCode 发现视图。
-	managementQueries, errManagementQueries := management.NewQueryService(configurations, catalogs)
+	managementQueries, errManagementQueries := management.NewQueryServiceWithRuntimeState(configurations, catalogs, routingStates)
 	if errManagementQueries != nil {
 		return fmt.Errorf("create management query service: %w", errManagementQueries)
 	}
@@ -291,6 +340,12 @@ func run(ctx context.Context, args []string) error {
 	managementCommands, errManagementCommands := management.NewService(configurations, secrets, catalogs)
 	if errManagementCommands != nil {
 		return fmt.Errorf("create management command service: %w", errManagementCommands)
+	}
+	// routingManagement owns global and instance scheduling policy plus manual plan mutations.
+	// routingManagement 管理全局与实例调度策略以及人工套餐变更。
+	routingManagement, errRoutingManagement := management.NewRoutingService(configurations, catalogs, routingStates)
+	if errRoutingManagement != nil {
+		return fmt.Errorf("create routing management service: %w", errRoutingManagement)
 	}
 	// kimiDeviceClient performs bounded Coding Plan device authorization exchanges.
 	// kimiDeviceClient 执行有界 Coding Plan 设备授权交换。
@@ -399,6 +454,27 @@ func run(ctx context.Context, args []string) error {
 	antigravityTokens, errAntigravityTokens := management.NewAntigravityTokenService(configurations, secrets, antigravityOAuthClient)
 	if errAntigravityTokens != nil {
 		return fmt.Errorf("create Antigravity token service: %w", errAntigravityTokens)
+	}
+	// credentialRefreshers bind each refreshable system definition to its existing protected token lifecycle service.
+	// credentialRefreshers 将每个可刷新系统定义绑定到现有的受保护令牌生命周期服务。
+	credentialRefreshers := map[string]refresh.CredentialRefresher{
+		bootstrap.KimiCodingDefinitionID:          kimiTokens,
+		bootstrap.XAIOAuthDefinitionID:            xaiTokens,
+		bootstrap.OpenAICodexDefinitionID:         codexTokens,
+		bootstrap.AnthropicClaudeCodeDefinitionID: claudeTokens,
+		bootstrap.GoogleAntigravityDefinitionID:   antigravityTokens,
+	}
+	// metadataRefresh atomically persists provider-native account metadata after refreshing expiring provider tokens.
+	// metadataRefresh 在刷新将到期的供应商令牌后原子持久化供应商原生账号元数据。
+	metadataRefresh, errMetadataRefresh := refresh.NewServiceWithCredentialRefreshers(configurations, catalogs, metadataDrivers, credentialRefreshers)
+	if errMetadataRefresh != nil {
+		return fmt.Errorf("create provider metadata refresh service: %w", errMetadataRefresh)
+	}
+	// metadataRefreshCoordinator deduplicates mutation triggers and performs bounded jittered background refreshes.
+	// metadataRefreshCoordinator 对变更触发去重，并执行有界且带抖动的后台刷新。
+	metadataRefreshCoordinator, errMetadataRefreshCoordinator := refresh.NewCoordinator(configurations, metadataRefresh, refresh.CoordinatorOptions{})
+	if errMetadataRefreshCoordinator != nil {
+		return fmt.Errorf("create provider metadata refresh coordinator: %w", errMetadataRefreshCoordinator)
 	}
 	// modelAccessCommands owns per-instance local model enablement policy.
 	// modelAccessCommands 管理每个实例的本地模型启停策略。
@@ -520,9 +596,15 @@ func run(ctx context.Context, args []string) error {
 	if errFactory := bootstrap.RegisterCustomExecutionDriverFactory(executionDrivers, openPlatformTransport); errFactory != nil {
 		return fmt.Errorf("register custom compatibility execution factory: %w", errFactory)
 	}
+	// runtimeFeedback applies classified execution outcomes using copied bounded cooldown behavior.
+	// runtimeFeedback 使用复制的有界冷却行为应用分类执行结果。
+	runtimeFeedback, errRuntimeFeedback := runtimefeedback.NewController(routingStates)
+	if errRuntimeFeedback != nil {
+		return fmt.Errorf("create runtime feedback controller: %w", errRuntimeFeedback)
+	}
 	// executions owns the durable public execution lifecycle and exact provider dispatch.
 	// executions 拥有持久化公共执行生命周期与精确供应商分派。
-	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway})
+	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway, RuntimeFeedback: runtimeFeedback})
 	if errExecutions != nil {
 		return fmt.Errorf("create execution service: %w", errExecutions)
 	}
@@ -533,7 +615,8 @@ func run(ctx context.Context, args []string) error {
 		Commands:              managementCommands,
 		ModelAccess:           modelAccessCommands,
 		CustomCatalogs:        customCatalogCommands,
-		MetadataRefresh:       metadataRefresh,
+		MetadataRefresh:       metadataRefreshCoordinator,
+		Routing:               routingManagement,
 		Protocols:             protocols,
 		APIKeys:               controlConfiguration,
 		Auth:                  controlConfiguration,
@@ -579,11 +662,17 @@ func run(ctx context.Context, args []string) error {
 	// recoveryErrors receives a terminal durable task-recovery failure without logging task affinity.
 	// recoveryErrors 接收持久化任务恢复终止错误且不记录任务亲和性。
 	recoveryErrors := make(chan error, 1)
+	// metadataRefreshErrors receives the terminal background metadata coordinator result.
+	// metadataRefreshErrors 接收后台元数据协调器的终止结果。
+	metadataRefreshErrors := make(chan error, 1)
 	go func() {
 		serveErrors <- server.Serve(listener)
 	}()
 	go func() {
 		recoveryErrors <- executions.RunRecovery(ctx, time.Second)
+	}()
+	go func() {
+		metadataRefreshErrors <- metadataRefreshCoordinator.Run(ctx)
 	}()
 	log.Printf("vulcan-model-core listening on %s", listener.Addr())
 
@@ -596,6 +685,11 @@ func run(ctx context.Context, args []string) error {
 	case errRecovery := <-recoveryErrors:
 		if errRecovery != nil && !errors.Is(errRecovery, context.Canceled) {
 			return fmt.Errorf("run durable execution recovery: %w", errRecovery)
+		}
+		return nil
+	case errMetadataRefreshRun := <-metadataRefreshErrors:
+		if errMetadataRefreshRun != nil && !errors.Is(errMetadataRefreshRun, context.Canceled) {
+			return fmt.Errorf("run provider metadata refresh coordinator: %w", errMetadataRefreshRun)
 		}
 		return nil
 	case <-ctx.Done():

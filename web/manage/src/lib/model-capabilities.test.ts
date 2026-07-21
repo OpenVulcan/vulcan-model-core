@@ -83,7 +83,7 @@ describe("model capability schema", () => {
           display_name: "Capability Model",
           entitlement_mode: "all_bound_credentials",
           enabled: true,
-          provider_authorized: true,
+          authorization_status: "authorized",
           offerings: [
             {
               id: "offering_capabilities",

@@ -160,8 +160,11 @@ func (s *MemoryStore) Save(ctx context.Context, record Record, expectedRevision 
 	currentEvents := s.events[record.ID]
 	nextSequence := uint64(len(currentEvents) + 1)
 	for index, event := range appended {
-		if errEvent := event.Validate(); errEvent != nil || event.ExecutionID != record.ID || event.Sequence != nextSequence+uint64(index) {
-			return fmt.Errorf("%w: appended event sequence is invalid", ErrInvalidExecution)
+		if errEvent := event.Validate(); errEvent != nil {
+			return fmt.Errorf("%w: appended event at index %d is invalid: %v", ErrInvalidExecution, index, errEvent)
+		}
+		if event.ExecutionID != record.ID || event.Sequence != nextSequence+uint64(index) {
+			return fmt.Errorf("%w: appended event at index %d has a non-contiguous identity or sequence: got %d, want %d", ErrInvalidExecution, index, event.Sequence, nextSequence+uint64(index))
 		}
 	}
 	s.records[record.ID] = cloneRecord(record)
@@ -252,6 +255,7 @@ func idempotencyStoreKey(ownerAPIKeyID string, idempotencyKey string) string {
 // cloneRecord copies mutable slices and pointers that may cross repository boundaries.
 // cloneRecord 复制可能跨越 Repository 边界的可变切片与指针。
 func cloneRecord(record Record) Record {
+	record.Attempts = append([]Attempt(nil), record.Attempts...)
 	if record.Result != nil {
 		result := *record.Result
 		result.Embeddings = append([]vcp.EmbeddingItem(nil), record.Result.Embeddings...)

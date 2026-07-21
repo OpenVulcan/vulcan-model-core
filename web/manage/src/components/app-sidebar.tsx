@@ -139,7 +139,7 @@ const data: SidebarData = {
   navSecondary: [
     {
       titleKey: "sidebar.settings",
-      url: "#",
+      url: "/settings",
       icon: (
         <Settings2Icon
         />
@@ -277,7 +277,7 @@ export function AppSidebar({ onNavigate, onLogout, ...props }: AppSidebarProps) 
       <SidebarContent>
         <NavMain items={localizedMainItems} />
         <NavDocuments items={localizedDocumentItems} onNavigate={onNavigate} />
-        <NavSecondary items={localizedSecondaryItems} className="mt-auto" />
+        <NavSecondary items={localizedSecondaryItems} onNavigate={onNavigate} className="mt-auto" />
       </SidebarContent>
       <SidebarFooter>
         <NavUser user={localizedUser} onLogout={onLogout} />

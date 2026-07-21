@@ -187,6 +187,9 @@ type ServiceEntitlement struct {
 	// Source records the authorization evidence source.
 	// Source 记录授权证据来源。
 	Source ModelSource
+	// EvidenceSource identifies how the commercial authorization fact was obtained.
+	// EvidenceSource 标识商业授权事实的获取方式。
+	EvidenceSource MetadataEvidenceSource
 	// ObservedAt records when authorization evidence was obtained.
 	// ObservedAt 记录获得授权证据的时间。
 	ObservedAt time.Time

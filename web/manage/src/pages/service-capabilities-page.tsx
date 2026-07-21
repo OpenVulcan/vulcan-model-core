@@ -55,7 +55,7 @@ export function ServiceCapabilitiesPage({ managementAuthToken }: ServiceCapabili
       {catalogs.flatMap(({ provider, catalog }) => catalog.services.map((service) => (
         <Card key={`${provider.instance.id}:${service.id}`}>
           <CardHeader>
-            <div className="flex flex-wrap items-center gap-2"><CardTitle>{service.display_name}</CardTitle><Badge variant="outline">{provider.instance.display_name}</Badge><Badge variant="outline">{service.operation}</Badge><Badge variant={service.enabled ? "default" : "secondary"}>{service.enabled ? t("capabilities.enabled") : t("capabilities.disabled")}</Badge><Badge variant={service.provider_authorized ? "default" : "destructive"}>{service.provider_authorized ? t("capabilities.authorized") : t("capabilities.unauthorized")}</Badge></div>
+            <div className="flex flex-wrap items-center gap-2"><CardTitle>{service.display_name}</CardTitle><Badge variant="outline">{provider.instance.display_name}</Badge><Badge variant="outline">{service.operation}</Badge><Badge variant={service.enabled ? "default" : "secondary"}>{service.enabled ? t("capabilities.enabled") : t("capabilities.disabled")}</Badge><Badge variant={service.authorization_status === "authorized" ? "default" : service.authorization_status === "denied" ? "destructive" : "secondary"}>{service.authorization_status === "authorized" ? t("capabilities.authorized") : service.authorization_status === "denied" ? t("capabilities.unauthorized") : t("capabilities.unknown")}</Badge></div>
             <CardDescription>{service.id}</CardDescription>
           </CardHeader>
           <CardContent className="grid gap-3">

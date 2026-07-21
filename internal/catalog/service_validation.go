@@ -1,6 +1,7 @@
 package catalog
 
 import (
+	"fmt"
 	"strings"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
@@ -126,8 +127,8 @@ func (e ServiceEntitlement) Validate() error {
 			return errProfile
 		}
 	}
-	if e.ObservedAt.IsZero() || e.ExpiresAt.IsZero() || e.ExpiresAt.Before(e.ObservedAt) {
-		return invalid("service entitlement timestamps are invalid")
+	if errEvidence := validateMetadataEvidence(e.EvidenceSource, e.ObservedAt, e.ExpiresAt); errEvidence != nil {
+		return fmt.Errorf("service entitlement evidence: %w", errEvidence)
 	}
 	return nil
 }

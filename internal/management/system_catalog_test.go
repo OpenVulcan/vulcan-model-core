@@ -108,7 +108,7 @@ func TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership(t *testin
 	if errCN != nil || errGlobal != nil || errCoding != nil {
 		t.Fatalf("catalog errors CN=%v Global=%v Coding=%v", errCN, errGlobal, errCoding)
 	}
-	if len(cn.Models) != 11 || len(global.Models) != 11 || len(coding.Models) != 7 || len(coding.Offerings) != 7 {
+	if len(cn.Models) != 11 || len(global.Models) != 11 || len(coding.Models) != 3 || len(coding.Offerings) != 3 || len(coding.Profiles) != 4 {
 		t.Fatalf("catalog sizes CN=%d Global=%d Coding models=%d offerings=%d", len(cn.Models), len(global.Models), len(coding.Models), len(coding.Offerings))
 	}
 	for index := range cn.Models {
@@ -130,12 +130,12 @@ func TestBuildSystemCatalogSharesTemplatesButIsolatesInstanceOwnership(t *testin
 			t.Fatalf("restricted model %q entitlement = %q", restrictedModelID, modelByUpstreamID[restrictedModelID].EntitlementMode)
 		}
 	}
-	// codingModelIDs is CLIProxyAPI's exact Kimi registry order at the pinned source baseline.
-	// codingModelIDs 是 CLIProxyAPI 在固定源码基线上的精确 Kimi 注册顺序。
-	codingModelIDs := []string{"kimi-k2", "kimi-k2-thinking", "kimi-k2.5", "kimi-k2.6", "kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k3"}
+	// codingModelIDs is the exact user-confirmed Kimi Coding Plan product set.
+	// codingModelIDs 是用户确认的精确 Kimi Coding Plan 产品集合。
+	codingModelIDs := []string{"kimi-for-coding", "k3", "kimi-for-coding-highspeed"}
 	for index, modelID := range codingModelIDs {
-		if coding.Models[index].UpstreamModelID != modelID || coding.Models[index].EntitlementMode != catalog.EntitlementAllBoundCredentials {
-			t.Fatalf("Coding model[%d] = %#v, want upstream %q with all-credential entitlement", index, coding.Models[index], modelID)
+		if coding.Models[index].UpstreamModelID != modelID || coding.Models[index].EntitlementMode != catalog.EntitlementExplicit {
+			t.Fatalf("Coding model[%d] = %#v, want upstream %q with explicit entitlement", index, coding.Models[index], modelID)
 		}
 	}
 }

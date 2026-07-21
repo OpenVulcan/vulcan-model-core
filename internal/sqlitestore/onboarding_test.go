@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
@@ -54,6 +55,108 @@ func TestSaveSystemOnboardingRollsBackEveryRowOnLateConflict(t *testing.T) {
 	credentials, errCredentials := store.ListCredentials(ctx, second.Instance.ID)
 	if errCredentials != nil || len(credentials) != 0 {
 		t.Fatalf("rolled-back credentials=%#v error=%v", credentials, errCredentials)
+	}
+}
+
+// TestDeleteCredentialGraphRemovesFinalSQLiteInstance verifies production persistence deletes the complete empty graph.
+// TestDeleteCredentialGraphRemovesFinalSQLiteInstance 验证生产持久化会删除完整的空实例图。
+func TestDeleteCredentialGraphRemovesFinalSQLiteInstance(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "delete-credential.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	store, errStore := NewConfigurationStore(database, protocols, systems)
+	if errStore != nil {
+		t.Fatalf("NewConfigurationStore() error = %v", errStore)
+	}
+	onboarding := sqliteKimiOnboarding("pvi_delete", "kimi-delete", "ep_delete", "cred_delete", "bind_delete")
+	if errSave := store.SaveSystemOnboarding(ctx, onboarding); errSave != nil {
+		t.Fatalf("SaveSystemOnboarding() error = %v", errSave)
+	}
+	deletion, errDelete := store.DeleteCredentialGraph(ctx, onboarding.Instance.ID, onboarding.Credential.ID)
+	if errDelete != nil || !deletion.InstanceDeleted {
+		t.Fatalf("DeleteCredentialGraph() deletion=%#v error=%v", deletion, errDelete)
+	}
+	if _, errInstance := store.GetInstance(ctx, onboarding.Instance.ID); !errors.Is(errInstance, providerconfig.ErrNotFound) {
+		t.Fatalf("deleted instance error = %v", errInstance)
+	}
+	bindings, errBindings := store.ListBindings(ctx, onboarding.Instance.ID)
+	if errBindings != nil || len(bindings) != 0 {
+		t.Fatalf("deleted bindings=%#v error=%v", bindings, errBindings)
+	}
+}
+
+// TestSaveCredentialAndCatalogRollsBackBothRevisions verifies manual plan changes cannot split configuration from catalog state.
+// TestSaveCredentialAndCatalogRollsBackBothRevisions 验证人工套餐变更不能使配置与目录状态分裂。
+func TestSaveCredentialAndCatalogRollsBackBothRevisions(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "credential-plan.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	configurations, errConfigurations := NewConfigurationStore(database, protocols, systems)
+	if errConfigurations != nil {
+		t.Fatalf("NewConfigurationStore() error = %v", errConfigurations)
+	}
+	catalogs, errCatalogs := NewCatalogStore(database)
+	if errCatalogs != nil {
+		t.Fatalf("NewCatalogStore() error = %v", errCatalogs)
+	}
+	onboarding := sqliteKimiOnboarding("pvi_plan", "kimi-plan", "ep_plan", "cred_plan", "bind_plan")
+	if errSave := configurations.SaveSystemOnboarding(ctx, onboarding); errSave != nil {
+		t.Fatalf("SaveSystemOnboarding() error = %v", errSave)
+	}
+	observedAt := time.Date(2026, 7, 20, 19, 0, 0, 0, time.UTC)
+	currentSnapshot := catalog.Snapshot{ProviderInstanceID: onboarding.Instance.ID, Revision: 2, ObservedAt: observedAt}
+	if errSave := catalogs.Save(ctx, currentSnapshot); errSave != nil {
+		t.Fatalf("save current catalog: %v", errSave)
+	}
+	updatedCredential := onboarding.Credential
+	updatedCredential.Label = "Updated Plan"
+	updatedCredential.Revision = 2
+	conflictingSnapshot := currentSnapshot
+	if errAtomic := configurations.SaveCredentialAndCatalog(ctx, updatedCredential, conflictingSnapshot); errAtomic == nil {
+		t.Fatal("SaveCredentialAndCatalog() error = nil, want catalog revision conflict")
+	}
+	credentials, errCredentials := configurations.ListCredentials(ctx, onboarding.Instance.ID)
+	if errCredentials != nil || len(credentials) != 1 || credentials[0].Revision != 1 || credentials[0].Label != onboarding.Credential.Label {
+		t.Fatalf("rolled-back credentials=%+v error=%v", credentials, errCredentials)
+	}
+	updatedSnapshot := currentSnapshot
+	updatedSnapshot.Revision = 3
+	updatedSnapshot.ObservedAt = observedAt.Add(time.Minute)
+	if errAtomic := configurations.SaveCredentialAndCatalog(ctx, updatedCredential, updatedSnapshot); errAtomic != nil {
+		t.Fatalf("SaveCredentialAndCatalog() success error = %v", errAtomic)
+	}
+	credentials, errCredentials = configurations.ListCredentials(ctx, onboarding.Instance.ID)
+	persistedSnapshot, errSnapshot := catalogs.Get(ctx, onboarding.Instance.ID)
+	if errCredentials != nil || errSnapshot != nil || credentials[0].Revision != 2 || credentials[0].Label != updatedCredential.Label || persistedSnapshot.Revision != 3 {
+		t.Fatalf("credentials=%+v catalog=%+v credential_error=%v catalog_error=%v", credentials, persistedSnapshot, errCredentials, errSnapshot)
 	}
 }
 

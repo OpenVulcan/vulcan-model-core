@@ -3,15 +3,81 @@ package management
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestQueryServiceReturnsModelContextsAndAccountUsage verifies the public discovery graph preserves exact model-profile-account ownership.
+// TestQueryServiceReturnsModelContextsAndAccountUsage 验证公开发现图保留精确模型规格账号归属关系。
+func TestQueryServiceReturnsModelContextsAndAccountUsage(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := newKimiOnboardingService(t)
+	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{DefinitionID: bootstrap.KimiCodingDefinitionID, DisplayName: "Kimi Coding", AuthMethodID: "api_key", CredentialLabel: "Allegretto Account", Secret: []byte("test-kimi-key"), PlanOptionID: providerkimi.PlanOptionAllegretto})
+	if errOnboard != nil {
+		t.Fatalf("OnboardSystemProvider() error = %v", errOnboard)
+	}
+	snapshot, errSnapshot := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errSnapshot != nil {
+		t.Fatalf("Get() catalog error = %v", errSnapshot)
+	}
+	observedAt := time.Now().UTC()
+	remaining := "75"
+	snapshot.Allowances = append(snapshot.Allowances, catalog.AllowanceSnapshot{ID: "allow_kimi_weekly", ProviderInstanceID: onboarding.Instance.ID, Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, ScopeID: onboarding.Credential.ID, Metric: "weekly_usage", Unit: catalog.UnitProviderDefined, Remaining: &remaining, Status: catalog.AllowanceAvailable, Window: &catalog.AllowanceWindow{Kind: catalog.WindowProviderDefined}, Source: catalog.ModelSourceProviderAPI, ObservedAt: observedAt, ExpiresAt: observedAt.Add(time.Hour), Revision: 1})
+	snapshot.Revision++
+	snapshot.ObservedAt = observedAt
+	if errSave := service.catalogs.Save(ctx, snapshot); errSave != nil {
+		t.Fatalf("Save() catalog error = %v", errSave)
+	}
+	queries, errQueries := NewQueryService(configurations, service.catalogs)
+	if errQueries != nil {
+		t.Fatalf("NewQueryService() error = %v", errQueries)
+	}
+	contexts, errContexts := queries.GetModelContexts(ctx, onboarding.Instance.ID, providerkimi.ModelK3ID)
+	if errContexts != nil {
+		t.Fatalf("GetModelContexts() error = %v", errContexts)
+	}
+	if len(contexts.ContextProfiles) != 2 || contexts.ContextProfiles[0].ID != providerkimi.ProfileK3256KID || contexts.ContextProfiles[1].ID != providerkimi.ProfileK31MID {
+		t.Fatalf("Kimi context profiles = %#v", contexts.ContextProfiles)
+	}
+	for _, profile := range contexts.ContextProfiles {
+		if len(profile.Accounts) != 1 || profile.Accounts[0].CredentialID != onboarding.Credential.ID || profile.Accounts[0].RuntimeStatus != "ready" || !profile.Accounts[0].UsageAvailable {
+			t.Fatalf("Kimi profile accounts = %#v", profile.Accounts)
+		}
+	}
+	encodedContexts, errEncodeContexts := json.Marshal(contexts)
+	if errEncodeContexts != nil {
+		t.Fatalf("encode model contexts: %v", errEncodeContexts)
+	}
+	if strings.Contains(string(encodedContexts), "test-kimi-key") || strings.Contains(string(encodedContexts), "secret_ref") || strings.Contains(string(encodedContexts), "principal_key") {
+		t.Fatalf("model contexts leaked protected data: %s", encodedContexts)
+	}
+	usage, errUsage := queries.GetModelCredentialUsage(ctx, onboarding.Instance.ID, providerkimi.ModelK3ID, onboarding.Credential.ID)
+	if errUsage != nil {
+		t.Fatalf("GetModelCredentialUsage() error = %v", errUsage)
+	}
+	if usage.PlanCode != providerkimi.PlanOptionAllegretto || len(usage.SupportedContextProfileIDs) != 2 || len(usage.Allowances) != 1 || usage.Allowances[0].Usage.Metric != "weekly_usage" || len(usage.Allowances[0].ContextProfileIDs) != 2 {
+		t.Fatalf("Kimi model credential usage = %#v", usage)
+	}
+	encodedUsage, errEncode := json.Marshal(usage)
+	if errEncode != nil {
+		t.Fatalf("encode model credential usage: %v", errEncode)
+	}
+	if strings.Contains(string(encodedUsage), "test-kimi-key") || strings.Contains(string(encodedUsage), "scope_id") {
+		t.Fatalf("model credential usage leaked protected data: %s", encodedUsage)
+	}
+	_, errMissing := queries.GetModelCredentialUsage(ctx, onboarding.Instance.ID, providerkimi.ModelK3ID, "cred_missing")
+	if !errors.Is(errMissing, providerconfig.ErrNotFound) {
+		t.Fatalf("missing model account error = %v", errMissing)
+	}
+}
 
 // TestQueryServiceRedactsCredentialSecretMetadata verifies every management query view excludes secret references and identity correlation fields.
 // TestQueryServiceRedactsCredentialSecretMetadata 验证每个管理查询视图均排除 Secret 引用和身份关联字段。
@@ -156,8 +222,8 @@ func TestCapabilityViewPreservesTokenRecommendations(t *testing.T) {
 	}
 }
 
-// TestCatalogViewPreservesAllowanceWindowSemantics verifies the management projection retains calendar reset context while redacting scope identity.
-// TestCatalogViewPreservesAllowanceWindowSemantics 验证管理投影在脱敏作用域身份时仍保留日历重置上下文。
+// TestCatalogViewPreservesAllowanceWindowSemantics verifies reset context and local credential labels without upstream scope identity.
+// TestCatalogViewPreservesAllowanceWindowSemantics 验证重置上下文与本地凭据名称且不暴露上游作用域身份。
 func TestCatalogViewPreservesAllowanceWindowSemantics(t *testing.T) {
 	// resetAt fixes the provider-reported recovery boundary serialized to management clients.
 	// resetAt 固定序列化给管理客户端的供应商报告恢复边界。
@@ -194,7 +260,7 @@ func TestCatalogViewPreservesAllowanceWindowSemantics(t *testing.T) {
 	}
 	// view is the exact DTO returned by management catalog endpoints.
 	// view 是管理目录端点返回的精确 DTO。
-	view := catalogView(snapshot, nil, nil)
+	view := catalogView(snapshot, nil, nil, []string{"cred_sensitive_scope", "cred_sensitive_rolling_scope"}, map[string]string{"cred_sensitive_scope": "Primary", "cred_sensitive_rolling_scope": "Backup"}, time.Now().UTC())
 	if len(view.Allowances) != 2 || view.Allowances[0].Window == nil || view.Allowances[1].Window == nil {
 		t.Fatalf("allowance projection = %#v", view.Allowances)
 	}
@@ -204,33 +270,37 @@ func TestCatalogViewPreservesAllowanceWindowSemantics(t *testing.T) {
 	if view.Allowances[1].Window.Duration != "31536000000000000" {
 		t.Fatalf("rolling allowance duration = %q", view.Allowances[1].Window.Duration)
 	}
+	if view.Allowances[0].CredentialID != "cred_sensitive_scope" || view.Allowances[0].CredentialLabel != "Primary" {
+		t.Fatalf("allowance credential projection = %#v", view.Allowances[0])
+	}
 	// encodedView proves the HTTP JSON contract retains the newly audited node name.
 	// encodedView 证明 HTTP JSON 合同保留了本轮审核补齐的节点名称。
 	encodedView, errEncode := json.Marshal(view)
 	if errEncode != nil {
 		t.Fatalf("encode catalog view: %v", errEncode)
 	}
-	if !strings.Contains(string(encodedView), `"time_zone":"Asia/Shanghai"`) || !strings.Contains(string(encodedView), `"duration":"31536000000000000"`) || strings.Contains(string(encodedView), "cred_") {
+	if !strings.Contains(string(encodedView), `"time_zone":"Asia/Shanghai"`) || !strings.Contains(string(encodedView), `"duration":"31536000000000000"`) || !strings.Contains(string(encodedView), `"credential_label":"Primary"`) || strings.Contains(string(encodedView), "scope_id") {
 		t.Fatalf("catalog view did not preserve safe window semantics: %s", encodedView)
 	}
 }
 
-// TestCatalogViewReportsProviderAuthorizedModels verifies explicit entitlements are not confused with local enablement policy.
-// TestCatalogViewReportsProviderAuthorizedModels 验证显式供应商授权不会与本地启用策略混淆。
-func TestCatalogViewReportsProviderAuthorizedModels(t *testing.T) {
+// TestCatalogViewReportsThreeStateModelAuthorization verifies explicit entitlements are not confused with unknown evidence or local policy.
+// TestCatalogViewReportsThreeStateModelAuthorization 验证显式权益不会与未知证据或本地策略混淆。
+func TestCatalogViewReportsThreeStateModelAuthorization(t *testing.T) {
 	// snapshot combines all-bound, explicitly allowed, and explicitly unproven model cases.
 	// snapshot 组合全部绑定、显式允许与未获得显式证明的模型场景。
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	snapshot := catalog.Snapshot{
 		Models: []catalog.ProviderModel{
 			{ID: "model_all_bound", EntitlementMode: catalog.EntitlementAllBoundCredentials},
 			{ID: "model_explicit_allowed", EntitlementMode: catalog.EntitlementExplicit},
 			{ID: "model_explicit_missing", EntitlementMode: catalog.EntitlementExplicit},
 		},
-		Entitlements: []catalog.ModelEntitlement{{ProviderModelID: "model_explicit_allowed", Availability: catalog.AvailabilityAllowed}},
+		Entitlements: []catalog.ModelEntitlement{{CredentialID: "cred_allowed", ProviderModelID: "model_explicit_allowed", Availability: catalog.AvailabilityAllowed, ObservedAt: now}},
 	}
 	// view disables the explicitly allowed model locally to prove the two states remain independent.
 	// view 在本地停用显式允许模型，以证明两种状态保持独立。
-	view := catalogView(snapshot, []string{"model_explicit_allowed"}, nil)
+	view := catalogView(snapshot, []string{"model_explicit_allowed"}, nil, []string{"cred_allowed"}, map[string]string{"cred_allowed": "Primary account"}, now)
 	if len(view.Models) != 3 {
 		t.Fatalf("model view count = %d, want 3", len(view.Models))
 	}
@@ -240,7 +310,7 @@ func TestCatalogViewReportsProviderAuthorizedModels(t *testing.T) {
 	for _, model := range view.Models {
 		modelsByID[model.ID] = model
 	}
-	if !modelsByID["model_all_bound"].ProviderAuthorized || !modelsByID["model_explicit_allowed"].ProviderAuthorized || modelsByID["model_explicit_missing"].ProviderAuthorized {
+	if modelsByID["model_all_bound"].AuthorizationStatus != catalog.AuthorizationAuthorized || modelsByID["model_explicit_allowed"].AuthorizationStatus != catalog.AuthorizationAuthorized || modelsByID["model_explicit_missing"].AuthorizationStatus != catalog.AuthorizationUnknown {
 		t.Fatalf("provider authorization projection = %#v", modelsByID)
 	}
 	if modelsByID["model_explicit_allowed"].Enabled {
@@ -260,7 +330,7 @@ func TestCatalogViewSortsPlansByEveryIdentityField(t *testing.T) {
 	}}
 	// plans is the redacted and aggregated management projection under test.
 	// plans 是待测的脱敏聚合管理投影。
-	plans := catalogView(snapshot, nil, nil).Plans
+	plans := catalogView(snapshot, nil, nil, nil, nil, time.Now().UTC()).Plans
 	if len(plans) != 3 {
 		t.Fatalf("plan view count = %d, want 3", len(plans))
 	}

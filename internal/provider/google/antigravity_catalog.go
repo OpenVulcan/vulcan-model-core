@@ -18,6 +18,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	providermetadata "github.com/OpenVulcan/vulcan-model-core/internal/provider/metadata"
 	providertransport "github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -32,6 +33,14 @@ const (
 	antigravityGoogleOneCreditType = "GOOGLE_ONE_AI"
 )
 
+// antigravityQuotaURLs preserves the source router's ordered production fallback endpoints.
+// antigravityQuotaURLs 保留来源路由项目按顺序排列的生产回退入口。
+var antigravityQuotaURLs = []string{
+	"https://daily-cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+	"https://daily-cloudcode-pa.sandbox.googleapis.com/v1internal:retrieveUserQuotaSummary",
+	"https://cloudcode-pa.googleapis.com/v1internal:retrieveUserQuotaSummary",
+}
+
 // AntigravityCatalogDriver reads plan and credit metadata from loadCodeAssist without exposing credentials.
 // AntigravityCatalogDriver 从 loadCodeAssist 读取套餐与积分元数据且不暴露凭据。
 type AntigravityCatalogDriver struct {
@@ -44,6 +53,9 @@ type AntigravityCatalogDriver struct {
 	// client executes bounded provider control-plane requests.
 	// client 执行有界的供应商控制面请求。
 	client *http.Client
+	// quotaURLs contains the exact provider-priority quota endpoints.
+	// quotaURLs 包含精确的供应商优先级额度入口。
+	quotaURLs []string
 }
 
 // antigravityLoadCodeAssistResponse is the exact subset consumed from CLIProxyAPI's proven response path.
@@ -79,13 +91,71 @@ type antigravityCredit struct {
 	MinimumCreditAmountForUsage json.Number `json:"minimumCreditAmountForUsage"`
 }
 
+// antigravityQuotaBucket is one percentage bucket returned by retrieveUserQuotaSummary.
+// antigravityQuotaBucket 是 retrieveUserQuotaSummary 返回的一个百分比额度桶。
+type antigravityQuotaBucket struct {
+	// BucketID is the stable provider bucket identifier.
+	// BucketID 是稳定的供应商额度桶标识。
+	BucketID string `json:"bucketId"`
+	// BucketIDSnake is the snake-case stable bucket identifier variant.
+	// BucketIDSnake 是下划线形式稳定额度桶标识变体。
+	BucketIDSnake string `json:"bucket_id"`
+	// DisplayName is the provider-facing bucket name.
+	// DisplayName 是供应商显示额度桶名称。
+	DisplayName string `json:"displayName"`
+	// DisplayNameSnake is the snake-case display name variant.
+	// DisplayNameSnake 是下划线形式显示名称变体。
+	DisplayNameSnake string `json:"display_name"`
+	// Window is the provider-defined window description.
+	// Window 是供应商定义的窗口描述。
+	Window string `json:"window"`
+	// ResetTime is the absolute reset time.
+	// ResetTime 是绝对重置时间。
+	ResetTime string `json:"resetTime"`
+	// ResetTimeSnake is the snake-case reset time variant.
+	// ResetTimeSnake 是下划线形式重置时间变体。
+	ResetTimeSnake string `json:"reset_time"`
+	// RemainingFraction is the normalized available fraction.
+	// RemainingFraction 是规范化可用比例。
+	RemainingFraction providermetadata.Decimal `json:"remainingFraction"`
+	// RemainingFractionSnake is the snake-case available fraction variant.
+	// RemainingFractionSnake 是下划线形式可用比例变体。
+	RemainingFractionSnake providermetadata.Decimal `json:"remaining_fraction"`
+}
+
+// antigravityQuotaGroup is one model-group quota collection.
+// antigravityQuotaGroup 是一个模型组额度集合。
+type antigravityQuotaGroup struct {
+	// DisplayName is the provider group name.
+	// DisplayName 是供应商组名称。
+	DisplayName string `json:"displayName"`
+	// DisplayNameSnake is the snake-case group name variant.
+	// DisplayNameSnake 是下划线形式组名称变体。
+	DisplayNameSnake string `json:"display_name"`
+	// Buckets contains independently resetting resources.
+	// Buckets 包含独立重置的资源。
+	Buckets []antigravityQuotaBucket `json:"buckets"`
+}
+
+// antigravityQuotaResponse is the exact quota-summary response subset consumed by Vulcan.
+// antigravityQuotaResponse 是 Vulcan 消费的精确额度摘要响应字段子集。
+type antigravityQuotaResponse struct {
+	// Groups contains provider model-group quotas.
+	// Groups 包含供应商模型组额度。
+	Groups []antigravityQuotaGroup `json:"groups"`
+}
+
 // NewAntigravityCatalogDriver creates a strongly typed plan and allowance reader.
 // NewAntigravityCatalogDriver 创建强类型套餐与额度读取器。
 func NewAntigravityCatalogDriver(definition providerconfig.ProviderDefinition, secrets secret.Store, client *http.Client) (*AntigravityCatalogDriver, error) {
 	if definition.ID == "" || len(definition.EndpointPresets) != 1 || strings.TrimSpace(definition.EndpointPresets[0].BaseURL) == "" || dependency.IsNil(secrets) || client == nil {
 		return nil, errors.New("Antigravity definition, secret store, and HTTP client are required")
 	}
-	return &AntigravityCatalogDriver{definition: providerconfig.CloneProviderDefinition(definition), secrets: secrets, client: providertransport.CloneHTTPClientWithoutRedirects(client)}, nil
+	quotaURLs := []string{strings.TrimSuffix(definition.EndpointPresets[0].BaseURL, "/") + "/v1internal:retrieveUserQuotaSummary"}
+	if strings.TrimSuffix(definition.EndpointPresets[0].BaseURL, "/") == "https://cloudcode-pa.googleapis.com" {
+		quotaURLs = append([]string(nil), antigravityQuotaURLs...)
+	}
+	return &AntigravityCatalogDriver{definition: providerconfig.CloneProviderDefinition(definition), secrets: secrets, client: providertransport.CloneHTTPClientWithoutRedirects(client), quotaURLs: quotaURLs}, nil
 }
 
 // Definition returns the immutable Antigravity system definition.
@@ -125,6 +195,11 @@ func (d *AntigravityCatalogDriver) ReadCredentialMetadata(ctx context.Context, i
 	if errAllowances != nil {
 		return provider.CredentialMetadataResult{}, errAllowances
 	}
+	quotaAllowances, errQuota := d.readQuotaAllowances(ctx, instance, credential, observedAt)
+	if errQuota != nil {
+		quotaAllowances = nil
+	}
+	allowances = append(allowances, quotaAllowances...)
 	return provider.CredentialMetadataResult{Plan: &plan, Allowances: allowances}, nil
 }
 
@@ -145,7 +220,163 @@ func (d *AntigravityCatalogDriver) ReadAllowances(ctx context.Context, instance 
 	if errRead != nil {
 		return nil, errRead
 	}
-	return antigravityAllowancesFromResponse(response, instance, credential, observedAt)
+	allowances, errAllowances := antigravityAllowancesFromResponse(response, instance, credential, observedAt)
+	if errAllowances != nil {
+		return nil, errAllowances
+	}
+	quotaAllowances, errQuota := d.readQuotaAllowances(ctx, instance, credential, observedAt)
+	if errQuota != nil {
+		quotaAllowances = nil
+	}
+	return append(allowances, quotaAllowances...), nil
+}
+
+// readQuotaAllowances queries the copied Antigravity quota endpoints in provider priority order.
+// readQuotaAllowances 按供应商优先顺序查询复制的 Antigravity 额度入口。
+func (d *AntigravityCatalogDriver) readQuotaAllowances(ctx context.Context, instance providerconfig.ProviderInstance, credential providerconfig.Credential, observedAt time.Time) ([]catalog.AllowanceSnapshot, error) {
+	protectedValue, errSecret := d.secrets.Get(ctx, credential.SecretRef)
+	if errSecret != nil {
+		return nil, fmt.Errorf("%w: resolve Antigravity credential: %v", provider.ErrMetadataAuthentication, errSecret)
+	}
+	token, errToken := UnmarshalAntigravityToken(protectedValue)
+	clear(protectedValue)
+	if errToken != nil {
+		return nil, fmt.Errorf("%w: decode Antigravity credential: %v", provider.ErrMetadataAuthentication, errToken)
+	}
+	body, errMarshal := json.Marshal(struct {
+		// Project is the provisioned Cloud AI Companion project.
+		// Project 是已配置的 Cloud AI Companion 项目。
+		Project string `json:"project"`
+	}{Project: token.ProjectID})
+	if errMarshal != nil {
+		return nil, fmt.Errorf("marshal Antigravity quota request: %w", errMarshal)
+	}
+	var lastError error
+	for _, endpoint := range d.quotaURLs {
+		allowances, errQuota := d.requestQuotaEndpoint(ctx, endpoint, body, token.AccessToken, instance, credential, observedAt)
+		if errQuota == nil {
+			return allowances, nil
+		}
+		lastError = errQuota
+	}
+	return nil, lastError
+}
+
+// requestQuotaEndpoint performs one bounded quota-summary request.
+// requestQuotaEndpoint 执行一次有界额度摘要请求。
+func (d *AntigravityCatalogDriver) requestQuotaEndpoint(ctx context.Context, endpoint string, body []byte, accessToken string, instance providerconfig.ProviderInstance, credential providerconfig.Credential, observedAt time.Time) ([]catalog.AllowanceSnapshot, error) {
+	request, errRequest := http.NewRequestWithContext(ctx, http.MethodPost, endpoint, bytes.NewReader(body))
+	if errRequest != nil {
+		return nil, fmt.Errorf("create Antigravity quota request: %w", errRequest)
+	}
+	request.Header.Set("Authorization", "Bearer "+accessToken)
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("User-Agent", "antigravity/cli/1.0.8 darwin/arm64")
+	response, errResponse := d.client.Do(request)
+	if errResponse != nil {
+		return nil, fmt.Errorf("%w: request Antigravity quota: %v", provider.ErrMetadataUnavailable, errResponse)
+	}
+	defer response.Body.Close()
+	responseBody, errBody := io.ReadAll(io.LimitReader(response.Body, antigravityControlResponseLimit+1))
+	if errBody != nil || len(responseBody) > antigravityControlResponseLimit {
+		return nil, fmt.Errorf("%w: read Antigravity quota response", provider.ErrMetadataResponseInvalid)
+	}
+	defer clear(responseBody)
+	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+		if response.StatusCode == http.StatusUnauthorized || response.StatusCode == http.StatusForbidden {
+			return nil, fmt.Errorf("%w: Antigravity quota request returned status %d", provider.ErrMetadataAuthentication, response.StatusCode)
+		}
+		return nil, fmt.Errorf("%w: Antigravity quota request returned status %d", provider.ErrMetadataUnavailable, response.StatusCode)
+	}
+	decoder := json.NewDecoder(bytes.NewReader(responseBody))
+	decoder.UseNumber()
+	var payload antigravityQuotaResponse
+	if errDecode := decoder.Decode(&payload); errDecode != nil {
+		return nil, fmt.Errorf("%w: decode Antigravity quota response: %v", provider.ErrMetadataResponseInvalid, errDecode)
+	}
+	return antigravityQuotaAllowances(payload, instance, credential, observedAt)
+}
+
+// antigravityQuotaAllowances converts every model-group bucket to a percentage window.
+// antigravityQuotaAllowances 将每个模型组额度桶转换为百分比窗口。
+func antigravityQuotaAllowances(payload antigravityQuotaResponse, instance providerconfig.ProviderInstance, credential providerconfig.Credential, observedAt time.Time) ([]catalog.AllowanceSnapshot, error) {
+	allowances := make([]catalog.AllowanceSnapshot, 0)
+	for groupIndex, group := range payload.Groups {
+		for bucketIndex, bucket := range group.Buckets {
+			remainingFraction := firstAntigravityDecimal(bucket.RemainingFraction, bucket.RemainingFractionSnake)
+			remainingRatio := remainingFraction.Float64()
+			if !remainingFraction.Set() || math.IsNaN(remainingRatio) || math.IsInf(remainingRatio, 0) || remainingRatio < 0 || remainingRatio > 1 {
+				return nil, fmt.Errorf("%w: Antigravity quota fraction is invalid", provider.ErrMetadataResponseInvalid)
+			}
+			groupName := firstAntigravityString(group.DisplayName, group.DisplayNameSnake)
+			bucketID := firstAntigravityString(bucket.BucketID, bucket.BucketIDSnake)
+			bucketName := firstAntigravityString(bucket.DisplayName, bucket.DisplayNameSnake)
+			metricSource := groupName + "_" + bucketID
+			if bucketID == "" {
+				metricSource = groupName + "_" + bucketName
+			}
+			if strings.Trim(metricSource, "_") == "" {
+				metricSource = fmt.Sprintf("group_%d_bucket_%d", groupIndex+1, bucketIndex+1)
+			}
+			metric := antigravityMetric(metricSource)
+			usedValue := (1 - remainingRatio) * 100
+			remainingValue := remainingRatio * 100
+			limit := "100"
+			used := strconv.FormatFloat(usedValue, 'f', -1, 64)
+			remaining := strconv.FormatFloat(remainingValue, 'f', -1, 64)
+			window := &catalog.AllowanceWindow{Kind: catalog.WindowProviderDefined}
+			resetTime := firstAntigravityString(bucket.ResetTime, bucket.ResetTimeSnake)
+			if resetTime != "" {
+				reset, errReset := time.Parse(time.RFC3339, resetTime)
+				if errReset != nil {
+					return nil, fmt.Errorf("%w: Antigravity quota reset time is invalid", provider.ErrMetadataResponseInvalid)
+				}
+				window.ResetAt = &reset
+			}
+			status := catalog.AllowanceAvailable
+			if remainingRatio <= 0 {
+				status = catalog.AllowanceExhausted
+			} else if remainingRatio <= 0.1 {
+				status = catalog.AllowanceLow
+			}
+			allowances = append(allowances, catalog.AllowanceSnapshot{ID: antigravityCredentialCatalogID("allow_", credential.ID+"\x00"+metric), ProviderInstanceID: instance.ID, Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, ScopeID: credential.ID, Metric: metric, Unit: catalog.UnitPercentage, Limit: &limit, Used: &used, Remaining: &remaining, RemainingRatio: &remainingRatio, Status: status, Mandatory: false, Window: window, Source: catalog.ModelSourceProviderAPI, ObservedAt: observedAt, ExpiresAt: observedAt.Add(5 * time.Minute), Revision: 1})
+		}
+	}
+	return allowances, nil
+}
+
+// firstAntigravityDecimal returns the first explicitly reported numeric variant.
+// firstAntigravityDecimal 返回第一个显式报告的数值变体。
+func firstAntigravityDecimal(values ...providermetadata.Decimal) providermetadata.Decimal {
+	for _, value := range values {
+		if value.Set() {
+			return value
+		}
+	}
+	return providermetadata.Decimal{}
+}
+
+// firstAntigravityString returns the first exact non-empty naming variant.
+// firstAntigravityString 返回第一个精确的非空命名变体。
+func firstAntigravityString(values ...string) string {
+	for _, value := range values {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return ""
+}
+
+// antigravityMetric normalizes a provider label into a stable readable metric identifier.
+// antigravityMetric 将供应商标签规范化为稳定且可读的指标标识。
+func antigravityMetric(value string) string {
+	parts := strings.FieldsFunc(strings.ToLower(strings.TrimSpace(value)), func(character rune) bool {
+		return (character < 'a' || character > 'z') && (character < '0' || character > '9')
+	})
+	if len(parts) == 0 {
+		return "provider_quota"
+	}
+	return strings.Join(parts, "_")
 }
 
 // antigravityAllowancesFromResponse maps the exact GOOGLE_ONE_AI credit from one typed response.

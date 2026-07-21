@@ -15,7 +15,11 @@ import (
 
 // recordingInputPlans captures the authenticated owner and returns one safe fixture plan.
 // recordingInputPlans 捕获已认证所有者并返回一个安全夹具方案。
-type recordingInputPlans struct{ owner string }
+type recordingInputPlans struct {
+	// owner records the authenticated API key identifier.
+	// owner 记录已认证 API Key 标识。
+	owner string
+}
 
 // CreateInputPlan records the server-installed owner and returns one plan with a private target.
 // CreateInputPlan 记录服务写入所有者并返回一个带私有 Target 的方案。

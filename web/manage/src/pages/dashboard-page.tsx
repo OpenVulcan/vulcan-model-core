@@ -8,6 +8,7 @@ import { DiagnosticsPage } from "@/pages/diagnostics-page"
 import { ModelCapabilitiesPage } from "@/pages/model-capabilities-page"
 import { ProviderManagementPage } from "@/pages/provider-management-page"
 import { ServiceCapabilitiesPage } from "@/pages/service-capabilities-page"
+import { SettingsPage } from "@/pages/settings-page"
 import type { TranslationKey } from "@/i18n"
 import { SidebarInset, SidebarProvider } from "@/components/ui/sidebar"
 
@@ -44,6 +45,8 @@ function resolvePageTitleKey(currentPath: string): TranslationKey {
       return "diagnostics.resourcesTitle"
     case "/diagnostics/executions":
       return "diagnostics.executionsTitle"
+    case "/settings":
+      return "sidebar.settings"
     default:
       return "dashboard.overview"
   }
@@ -63,6 +66,8 @@ function renderAuthenticatedPage(currentPath: string, managementAuthToken: strin
       return <DiagnosticsPage kind="resources" managementAuthToken={managementAuthToken} />
     case "/diagnostics/executions":
       return <DiagnosticsPage kind="executions" managementAuthToken={managementAuthToken} />
+    case "/settings":
+      return <SettingsPage managementAuthToken={managementAuthToken} />
     default:
       return <><SectionCards /><DataTable data={data} /></>
   }

@@ -4,6 +4,9 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
+	"net/http"
+	"net/http/httptest"
 	"slices"
 	"strings"
 	"testing"
@@ -41,8 +44,8 @@ func TestCodexCatalogDriverDefinitionIsMutationSafe(t *testing.T) {
 	}
 }
 
-// TestCodexPlanModelsMatchPinnedCLIProxyCatalog verifies every CLIProxyAPI plan branch and its Pro fallback.
-// TestCodexPlanModelsMatchPinnedCLIProxyCatalog 校验 CLIProxyAPI 的每个套餐分支及其 Pro 回退。
+// TestCodexPlanModelsMatchPinnedCLIProxyCatalog verifies known copied branches and Vulcan's explicit unknown-plan safety divergence.
+// TestCodexPlanModelsMatchPinnedCLIProxyCatalog 校验已知复制分支与 Vulcan 明确的未知套餐安全差异。
 func TestCodexPlanModelsMatchPinnedCLIProxyCatalog(t *testing.T) {
 	proModels := []string{"gpt-5.3-codex-spark", "gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"}
 	teamModels := []string{"gpt-5.4", "gpt-5.4-mini", "gpt-5.5", "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna", "codex-auto-review"}
@@ -64,7 +67,7 @@ func TestCodexPlanModelsMatchPinnedCLIProxyCatalog(t *testing.T) {
 		{plan: "go", entitlementClass: "codex_team", models: teamModels},
 		{plan: "plus", entitlementClass: "codex_plus", models: proModels},
 		{plan: "pro", entitlementClass: "codex_pro", models: proModels},
-		{plan: "future-plan", entitlementClass: "codex_pro", models: proModels},
+		{plan: "future-plan", entitlementClass: "codex_unknown", models: nil},
 	}
 	for _, testCase := range testCases {
 		entitlementClass, models := codexPlanModels(testCase.plan)
@@ -77,6 +80,14 @@ func TestCodexPlanModelsMatchPinnedCLIProxyCatalog(t *testing.T) {
 // TestCodexCatalogDriverReadsPlanAndEntitlementsFromProtectedIDToken verifies copied claim parsing and model authorization.
 // TestCodexCatalogDriverReadsPlanAndEntitlementsFromProtectedIDToken 验证复制的声明解析与模型授权。
 func TestCodexCatalogDriverReadsPlanAndEntitlementsFromProtectedIDToken(t *testing.T) {
+	usageServer := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.Header.Get("Authorization") != "Bearer access-token" || request.Header.Get("Chatgpt-Account-Id") != "account-1" {
+			t.Errorf("Codex usage headers = %v", request.Header)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"rate_limit":{"primary_window":{"used_percent":25,"limit_window_seconds":18000,"reset_after_seconds":60}},"rate_limit_reset_credits":{"available_count":2}}`)
+	}))
+	defer usageServer.Close()
 	payload := base64.RawURLEncoding.EncodeToString([]byte(`{"exp":946684800,"email":"user@example.com","https://api.openai.com/auth":{"chatgpt_account_id":"account-1","chatgpt_plan_type":"team"}}`))
 	idToken := "header." + payload + ".signature"
 	credentialExpiresAt := time.Unix(4102444800, 0).UTC()
@@ -90,10 +101,11 @@ func TestCodexCatalogDriverReadsPlanAndEntitlementsFromProtectedIDToken(t *testi
 		t.Fatalf("Put() error = %v", errSecret)
 	}
 	definition := providerconfig.ProviderDefinition{ID: "system_openai_codex", Kind: providerconfig.DefinitionKindSystem}
-	driver, errDriver := NewCodexCatalogDriver(definition, secrets)
+	driver, errDriver := NewCodexCatalogDriver(definition, secrets, usageServer.Client())
 	if errDriver != nil {
 		t.Fatalf("NewCodexCatalogDriver() error = %v", errDriver)
 	}
+	driver.usageURL = usageServer.URL
 	instance := providerconfig.ProviderInstance{ID: "pvi_account_1"}
 	// credentialID exercises the maximum portable credential length without weakening catalog identifier validation.
 	// credentialID 覆盖最大可移植凭据长度，且不弱化目录标识校验。
@@ -108,6 +120,9 @@ func TestCodexCatalogDriverReadsPlanAndEntitlementsFromProtectedIDToken(t *testi
 	}
 	if len(metadata.Entitlements) != 7 {
 		t.Fatalf("entitlement count = %d, want 7", len(metadata.Entitlements))
+	}
+	if len(metadata.Allowances) != 2 || metadata.Allowances[0].RemainingRatio == nil || *metadata.Allowances[0].RemainingRatio != 0.75 || metadata.Allowances[1].Remaining == nil || *metadata.Allowances[1].Remaining != "2" {
+		t.Fatalf("Codex allowances = %#v", metadata.Allowances)
 	}
 	if errPlanValidation := metadata.Plan.Validate(); errPlanValidation != nil {
 		t.Fatalf("plan validation error = %v", errPlanValidation)

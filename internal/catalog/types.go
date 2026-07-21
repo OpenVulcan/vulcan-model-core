@@ -74,6 +74,44 @@ const (
 	ModelSourceUserDeclared ModelSource = "user_declared"
 )
 
+// MetadataEvidenceSource identifies the authority behind commercial account metadata.
+// MetadataEvidenceSource 标识商业账号元数据背后的权威来源。
+type MetadataEvidenceSource string
+
+const (
+	// MetadataEvidenceProviderAPI identifies a provider account or usage API response.
+	// MetadataEvidenceProviderAPI 标识供应商账号或用量 API 响应。
+	MetadataEvidenceProviderAPI MetadataEvidenceSource = "provider_api"
+	// MetadataEvidenceProtectedTokenClaim identifies a verified claim inside protected credentials.
+	// MetadataEvidenceProtectedTokenClaim 标识受保护凭据中的已验证声明。
+	MetadataEvidenceProtectedTokenClaim MetadataEvidenceSource = "protected_token_claim"
+	// MetadataEvidenceOperatorDeclared identifies one explicit code-constrained operator selection.
+	// MetadataEvidenceOperatorDeclared 标识一个受代码约束的显式操作员选择。
+	MetadataEvidenceOperatorDeclared MetadataEvidenceSource = "operator_declared"
+	// MetadataEvidenceSystemRule identifies immutable product rules maintained by the Router.
+	// MetadataEvidenceSystemRule 标识由 Router 维护的不可变产品规则。
+	MetadataEvidenceSystemRule MetadataEvidenceSource = "system_rule"
+	// MetadataEvidenceRuntimeObservation identifies a trusted classified execution result.
+	// MetadataEvidenceRuntimeObservation 标识一个可信的已分类执行结果。
+	MetadataEvidenceRuntimeObservation MetadataEvidenceSource = "runtime_observation"
+)
+
+// AuthorizationStatus describes provider-evidenced model or service access without collapsing unknown into denial.
+// AuthorizationStatus 描述供应商证据支持的模型或服务访问状态，且不会把未知折叠为拒绝。
+type AuthorizationStatus string
+
+const (
+	// AuthorizationAuthorized means at least one account has current affirmative evidence.
+	// AuthorizationAuthorized 表示至少一个账号拥有当前有效的肯定证据。
+	AuthorizationAuthorized AuthorizationStatus = "authorized"
+	// AuthorizationDenied means current provider evidence explicitly rejects every configured account.
+	// AuthorizationDenied 表示当前供应商证据明确拒绝全部已配置账号。
+	AuthorizationDenied AuthorizationStatus = "denied"
+	// AuthorizationUnknown means no current authoritative evidence proves allowance or denial.
+	// AuthorizationUnknown 表示没有当前权威证据证明允许或拒绝。
+	AuthorizationUnknown AuthorizationStatus = "unknown"
+)
+
 // EntitlementMode describes how credentials become eligible for one provider model.
 // EntitlementMode 描述凭据如何获得一个供应商模型的执行资格。
 type EntitlementMode string
@@ -182,6 +220,9 @@ type ModelCapabilities struct {
 	// Reasoning describes reasoning control and output support.
 	// Reasoning 描述推理控制和输出支持。
 	Reasoning CapabilityLevel
+	// ReasoningEfforts lists exact accepted request effort values when reasoning control is callable.
+	// ReasoningEfforts 列出推理控制可调用时接受的精确请求强度值。
+	ReasoningEfforts []string
 	// InputModalities lists normalized accepted input modality identifiers.
 	// InputModalities 列出规范化的输入模态标识。
 	InputModalities []string
@@ -349,6 +390,9 @@ type ModelEntitlement struct {
 	// Source records the authorization evidence source.
 	// Source 记录授权证据来源。
 	Source ModelSource
+	// EvidenceSource identifies how the commercial authorization fact was obtained.
+	// EvidenceSource 标识商业授权事实的获取方式。
+	EvidenceSource MetadataEvidenceSource
 	// ObservedAt records when the authorization evidence was obtained.
 	// ObservedAt 记录获得授权证据的时间。
 	ObservedAt time.Time
@@ -381,6 +425,9 @@ type PlanSnapshot struct {
 	// Status is the provider-normalized plan lifecycle state.
 	// Status 是供应商规范化后的套餐生命周期状态。
 	Status string
+	// EvidenceSource identifies how this commercial plan was obtained.
+	// EvidenceSource 标识该商业套餐的获取方式。
+	EvidenceSource MetadataEvidenceSource
 	// ObservedAt records when the plan was obtained.
 	// ObservedAt 记录获得套餐的时间。
 	ObservedAt time.Time
@@ -579,6 +626,9 @@ type AllowanceSnapshot struct {
 	// Source records the snapshot evidence source.
 	// Source 记录快照证据来源。
 	Source ModelSource
+	// EvidenceSource identifies how the commercial resource fact was obtained.
+	// EvidenceSource 标识商业资源事实的获取方式。
+	EvidenceSource MetadataEvidenceSource
 	// ObservedAt records when the resource was obtained.
 	// ObservedAt 记录获得资源状态的时间。
 	ObservedAt time.Time

@@ -154,6 +154,34 @@ func (d ProviderDefinition) Validate() error {
 		}
 		authMethods[authMethod.ID] = struct{}{}
 	}
+	planOptions := make(map[string]struct{}, len(d.PlanOptions))
+	for _, option := range d.PlanOptions {
+		if d.Kind != DefinitionKindSystem {
+			return invalid("custom provider definition cannot register plan options")
+		}
+		if errOption := option.Validate(authMethods); errOption != nil {
+			return errOption
+		}
+		if _, exists := planOptions[option.ID]; exists {
+			return invalid("provider plan option %q is duplicated", option.ID)
+		}
+		planOptions[option.ID] = struct{}{}
+	}
+	for _, authMethod := range d.AuthMethods {
+		if authMethod.PlanAcquisition != PlanAcquisitionManualRequired {
+			continue
+		}
+		foundOption := false
+		for _, option := range d.PlanOptions {
+			if option.ManuallySelectable && slices.Contains(option.AuthMethodIDs, authMethod.ID) {
+				foundOption = true
+				break
+			}
+		}
+		if !foundOption {
+			return invalid("manual-required auth method %q requires at least one plan option", authMethod.ID)
+		}
+	}
 	// protocolAuthMethods prevents duplicated references from changing protocol authentication semantics.
 	// protocolAuthMethods 防止重复引用改变协议认证语义。
 	protocolAuthMethods := make(map[string]struct{}, len(d.AuthMethodIDs))
@@ -235,6 +263,41 @@ func (a AuthMethodDefinition) Validate() error {
 	}
 	if !validAuthMethodType(a.Type) {
 		return invalid("auth method type %q is invalid", a.Type)
+	}
+	if a.PlanAcquisition != "" && !validPlanAcquisitionMode(a.PlanAcquisition) {
+		return invalid("auth method plan acquisition mode %q is invalid", a.PlanAcquisition)
+	}
+	return nil
+}
+
+// Validate verifies one immutable provider plan choice against the owning auth-method set.
+// Validate 根据所属认证方式集合校验一个不可变供应商套餐选项。
+func (p PlanOptionDefinition) Validate(authMethods map[string]struct{}) error {
+	if errID := validateIdentifier("provider plan option id", p.ID); errID != nil {
+		return errID
+	}
+	if strings.TrimSpace(p.DisplayName) == "" || p.SortOrder < 0 || p.Revision == 0 || p.EvidenceRevision == 0 || len(p.AuthMethodIDs) == 0 {
+		return invalid("provider plan option display name, auth methods, sort order, and revision are invalid")
+	}
+	seenAuthMethods := make(map[string]struct{}, len(p.AuthMethodIDs))
+	for _, authMethodID := range p.AuthMethodIDs {
+		if _, exists := authMethods[authMethodID]; !exists {
+			return invalid("provider plan option %q references unknown auth method %q", p.ID, authMethodID)
+		}
+		if _, exists := seenAuthMethods[authMethodID]; exists {
+			return invalid("provider plan option %q duplicates auth method %q", p.ID, authMethodID)
+		}
+		seenAuthMethods[authMethodID] = struct{}{}
+	}
+	seenCodes := make(map[string]struct{}, len(p.ProviderPlanCodes))
+	for _, providerPlanCode := range p.ProviderPlanCodes {
+		if errCode := validateIdentifier("provider plan code", providerPlanCode); errCode != nil {
+			return errCode
+		}
+		if _, exists := seenCodes[providerPlanCode]; exists {
+			return invalid("duplicate provider plan code %q", providerPlanCode)
+		}
+		seenCodes[providerPlanCode] = struct{}{}
 	}
 	return nil
 }
@@ -320,6 +383,9 @@ func (i ProviderInstance) Validate() error {
 	}
 	if strings.TrimSpace(i.DisplayName) == "" || !validLifecycleStatus(i.Status) {
 		return invalid("provider instance display name or lifecycle status is invalid")
+	}
+	if i.RoutingStrategy != "" && !validRoutingStrategy(i.RoutingStrategy) {
+		return invalid("provider instance routing strategy %q is invalid", i.RoutingStrategy)
 	}
 	if i.Revision == 0 || i.DefinitionRevision == 0 {
 		return invalid("provider instance revisions must be positive")
@@ -418,6 +484,17 @@ func (c Credential) Validate() error {
 	}
 	if !validCredentialStatus(c.Status) || c.Revision == 0 {
 		return invalid("credential status or revision is invalid")
+	}
+	if c.Priority < 0 {
+		return invalid("credential priority cannot be negative")
+	}
+	if c.DeclaredPlan != nil {
+		if errPlan := validateIdentifier("credential declared plan option id", c.DeclaredPlan.PlanOptionID); errPlan != nil {
+			return errPlan
+		}
+		if c.DeclaredPlan.DeclaredAt.IsZero() || c.DeclaredPlan.Revision == 0 {
+			return invalid("credential declared plan time and revision are required")
+		}
 	}
 	if c.Status == CredentialCooling && c.CoolingUntil == nil {
 		return invalid("cooling credential requires a recovery time")
@@ -593,6 +670,24 @@ func (d ProviderDefinition) AuthMethod(authMethodID string) (AuthMethodDefinitio
 		}
 	}
 	return AuthMethodDefinition{}, false
+}
+
+// PlanOption returns one code-owned commercial plan by exact identifier.
+// PlanOption 按精确标识返回一个代码拥有的商业套餐。
+func (d ProviderDefinition) PlanOption(planOptionID string) (PlanOptionDefinition, bool) {
+	for _, option := range d.PlanOptions {
+		if option.ID == planOptionID {
+			return option, true
+		}
+	}
+	return PlanOptionDefinition{}, false
+}
+
+// AuthMethodAllowsPlan reports whether one exact manual plan belongs to the selected authentication method.
+// AuthMethodAllowsPlan 报告一个精确人工套餐是否属于所选认证方式。
+func (d ProviderDefinition) AuthMethodAllowsPlan(authMethodID string, planOptionID string) bool {
+	option, exists := d.PlanOption(planOptionID)
+	return exists && slices.Contains(option.AuthMethodIDs, authMethodID)
 }
 
 // ChannelAllowsAuth reports whether a channel accepts one provider authentication method.
@@ -809,6 +904,34 @@ func ValidateSystemOnboarding(onboarding SystemOnboarding, definition ProviderDe
 	if onboarding.Credential.ProviderInstanceID != onboarding.Instance.ID || !definition.HasAuthMethod(onboarding.Credential.AuthMethodID) {
 		return invalid("system onboarding credential is outside its provider definition")
 	}
+	authMethod, _ := definition.AuthMethod(onboarding.Credential.AuthMethodID)
+	planAcquisition := authMethod.PlanAcquisition
+	if planAcquisition == "" {
+		planAcquisition = PlanAcquisitionUnavailable
+	}
+	switch planAcquisition {
+	case PlanAcquisitionManualRequired:
+		if onboarding.Credential.DeclaredPlan == nil {
+			return invalid("system onboarding credential requires one valid declared plan option")
+		}
+		planOption, exists := definition.PlanOption(onboarding.Credential.DeclaredPlan.PlanOptionID)
+		if !exists || !planOption.ManuallySelectable || !definition.AuthMethodAllowsPlan(authMethod.ID, onboarding.Credential.DeclaredPlan.PlanOptionID) {
+			return invalid("system onboarding credential requires one manually selectable declared plan option")
+		}
+	case PlanAcquisitionManualOptional:
+		if onboarding.Credential.DeclaredPlan != nil {
+			planOption, exists := definition.PlanOption(onboarding.Credential.DeclaredPlan.PlanOptionID)
+			if !exists || !planOption.ManuallySelectable || !definition.AuthMethodAllowsPlan(authMethod.ID, onboarding.Credential.DeclaredPlan.PlanOptionID) {
+				return invalid("system onboarding credential declared plan option is not manually selectable")
+			}
+		}
+	case PlanAcquisitionProviderDetected, PlanAcquisitionUnavailable:
+		if onboarding.Credential.DeclaredPlan != nil {
+			return invalid("system onboarding credential cannot declare a plan for this auth method")
+		}
+	default:
+		return invalid("system onboarding credential plan acquisition mode is invalid")
+	}
 	// endpoints indexes exact onboarding endpoints for binding ownership validation.
 	// endpoints 为绑定所有权校验索引精确的录入端点。
 	endpoints := make(map[string]Endpoint, len(onboarding.Endpoints))
@@ -975,6 +1098,23 @@ func validAuthMethodType(authMethod AuthMethodType) bool {
 	default:
 		return false
 	}
+}
+
+// validPlanAcquisitionMode reports whether one plan source belongs to the closed vocabulary.
+// validPlanAcquisitionMode 报告一个套餐来源是否属于封闭词汇表。
+func validPlanAcquisitionMode(mode PlanAcquisitionMode) bool {
+	switch mode {
+	case PlanAcquisitionUnavailable, PlanAcquisitionProviderDetected, PlanAcquisitionManualRequired, PlanAcquisitionManualOptional:
+		return true
+	default:
+		return false
+	}
+}
+
+// validRoutingStrategy reports whether one persisted credential strategy is supported.
+// validRoutingStrategy 报告一个持久化凭据策略是否受支持。
+func validRoutingStrategy(strategy RoutingStrategy) bool {
+	return strategy == RoutingRoundRobin || strategy == RoutingFillFirst
 }
 
 // validLifecycleStatus reports whether a provider lifecycle state is explicitly defined.

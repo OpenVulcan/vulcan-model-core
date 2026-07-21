@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -61,6 +62,15 @@ type Request struct {
 	// RequiredCapabilities lists normalized capability identifiers needed by the request.
 	// RequiredCapabilities 列出请求需要的规范化能力标识。
 	RequiredCapabilities []string
+	// ExcludedCredentialIDs lists same-instance accounts already attempted by this logical execution.
+	// ExcludedCredentialIDs 列出该逻辑执行已经尝试过的同实例账号。
+	ExcludedCredentialIDs []string
+	// RequiredCredentialID constrains endpoint failover to the credential that owned the failed attempt.
+	// RequiredCredentialID 将入口故障切换限制在失败尝试所属的凭据内。
+	RequiredCredentialID string
+	// ExcludedEndpointIDs lists same-instance endpoints already attempted by this logical execution.
+	// ExcludedEndpointIDs 列出该逻辑执行已经尝试过的同实例入口。
+	ExcludedEndpointIDs []string
 	// Now fixes time-dependent cooldown and snapshot evaluation.
 	// Now 固定依赖时间的冷却和快照评估时刻。
 	Now time.Time
@@ -93,6 +103,71 @@ type Diagnostics struct {
 	// EarliestResetAt is the earliest known recovery time among blocked candidates.
 	// EarliestResetAt 是阻塞候选中最早的已知恢复时间。
 	EarliestResetAt *time.Time
+}
+
+// ContextAccountRuntimeStatus identifies why one model-context account is or is not immediately executable.
+// ContextAccountRuntimeStatus 标识一个模型上下文账号为何能够或不能立即执行。
+type ContextAccountRuntimeStatus string
+
+const (
+	// ContextAccountReady means the account has an eligible endpoint, authorization, allowance, and runtime state.
+	// ContextAccountReady 表示账号具有合格入口、授权、额度与运行时状态。
+	ContextAccountReady ContextAccountRuntimeStatus = "ready"
+	// ContextAccountCooling means the account or one provider-owned runtime scope is temporarily cooling.
+	// ContextAccountCooling 表示账号或某个供应商拥有的运行时作用域正在临时冷却。
+	ContextAccountCooling ContextAccountRuntimeStatus = "cooling"
+	// ContextAccountExhausted means a mandatory applicable allowance is exhausted.
+	// ContextAccountExhausted 表示一个适用的强制额度已经耗尽。
+	ContextAccountExhausted ContextAccountRuntimeStatus = "exhausted"
+	// ContextAccountInvalid means the credential is disabled, expired, or invalid.
+	// ContextAccountInvalid 表示凭据已禁用、过期或无效。
+	ContextAccountInvalid ContextAccountRuntimeStatus = "invalid"
+	// ContextAccountUnavailable means no currently ready provider-owned path exists.
+	// ContextAccountUnavailable 表示当前不存在就绪的供应商所属路径。
+	ContextAccountUnavailable ContextAccountRuntimeStatus = "unavailable"
+)
+
+// ModelContextAccountState describes one concrete credential authorized for one execution profile.
+// ModelContextAccountState 描述一个获得某个执行规格授权的具体凭据。
+type ModelContextAccountState struct {
+	// CredentialID identifies the concrete local account without exposing secret material.
+	// CredentialID 标识具体本地账号且不暴露秘密材料。
+	CredentialID string
+	// CredentialStatus is the persisted credential lifecycle state.
+	// CredentialStatus 是持久化凭据生命周期状态。
+	CredentialStatus providerconfig.CredentialStatus
+	// Priority is the account scheduling priority; lower values win.
+	// Priority 是账号调度优先级；较小值优先。
+	Priority int
+	// EntitlementClass is the provider-normalized commercial authorization class.
+	// EntitlementClass 是供应商规范化商业授权类别。
+	EntitlementClass string
+	// EffectiveContextWindow is the smallest authoritative profile and account ceiling.
+	// EffectiveContextWindow 是规格与账号权威上限中的最小值。
+	EffectiveContextWindow catalog.OptionalTokenLimit
+	// RuntimeStatus is the exact current execution eligibility class.
+	// RuntimeStatus 是精确的当前执行资格类别。
+	RuntimeStatus ContextAccountRuntimeStatus
+	// CoolingUntil is the known credential recovery time when present.
+	// CoolingUntil 是存在时已知的凭据恢复时间。
+	CoolingUntil *time.Time
+	// BlockingAllowanceKinds lists mandatory exhausted resource shapes.
+	// BlockingAllowanceKinds 列出强制且已耗尽的资源形态。
+	BlockingAllowanceKinds []catalog.AllowanceKind
+	// EarliestResetAt is the earliest known allowance recovery time.
+	// EarliestResetAt 是已知最早的额度恢复时间。
+	EarliestResetAt *time.Time
+}
+
+// ModelContextState binds one exact execution profile to every authorized configured account.
+// ModelContextState 将一个精确执行规格绑定到全部已授权配置账号。
+type ModelContextState struct {
+	// ProfileID identifies the exact client-selectable context shape.
+	// ProfileID 标识精确且客户端可选择的上下文形态。
+	ProfileID string
+	// Accounts contains authorized accounts in deterministic scheduling order.
+	// Accounts 包含按确定性调度顺序排列的已授权账号。
+	Accounts []ModelContextAccountState
 }
 
 // Target is an immutable value snapshot of one exact same-provider execution destination.

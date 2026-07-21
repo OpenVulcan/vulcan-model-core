@@ -1,6 +1,7 @@
 package provider
 
 import (
+	"context"
 	"testing"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -12,6 +13,18 @@ type testDriver struct {
 	// definition is the immutable provider metadata exposed by the fixture.
 	// definition 是测试夹具暴露的不可变供应商元数据。
 	definition providerconfig.ProviderDefinition
+}
+
+// aggregateMetadataTestDriver implements the one-call metadata contract without redundant per-class readers.
+// aggregateMetadataTestDriver 实现单次调用元数据合同且不提供冗余的分类读取器。
+type aggregateMetadataTestDriver struct {
+	testDriver
+}
+
+// ReadCredentialMetadata returns an empty deterministic aggregate fixture.
+// ReadCredentialMetadata 返回一个空的确定性聚合测试夹具。
+func (d aggregateMetadataTestDriver) ReadCredentialMetadata(context.Context, providerconfig.ProviderInstance, providerconfig.Credential) (CredentialMetadataResult, error) {
+	return CredentialMetadataResult{}, nil
 }
 
 // Definition returns the fixture's immutable system-provider definition.
@@ -125,6 +138,20 @@ func TestRegistryRejectsUnsupportedFeatureContract(t *testing.T) {
 	definition.Features.ModelDiscovery = providerconfig.SupportSupported
 	if err := registry.Register(testDriver{definition: definition}); err == nil {
 		t.Fatal("expected missing ModelDiscoverer implementation rejection")
+	}
+}
+
+// TestRegistryAcceptsAggregateMetadataContract verifies one-call readers satisfy every account metadata feature they return.
+// TestRegistryAcceptsAggregateMetadataContract 验证单次调用读取器满足其返回的全部账号元数据功能。
+func TestRegistryAcceptsAggregateMetadataContract(t *testing.T) {
+	registry := testProviderRegistry(t)
+	definition := testProviderDefinition()
+	definition.Features.PlanReader = providerconfig.SupportSupported
+	definition.Features.EntitlementReader = providerconfig.SupportSupported
+	definition.Features.AllowanceReader = providerconfig.SupportSupported
+	driver := aggregateMetadataTestDriver{testDriver: testDriver{definition: definition}}
+	if errRegister := registry.Register(driver); errRegister != nil {
+		t.Fatalf("register aggregate metadata driver: %v", errRegister)
 	}
 }
 

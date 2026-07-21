@@ -33,7 +33,7 @@
 | Google Antigravity | Antigravity | `https://cloudcode-pa.googleapis.com` | Google OAuth、Refresh Token | 邮箱、Project、`loadCodeAssist.paidTier.id` | `paidTier.availableCredits` 中的 `GOOGLE_ONE_AI` | 已实现 OAuth、刷新、动态客户端版本、HTTP/1.1 边界、套餐与积分读取；积分是非强制、模型选择相关观测，不会阻塞该凭据的全部模型 |
 | Kimi CN | OpenAI Chat | `https://api.moonshot.cn` | API Key | Kimi Open Platform 代码拥有目录 | 固定基线未发现账号或用量读取 | 已注册独立区域产品与唯一 Chat 协议；账号读取显式不支持 |
 | Kimi Global | OpenAI Chat | `https://api.moonshot.ai` | API Key | 与 CN 共用模型事实，入口不同 | 固定基线未发现账号或用量读取 | 已注册独立区域产品与唯一 Chat 协议；账号读取显式不支持 |
-| Kimi Coding Plan | OpenAI Chat | `https://api.kimi.com/coding` | 设备授权、API Key、Refresh Token、TUI 风格设备头 | `kimi` 静态目录 | 固定基线没有 `/usages`、余额或周期用量读取器 | 已实现设备授权、刷新、设备身份、模型前缀移除与精确七模型目录；协议路径追加 `/v1/chat/completions`，用量显式不支持 |
+| Kimi Coding Plan | OpenAI Chat | `https://api.kimi.com/coding` | 设备授权、API Key、Refresh Token、TUI 风格设备头 | 用户确认的 Andante、Moderato、Allegretto、Allegro 权益矩阵；精确模型为 `kimi-for-coding`、`k3`、`kimi-for-coding-highspeed` | 固定基线没有会员档位、`/usages`、余额或周期用量读取器 | 已实现 API Key 人工四档套餐、三模型、K3 256K/1M Profile 与 `low/high/max`；设备授权在没有会员接口证据时保持套餐与模型权益未知 |
 | Alibaba Coding Plan CN / Global | Anthropic Messages | 区域固定 `/apps/anthropic/v1` 入口 | 阿里云官方 API Key、`x-api-key` | 区域产品页与 Coding Plan 上下文表 | 未发现稳定公开账号或额度 Reader | 已注册两个区域产品、独立 Driver 与隔离目录；流式工具请求按 Qwen/GLM 白名单自动开启 `tool_stream` |
 | Alibaba Token Plan Personal CN | Anthropic Messages | `https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1` | 阿里云官方 API Key、`x-api-key` | CN Personal 精确模型集合 | 未发现稳定公开账号或额度 Reader | 已注册个人版产品与独立目录；不虚构 Personal Global |
 | Alibaba Token Plan Team CN / Global | Anthropic Messages | CN / Global 区域固定 `/apps/anthropic/v1` 入口 | 阿里云官方 API Key、`x-api-key` | 区域 Team 精确模型集合与上下文差异 | 未发现稳定公开账号或额度 Reader | 已注册两个区域团队版产品与隔离目录；CN/Global 不跨区域合并或回退 |
@@ -112,7 +112,7 @@ Codex 保留三次刷新与一秒、两秒线性等待，并对 `refresh_token_r
 | `sdk/auth/interfaces.go` | 通用登录选项、认证器接口与 RefreshLead | 由强类型管理命令、供应商专属 Flow Manager 和 Credential `ExpiresAt` 替代，不引入通用 Metadata 登录参数 |
 | `sdk/auth/kimi.go` | Kimi 设备授权交互、五分钟提前刷新、设备 ID 与 Token 文档 | `provider/kimi/device_flow.go`、Kimi 原子录入与管理刷新服务 |
 | `sdk/auth/manager.go` | 按供应商注册认证器并保存 Auth 记录 | 由系统 Definition 固定分派、供应商专属管理服务、加密 Secret Store 与原子录入替代 |
-| `sdk/auth/refresh_registry.go` | Codex、Claude、Antigravity、Kimi、xAI 的刷新提前量注册 | 由 Credential `ExpiresAt`、供应商刷新客户端与管理刷新服务承载；当前阶段仅提供显式管理刷新，不伪装后台自动刷新 |
+| `sdk/auth/refresh_registry.go` | Codex、Claude、Antigravity、Kimi、xAI 的刷新提前量注册 | Token 交换仍由供应商专属刷新服务负责；Token 刷新、授权完成、API Key 变更会触发元数据刷新，另有带去重、超时、并发上限和固定抖动的后台元数据协调器；不把元数据刷新伪装成 Token 交换 |
 | `sdk/auth/store_registry.go` | 全局 Token Store 注册与默认文件存储 | 使用显式依赖注入的 Secret Store，不引入全局可变认证存储 |
 | `sdk/auth/xai.go` | xAI 设备授权、身份文件名与 RefreshLead | `provider/xai/device_flow.go`、服务端身份派生、原子录入与管理刷新服务 |
 | `sdk/auth/xai_test.go` | xAI Provider ID 与刷新提前量回归 | xAI Definition、设备授权和刷新聚焦测试覆盖对应边界 |

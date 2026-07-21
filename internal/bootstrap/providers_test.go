@@ -126,6 +126,9 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 	if len(coding.AuthMethods) != 2 || coding.AuthMethods[0].Type != providerconfig.AuthMethodAPIKey || coding.AuthMethods[1].Type != providerconfig.AuthMethodDeviceFlow || !coding.AuthMethods[1].Refreshable {
 		t.Fatalf("Coding authentication = %#v", coding.AuthMethods)
 	}
+	if coding.Features.PlanReader != providerconfig.SupportSupported || coding.Features.EntitlementReader != providerconfig.SupportSupported || coding.Features.AllowanceReader != providerconfig.SupportSupported {
+		t.Fatalf("Coding metadata features = %#v", coding.Features)
+	}
 	if !coding.RuntimeReady {
 		t.Fatal("Coding protocol is not runtime ready after its driver implementation was added")
 	}

@@ -8,6 +8,7 @@ import (
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routingstate"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -53,6 +54,20 @@ func TestResolveSelectsExactModelGroundedSearchService(t *testing.T) {
 	fixture.snapshot.ObservedAt = fixture.snapshot.ObservedAt.Add(time.Second)
 	if errSave := fixture.catalogs.Save(context.Background(), fixture.snapshot); errSave != nil {
 		t.Fatalf("save search service snapshot: %v", errSave)
+	}
+	pools, errPools := fixture.resolver.SummarizeSnapshot(context.Background(), fixture.snapshot, fixture.now, fixture.snapshot.Revision)
+	if errPools != nil {
+		t.Fatalf("summarize search service snapshot: %v", errPools)
+	}
+	var searchPool catalog.PoolSummary
+	for _, pool := range pools {
+		if pool.ExecutionProfileID == "profile_web_search" {
+			searchPool = pool
+			break
+		}
+	}
+	if searchPool.EntitledCredentials != 2 || searchPool.ReadyCredentials != 2 {
+		t.Fatalf("search service pool=%+v, want two ready credentials", searchPool)
 	}
 
 	target, diagnostics, errResolve := fixture.resolver.Resolve(context.Background(), Request{
@@ -357,6 +372,132 @@ func newResolverFixture(t *testing.T) resolverFixture {
 	return resolverFixture{resolver: resolver, configurations: configurations, catalogs: catalogs, snapshot: snapshot, now: now}
 }
 
+// TestResolverSkipsCoolingCredentialModelState verifies a model failure does not globally disable the account.
+// TestResolverSkipsCoolingCredentialModelState 验证模型失败不会全局禁用账号。
+func TestResolverSkipsCoolingCredentialModelState(t *testing.T) {
+	fixture := newResolverFixture(t)
+	states := routingstate.NewMemoryStore(fixture.now)
+	coolingUntil := fixture.now.Add(time.Minute)
+	if errState := states.SaveCredentialModelState(context.Background(), routingstate.CredentialModelState{ProviderInstanceID: "pvi_kimi", CredentialID: "cred_kimi_256k", ProviderModelID: "model_kimi_k3", Status: routingstate.ModelCooling, CoolingUntil: &coolingUntil, LastFailureAt: &fixture.now, Revision: 1}); errState != nil {
+		t.Fatalf("SaveCredentialModelState() error = %v", errState)
+	}
+	resolver, errResolver := NewWithRuntimeState(fixture.configurations, fixture.catalogs, states)
+	if errResolver != nil {
+		t.Fatalf("NewWithRuntimeState() error = %v", errResolver)
+	}
+	target, _, errResolve := resolver.Resolve(context.Background(), Request{ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Operation: vcp.OperationConversationRespond, Now: fixture.now})
+	if errResolve != nil || target.CredentialID != "cred_kimi_1m" {
+		t.Fatalf("resolved target = %#v, error = %v", target, errResolve)
+	}
+	if !fixture.snapshot.Entitlements[0].LimitOverrides.ContextWindow.Known {
+		t.Fatal("fixture unexpectedly mutated the cooling credential entitlement")
+	}
+}
+
+// TestResolverAppliesCredentialEndpointAndSharedRuntimeScopes verifies every classified non-model boundary filters the exact candidate set.
+// TestResolverAppliesCredentialEndpointAndSharedRuntimeScopes 验证每个分类非模型边界都会过滤精确候选集合。
+func TestResolverAppliesCredentialEndpointAndSharedRuntimeScopes(t *testing.T) {
+	testCases := []struct {
+		// name identifies the runtime scope scenario.
+		// name 标识运行时作用域场景。
+		name string
+		// scope is the persisted runtime resource boundary.
+		// scope 是持久化的运行时资源边界。
+		scope routingstate.RuntimeScope
+		// scopeID is the exact resource identifier to cool down.
+		// scopeID 是需要冷却的精确资源标识。
+		scopeID string
+		// wantCredentialID is the eligible alternative credential.
+		// wantCredentialID 是可用的替代凭据。
+		wantCredentialID string
+		// wantNoTarget reports whether the scope blocks every candidate.
+		// wantNoTarget 表示该作用域是否阻断所有候选项。
+		wantNoTarget bool
+	}{
+		{name: "credential", scope: routingstate.ScopeCredential, scopeID: "cred_kimi_256k", wantCredentialID: "cred_kimi_1m"},
+		{name: "billing_account", scope: routingstate.ScopeBillingAccount, scopeID: "billing-1m", wantCredentialID: "cred_kimi_256k"},
+		{name: "endpoint", scope: routingstate.ScopeEndpoint, scopeID: "ep_kimi", wantNoTarget: true},
+		{name: "provider", scope: routingstate.ScopeProvider, scopeID: "pvi_kimi", wantNoTarget: true},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			fixture := newResolverFixture(t)
+			states := routingstate.NewMemoryStore(fixture.now)
+			coolingUntil := fixture.now.Add(time.Minute)
+			state := routingstate.RuntimeScopeState{ProviderInstanceID: "pvi_kimi", Scope: testCase.scope, ScopeID: testCase.scopeID, Status: routingstate.ModelCooling, CoolingUntil: &coolingUntil, LastFailureAt: &fixture.now, Revision: 1}
+			if errState := states.SaveRuntimeScopeState(context.Background(), state); errState != nil {
+				t.Fatalf("SaveRuntimeScopeState() error = %v", errState)
+			}
+			resolver, errResolver := NewWithRuntimeState(fixture.configurations, fixture.catalogs, states)
+			if errResolver != nil {
+				t.Fatalf("NewWithRuntimeState() error = %v", errResolver)
+			}
+			target, _, errResolve := resolver.Resolve(context.Background(), Request{ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Operation: vcp.OperationConversationRespond, Now: fixture.now})
+			if testCase.wantNoTarget {
+				if !errors.Is(errResolve, ErrNoEligibleTarget) {
+					t.Fatalf("target=%+v error=%v, want ErrNoEligibleTarget", target, errResolve)
+				}
+				return
+			}
+			if errResolve != nil || target.CredentialID != testCase.wantCredentialID {
+				t.Fatalf("target=%+v error=%v", target, errResolve)
+			}
+		})
+	}
+}
+
+// TestSummarizeSnapshotAppliesLiveRuntimeState verifies management pool summaries match execution-time cooldown filtering.
+// TestSummarizeSnapshotAppliesLiveRuntimeState 验证管理账号池摘要与执行时冷却过滤保持一致。
+func TestSummarizeSnapshotAppliesLiveRuntimeState(t *testing.T) {
+	fixture := newResolverFixture(t)
+	states := routingstate.NewMemoryStore(fixture.now)
+	coolingUntil := fixture.now.Add(time.Minute)
+	state := routingstate.RuntimeScopeState{ProviderInstanceID: "pvi_kimi", Scope: routingstate.ScopeCredential, ScopeID: "cred_kimi_1m", Status: routingstate.ModelCooling, CoolingUntil: &coolingUntil, LastFailureAt: &fixture.now, Revision: 1}
+	if errState := states.SaveRuntimeScopeState(context.Background(), state); errState != nil {
+		t.Fatalf("SaveRuntimeScopeState() error = %v", errState)
+	}
+	resolver, errResolver := NewWithRuntimeState(fixture.configurations, fixture.catalogs, states)
+	if errResolver != nil {
+		t.Fatalf("NewWithRuntimeState() error = %v", errResolver)
+	}
+	pools, errPools := resolver.SummarizeSnapshot(context.Background(), fixture.snapshot, fixture.now, fixture.snapshot.Revision)
+	if errPools != nil {
+		t.Fatalf("SummarizeSnapshot() error = %v", errPools)
+	}
+	for _, pool := range pools {
+		if pool.ExecutionProfileID != "profile_kimi_k3_1m" {
+			continue
+		}
+		if pool.EntitledCredentials != 1 || pool.ReadyCredentials != 0 || pool.CoolingCredentials != 1 {
+			t.Fatalf("pool=%+v, want one entitled cooling credential", pool)
+		}
+		return
+	}
+	t.Fatal("profile_kimi_k3_1m pool was not summarized")
+}
+
+// TestResolverUsesGlobalFillFirstAndExcludedCredentials verifies inherited strategy and one-execution retry exclusion.
+// TestResolverUsesGlobalFillFirstAndExcludedCredentials 验证继承策略与单次执行重试排除。
+func TestResolverUsesGlobalFillFirstAndExcludedCredentials(t *testing.T) {
+	fixture := newResolverFixture(t)
+	states := routingstate.NewMemoryStore(fixture.now)
+	if errSettings := states.SaveSettings(context.Background(), routingstate.Settings{DefaultRoutingStrategy: providerconfig.RoutingFillFirst, Revision: 2, UpdatedAt: fixture.now.Add(time.Second)}); errSettings != nil {
+		t.Fatalf("SaveSettings() error = %v", errSettings)
+	}
+	resolver, _ := NewWithRuntimeState(fixture.configurations, fixture.catalogs, states)
+	request := Request{ProviderInstanceID: "pvi_kimi", ProviderModelID: "model_kimi_k3", ExecutionProfileID: "profile_kimi_k3_256k", Operation: vcp.OperationConversationRespond, Now: fixture.now}
+	first, _, errFirst := resolver.Resolve(context.Background(), request)
+	second, _, errSecond := resolver.Resolve(context.Background(), request)
+	if errFirst != nil || errSecond != nil || first.CredentialID != second.CredentialID {
+		t.Fatalf("fill-first targets first=%#v second=%#v errors=%v/%v", first, second, errFirst, errSecond)
+	}
+	request.ExcludedCredentialIDs = []string{first.CredentialID}
+	fallback, _, errFallback := resolver.Resolve(context.Background(), request)
+	if errFallback != nil || fallback.CredentialID == first.CredentialID {
+		t.Fatalf("excluded fallback = %#v, error = %v", fallback, errFallback)
+	}
+}
+
 // TestResolverRejectsLocallyDisabledModel verifies call routing cannot bypass management-disabled model policy.
 // TestResolverRejectsLocallyDisabledModel 验证调用路由无法绕过管理面禁用的模型策略。
 func TestResolverRejectsLocallyDisabledModel(t *testing.T) {
@@ -426,6 +567,49 @@ func TestResolverRequiresHighTierEntitlement(t *testing.T) {
 	}
 	if target.CredentialID != "cred_kimi_1m" || diagnostics.EntitledCandidates != 1 {
 		t.Fatalf("expected only the 1M credential, target=%s entitled=%d", target.CredentialID, diagnostics.EntitledCandidates)
+	}
+}
+
+// TestInspectModelContextsListsExactAuthorizedAccounts verifies context-to-account mapping without selecting or hiding non-default profiles.
+// TestInspectModelContextsListsExactAuthorizedAccounts 验证上下文到账号的精确映射，且不选择账号或隐藏非默认规格。
+func TestInspectModelContextsListsExactAuthorizedAccounts(t *testing.T) {
+	fixture := newResolverFixture(t)
+	contexts, errContexts := fixture.resolver.InspectModelContexts(context.Background(), "pvi_kimi", "model_kimi_k3", fixture.now)
+	if errContexts != nil {
+		t.Fatalf("InspectModelContexts() error = %v", errContexts)
+	}
+	if len(contexts) != 2 || contexts[0].ProfileID != "profile_kimi_k3_1m" || contexts[1].ProfileID != "profile_kimi_k3_256k" {
+		t.Fatalf("model contexts = %#v", contexts)
+	}
+	if len(contexts[0].Accounts) != 1 || contexts[0].Accounts[0].CredentialID != "cred_kimi_1m" || contexts[0].Accounts[0].RuntimeStatus != ContextAccountReady || contexts[0].Accounts[0].EffectiveContextWindow.Value != 1048576 {
+		t.Fatalf("1M context accounts = %#v", contexts[0].Accounts)
+	}
+	if len(contexts[1].Accounts) != 2 || contexts[1].Accounts[0].CredentialID != "cred_kimi_1m" || contexts[1].Accounts[1].CredentialID != "cred_kimi_256k" {
+		t.Fatalf("256K context accounts = %#v", contexts[1].Accounts)
+	}
+}
+
+// TestInspectModelContextsKeepsExplicitEntitlementWhenPathIsUnavailable verifies authorization ownership is not erased by local endpoint state.
+// TestInspectModelContextsKeepsExplicitEntitlementWhenPathIsUnavailable 验证授权归属不会被本地入口状态抹除。
+func TestInspectModelContextsKeepsExplicitEntitlementWhenPathIsUnavailable(t *testing.T) {
+	fixture := newResolverFixture(t)
+	bindings, errBindings := fixture.configurations.ListBindings(context.Background(), "pvi_kimi")
+	if errBindings != nil {
+		t.Fatalf("ListBindings() error = %v", errBindings)
+	}
+	for _, binding := range bindings {
+		binding.Enabled = false
+		binding.Revision++
+		if errSave := fixture.configurations.SaveBinding(context.Background(), binding); errSave != nil {
+			t.Fatalf("SaveBinding() error = %v", errSave)
+		}
+	}
+	contexts, errContexts := fixture.resolver.InspectModelContexts(context.Background(), "pvi_kimi", "model_kimi_k3", fixture.now)
+	if errContexts != nil {
+		t.Fatalf("InspectModelContexts() error = %v", errContexts)
+	}
+	if len(contexts) != 2 || len(contexts[0].Accounts) != 1 || contexts[0].Accounts[0].RuntimeStatus != ContextAccountUnavailable || len(contexts[1].Accounts) != 2 {
+		t.Fatalf("unavailable explicit context accounts = %#v", contexts)
 	}
 }
 

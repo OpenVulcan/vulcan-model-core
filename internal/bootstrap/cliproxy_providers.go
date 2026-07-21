@@ -379,16 +379,26 @@ func xaiAccountResponsesCapabilities() protocolxai.ProfileCapabilities {
 func cliProxyProviderDefinitions() []providerconfig.ProviderDefinition {
 	// apiKey represents manually issued provider API keys.
 	// apiKey 表示供应商手动签发的 API Key。
-	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true}
-	// oauth represents refreshable account authorization whose acquisition remains provider-specific.
-	// oauth 表示可刷新的账号授权，其获取流程仍由供应商专属实现负责。
-	oauth := providerconfig.AuthMethodDefinition{ID: "oauth", Type: providerconfig.AuthMethodOAuth, Refreshable: true, MultipleCredentials: true}
+	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	// oauth represents refreshable account authorization without a proven commercial-plan reader.
+	// oauth 表示没有已证实商业套餐读取器的可刷新账号授权。
+	oauth := providerconfig.AuthMethodDefinition{ID: "oauth", Type: providerconfig.AuthMethodOAuth, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
 	// deviceFlow represents refreshable RFC 8628 account authorization.
 	// deviceFlow 表示可刷新的 RFC 8628 账号授权。
-	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true}
+	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
 	// serviceAccount represents one uploaded Google-owned RSA service-account document.
 	// serviceAccount 表示一个上传的 Google 所有 RSA 服务账号文档。
-	serviceAccount := providerconfig.AuthMethodDefinition{ID: "service_account", Type: providerconfig.AuthMethodServiceAccount, MultipleCredentials: true}
+	serviceAccount := providerconfig.AuthMethodDefinition{ID: "service_account", Type: providerconfig.AuthMethodServiceAccount, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	// codexOAuth and codexDeviceFlow derive a commercial plan from the protected provider identity token.
+	// codexOAuth 与 codexDeviceFlow 从受保护的供应商身份 Token 派生商业套餐。
+	codexOAuth := oauth
+	codexOAuth.PlanAcquisition = providerconfig.PlanAcquisitionProviderDetected
+	codexDeviceFlow := deviceFlow
+	codexDeviceFlow.PlanAcquisition = providerconfig.PlanAcquisitionProviderDetected
+	// antigravityOAuth derives its provider tier from loadCodeAssist.
+	// antigravityOAuth 从 loadCodeAssist 派生供应商套餐层级。
+	antigravityOAuth := oauth
+	antigravityOAuth.PlanAcquisition = providerconfig.PlanAcquisitionProviderDetected
 	// unavailable records capabilities that CLIProxyAPI does not expose as provider catalog readers.
 	// unavailable 记录 CLIProxyAPI 未作为供应商目录读取器暴露的能力。
 	unavailable := providerconfig.ProviderFeatureSet{ModelDiscovery: providerconfig.SupportUnsupported, PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportUnsupported}
@@ -397,6 +407,15 @@ func cliProxyProviderDefinitions() []providerconfig.ProviderDefinition {
 	codexFeatures := unavailable
 	codexFeatures.PlanReader = providerconfig.SupportSupported
 	codexFeatures.EntitlementReader = providerconfig.SupportSupported
+	codexFeatures.AllowanceReader = providerconfig.SupportSupported
+	// claudeAccountFeatures expose the proven Claude OAuth usage endpoint.
+	// claudeAccountFeatures 暴露已验证的 Claude OAuth 用量入口。
+	claudeAccountFeatures := unavailable
+	claudeAccountFeatures.AllowanceReader = providerconfig.SupportSupported
+	// xaiAccountFeatures expose the proven Grok CLI billing endpoint.
+	// xaiAccountFeatures 暴露已验证的 Grok CLI 计费入口。
+	xaiAccountFeatures := unavailable
+	xaiAccountFeatures.AllowanceReader = providerconfig.SupportSupported
 	// antigravityFeatures reflect loadCodeAssist tier and GOOGLE_ONE_AI credit data.
 	// antigravityFeatures 反映 loadCodeAssist 返回的套餐层级与 GOOGLE_ONE_AI 积分数据。
 	antigravityFeatures := unavailable
@@ -405,15 +424,15 @@ func cliProxyProviderDefinitions() []providerconfig.ProviderDefinition {
 	return []providerconfig.ProviderDefinition{
 		providerDefinition(OpenAIAPIDefinitionID, "OpenAI API", OpenAIGroupID, "API", "Public OpenAI API using the Responses protocol.", "providers.openai.apiDescription", "openai_api", 10, "openai", protocolresponses.ProfileID, "openai_responses", "https://api.openai.com", true, []providerconfig.AuthMethodDefinition{apiKey}, unavailable),
 		providerDefinition(OpenAICodexAPIKeyDefinitionID, "OpenAI Codex API Key", OpenAIGroupID, "Codex API Key", "Codex Responses service configured with a standalone bearer API key.", "providers.openai.codexAPIKeyDescription", "openai_codex_api_key", 20, "codex", protocolcodex.ProfileID, "openai_codex_api_key", "https://chatgpt.com/backend-api/codex", true, []providerconfig.AuthMethodDefinition{apiKey}, unavailable),
-		providerDefinition(OpenAICodexDefinitionID, "OpenAI Codex Account", OpenAIGroupID, "Codex Account", "ChatGPT account-scoped Codex service.", "providers.openai.codexDescription", "openai_codex_account", 30, "codex", protocolcodex.ProfileID, "openai_codex", "https://chatgpt.com/backend-api/codex", true, []providerconfig.AuthMethodDefinition{oauth, deviceFlow}, codexFeatures),
+		providerDefinition(OpenAICodexDefinitionID, "OpenAI Codex Account", OpenAIGroupID, "Codex Account", "ChatGPT account-scoped Codex service.", "providers.openai.codexDescription", "openai_codex_account", 30, "codex", protocolcodex.ProfileID, "openai_codex", "https://chatgpt.com/backend-api/codex", true, []providerconfig.AuthMethodDefinition{codexOAuth, codexDeviceFlow}, codexFeatures),
 		providerDefinition(AnthropicAPIDefinitionID, "Anthropic API", AnthropicGroupID, "API", "Public Anthropic API using Messages.", "providers.anthropic.apiDescription", "anthropic_api", 10, "anthropic", protocolmessages.ProfileID, "anthropic_messages", "https://api.anthropic.com", true, []providerconfig.AuthMethodDefinition{apiKey}, unavailable),
-		providerDefinition(AnthropicClaudeCodeDefinitionID, "Claude Code", AnthropicGroupID, "Claude Code", "Anthropic account-scoped Claude Code subscription.", "providers.anthropic.claudeCodeDescription", "anthropic_claude_code", 20, "claude", protocolmessages.ProfileID, "claude_code_messages", "https://api.anthropic.com", true, []providerconfig.AuthMethodDefinition{oauth}, unavailable),
+		providerDefinition(AnthropicClaudeCodeDefinitionID, "Claude Code", AnthropicGroupID, "Claude Code", "Anthropic account-scoped Claude Code subscription.", "providers.anthropic.claudeCodeDescription", "anthropic_claude_code", 20, "claude", protocolmessages.ProfileID, "claude_code_messages", "https://api.anthropic.com", true, []providerconfig.AuthMethodDefinition{oauth}, claudeAccountFeatures),
 		providerDefinition(GoogleAIStudioDefinitionID, "Google AI Studio", GoogleGroupID, "AI Studio", "Google AI Studio GenerateContent API.", "providers.google.aiStudioDescription", "google_ai_studio", 10, "aistudio", protocolaistudio.ProfileID, "google_ai_studio", "https://generativelanguage.googleapis.com", true, []providerconfig.AuthMethodDefinition{apiKey}, unavailable),
 		providerDefinition(GoogleInteractionsDefinitionID, "Google Interactions", GoogleGroupID, "Interactions", "Google native Interactions API.", "providers.google.interactionsDescription", "google_interactions", 20, "interactions", protocolinteractions.ProfileID, "google_interactions", "https://generativelanguage.googleapis.com", true, []providerconfig.AuthMethodDefinition{apiKey}, unavailable),
 		vertexProviderDefinition(serviceAccount, unavailable),
-		providerDefinition(GoogleAntigravityDefinitionID, "Google Antigravity", GoogleGroupID, "Antigravity", "Google account-scoped Antigravity agent backend.", "providers.google.antigravityDescription", "google_antigravity", 40, "antigravity", protocolantigravity.ProfileID, "google_antigravity", "https://cloudcode-pa.googleapis.com", true, []providerconfig.AuthMethodDefinition{oauth}, antigravityFeatures),
+		providerDefinition(GoogleAntigravityDefinitionID, "Google Antigravity", GoogleGroupID, "Antigravity", "Google account-scoped Antigravity agent backend.", "providers.google.antigravityDescription", "google_antigravity", 40, "antigravity", protocolantigravity.ProfileID, "google_antigravity", "https://cloudcode-pa.googleapis.com", true, []providerconfig.AuthMethodDefinition{antigravityOAuth}, antigravityFeatures),
 		providerDefinition(XAIAPIDefinitionID, "xAI API", XAIGroupID, "API", "Public xAI API using xAI Responses.", "providers.xai.apiDescription", "xai_api", 10, "xai", protocolxai.ProfileID, "xai_responses", "https://api.x.ai/v1", true, []providerconfig.AuthMethodDefinition{apiKey}, unavailable),
-		providerDefinition(XAIOAuthDefinitionID, "xAI Account", XAIGroupID, "Account", "Grok CLI account authorization using xAI Responses.", "providers.xai.oauthDescription", "xai_account", 20, "xai", protocolxai.ProfileID, "xai_oauth_responses", "https://cli-chat-proxy.grok.com/v1", true, []providerconfig.AuthMethodDefinition{deviceFlow}, unavailable),
+		providerDefinition(XAIOAuthDefinitionID, "xAI Account", XAIGroupID, "Account", "Grok CLI account authorization using xAI Responses.", "providers.xai.oauthDescription", "xai_account", 20, "xai", protocolxai.ProfileID, "xai_oauth_responses", "https://cli-chat-proxy.grok.com/v1", true, []providerconfig.AuthMethodDefinition{deviceFlow}, xaiAccountFeatures),
 	}
 }
 

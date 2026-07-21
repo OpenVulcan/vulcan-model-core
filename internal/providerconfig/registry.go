@@ -271,6 +271,11 @@ func cloneProtocolProfile(profile ProtocolProfile) ProtocolProfile {
 func cloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
 	definition.AuthMethodIDs = append([]string(nil), definition.AuthMethodIDs...)
 	definition.AuthMethods = append([]AuthMethodDefinition(nil), definition.AuthMethods...)
+	definition.PlanOptions = append([]PlanOptionDefinition(nil), definition.PlanOptions...)
+	for index := range definition.PlanOptions {
+		definition.PlanOptions[index].AuthMethodIDs = append([]string(nil), definition.PlanOptions[index].AuthMethodIDs...)
+		definition.PlanOptions[index].ProviderPlanCodes = append([]string(nil), definition.PlanOptions[index].ProviderPlanCodes...)
+	}
 	definition.EndpointPresets = append([]EndpointPreset(nil), definition.EndpointPresets...)
 	for index := range definition.EndpointPresets {
 		definition.EndpointPresets[index].Parameters = append([]EndpointParameterDefinition(nil), definition.EndpointPresets[index].Parameters...)

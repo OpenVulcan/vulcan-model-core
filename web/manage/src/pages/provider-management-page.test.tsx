@@ -371,6 +371,45 @@ const vertexGroupResponse = {
   ],
 };
 
+// authorizedVertexInstanceResponse exposes one configured Vertex instance for credential replacement tests.
+// authorizedVertexInstanceResponse 暴露一个已配置 Vertex 实例用于凭据替换测试。
+const authorizedVertexInstanceResponse = {
+  provider_instances: [
+    {
+      id: "pvi_vertex",
+      definition_id: "system_google_vertex",
+      handle: "google_vertex",
+      display_name: "vertex@vertex-project.iam.gserviceaccount.com",
+      status: "ready",
+      disabled_model_ids: [],
+      endpoint_count: 1,
+      credential_count: 1,
+      binding_count: 1,
+      revision: 1,
+    },
+  ],
+};
+
+// authorizedVertexCredentialsResponse exposes the service-account metadata without protected bytes.
+// authorizedVertexCredentialsResponse 暴露不含受保护字节的服务账号元数据。
+const authorizedVertexCredentialsResponse = {
+  credentials: [
+    {
+      id: "cred_vertex",
+      provider_instance_id: "pvi_vertex",
+      auth_method_id: "service_account",
+      label: "vertex@vertex-project.iam.gserviceaccount.com",
+      principal_key: "vertex@vertex-project.iam.gserviceaccount.com",
+      status: "active",
+      expires_at: null,
+      cooling_until: null,
+      priority: 0,
+      revision: 1,
+      scope_refs: [{ kind: "project", id: "vertex-project" }],
+    },
+  ],
+};
+
 // emptyProviderInstancesResponse represents a management account with no completed authorization.
 // emptyProviderInstancesResponse 表示尚无已完成授权的管理账户。
 const emptyProviderInstancesResponse = { provider_instances: [] };
@@ -588,6 +627,66 @@ describe("ProviderManagementPage", () => {
         headers: { Authorization: "Bearer management-token" },
       }),
     );
+  });
+
+  // This test verifies an API key is replaced through the credential-specific route without creating another provider.
+  // 此测试验证 API Key 通过凭据专属入口替换且不会创建另一个供应商。
+  it("replaces one existing API-key credential", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/vulcan/manage/provider-groups")
+            return Promise.resolve(jsonResponse(kimiGroupResponse));
+          if (url === "/vulcan/manage/provider-instances")
+            return Promise.resolve(jsonResponse(authorizedCNInstanceResponse));
+          if (
+            url === "/vulcan/manage/provider-instances/pvi_kimi_cn/credentials"
+          )
+            return Promise.resolve(
+              jsonResponse(authorizedCNCredentialsResponse),
+            );
+          if (
+            url ===
+              "/vulcan/manage/provider-instances/pvi_kimi_cn/credentials/cred_kimi_cn/secret" &&
+            init?.method === "PUT"
+          )
+            return Promise.resolve(jsonResponse({ id: "cred_kimi_cn" }));
+          return Promise.resolve(new Response(null, { status: 404 }));
+        },
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    await screen.findByText("API key");
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace credential" }),
+    );
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("API key"), {
+      target: { value: "replacement-kimi-key" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace credential" }),
+    );
+    await waitFor(() => {
+      const replacementCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/cred_kimi_cn/secret") &&
+          init?.method === "PUT",
+      );
+      expect(replacementCall?.[1]?.body).toBe(
+        JSON.stringify({ secret: "replacement-kimi-key" }),
+      );
+    });
+    expect(
+      fetchMock.mock.calls.some(
+        ([url, init]) =>
+          String(url) === "/vulcan/manage/provider-instances/onboard" &&
+          init?.method === "POST",
+      ),
+    ).toBe(false);
   });
 
   // This test verifies Alibaba uses concise plan-family badges and keeps all exact variants inside the existing dialog workflow.
@@ -1234,6 +1333,83 @@ describe("ProviderManagementPage", () => {
     );
   });
 
+  // This test verifies Vertex service-account replacement targets the existing credential instead of creating another instance.
+  // 此测试验证 Vertex 服务账号替换指向既有凭据而不是创建另一个实例。
+  it("replaces one existing Vertex service-account credential", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/vulcan/manage/provider-groups")
+            return Promise.resolve(jsonResponse(vertexGroupResponse));
+          if (url === "/vulcan/manage/provider-instances")
+            return Promise.resolve(jsonResponse(authorizedVertexInstanceResponse));
+          if (
+            url === "/vulcan/manage/provider-instances/pvi_vertex/credentials"
+          )
+            return Promise.resolve(
+              jsonResponse(authorizedVertexCredentialsResponse),
+            );
+          if (
+            url === "/vulcan/manage/vertex/service-accounts/onboard" &&
+            init?.method === "POST"
+          )
+            return Promise.resolve(
+              jsonResponse({
+                provider_instance_id: "pvi_vertex",
+                credential_id: "cred_vertex",
+                endpoint_ids: [],
+                binding_ids: [],
+              }),
+            );
+          return Promise.resolve(new Response(null, { status: 404 }));
+        },
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    expect(
+      (
+        await screen.findAllByText(
+          "vertex@vertex-project.iam.gserviceaccount.com",
+        )
+      ).length,
+    ).toBeGreaterThan(1);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace credential" }),
+    );
+    expect(screen.queryByLabelText("Vertex location")).not.toBeInTheDocument();
+    fireEvent.change(screen.getByLabelText("Service account JSON"), {
+      target: {
+        value: JSON.stringify({
+          type: "service_account",
+          project_id: "vertex-project",
+          private_key: "replacement-private-key",
+          client_email: "vertex@vertex-project.iam.gserviceaccount.com",
+          token_uri: "https://oauth2.googleapis.com/token",
+        }),
+      },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Replace credential" }),
+    );
+    await waitFor(() => {
+      const replacementCall = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url) ===
+            "/vulcan/manage/vertex/service-accounts/onboard" &&
+          init?.method === "POST",
+      );
+      expect(replacementCall?.[1]?.body).toContain(
+        '"provider_instance_id":"pvi_vertex"',
+      );
+      expect(replacementCall?.[1]?.body).toContain(
+        '"credential_id":"cred_vertex"',
+      );
+    });
+  });
+
   // This test verifies completed device authorization refreshes the list without exposing provider tokens to the browser.
   // 此测试验证完成的设备授权会刷新列表，且不会向浏览器暴露供应商令牌。
   it("refreshes the authorized list after server-confidential device authorization", async () => {
@@ -1709,7 +1885,7 @@ describe("ProviderManagementPage", () => {
                     display_name: "Gemini 3 Pro",
                     entitlement_mode: "all_bound_credentials",
                     enabled: true,
-                    provider_authorized: true,
+                    authorization_status: "authorized",
                     offerings: [],
                   },
                 ],
@@ -1723,6 +1899,8 @@ describe("ProviderManagementPage", () => {
                 ],
                 allowances: [
                   {
+                    credential_id: "cred_antigravity",
+                    credential_label: "Google Account",
                     kind: "balance",
                     scope: "credential",
                     metric: "GOOGLE_ONE_AI",
@@ -1771,16 +1949,15 @@ describe("ProviderManagementPage", () => {
     expect(await screen.findByText("Google AI Pro")).toBeInTheDocument();
     expect(screen.getByText("Gemini 3 Pro")).toBeInTheDocument();
     expect(screen.getByText("gemini-3-pro-preview")).toBeInTheDocument();
-    expect(screen.getByText("GOOGLE_ONE_AI")).toBeInTheDocument();
-    expect(
-      screen.getByText(/Remaining: 750 provider_credits/),
-    ).toBeInTheDocument();
-    expect(screen.getByText(/Remaining ratio: 50%/)).toBeInTheDocument();
+    expect(screen.getByText("Google One AI credits")).toBeInTheDocument();
+    expect(screen.getAllByText("Google Account").length).toBeGreaterThan(1);
+    expect(screen.getByText("750 provider_credits")).toBeInTheDocument();
+    expect(screen.getByText(/Remaining: 50%/)).toBeInTheDocument();
     expect(
       screen.getByText(/Window: calendar · month · Asia\/Shanghai/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/Resets at: 2026-08-01T00:00:00\+08:00/),
+      screen.getByText(/Resets at:/),
     ).toBeInTheDocument();
   });
 
@@ -1829,6 +2006,133 @@ describe("ProviderManagementPage", () => {
     expect(
       screen.queryByText(/Unable to refresh this credential/),
     ).not.toBeInTheDocument();
+  });
+
+  // This test verifies reauthorization reuses the exact OAuth workflow and targets the existing credential.
+  // 此测试验证重新授权复用精确 OAuth 流程并指向既有凭据。
+  it("reauthorizes one existing provider credential", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/vulcan/manage/provider-groups")
+            return Promise.resolve(jsonResponse(antigravityGroupResponse));
+          if (url === "/vulcan/manage/provider-instances")
+            return Promise.resolve(jsonResponse(authorizedAntigravityResponse));
+          if (
+            url ===
+            "/vulcan/manage/provider-instances/pvi_antigravity/credentials"
+          )
+            return Promise.resolve(
+              jsonResponse(authorizedAntigravityCredentialsResponse),
+            );
+          if (
+            url === "/vulcan/manage/antigravity/oauth-flows" &&
+            init?.method === "POST"
+          )
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  id: "reauthorize-flow",
+                  authorization_url: "https://accounts.google.com/authorize",
+                  redirect_uri: "http://localhost:51121/oauth-callback",
+                  expires_at: "2026-07-21T02:00:00Z",
+                },
+                201,
+              ),
+            );
+          if (
+            url ===
+              "/vulcan/manage/antigravity/oauth-flows/reauthorize-flow/onboard" &&
+            init?.method === "POST"
+          )
+            return Promise.resolve(
+              jsonResponse({
+                provider_instance_id: "pvi_antigravity",
+                credential_id: "cred_antigravity",
+                endpoint_ids: [],
+                binding_ids: [],
+              }),
+            );
+          return Promise.resolve(new Response(null, { status: 404 }));
+        },
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    expect(await screen.findByText("Google Account")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Reauthorize" }));
+    fireEvent.click(screen.getByRole("button", { name: "Start authorization" }));
+    await screen.findByRole("link", { name: "Open authorization page" });
+    fireEvent.change(screen.getByLabelText("Callback URL"), {
+      target: { value: "http://localhost:51121/oauth-callback?code=test" },
+    });
+    fireEvent.click(
+      screen.getByRole("button", { name: "Complete authorization" }),
+    );
+    await waitFor(() => {
+      const call = fetchMock.mock.calls.find(
+        ([url, init]) =>
+          String(url).endsWith("/reauthorize-flow/onboard") &&
+          init?.method === "POST",
+      );
+      expect(call).toBeDefined();
+      expect(call?.[1]?.body).toContain(
+        '"provider_instance_id":"pvi_antigravity"',
+      );
+      expect(call?.[1]?.body).toContain(
+        '"credential_id":"cred_antigravity"',
+      );
+    });
+  });
+
+  // This test verifies credential deletion is gated by confirmation and uses the exact local target.
+  // 此测试验证凭据删除受确认保护并使用精确本地目标。
+  it("confirms and deletes one provider credential", async () => {
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url === "/vulcan/manage/provider-groups")
+            return Promise.resolve(jsonResponse(antigravityGroupResponse));
+          if (url === "/vulcan/manage/provider-instances")
+            return Promise.resolve(jsonResponse(authorizedAntigravityResponse));
+          if (
+            url ===
+            "/vulcan/manage/provider-instances/pvi_antigravity/credentials"
+          )
+            return Promise.resolve(
+              jsonResponse(authorizedAntigravityCredentialsResponse),
+            );
+          if (
+            url ===
+              "/vulcan/manage/provider-instances/pvi_antigravity/credentials/cred_antigravity" &&
+            init?.method === "DELETE"
+          )
+            return Promise.resolve(new Response(null, { status: 204 }));
+          return Promise.resolve(new Response(null, { status: 404 }));
+        },
+      );
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    expect(await screen.findByText("Google Account")).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Delete credential" }),
+    );
+    expect(await screen.findByText("Delete this credential?")).toBeInTheDocument();
+    const deleteButtons = screen.getAllByRole("button", {
+      name: "Delete credential",
+    });
+    fireEvent.click(deleteButtons[deleteButtons.length - 1]);
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/vulcan/manage/provider-instances/pvi_antigravity/credentials/cred_antigravity",
+        expect.objectContaining({ method: "DELETE" }),
+      ),
+    );
   });
 
   // This test verifies every credential refresh failure category produces exact retry-safe guidance.

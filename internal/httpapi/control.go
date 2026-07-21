@@ -22,6 +22,7 @@ import (
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routingstate"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 )
 
@@ -122,6 +123,12 @@ type ManagementCommands interface {
 	// RotateCredentialSecret replaces one credential's protected secret bytes.
 	// RotateCredentialSecret 替换一个凭据的受保护 Secret 字节。
 	RotateCredentialSecret(context.Context, management.RotateCredentialSecretInput) (providerconfig.Credential, error)
+	// ReauthorizeCredential replaces one provider-owned token after exact account validation.
+	// ReauthorizeCredential 在精确账号校验后替换一个供应商拥有的 Token。
+	ReauthorizeCredential(context.Context, management.ReauthorizeCredentialInput) (providerconfig.Credential, error)
+	// DeleteCredential removes one credential graph and reports whether its instance was deleted.
+	// DeleteCredential 删除一个凭据图并报告其实例是否已删除。
+	DeleteCredential(context.Context, string, string) (providerconfig.CredentialDeletion, error)
 	// SetCredentialStatus changes one credential lifecycle state.
 	// SetCredentialStatus 更改一个凭据生命周期状态。
 	SetCredentialStatus(context.Context, management.SetCredentialStatusInput) (providerconfig.Credential, error)
@@ -302,12 +309,40 @@ type ProviderMetadataRefresh interface {
 	Refresh(context.Context, string, time.Time) (catalog.Snapshot, error)
 }
 
+// ProviderMetadataRefreshScheduler accepts deduplicated immediate refresh triggers.
+// ProviderMetadataRefreshScheduler 接收去重后的即时刷新触发。
+type ProviderMetadataRefreshScheduler interface {
+	// Trigger queues one provider instance unless it is already pending.
+	// Trigger 将一个供应商实例入队，除非它已经待处理。
+	Trigger(string) bool
+}
+
 // ProtocolProfileQuery exposes immutable process-owned protocol metadata to the management surface.
 // ProtocolProfileQuery 向管理接口面暴露不可变的进程拥有协议元数据。
 type ProtocolProfileQuery interface {
 	// List returns an isolated stable snapshot of registered protocol profiles.
 	// List 返回已注册协议 Profile 的隔离稳定快照。
 	List() []providerconfig.ProtocolProfile
+}
+
+// RoutingManagement exposes persisted scheduling and manual plan mutations.
+// RoutingManagement 暴露持久化调度与人工套餐变更。
+type RoutingManagement interface {
+	// GetSettings returns Router-wide scheduling settings.
+	// GetSettings 返回 Router 全局调度设置。
+	GetSettings(context.Context) (routingstate.Settings, error)
+	// SetDefaultRoutingStrategy changes the inherited scheduling strategy.
+	// SetDefaultRoutingStrategy 修改继承的调度策略。
+	SetDefaultRoutingStrategy(context.Context, providerconfig.RoutingStrategy) (routingstate.Settings, error)
+	// SetInstanceRoutingStrategy sets or clears one provider override.
+	// SetInstanceRoutingStrategy 设置或清除一个供应商覆盖策略。
+	SetInstanceRoutingStrategy(context.Context, string, providerconfig.RoutingStrategy) (providerconfig.ProviderInstance, error)
+	// SetCredentialPriority updates account ordering independently from endpoints.
+	// SetCredentialPriority 独立于入口更新账号顺序。
+	SetCredentialPriority(context.Context, string, string, int) (providerconfig.Credential, error)
+	// SetCredentialPlan replaces one manual plan and exact entitlement matrix.
+	// SetCredentialPlan 替换一个人工套餐与精确权益矩阵。
+	SetCredentialPlan(context.Context, string, string, string) (providerconfig.Credential, error)
 }
 
 // ControlPlane groups every dependency required by authenticated management and call-plane routes.
@@ -328,6 +363,9 @@ type ControlPlane struct {
 	// MetadataRefresh refreshes provider-native account metadata when a trusted reader exists.
 	// MetadataRefresh 在存在受信任读取器时刷新供应商原生账号元数据。
 	MetadataRefresh ProviderMetadataRefresh
+	// Routing optionally exposes scheduling and manual-plan settings.
+	// Routing 可选暴露调度与人工套餐设置。
+	Routing RoutingManagement
 	// Protocols exposes custom-provider-selectable protocol metadata.
 	// Protocols 暴露可供自定义供应商选择的协议元数据。
 	Protocols ProtocolProfileQuery
@@ -403,7 +441,7 @@ func (c ControlPlane) validate() error {
 	}
 	// optionalDependencies may be absent, but a typed nil would register or dispatch an unusable service.
 	// optionalDependencies 可以缺省，但带类型的 nil 会注册或分派一个不可用服务。
-	optionalDependencies := []any{c.MetadataRefresh, c.KimiDeviceFlows, c.KimiTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
+	optionalDependencies := []any{c.MetadataRefresh, c.Routing, c.KimiDeviceFlows, c.KimiTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
 	for _, dependency := range optionalDependencies {
 		if dependency != nil && isNilHTTPDependency(dependency) {
 			return errors.New("control-plane optional dependency must not contain a typed nil reference")
@@ -524,12 +562,90 @@ type apiKeyListResponse struct {
 	APIKeys []runtimeconfig.APIKey `json:"api_keys"`
 }
 
-// callModelListResponse returns provider-scoped models usable by the authenticated call plane.
-// callModelListResponse 返回认证调用面可使用的供应商作用域模型。
-type callModelListResponse struct {
+// callInformationKind identifies one closed read-only Vulcan information projection.
+// callInformationKind 标识一种封闭的只读 Vulcan 信息投影。
+type callInformationKind string
+
+const (
+	// callInformationInstances selects configured provider instances.
+	// callInformationInstances 选择已配置供应商实例。
+	callInformationInstances callInformationKind = "instances"
+	// callInformationModels selects executable provider-scoped models.
+	// callInformationModels 选择可执行的供应商作用域模型。
+	callInformationModels callInformationKind = "models"
+	// callInformationAccounts selects context profiles and their authorized accounts for one exact model.
+	// callInformationAccounts 选择一个精确模型的上下文规格及其已授权账号。
+	callInformationAccounts callInformationKind = "accounts"
+	// callInformationServices selects executable provider-scoped special services.
+	// callInformationServices 选择可执行的供应商作用域特殊服务。
+	callInformationServices callInformationKind = "services"
+	// callInformationUsage selects current usage for one exact model-account pair.
+	// callInformationUsage 选择一个精确模型账号组合的当前用量。
+	callInformationUsage callInformationKind = "usage"
+)
+
+// callInformationRequest selects one information shape and its exact provider-owned identifiers.
+// callInformationRequest 选择一种信息形态及其精确供应商所属标识。
+type callInformationRequest struct {
+	// Get selects exactly one registered information shape.
+	// Get 精确选择一种已注册信息形态。
+	Get callInformationKind `json:"get"`
+	// ProviderInstanceID optionally constrains models or services and is required by account-scoped projections.
+	// ProviderInstanceID 可选约束模型或服务，并且是账号作用域投影的必填项。
+	ProviderInstanceID string `json:"provider_instance_id,omitempty"`
+	// ProviderModelID optionally selects one exact model and is required by accounts and usage.
+	// ProviderModelID 可选选择一个精确模型，并且是 accounts 与 usage 的必填项。
+	ProviderModelID string `json:"provider_model_id,omitempty"`
+	// CredentialID selects one exact local account only for usage.
+	// CredentialID 仅为 usage 选择一个精确本地账号。
+	CredentialID string `json:"credential_id,omitempty"`
+	// ProviderServiceID optionally selects one exact special service.
+	// ProviderServiceID 可选选择一个精确特殊服务。
+	ProviderServiceID string `json:"provider_service_id,omitempty"`
+}
+
+// callInformationInstancesResponse returns the instances branch of the information union.
+// callInformationInstancesResponse 返回信息联合中的实例分支。
+type callInformationInstancesResponse struct {
+	// Get echoes the selected projection.
+	// Get 回显已选投影。
+	Get callInformationKind `json:"get"`
+	// Instances contains safe configured provider instances.
+	// Instances 包含安全的已配置供应商实例。
+	Instances []management.ProviderInstanceView `json:"instances"`
+}
+
+// callInformationModelsResponse returns the models branch of the information union.
+// callInformationModelsResponse 返回信息联合中的模型分支。
+type callInformationModelsResponse struct {
+	// Get echoes the selected projection.
+	// Get 回显已选投影。
+	Get callInformationKind `json:"get"`
 	// Models contains non-fused models from individually selected provider instances.
 	// Models 包含来自各自选定供应商实例且未融合的模型。
 	Models []callModelView `json:"models"`
+}
+
+// callInformationAccountsResponse returns model contexts grouped with their concrete accounts.
+// callInformationAccountsResponse 返回与具体账号分组的模型上下文。
+type callInformationAccountsResponse struct {
+	// Get echoes the selected projection.
+	// Get 回显已选投影。
+	Get callInformationKind `json:"get"`
+	// Accounts contains context profiles and the authorized account set under each profile.
+	// Accounts 包含上下文规格以及每个规格下的已授权账号集合。
+	Accounts management.ModelContextsView `json:"accounts"`
+}
+
+// callInformationUsageResponse returns the usage branch of the information union.
+// callInformationUsageResponse 返回信息联合中的用量分支。
+type callInformationUsageResponse struct {
+	// Get echoes the selected projection.
+	// Get 回显已选投影。
+	Get callInformationKind `json:"get"`
+	// Usage contains current usage for the exact selected model and account.
+	// Usage 包含精确选定模型与账号的当前用量。
+	Usage management.ModelCredentialUsageView `json:"usage"`
 }
 
 // callModelView identifies one selected provider instance and its local model capability view.
@@ -549,9 +665,12 @@ type callModelView struct {
 	Model management.ModelView `json:"model"`
 }
 
-// callServiceListResponse returns provider-scoped special services usable by the call plane.
-// callServiceListResponse 返回调用面可使用的供应商作用域特殊服务。
-type callServiceListResponse struct {
+// callInformationServicesResponse returns the services branch of the information union.
+// callInformationServicesResponse 返回信息联合中的服务分支。
+type callInformationServicesResponse struct {
+	// Get echoes the selected projection.
+	// Get 回显已选投影。
+	Get callInformationKind `json:"get"`
 	// Services contains non-fused exact service offerings.
 	// Services 包含未融合精确服务产品。
 	Services []callServiceView `json:"services"`
@@ -771,6 +890,12 @@ type onboardSystemProviderRequest struct {
 	// Secret contains transient credential material and is never returned.
 	// Secret 包含临时凭据材料且绝不返回。
 	Secret string `json:"secret"`
+	// PlanOptionID selects one code-owned plan when the authentication method requires manual declaration.
+	// PlanOptionID 在认证方式要求人工声明时选择一个代码拥有套餐。
+	PlanOptionID string `json:"plan_option_id,omitempty"`
+	// CredentialPriority orders this account within its provider instance.
+	// CredentialPriority 在供应商实例内排列该账号。
+	CredentialPriority int `json:"credential_priority,omitempty"`
 	// EndpointParameters contains only values declared by the selected system endpoint preset.
 	// EndpointParameters 仅包含所选系统端点预设声明的值。
 	EndpointParameters []endpointParameterValueRequest `json:"endpoint_parameters,omitempty"`
@@ -779,6 +904,7 @@ type onboardSystemProviderRequest struct {
 // onboardVertexServiceAccountRequest decodes one server-validated Vertex service-account upload.
 // onboardVertexServiceAccountRequest 解码一次由服务端校验的 Vertex 服务账号上传。
 type onboardVertexServiceAccountRequest struct {
+	credentialReauthorizationTarget
 	// DefinitionID must select the code-owned Google Vertex AI product.
 	// DefinitionID 必须选择代码拥有的 Google Vertex AI 产品。
 	DefinitionID string `json:"provider_definition_id"`
@@ -793,6 +919,7 @@ type onboardVertexServiceAccountRequest struct {
 // deviceFlowOnboardRequest contains the exact product and an optional sole name for providers without account identity.
 // deviceFlowOnboardRequest 包含精确产品，以及不提供账号身份的供应商所需的可选唯一名称。
 type deviceFlowOnboardRequest struct {
+	credentialReauthorizationTarget
 	// DefinitionID must select the exact device-flow system product.
 	// DefinitionID 必须选择精确的设备授权系统产品。
 	DefinitionID string `json:"provider_definition_id"`
@@ -801,9 +928,90 @@ type deviceFlowOnboardRequest struct {
 	Name string `json:"name"`
 }
 
+// credentialReauthorizationTarget optionally selects an existing credential instead of creating a provider instance.
+// credentialReauthorizationTarget 可选选择一个既有凭据而不是创建供应商实例。
+type credentialReauthorizationTarget struct {
+	// ProviderInstanceID owns the credential being reauthorized.
+	// ProviderInstanceID 拥有正在重新授权的凭据。
+	ProviderInstanceID string `json:"provider_instance_id,omitempty"`
+	// CredentialID identifies the exact credential being reauthorized.
+	// CredentialID 标识正在重新授权的精确凭据。
+	CredentialID string `json:"credential_id,omitempty"`
+}
+
+// routingStrategyRequest decodes one closed global or instance scheduling strategy.
+// routingStrategyRequest 解码一个封闭的全局或实例调度策略。
+type routingStrategyRequest struct {
+	// Strategy is round_robin, fill_first, or empty only for instance inheritance.
+	// Strategy 是 round_robin、fill_first，或仅在实例继承时为空。
+	Strategy providerconfig.RoutingStrategy `json:"strategy"`
+}
+
+// credentialPriorityRequest decodes one nonnegative account ordering value.
+// credentialPriorityRequest 解码一个非负账号排序值。
+type credentialPriorityRequest struct {
+	// Priority orders accounts before endpoint paths.
+	// Priority 在入口路径之前排列账号。
+	Priority int `json:"priority"`
+}
+
+// credentialPlanRequest decodes one immutable code-owned plan option identifier.
+// credentialPlanRequest 解码一个不可变的代码拥有套餐选项标识。
+type credentialPlanRequest struct {
+	// PlanOptionID selects one exact system plan.
+	// PlanOptionID 选择一个精确系统套餐。
+	PlanOptionID string `json:"plan_option_id"`
+}
+
+// routingSettingsResponse exposes Router-wide scheduling settings.
+// routingSettingsResponse 暴露 Router 全局调度设置。
+type routingSettingsResponse struct {
+	// Strategy is the inherited credential selection strategy.
+	// Strategy 是继承的凭据选择策略。
+	Strategy providerconfig.RoutingStrategy `json:"strategy"`
+	// Revision is the persisted settings revision.
+	// Revision 是持久化设置修订号。
+	Revision uint64 `json:"revision"`
+	// UpdatedAt is the latest mutation time.
+	// UpdatedAt 是最新变更时间。
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// credentialRoutingResponse contains only safe updated routing metadata.
+// credentialRoutingResponse 仅包含安全的已更新路由元数据。
+type credentialRoutingResponse struct {
+	// CredentialID identifies the updated credential.
+	// CredentialID 标识已更新凭据。
+	CredentialID string `json:"credential_id"`
+	// Priority is the updated account ordering value.
+	// Priority 是更新后的账号排序值。
+	Priority int `json:"priority"`
+	// DeclaredPlan contains safe manual plan metadata when changed.
+	// DeclaredPlan 在变更后包含安全的人工套餐元数据。
+	DeclaredPlan *providerconfig.DeclaredPlanSelection `json:"declared_plan,omitempty"`
+	// Revision is the updated credential revision.
+	// Revision 是更新后的凭据修订号。
+	Revision uint64 `json:"revision"`
+}
+
+// instanceRoutingResponse contains one safe updated scheduling override.
+// instanceRoutingResponse 包含一个安全的已更新调度覆盖值。
+type instanceRoutingResponse struct {
+	// ProviderInstanceID identifies the updated instance.
+	// ProviderInstanceID 标识已更新实例。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// Strategy is empty when the instance inherits the Router default.
+	// Strategy 在实例继承 Router 默认值时为空。
+	Strategy providerconfig.RoutingStrategy `json:"strategy"`
+	// Revision is the updated instance revision.
+	// Revision 是更新后的实例修订号。
+	Revision uint64 `json:"revision"`
+}
+
 // antigravityOAuthOnboardRequest contains the pasted callback while Google supplies the account display identity.
 // antigravityOAuthOnboardRequest 包含粘贴回调，账号显示身份由 Google 提供。
 type antigravityOAuthOnboardRequest struct {
+	credentialReauthorizationTarget
 	// DefinitionID must select the code-owned Google Antigravity product.
 	// DefinitionID 必须选择代码拥有的 Google Antigravity 产品。
 	DefinitionID string `json:"provider_definition_id"`
@@ -815,6 +1023,7 @@ type antigravityOAuthOnboardRequest struct {
 // claudeOAuthOnboardRequest contains one pasted callback or code#state value while Claude supplies account identity.
 // claudeOAuthOnboardRequest 包含一个粘贴回调或 code#state 值，账号身份由 Claude 提供。
 type claudeOAuthOnboardRequest struct {
+	credentialReauthorizationTarget
 	// DefinitionID must select the code-owned Claude Code product.
 	// DefinitionID 必须选择代码拥有的 Claude Code 产品。
 	DefinitionID string `json:"provider_definition_id"`
@@ -826,6 +1035,7 @@ type claudeOAuthOnboardRequest struct {
 // codexOAuthOnboardRequest contains one pasted localhost callback while OpenAI supplies account identity.
 // codexOAuthOnboardRequest 包含一个粘贴的 localhost 回调，账号身份由 OpenAI 提供。
 type codexOAuthOnboardRequest struct {
+	credentialReauthorizationTarget
 	// DefinitionID must select the code-owned Codex Account product.
 	// DefinitionID 必须选择代码拥有的 Codex Account 产品。
 	DefinitionID string `json:"provider_definition_id"`
@@ -849,6 +1059,17 @@ type onboardSystemProviderResponse struct {
 	// BindingIDs identify the created closed access paths.
 	// BindingIDs 标识创建的闭合访问路径。
 	BindingIDs []string `json:"binding_ids"`
+}
+
+// credentialReplacementResponse returns stable empty collection fields for a credential-only replacement.
+// credentialReplacementResponse 为仅替换凭据的响应返回稳定的空集合字段。
+func credentialReplacementResponse(credential providerconfig.Credential) onboardSystemProviderResponse {
+	return onboardSystemProviderResponse{
+		ProviderInstanceID: credential.ProviderInstanceID,
+		CredentialID:       credential.ID,
+		EndpointIDs:        []string{},
+		BindingIDs:         []string{},
+	}
 }
 
 // updateInstanceRequest decodes editable provider-instance identity fields.
@@ -1105,7 +1326,7 @@ func decodeControlJSON[T any](writer http.ResponseWriter, request *http.Request)
 func writeControlError(writer http.ResponseWriter, err error) {
 	statusCode := http.StatusBadRequest
 	errorCode := "invalid_request"
-	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) || errors.Is(err, management.ErrProviderModelNotFound) || errors.Is(err, runtimeconfig.ErrAPIKeyNotFound) {
+	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) || errors.Is(err, management.ErrProviderModelNotFound) || errors.Is(err, resolve.ErrModelNotFound) || errors.Is(err, resolve.ErrProfileNotFound) || errors.Is(err, runtimeconfig.ErrAPIKeyNotFound) {
 		statusCode = http.StatusNotFound
 		errorCode = "not_found"
 	} else if errors.Is(err, providerkimi.ErrFlowNotFound) || errors.Is(err, providerxai.ErrFlowNotFound) || errors.Is(err, provideropenai.ErrCodexFlowNotFound) {
@@ -1321,7 +1542,7 @@ func (s *Server) handleOnboardSystemProvider(writer http.ResponseWriter, request
 	}
 	onboarding, errOnboard := s.control.Commands.OnboardSystemProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: body.AuthMethodID,
-		CredentialLabel: body.Name, Secret: []byte(body.Secret), EndpointParameters: endpointParameters,
+		CredentialLabel: body.Name, Secret: []byte(body.Secret), PlanOptionID: body.PlanOptionID, CredentialPriority: body.CredentialPriority, EndpointParameters: endpointParameters,
 	})
 	if errOnboard != nil {
 		writeControlError(writer, errOnboard)
@@ -1334,6 +1555,7 @@ func (s *Server) handleOnboardSystemProvider(writer http.ResponseWriter, request
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1343,6 +1565,27 @@ func (s *Server) handleOnboardVertexServiceAccount(writer http.ResponseWriter, r
 	body, errDecode := decodeControlJSON[onboardVertexServiceAccountRequest](writer, request)
 	if errDecode != nil {
 		writeControlError(writer, errDecode)
+		return
+	}
+	if body.ProviderInstanceID != "" || body.CredentialID != "" {
+		vertexCredential, errCredential := providergoogle.ParseVertexCredential(body.ServiceAccount, body.Location)
+		if errCredential != nil {
+			writeControlError(writer, errCredential)
+			return
+		}
+		protectedValue, errMarshal := providergoogle.MarshalVertexCredential(vertexCredential)
+		if errMarshal != nil {
+			writeControlError(writer, errMarshal)
+			return
+		}
+		defer clear(protectedValue)
+		credential, _, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "service_account", protectedValue)
+		if errReauthorize != nil {
+			writeControlError(writer, errReauthorize)
+			return
+		}
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
 		return
 	}
 	onboarding, errOnboard := s.control.Commands.OnboardVertexServiceAccountProvider(request.Context(), management.OnboardSystemProviderInput{
@@ -1359,6 +1602,7 @@ func (s *Server) handleOnboardVertexServiceAccount(writer http.ResponseWriter, r
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1371,6 +1615,19 @@ func (s *Server) handleStartKimiDeviceFlow(writer http.ResponseWriter, request *
 		return
 	}
 	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// reauthorizeCredential replaces an existing target when both target identifiers are present.
+// reauthorizeCredential 在两个目标标识均存在时替换既有目标凭据。
+func (s *Server) reauthorizeCredential(ctx context.Context, target credentialReauthorizationTarget, authMethodID string, secretValue []byte) (providerconfig.Credential, bool, error) {
+	if target.ProviderInstanceID == "" && target.CredentialID == "" {
+		return providerconfig.Credential{}, false, nil
+	}
+	if target.ProviderInstanceID == "" || target.CredentialID == "" {
+		return providerconfig.Credential{}, true, errors.New("reauthorization requires both provider instance and credential identifiers")
+	}
+	credential, errReauthorize := s.control.Commands.ReauthorizeCredential(ctx, management.ReauthorizeCredentialInput{ProviderInstanceID: target.ProviderInstanceID, CredentialID: target.CredentialID, AuthMethodID: authMethodID, Secret: secretValue})
+	return credential, true, errReauthorize
 }
 
 // handleOnboardKimiDeviceFlow polls authorization once and atomically onboards a completed token.
@@ -1398,6 +1655,17 @@ func (s *Server) handleOnboardKimiDeviceFlow(writer http.ResponseWriter, request
 		return
 	}
 	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.KimiDeviceFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardKimiDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow",
 		Secret: secretValue,
@@ -1414,6 +1682,7 @@ func (s *Server) handleOnboardKimiDeviceFlow(writer http.ResponseWriter, request
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1460,6 +1729,17 @@ func (s *Server) handleOnboardXAIDeviceFlow(writer http.ResponseWriter, request 
 		return
 	}
 	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.XAIDeviceFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardXAIDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow",
 		Secret: secretValue,
@@ -1476,6 +1756,7 @@ func (s *Server) handleOnboardXAIDeviceFlow(writer http.ResponseWriter, request 
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1522,6 +1803,17 @@ func (s *Server) handleOnboardCodexDeviceFlow(writer http.ResponseWriter, reques
 		return
 	}
 	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.CodexDeviceFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardCodexDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow",
 		Secret: secretValue,
@@ -1538,6 +1830,7 @@ func (s *Server) handleOnboardCodexDeviceFlow(writer http.ResponseWriter, reques
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1580,6 +1873,17 @@ func (s *Server) handleOnboardCodexOAuthFlow(writer http.ResponseWriter, request
 		return
 	}
 	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.CodexOAuthFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardCodexOAuthProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, AuthMethodID: "oauth", Secret: secretValue,
 	})
@@ -1595,6 +1899,7 @@ func (s *Server) handleOnboardCodexOAuthFlow(writer http.ResponseWriter, request
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1637,6 +1942,17 @@ func (s *Server) handleOnboardClaudeOAuthFlow(writer http.ResponseWriter, reques
 		return
 	}
 	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.ClaudeOAuthFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardClaudeOAuthProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, AuthMethodID: "oauth", Secret: secretValue,
 	})
@@ -1652,6 +1968,7 @@ func (s *Server) handleOnboardClaudeOAuthFlow(writer http.ResponseWriter, reques
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1694,6 +2011,17 @@ func (s *Server) handleOnboardAntigravityOAuthFlow(writer http.ResponseWriter, r
 		return
 	}
 	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "oauth", secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.AntigravityOAuthFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
 	onboarding, errOnboard := s.control.Commands.OnboardAntigravityOAuthProvider(request.Context(), management.OnboardSystemProviderInput{
 		DefinitionID: body.DefinitionID, AuthMethodID: "oauth", Secret: secretValue,
 		ScopeRefs: []providerconfig.ScopeReference{{Kind: "project", ID: token.ProjectID}},
@@ -1710,6 +2038,7 @@ func (s *Server) handleOnboardAntigravityOAuthFlow(writer http.ResponseWriter, r
 	for _, binding := range onboarding.Bindings {
 		response.BindingIDs = append(response.BindingIDs, binding.ID)
 	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
 	writeJSON(writer, http.StatusCreated, response)
 }
 
@@ -1770,7 +2099,17 @@ func (s *Server) handleRefreshProviderCredential(writer http.ResponseWriter, req
 		writeControlError(writer, errRefresh)
 		return
 	}
+	s.triggerMetadataRefresh(instanceID)
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
+}
+
+// triggerMetadataRefresh queues account metadata replacement after a successful credential mutation.
+// triggerMetadataRefresh 在凭据变更成功后将账号元数据替换任务入队。
+func (s *Server) triggerMetadataRefresh(instanceID string) {
+	scheduler, supportsScheduling := s.control.MetadataRefresh.(ProviderMetadataRefreshScheduler)
+	if supportsScheduling {
+		scheduler.Trigger(instanceID)
+	}
 }
 
 // handleRefreshProviderMetadata refreshes provider-native account metadata and returns the safe catalog view.
@@ -1791,6 +2130,81 @@ func (s *Server) handleRefreshProviderMetadata(writer http.ResponseWriter, reque
 		return
 	}
 	writeJSON(writer, http.StatusOK, view)
+}
+
+// handleRoutingSettings returns the persisted Router-wide credential selection strategy.
+// handleRoutingSettings 返回持久化 Router 全局凭据选择策略。
+func (s *Server) handleRoutingSettings(writer http.ResponseWriter, request *http.Request) {
+	settings, errSettings := s.control.Routing.GetSettings(request.Context())
+	if errSettings != nil {
+		writeControlError(writer, errSettings)
+		return
+	}
+	writeJSON(writer, http.StatusOK, routingSettingsResponse{Strategy: settings.DefaultRoutingStrategy, Revision: settings.Revision, UpdatedAt: settings.UpdatedAt})
+}
+
+// handleSetRoutingSettings changes the inherited Router-wide credential selection strategy.
+// handleSetRoutingSettings 修改继承的 Router 全局凭据选择策略。
+func (s *Server) handleSetRoutingSettings(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[routingStrategyRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	settings, errSettings := s.control.Routing.SetDefaultRoutingStrategy(request.Context(), body.Strategy)
+	if errSettings != nil {
+		writeControlError(writer, errSettings)
+		return
+	}
+	writeJSON(writer, http.StatusOK, routingSettingsResponse{Strategy: settings.DefaultRoutingStrategy, Revision: settings.Revision, UpdatedAt: settings.UpdatedAt})
+}
+
+// handleSetInstanceRouting sets or clears one provider-instance scheduling override.
+// handleSetInstanceRouting 设置或清除一个供应商实例调度覆盖值。
+func (s *Server) handleSetInstanceRouting(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[routingStrategyRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	instance, errInstance := s.control.Routing.SetInstanceRoutingStrategy(request.Context(), request.PathValue("provider_instance_id"), body.Strategy)
+	if errInstance != nil {
+		writeControlError(writer, errInstance)
+		return
+	}
+	writeJSON(writer, http.StatusOK, instanceRoutingResponse{ProviderInstanceID: instance.ID, Strategy: instance.RoutingStrategy, Revision: instance.Revision})
+}
+
+// handleSetCredentialPriority changes account ordering without changing endpoint path priority.
+// handleSetCredentialPriority 修改账号顺序且不改变入口路径优先级。
+func (s *Server) handleSetCredentialPriority(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[credentialPriorityRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	credential, errCredential := s.control.Routing.SetCredentialPriority(request.Context(), request.PathValue("provider_instance_id"), request.PathValue("credential_id"), body.Priority)
+	if errCredential != nil {
+		writeControlError(writer, errCredential)
+		return
+	}
+	writeJSON(writer, http.StatusOK, credentialRoutingResponse{CredentialID: credential.ID, Priority: credential.Priority, Revision: credential.Revision})
+}
+
+// handleSetCredentialPlan changes one manual plan and atomically rebuilt entitlement snapshot.
+// handleSetCredentialPlan 修改一个人工套餐与原子重建的权益快照。
+func (s *Server) handleSetCredentialPlan(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[credentialPlanRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	credential, errCredential := s.control.Routing.SetCredentialPlan(request.Context(), request.PathValue("provider_instance_id"), request.PathValue("credential_id"), body.PlanOptionID)
+	if errCredential != nil {
+		writeControlError(writer, errCredential)
+		return
+	}
+	writeJSON(writer, http.StatusOK, credentialRoutingResponse{CredentialID: credential.ID, Priority: credential.Priority, DeclaredPlan: credential.DeclaredPlan, Revision: credential.Revision})
 }
 
 // handleProviderInstance returns one management-safe provider instance view.
@@ -2123,6 +2537,7 @@ func (s *Server) handleCreateCredential(writer http.ResponseWriter, request *htt
 		writeControlError(writer, errCreate)
 		return
 	}
+	s.triggerMetadataRefresh(credential.ProviderInstanceID)
 	writeJSON(writer, http.StatusCreated, identifierResponse{ID: credential.ID})
 }
 
@@ -2142,6 +2557,7 @@ func (s *Server) handleUpdateCredential(writer http.ResponseWriter, request *htt
 		writeControlError(writer, errUpdate)
 		return
 	}
+	s.triggerMetadataRefresh(credential.ProviderInstanceID)
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
 }
 
@@ -2160,7 +2576,23 @@ func (s *Server) handleRotateCredentialSecret(writer http.ResponseWriter, reques
 		writeControlError(writer, errRotate)
 		return
 	}
+	s.triggerMetadataRefresh(credential.ProviderInstanceID)
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
+}
+
+// handleDeleteCredential deletes one credential graph and its protected secret.
+// handleDeleteCredential 删除一个凭据图及其受保护 Secret。
+func (s *Server) handleDeleteCredential(writer http.ResponseWriter, request *http.Request) {
+	instanceID := request.PathValue("provider_instance_id")
+	deletion, errDelete := s.control.Commands.DeleteCredential(request.Context(), instanceID, request.PathValue("credential_id"))
+	if errDelete != nil {
+		writeControlError(writer, errDelete)
+		return
+	}
+	if !deletion.InstanceDeleted {
+		s.triggerMetadataRefresh(instanceID)
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 // handleSetCredentialStatus changes one credential lifecycle status without reading secret material.
@@ -2178,6 +2610,7 @@ func (s *Server) handleSetCredentialStatus(writer http.ResponseWriter, request *
 		writeControlError(writer, errSet)
 		return
 	}
+	s.triggerMetadataRefresh(credential.ProviderInstanceID)
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
 }
 
@@ -2278,38 +2711,122 @@ func (s *Server) handleDeleteAPIKey(writer http.ResponseWriter, request *http.Re
 	writer.WriteHeader(http.StatusNoContent)
 }
 
-// handleCallModels returns enabled models and capabilities without fusing identically named provider models.
-// handleCallModels 返回启用模型和能力，且不融合名称相同的供应商模型。
-func (s *Server) handleCallModels(writer http.ResponseWriter, request *http.Request) {
-	instances, errInstances := s.control.Query.ListInstances(request.Context())
-	if errInstances != nil {
-		writeControlError(writer, errInstances)
+// Validate enforces the exact identifier contract for the selected information projection.
+// Validate 强制执行已选信息投影的精确标识契约。
+func (r callInformationRequest) Validate() error {
+	switch r.Get {
+	case callInformationInstances:
+		if r.ProviderInstanceID != "" || r.ProviderModelID != "" || r.CredentialID != "" || r.ProviderServiceID != "" {
+			return errors.New("instances information does not accept selectors")
+		}
+	case callInformationModels:
+		if r.CredentialID != "" || r.ProviderServiceID != "" || (r.ProviderModelID != "" && r.ProviderInstanceID == "") {
+			return errors.New("models information accepts an optional instance and an instance-owned model only")
+		}
+	case callInformationAccounts:
+		if r.ProviderInstanceID == "" || r.ProviderModelID == "" || r.CredentialID != "" || r.ProviderServiceID != "" {
+			return errors.New("accounts information requires provider_instance_id and provider_model_id only")
+		}
+	case callInformationServices:
+		if r.ProviderModelID != "" || r.CredentialID != "" || (r.ProviderServiceID != "" && r.ProviderInstanceID == "") {
+			return errors.New("services information accepts an optional instance and an instance-owned service only")
+		}
+	case callInformationUsage:
+		if r.ProviderInstanceID == "" || r.ProviderModelID == "" || r.CredentialID == "" || r.ProviderServiceID != "" {
+			return errors.New("usage information requires provider_instance_id, provider_model_id, and credential_id only")
+		}
+	default:
+		return errors.New("get must be one of instances, models, accounts, services, or usage")
+	}
+	return nil
+}
+
+// handleCallInformation dispatches one strong information union selected exclusively by the get field.
+// handleCallInformation 仅根据 get 字段分派一个强类型信息联合。
+func (s *Server) handleCallInformation(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[callInformationRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
 		return
+	}
+	if errValidate := payload.Validate(); errValidate != nil {
+		writeControlError(writer, errValidate)
+		return
+	}
+	switch payload.Get {
+	case callInformationInstances:
+		instances, errInstances := s.control.Query.ListInstances(request.Context())
+		if errInstances != nil {
+			writeControlError(writer, errInstances)
+			return
+		}
+		writeJSON(writer, http.StatusOK, callInformationInstancesResponse{Get: payload.Get, Instances: instances})
+	case callInformationModels:
+		models, errModels := s.callModels(request.Context(), payload.ProviderInstanceID, payload.ProviderModelID)
+		if errModels != nil {
+			writeControlError(writer, errModels)
+			return
+		}
+		writeJSON(writer, http.StatusOK, callInformationModelsResponse{Get: payload.Get, Models: models})
+	case callInformationAccounts:
+		accounts, errAccounts := s.control.Query.GetModelContexts(request.Context(), payload.ProviderInstanceID, payload.ProviderModelID)
+		if errAccounts != nil {
+			writeControlError(writer, errAccounts)
+			return
+		}
+		writeJSON(writer, http.StatusOK, callInformationAccountsResponse{Get: payload.Get, Accounts: accounts})
+	case callInformationServices:
+		services, errServices := s.callServices(request.Context(), payload.ProviderInstanceID, payload.ProviderServiceID)
+		if errServices != nil {
+			writeControlError(writer, errServices)
+			return
+		}
+		writeJSON(writer, http.StatusOK, callInformationServicesResponse{Get: payload.Get, Services: services})
+	case callInformationUsage:
+		usage, errUsage := s.control.Query.GetModelCredentialUsage(request.Context(), payload.ProviderInstanceID, payload.ProviderModelID, payload.CredentialID)
+		if errUsage != nil {
+			writeControlError(writer, errUsage)
+			return
+		}
+		writeJSON(writer, http.StatusOK, callInformationUsageResponse{Get: payload.Get, Usage: usage})
+	}
+}
+
+// callModels returns enabled models and capabilities without fusing identically named provider models.
+// callModels 返回启用模型和能力，且不融合名称相同的供应商模型。
+func (s *Server) callModels(ctx context.Context, providerInstanceID string, providerModelID string) ([]callModelView, error) {
+	instances, errInstances := s.control.Query.ListInstances(ctx)
+	if errInstances != nil {
+		return nil, errInstances
 	}
 	models := make([]callModelView, 0)
 	// discoveryTime freezes one availability instant across the complete response.
 	// discoveryTime 为完整响应冻结同一个可用性判断时刻。
 	discoveryTime := time.Now().UTC()
 	for _, instance := range instances {
+		if providerInstanceID != "" && instance.ID != providerInstanceID {
+			continue
+		}
 		if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
 			continue
 		}
-		providerCatalog, errCatalog := s.control.Query.GetCatalog(request.Context(), instance.ID)
+		providerCatalog, errCatalog := s.control.Query.GetCatalog(ctx, instance.ID)
 		if errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
 			continue
 		}
 		if errCatalog != nil {
-			writeControlError(writer, errCatalog)
-			return
+			return nil, errCatalog
 		}
 		for _, model := range providerCatalog.Models {
-			if !model.Enabled || !model.ProviderAuthorized {
+			if providerModelID != "" && model.ID != providerModelID {
 				continue
 			}
-			filteredModel, executable, errFilter := s.executableModelView(request.Context(), instance.ID, model, discoveryTime)
+			if !model.Enabled || model.AuthorizationStatus != catalog.AuthorizationAuthorized {
+				continue
+			}
+			filteredModel, executable, errFilter := s.executableModelView(ctx, instance.ID, model, discoveryTime)
 			if errFilter != nil {
-				writeControlError(writer, errFilter)
-				return
+				return nil, errFilter
 			}
 			if !executable {
 				continue
@@ -2322,41 +2839,44 @@ func (s *Server) handleCallModels(writer http.ResponseWriter, request *http.Requ
 			})
 		}
 	}
-	writeJSON(writer, http.StatusOK, callModelListResponse{Models: models})
+	return models, nil
 }
 
-// handleCallServices returns executable provider-scoped special services without entering the model list.
-// handleCallServices 返回可执行供应商作用域特殊服务且不进入模型列表。
-func (s *Server) handleCallServices(writer http.ResponseWriter, request *http.Request) {
-	instances, errInstances := s.control.Query.ListInstances(request.Context())
+// callServices returns executable provider-scoped special services without entering the model list.
+// callServices 返回可执行供应商作用域特殊服务且不进入模型列表。
+func (s *Server) callServices(ctx context.Context, providerInstanceID string, providerServiceID string) ([]callServiceView, error) {
+	instances, errInstances := s.control.Query.ListInstances(ctx)
 	if errInstances != nil {
-		writeControlError(writer, errInstances)
-		return
+		return nil, errInstances
 	}
 	services := make([]callServiceView, 0)
 	// discoveryTime freezes one availability instant across the complete response.
 	// discoveryTime 为完整响应冻结同一个可用性判断时刻。
 	discoveryTime := time.Now().UTC()
 	for _, instance := range instances {
+		if providerInstanceID != "" && instance.ID != providerInstanceID {
+			continue
+		}
 		if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
 			continue
 		}
-		providerCatalog, errCatalog := s.control.Query.GetCatalog(request.Context(), instance.ID)
+		providerCatalog, errCatalog := s.control.Query.GetCatalog(ctx, instance.ID)
 		if errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
 			continue
 		}
 		if errCatalog != nil {
-			writeControlError(writer, errCatalog)
-			return
+			return nil, errCatalog
 		}
 		for _, service := range providerCatalog.Services {
-			if !service.Enabled || !service.ProviderAuthorized {
+			if providerServiceID != "" && service.ID != providerServiceID {
 				continue
 			}
-			filteredService, executable, errFilter := s.executableServiceView(request.Context(), instance.ID, service, discoveryTime)
+			if !service.Enabled || service.AuthorizationStatus != catalog.AuthorizationAuthorized {
+				continue
+			}
+			filteredService, executable, errFilter := s.executableServiceView(ctx, instance.ID, service, discoveryTime)
 			if errFilter != nil {
-				writeControlError(writer, errFilter)
-				return
+				return nil, errFilter
 			}
 			if !executable {
 				continue
@@ -2364,7 +2884,7 @@ func (s *Server) handleCallServices(writer http.ResponseWriter, request *http.Re
 			services = append(services, callServiceView{ProviderInstanceID: instance.ID, ProviderHandle: instance.Handle, ProviderDefinitionID: instance.DefinitionID, Service: filteredService})
 		}
 	}
-	writeJSON(writer, http.StatusOK, callServiceListResponse{Services: services})
+	return services, nil
 }
 
 // executableModelView retains only offerings and profiles whose exact target currently resolves.

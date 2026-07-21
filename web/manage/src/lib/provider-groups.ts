@@ -79,6 +79,9 @@ export interface ProviderDefinition {
   // auth_methods lists exact credential acquisition mechanisms.
   // auth_methods 列出精确凭据获取机制。
   auth_methods: ProviderAuthMethod[];
+  // plan_options lists immutable commercial tiers accepted by manual credential onboarding.
+  // plan_options 列出人工凭据录入可选择的不可变商业档位。
+  plan_options: ProviderPlanOption[];
   // features reports provider-native management readers implemented by the server.
   // features 报告服务端实现的供应商原生管理读取器。
   features: ProviderFeatures;
@@ -113,6 +116,42 @@ export interface ProviderAuthMethod {
   // refreshable reports whether the server can renew this credential.
   // refreshable 表示服务端能否续期此凭据。
   refreshable: boolean;
+  // multiple_credentials reports whether one instance accepts an account pool for this method.
+  // multiple_credentials 表示一个实例是否接受该认证方式的账号池。
+  multiple_credentials: boolean;
+  // plan_acquisition identifies how this authentication method obtains plan evidence.
+  // plan_acquisition 标识该认证方式如何获得套餐证据。
+  plan_acquisition:
+    | "provider_detected"
+    | "manual_required"
+    | "manual_optional"
+    | "unavailable";
+}
+
+// ProviderPlanOption describes one safe code-owned commercial tier.
+// ProviderPlanOption 描述一个安全的代码拥有商业档位。
+export interface ProviderPlanOption {
+  // id is the stable onboarding request value.
+  // id 是稳定的录入请求值。
+  id: string;
+  // display_name is the provider's locale-neutral plan name.
+  // display_name 是供应商与语言环境无关的套餐名称。
+  display_name: string;
+  // display_name_key identifies optional authored localization.
+  // display_name_key 标识可选的客户端编写本地化文本。
+  display_name_key?: string;
+  // auth_method_ids lists exact authentication methods associated with the tier.
+  // auth_method_ids 列出与该档位关联的精确认证方式。
+  auth_method_ids: string[];
+  // manually_selectable reports whether the browser may submit this option.
+  // manually_selectable 表示浏览器是否可以提交该选项。
+  manually_selectable: boolean;
+  // sort_order is the stable display order.
+  // sort_order 是稳定显示顺序。
+  sort_order: number;
+  // revision is the immutable option revision.
+  // revision 是不可变选项修订号。
+  revision: number;
 }
 
 // ProviderDefinitionIdentity contains the common display and capability contract used by grouped and custom definitions.
@@ -130,6 +169,9 @@ export interface ProviderDefinitionIdentity {
   // auth_methods lists the exact authentication mechanisms owned by the definition.
   // auth_methods 列出 Definition 拥有的精确认证机制。
   auth_methods: ProviderAuthMethod[];
+  // plan_options contains code-owned commercial tiers when applicable.
+  // plan_options 在适用时包含代码拥有商业档位。
+  plan_options: ProviderPlanOption[];
   // features reports server-verified provider-native metadata readers.
   // features 报告服务端验证的供应商原生元数据读取器。
   features: ProviderFeatures;
@@ -178,6 +220,9 @@ export interface SystemOnboardingInput {
   // secret carries the transient provider credential to the server.
   // secret 将临时供应商凭据传递给服务端。
   secret: string;
+  // plan_option_id selects one code-owned tier for manual plan acquisition.
+  // plan_option_id 为人工套餐获取选择一个代码拥有档位。
+  plan_option_id?: string;
   // endpoint_parameters contains only values declared by the selected endpoint preset.
   // endpoint_parameters 仅包含所选端点预设声明的值。
   endpoint_parameters?: Array<{ id: string; value: string }>;
@@ -185,7 +230,8 @@ export interface SystemOnboardingInput {
 
 // VertexServiceAccountOnboardingInput contains one transient typed JSON document whose identity is derived server-side.
 // VertexServiceAccountOnboardingInput 包含一个临时类型化 JSON 文档，其身份由服务端派生。
-export interface VertexServiceAccountOnboardingInput {
+export interface VertexServiceAccountOnboardingInput
+  extends Partial<CredentialReauthorizationTarget> {
   // provider_definition_id selects the Vertex system definition.
   // provider_definition_id 选择 Vertex 系统 Definition。
   provider_definition_id: string;
@@ -360,6 +406,9 @@ export interface ProviderInstance {
   // status is the current configuration lifecycle state.
   // status 是当前配置生命周期状态。
   status: string;
+  // routing_strategy is empty when this instance inherits the Router-wide default.
+  // routing_strategy 在该实例继承 Router 全局默认值时为空。
+  routing_strategy: "" | "round_robin" | "fill_first";
   // disabled_model_ids lists models disabled by local policy.
   // disabled_model_ids 列出被本地策略禁用的模型。
   disabled_model_ids: string[];
@@ -401,6 +450,16 @@ export interface ProviderCredential {
   // cooling_until is the local recovery time when cooling applies.
   // cooling_until 是适用冷却时的本地恢复时间。
   cooling_until: string | null;
+  // priority orders this account before endpoint paths.
+  // priority 在入口路径之前排列该账号。
+  priority: number;
+  // declared_plan contains operator-authored plan evidence when present.
+  // declared_plan 在存在时包含操作员声明的套餐证据。
+  declared_plan?: {
+    plan_option_id: string;
+    declared_at: string;
+    revision: number;
+  };
   // revision is the persisted credential revision.
   // revision 是持久化凭据修订号。
   revision: number;
@@ -415,6 +474,17 @@ export interface AuthorizedProvider {
   // credentials contains every configured API key or device authorization.
   // credentials 包含每个已配置 API 密钥或设备授权。
   credentials: ProviderCredential[];
+}
+
+// CredentialReauthorizationTarget selects an existing local credential for replacement.
+// CredentialReauthorizationTarget 选择一个需要替换的既有本地凭据。
+export interface CredentialReauthorizationTarget {
+  // provider_instance_id owns the credential.
+  // provider_instance_id 拥有该凭据。
+  provider_instance_id: string;
+  // credential_id identifies the exact credential.
+  // credential_id 标识精确凭据。
+  credential_id: string;
 }
 
 // ProviderCatalogModel contains the management-safe identity and local eligibility of one refreshed model.
@@ -435,9 +505,9 @@ export interface ProviderCatalogModel {
   // enabled reports whether local policy allows this model.
   // enabled 表示本地策略是否允许此模型。
   enabled: boolean;
-  // provider_authorized reports whether provider evidence permits at least one configured account to use this model.
-  // provider_authorized 报告供应商证据是否允许至少一个已配置账号使用此模型。
-  provider_authorized: boolean;
+  // authorization_status preserves authorized, denied, and unknown evidence.
+  // authorization_status 保留已授权、已拒绝与未知证据。
+  authorization_status: "authorized" | "denied" | "unknown";
 }
 
 // ProviderPlan contains one identity-free commercial plan aggregate.
@@ -455,6 +525,20 @@ export interface ProviderPlan {
   // credential_count is the number of credentials reporting this aggregate.
   // credential_count 是报告此聚合结果的凭据数量。
   credential_count: number;
+  // evidence_source identifies provider-detected or operator-declared plan evidence.
+  // evidence_source 标识供应商自动识别或操作员声明的套餐证据。
+  evidence_source:
+    | "provider_api"
+    | "protected_token_claim"
+    | "operator_declared"
+    | "system_rule"
+    | "runtime_observation";
+  // observed_at is the newest observation represented by this aggregate.
+  // observed_at 是该聚合所代表的最新观测时间。
+  observed_at: string;
+  // expires_at is the earliest finite expiry when present.
+  // expires_at 是存在时最早的有限到期时间。
+  expires_at?: string;
 }
 
 // ProviderAllowanceWindow preserves provider-authored quota reset semantics without exposing account identity.
@@ -480,6 +564,12 @@ export interface ProviderAllowanceWindow {
 // ProviderAllowance contains one redacted provider quota or credit observation.
 // ProviderAllowance 包含一个脱敏的供应商额度或积分观测。
 export interface ProviderAllowance {
+  // credential_id identifies the local credential for credential-scoped usage.
+  // credential_id 标识凭据作用域用量对应的本地凭据。
+  credential_id?: string;
+  // credential_label is the operator-authored local credential name.
+  // credential_label 是操作员编写的本地凭据名称。
+  credential_label?: string;
   // kind identifies the normalized allowance category.
   // kind 标识规范化的额度类别。
   kind: string;
@@ -604,8 +694,32 @@ const providerGroupListResponseSchema = z.object({
               id: z.string().min(1),
               type: z.string().min(1),
               refreshable: z.boolean(),
+              multiple_credentials: z.boolean().optional().default(false),
+              plan_acquisition: z
+                .enum([
+                  "provider_detected",
+                  "manual_required",
+                  "manual_optional",
+                  "unavailable",
+                ])
+                .optional()
+                .default("unavailable"),
             }),
           ),
+          plan_options: z
+            .array(
+              z.object({
+                id: z.string().min(1),
+                display_name: z.string().min(1),
+                display_name_key: z.string().optional(),
+                auth_method_ids: z.array(z.string().min(1)),
+                manually_selectable: z.boolean(),
+                sort_order: z.number().int().nonnegative(),
+                revision: z.number().int().positive(),
+              }),
+            )
+            .optional()
+            .default([]),
           features: z.object({
             model_discovery: z.string(),
             plan_reader: z.string(),
@@ -630,8 +744,32 @@ const providerDefinitionSummarySchema = z.object({
       id: z.string().min(1),
       type: z.string().min(1),
       refreshable: z.boolean(),
+      multiple_credentials: z.boolean().optional().default(false),
+      plan_acquisition: z
+        .enum([
+          "provider_detected",
+          "manual_required",
+          "manual_optional",
+          "unavailable",
+        ])
+        .optional()
+        .default("unavailable"),
     }),
   ),
+  plan_options: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        display_name: z.string().min(1),
+        display_name_key: z.string().optional(),
+        auth_method_ids: z.array(z.string().min(1)),
+        manually_selectable: z.boolean(),
+        sort_order: z.number().int().nonnegative(),
+        revision: z.number().int().positive(),
+      }),
+    )
+    .optional()
+    .default([]),
   features: z.object({
     model_discovery: z.string(),
     plan_reader: z.string(),
@@ -768,7 +906,7 @@ const providerCatalogMetadataSchema = z.object({
       display_name: z.string().min(1),
       entitlement_mode: z.enum(["all_bound_credentials", "explicit"]),
       enabled: z.boolean(),
-      provider_authorized: z.boolean(),
+      authorization_status: z.enum(["authorized", "denied", "unknown"]),
     }),
   ),
   plans: z.array(
@@ -777,10 +915,24 @@ const providerCatalogMetadataSchema = z.object({
       plan_name: z.string().min(1),
       status: z.string().min(1),
       credential_count: z.number().int().nonnegative(),
+      evidence_source: z
+        .enum([
+          "provider_api",
+          "protected_token_claim",
+          "operator_declared",
+          "system_rule",
+          "runtime_observation",
+        ])
+        .optional()
+        .default("provider_api"),
+      observed_at: z.string().datetime({ offset: true }).optional().default("1970-01-01T00:00:00Z"),
+      expires_at: z.string().datetime({ offset: true }).optional(),
     }),
   ),
   allowances: z.array(
     z.object({
+      credential_id: z.string().min(1).optional(),
+      credential_label: z.string().optional(),
       kind: z.enum([
         "window_quota",
         "balance",
@@ -892,6 +1044,10 @@ const providerInstanceSchema = z.object({
   handle: z.string().min(1),
   display_name: z.string().min(1),
   status: z.string().min(1),
+  routing_strategy: z
+    .enum(["", "round_robin", "fill_first"])
+    .optional()
+    .default(""),
   // The running management API historically serialized an unset slice as null; normalize that exact shape at the boundary.
   // 当前运行中的管理 API 历史上会将未设置切片序列化为 null；在边界处规范化这一精确结构。
   disabled_model_ids: z
@@ -914,6 +1070,14 @@ const providerCredentialSchema = z.object({
   status: z.string().min(1),
   expires_at: z.string().datetime({ offset: true }).nullable(),
   cooling_until: z.string().datetime({ offset: true }).nullable(),
+  priority: z.number().int().nonnegative().optional().default(0),
+  declared_plan: z
+    .object({
+      plan_option_id: z.string().min(1),
+      declared_at: z.string().datetime({ offset: true }),
+      revision: z.number().int().positive(),
+    })
+    .optional(),
   revision: z.number().int().positive(),
 });
 
@@ -928,6 +1092,18 @@ const providerInstanceListResponseSchema = z.object({
 const providerCredentialListResponseSchema = z.object({
   credentials: z.array(providerCredentialSchema),
 });
+
+// routingSettingsSchema validates the persisted global scheduling strategy.
+// routingSettingsSchema 校验持久化全局调度策略。
+const routingSettingsSchema = z.object({
+  strategy: z.enum(["round_robin", "fill_first"]),
+  revision: z.number().int().positive(),
+  updated_at: z.string().datetime({ offset: true }),
+});
+
+// RoutingSettings contains the Router-wide account scheduling default.
+// RoutingSettings 包含 Router 全局账号调度默认值。
+export type RoutingSettings = z.infer<typeof routingSettingsSchema>;
 
 // fetchProviderDefinitions loads the common identity contract for both system and user-owned custom definitions.
 // fetchProviderDefinitions 加载系统与用户拥有自定义 Definition 共用的身份合同。
@@ -1066,6 +1242,158 @@ export async function onboardSystemProvider(
   return systemOnboardingResponseSchema.parse(await response.json());
 }
 
+// fetchRoutingSettings loads the persisted Router-wide account scheduling default.
+// fetchRoutingSettings 加载持久化 Router 全局账号调度默认值。
+export async function fetchRoutingSettings(
+  managementAuthToken: string,
+  signal?: AbortSignal,
+): Promise<RoutingSettings> {
+  const response = await fetch("/vulcan/manage/settings/routing", {
+    headers: { Authorization: `Bearer ${managementAuthToken}` },
+    signal,
+  });
+  if (!response.ok) {
+    throw new Error(`routing settings request failed with status ${response.status}`);
+  }
+  return routingSettingsSchema.parse(await response.json());
+}
+
+// updateRoutingSettings persists one closed Router-wide account scheduling strategy.
+// updateRoutingSettings 持久化一个封闭的 Router 全局账号调度策略。
+export async function updateRoutingSettings(
+  managementAuthToken: string,
+  strategy: "round_robin" | "fill_first",
+): Promise<RoutingSettings> {
+  const response = await fetch("/vulcan/manage/settings/routing", {
+    method: "PUT",
+    headers: {
+      Authorization: `Bearer ${managementAuthToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ strategy }),
+  });
+  if (!response.ok) {
+    throw new Error(`routing settings update failed with status ${response.status}`);
+  }
+  return routingSettingsSchema.parse(await response.json());
+}
+
+// updateProviderRoutingStrategy sets or clears one provider-instance override.
+// updateProviderRoutingStrategy 设置或清除一个供应商实例覆盖策略。
+export async function updateProviderRoutingStrategy(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  strategy: "" | "round_robin" | "fill_first",
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/routing`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ strategy }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`provider routing update failed with status ${response.status}`);
+  }
+}
+
+// updateProviderCredentialPriority persists one nonnegative account priority.
+// updateProviderCredentialPriority 持久化一个非负账号优先级。
+export async function updateProviderCredentialPriority(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+  priority: number,
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}/priority`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ priority }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`credential priority update failed with status ${response.status}`);
+  }
+}
+
+// updateProviderCredentialPlan replaces one code-owned manual plan selection.
+// updateProviderCredentialPlan 替换一个代码拥有人工套餐选择。
+export async function updateProviderCredentialPlan(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+  planOptionID: string,
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}/plan`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ plan_option_id: planOptionID }),
+    },
+  );
+  if (!response.ok) {
+    throw new Error(`credential plan update failed with status ${response.status}`);
+  }
+}
+
+// rotateProviderCredentialSecret replaces one operator-managed credential without changing its local identity.
+// rotateProviderCredentialSecret 替换一个操作员管理的凭据且不改变其本地身份。
+export async function rotateProviderCredentialSecret(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+  secret: string,
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}/secret`,
+    {
+      method: "PUT",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ secret }),
+    },
+  );
+  if (!response.ok)
+    throw new Error(
+      `provider credential replacement failed with status ${response.status}`,
+    );
+}
+
+// deleteProviderCredential permanently removes one credential and its local access bindings.
+// deleteProviderCredential 永久删除一个凭据及其本地访问绑定。
+export async function deleteProviderCredential(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+    },
+  );
+  if (!response.ok)
+    throw new Error(
+      `provider credential deletion failed with status ${response.status}`,
+    );
+}
+
 // onboardCustomProvider submits the complete compatibility definition and initial model through one atomic management command.
 // onboardCustomProvider 通过一个原子管理命令提交完整兼容 Definition 与初始模型。
 export async function onboardCustomProvider(
@@ -1133,7 +1461,8 @@ export async function startKimiDeviceFlow(
 export async function onboardKimiDeviceFlow(
   managementAuthToken: string,
   flowID: string,
-  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name">,
+  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name"> &
+    Partial<CredentialReauthorizationTarget>,
 ): Promise<SystemOnboardingResponse | null> {
   const response = await fetch(
     `/vulcan/manage/kimi/device-flows/${encodeURIComponent(flowID)}/onboard`,
@@ -1197,7 +1526,8 @@ export async function startXAIDeviceFlow(
 export async function onboardXAIDeviceFlow(
   managementAuthToken: string,
   flowID: string,
-  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name">,
+  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name"> &
+    Partial<CredentialReauthorizationTarget>,
 ): Promise<SystemOnboardingResponse | null> {
   const response = await fetch(
     `/vulcan/manage/xai/device-flows/${encodeURIComponent(flowID)}/onboard`,
@@ -1261,7 +1591,8 @@ export async function startCodexDeviceFlow(
 export async function onboardCodexDeviceFlow(
   managementAuthToken: string,
   flowID: string,
-  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name">,
+  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name"> &
+    Partial<CredentialReauthorizationTarget>,
 ): Promise<SystemOnboardingResponse | null> {
   const response = await fetch(
     `/vulcan/manage/codex/device-flows/${encodeURIComponent(flowID)}/onboard`,
@@ -1332,7 +1663,7 @@ export async function onboardCodexOAuthFlow(
     // callback_url is the exact pasted localhost callback returned by OpenAI.
     // callback_url 是 OpenAI 返回且由操作员粘贴的精确 localhost 回调地址。
     callback_url: string;
-  },
+  } & Partial<CredentialReauthorizationTarget>,
 ): Promise<SystemOnboardingResponse> {
   const response = await fetch(
     `/vulcan/manage/codex/oauth-flows/${encodeURIComponent(flowID)}/onboard`,
@@ -1400,7 +1731,7 @@ export async function onboardClaudeOAuthFlow(
     // callback_url is the exact callback or code#state value returned by Anthropic.
     // callback_url 是 Anthropic 返回的精确回调或 code#state 值。
     callback_url: string;
-  },
+  } & Partial<CredentialReauthorizationTarget>,
 ): Promise<SystemOnboardingResponse> {
   const response = await fetch(
     `/vulcan/manage/claude/oauth-flows/${encodeURIComponent(flowID)}/onboard`,
@@ -1470,7 +1801,7 @@ export async function onboardAntigravityOAuthFlow(
     // callback_url is the exact pasted localhost callback returned by Google.
     // callback_url 是 Google 返回且由操作员粘贴的精确 localhost 回调地址。
     callback_url: string;
-  },
+  } & Partial<CredentialReauthorizationTarget>,
 ): Promise<SystemOnboardingResponse> {
   const response = await fetch(
     `/vulcan/manage/antigravity/oauth-flows/${encodeURIComponent(flowID)}/onboard`,

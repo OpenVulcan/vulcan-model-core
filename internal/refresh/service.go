@@ -22,12 +22,26 @@ var (
 	ErrDriverNotFound = errors.New("trusted provider driver not found")
 )
 
+const (
+	// credentialRefreshLeadTime refreshes short-lived provider tokens before the next metadata scan can cross expiry.
+	// credentialRefreshLeadTime 在下一次元数据扫描可能跨过到期时间前刷新短期供应商令牌。
+	credentialRefreshLeadTime = time.Minute
+)
+
 // DriverRegistry resolves one trusted system-provider driver by definition identifier.
 // DriverRegistry 按定义标识解析一个受信任系统供应商 Driver。
 type DriverRegistry interface {
 	// Lookup returns the exact trusted driver for one system definition.
 	// Lookup 返回一个系统定义的精确受信任 Driver。
 	Lookup(string) (provider.Driver, bool)
+}
+
+// CredentialRefresher replaces one protected refreshable credential without exposing token material.
+// CredentialRefresher 替换一个受保护的可刷新凭据且不暴露令牌材料。
+type CredentialRefresher interface {
+	// RefreshCredential returns the persisted replacement metadata for one exact credential.
+	// RefreshCredential 返回一个精确凭据的持久化替换元数据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
 }
 
 // Service refreshes provider-native metadata without implementing any protocol translation.
@@ -45,11 +59,20 @@ type Service struct {
 	// resolver derives local account pool summaries from the collected snapshot.
 	// resolver 根据收集到的快照派生本地账号池摘要。
 	resolver *resolve.Resolver
+	// credentialRefreshers maps exact provider definitions to their proven protected token lifecycle implementation.
+	// credentialRefreshers 将精确供应商定义映射到其已验证的受保护令牌生命周期实现。
+	credentialRefreshers map[string]CredentialRefresher
 }
 
 // NewService creates one provider metadata refresh coordinator.
 // NewService 创建一个供应商元数据刷新协调器。
 func NewService(configurations providerconfig.Store, catalogs catalog.Store, drivers DriverRegistry) (*Service, error) {
+	return NewServiceWithCredentialRefreshers(configurations, catalogs, drivers, nil)
+}
+
+// NewServiceWithCredentialRefreshers creates one metadata service with exact provider-owned token refreshers.
+// NewServiceWithCredentialRefreshers 创建一个具有精确供应商所属令牌刷新器的元数据服务。
+func NewServiceWithCredentialRefreshers(configurations providerconfig.Store, catalogs catalog.Store, drivers DriverRegistry, refreshers map[string]CredentialRefresher) (*Service, error) {
 	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) || dependency.IsNil(drivers) {
 		return nil, errors.New("provider configuration, catalog, and driver registries are required")
 	}
@@ -57,7 +80,14 @@ func NewService(configurations providerconfig.Store, catalogs catalog.Store, dri
 	if errResolver != nil {
 		return nil, errResolver
 	}
-	return &Service{configurations: configurations, catalogs: catalogs, drivers: drivers, resolver: targetResolver}, nil
+	isolatedRefreshers := make(map[string]CredentialRefresher, len(refreshers))
+	for definitionID, refresher := range refreshers {
+		if definitionID == "" || dependency.IsNil(refresher) {
+			return nil, errors.New("credential refresher definition and implementation are required")
+		}
+		isolatedRefreshers[definitionID] = refresher
+	}
+	return &Service{configurations: configurations, catalogs: catalogs, drivers: drivers, resolver: targetResolver, credentialRefreshers: isolatedRefreshers}, nil
 }
 
 // Refresh reads one exact system provider instance and atomically replaces its catalog.
@@ -115,12 +145,62 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 	}
 	plans := make([]catalog.PlanSnapshot, 0)
 	entitlements := make([]catalog.ModelEntitlement, 0)
+	serviceEntitlements := make([]catalog.ServiceEntitlement, 0)
 	allowances := make([]catalog.AllowanceSnapshot, 0)
 	planByID := make(map[string]catalog.PlanSnapshot)
 	entitlementByID := make(map[string]catalog.ModelEntitlement)
+	serviceEntitlementByID := make(map[string]catalog.ServiceEntitlement)
 	allowanceByID := make(map[string]catalog.AllowanceSnapshot)
+	if errCurrentSnapshot == nil && driverDefinition.Features.PlanReader != providerconfig.SupportSupported {
+		for _, plan := range currentSnapshot.Plans {
+			if metadataCurrent(plan.ObservedAt, plan.ExpiresAt, now) {
+				if errAppend := appendUnique(plan.ID, plan, planByID, &plans); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
+		}
+	}
+	if errCurrentSnapshot == nil && driverDefinition.Features.EntitlementReader != providerconfig.SupportSupported {
+		for _, entitlement := range currentSnapshot.Entitlements {
+			if metadataCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, now) {
+				if errAppend := appendUnique(entitlement.ID, entitlement, entitlementByID, &entitlements); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
+		}
+	}
+	if errCurrentSnapshot == nil && driverDefinition.Features.AllowanceReader != providerconfig.SupportSupported {
+		for _, allowance := range currentSnapshot.Allowances {
+			if metadataCurrent(allowance.ObservedAt, allowance.ExpiresAt, now) {
+				if errAppend := appendUnique(allowance.ID, allowance, allowanceByID, &allowances); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
+		}
+	}
+	if errCurrentSnapshot == nil {
+		for _, entitlement := range currentSnapshot.ServiceEntitlements {
+			if !metadataCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, now) {
+				continue
+			}
+			if errAppend := appendUnique(entitlement.ID, entitlement, serviceEntitlementByID, &serviceEntitlements); errAppend != nil {
+				return catalog.Snapshot{}, errAppend
+			}
+		}
+	}
 	for _, credential := range credentials {
+		preparedCredential, errPrepare := s.prepareCredential(ctx, driverDefinition, credential, now)
+		if errPrepare != nil {
+			if errPreserve := preserveCredentialMetadata(credential, currentSnapshot, now, planByID, &plans, entitlementByID, &entitlements, allowanceByID, &allowances); errPreserve != nil {
+				return catalog.Snapshot{}, errPreserve
+			}
+			continue
+		}
+		credential = preparedCredential
 		if !credential.RuntimeEligibleAt(now) {
+			if errPreserve := preserveCredentialMetadata(credential, currentSnapshot, now, planByID, &plans, entitlementByID, &entitlements, allowanceByID, &allowances); errPreserve != nil {
+				return catalog.Snapshot{}, errPreserve
+			}
 			continue
 		}
 		// aggregateReader preserves consistency when one provider response contains multiple metadata classes.
@@ -128,9 +208,12 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 		if aggregateReader, supported := driver.(provider.CredentialMetadataReader); supported {
 			metadata, errMetadata := aggregateReader.ReadCredentialMetadata(ctx, instance, credential)
 			if errMetadata != nil {
-				return catalog.Snapshot{}, fmt.Errorf("read provider metadata for credential %s: %w", credential.ID, errMetadata)
+				if errPreserve := preserveCredentialMetadata(credential, currentSnapshot, now, planByID, &plans, entitlementByID, &entitlements, allowanceByID, &allowances); errPreserve != nil {
+					return catalog.Snapshot{}, errPreserve
+				}
+				continue
 			}
-			if errOwnership := validateCredentialMetadataOwnership(credential, metadata.Plan, metadata.Entitlements, metadata.Allowances); errOwnership != nil {
+			if errOwnership := validateCredentialMetadataOwnership(credential, metadata.Plan, metadata.Entitlements, metadata.ServiceEntitlements, metadata.Allowances); errOwnership != nil {
 				return catalog.Snapshot{}, fmt.Errorf("validate provider metadata ownership for credential %s: %w", credential.ID, errOwnership)
 			}
 			if driverDefinition.Features.PlanReader == providerconfig.SupportSupported {
@@ -151,6 +234,14 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 					return catalog.Snapshot{}, errAppend
 				}
 			}
+			if metadata.ServiceEntitlements != nil {
+				serviceEntitlements = removeCredentialServiceEntitlements(serviceEntitlements, serviceEntitlementByID, credential.ID)
+			}
+			for _, entitlement := range metadata.ServiceEntitlements {
+				if errAppend := appendUnique(entitlement.ID, entitlement, serviceEntitlementByID, &serviceEntitlements); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
 			if driverDefinition.Features.AllowanceReader != providerconfig.SupportSupported && len(metadata.Allowances) > 0 {
 				return catalog.Snapshot{}, errors.New("provider aggregate metadata returned undeclared allowances")
 			}
@@ -161,44 +252,68 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 			}
 			continue
 		}
-		if planReader, supported := driver.(provider.PlanReader); driverDefinition.Features.PlanReader == providerconfig.SupportSupported && supported {
+		// credentialMetadata stages independent reader results so a later read failure cannot commit a partial account refresh.
+		// credentialMetadata 暂存独立读取器结果，避免后续读取失败提交部分账号刷新。
+		credentialMetadata := provider.CredentialMetadataResult{}
+		readFailed := false
+		if driverDefinition.Features.PlanReader == providerconfig.SupportSupported {
+			planReader, supported := driver.(provider.PlanReader)
+			if !supported {
+				return catalog.Snapshot{}, errors.New("provider declares plan reading without a PlanReader")
+			}
 			plan, errPlan := planReader.ReadPlan(ctx, instance, credential)
 			if errPlan != nil {
-				return catalog.Snapshot{}, fmt.Errorf("read provider plan for credential %s: %w", credential.ID, errPlan)
+				readFailed = true
+			} else {
+				credentialMetadata.Plan = &plan
 			}
-			if errOwnership := validateCredentialMetadataOwnership(credential, &plan, nil, nil); errOwnership != nil {
-				return catalog.Snapshot{}, fmt.Errorf("validate provider plan ownership for credential %s: %w", credential.ID, errOwnership)
+		}
+		if !readFailed && driverDefinition.Features.EntitlementReader == providerconfig.SupportSupported {
+			entitlementReader, supported := driver.(provider.EntitlementReader)
+			if !supported {
+				return catalog.Snapshot{}, errors.New("provider declares entitlement reading without an EntitlementReader")
 			}
-			if errAppend := appendUnique(plan.ID, plan, planByID, &plans); errAppend != nil {
+			credentialEntitlements, errEntitlements := entitlementReader.ReadEntitlements(ctx, instance, credential)
+			if errEntitlements != nil {
+				readFailed = true
+			} else {
+				credentialMetadata.Entitlements = credentialEntitlements
+			}
+		}
+		if !readFailed && driverDefinition.Features.AllowanceReader == providerconfig.SupportSupported {
+			allowanceReader, supported := driver.(provider.AllowanceReader)
+			if !supported {
+				return catalog.Snapshot{}, errors.New("provider declares allowance reading without an AllowanceReader")
+			}
+			credentialAllowances, errAllowances := allowanceReader.ReadAllowances(ctx, instance, credential)
+			if errAllowances != nil {
+				readFailed = true
+			} else {
+				credentialMetadata.Allowances = credentialAllowances
+			}
+		}
+		if readFailed {
+			if errPreserve := preserveCredentialMetadata(credential, currentSnapshot, now, planByID, &plans, entitlementByID, &entitlements, allowanceByID, &allowances); errPreserve != nil {
+				return catalog.Snapshot{}, errPreserve
+			}
+			continue
+		}
+		if errOwnership := validateCredentialMetadataOwnership(credential, credentialMetadata.Plan, credentialMetadata.Entitlements, nil, credentialMetadata.Allowances); errOwnership != nil {
+			return catalog.Snapshot{}, fmt.Errorf("validate provider metadata ownership for credential %s: %w", credential.ID, errOwnership)
+		}
+		if credentialMetadata.Plan != nil {
+			if errAppend := appendUnique(credentialMetadata.Plan.ID, *credentialMetadata.Plan, planByID, &plans); errAppend != nil {
 				return catalog.Snapshot{}, errAppend
 			}
 		}
-		if entitlementReader, supported := driver.(provider.EntitlementReader); driverDefinition.Features.EntitlementReader == providerconfig.SupportSupported && supported {
-			credentialEntitlements, errEntitlements := entitlementReader.ReadEntitlements(ctx, instance, credential)
-			if errEntitlements != nil {
-				return catalog.Snapshot{}, fmt.Errorf("read provider entitlements for credential %s: %w", credential.ID, errEntitlements)
-			}
-			if errOwnership := validateCredentialMetadataOwnership(credential, nil, credentialEntitlements, nil); errOwnership != nil {
-				return catalog.Snapshot{}, fmt.Errorf("validate provider entitlement ownership for credential %s: %w", credential.ID, errOwnership)
-			}
-			for _, entitlement := range credentialEntitlements {
-				if errAppend := appendUnique(entitlement.ID, entitlement, entitlementByID, &entitlements); errAppend != nil {
-					return catalog.Snapshot{}, errAppend
-				}
+		for _, entitlement := range credentialMetadata.Entitlements {
+			if errAppend := appendUnique(entitlement.ID, entitlement, entitlementByID, &entitlements); errAppend != nil {
+				return catalog.Snapshot{}, errAppend
 			}
 		}
-		if allowanceReader, supported := driver.(provider.AllowanceReader); driverDefinition.Features.AllowanceReader == providerconfig.SupportSupported && supported {
-			credentialAllowances, errAllowances := allowanceReader.ReadAllowances(ctx, instance, credential)
-			if errAllowances != nil {
-				return catalog.Snapshot{}, fmt.Errorf("read provider allowances for credential %s: %w", credential.ID, errAllowances)
-			}
-			if errOwnership := validateCredentialMetadataOwnership(credential, nil, nil, credentialAllowances); errOwnership != nil {
-				return catalog.Snapshot{}, fmt.Errorf("validate provider allowance ownership for credential %s: %w", credential.ID, errOwnership)
-			}
-			for _, allowance := range credentialAllowances {
-				if errAppend := appendUnique(allowance.ID, allowance, allowanceByID, &allowances); errAppend != nil {
-					return catalog.Snapshot{}, errAppend
-				}
+		for _, allowance := range credentialMetadata.Allowances {
+			if errAppend := appendUnique(allowance.ID, allowance, allowanceByID, &allowances); errAppend != nil {
+				return catalog.Snapshot{}, errAppend
 			}
 		}
 	}
@@ -207,15 +322,18 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 		revision = currentSnapshot.Revision + 1
 	}
 	snapshot := catalog.Snapshot{
-		ProviderInstanceID: instance.ID,
-		Models:             append([]catalog.ProviderModel(nil), discovery.Models...),
-		Offerings:          append([]catalog.ModelOffering(nil), discovery.Offerings...),
-		Profiles:           append([]catalog.ExecutionProfile(nil), discovery.Profiles...),
-		Entitlements:       entitlements,
-		Plans:              plans,
-		Allowances:         allowances,
-		Revision:           revision,
-		ObservedAt:         discovery.ObservedAt,
+		ProviderInstanceID:  instance.ID,
+		Models:              append([]catalog.ProviderModel(nil), discovery.Models...),
+		Offerings:           append([]catalog.ModelOffering(nil), discovery.Offerings...),
+		Profiles:            append([]catalog.ExecutionProfile(nil), discovery.Profiles...),
+		Services:            append([]catalog.ProviderService(nil), currentSnapshot.Services...),
+		ServiceOfferings:    append([]catalog.ServiceOffering(nil), currentSnapshot.ServiceOfferings...),
+		Entitlements:        entitlements,
+		ServiceEntitlements: serviceEntitlements,
+		Plans:               plans,
+		Allowances:          allowances,
+		Revision:            revision,
+		ObservedAt:          discovery.ObservedAt,
 	}
 	if errValidate := snapshot.Validate(); errValidate != nil {
 		return catalog.Snapshot{}, errValidate
@@ -231,9 +349,36 @@ func (s *Service) Refresh(ctx context.Context, instanceID string, now time.Time)
 	return snapshot, nil
 }
 
+// prepareCredential refreshes only active, refreshable credentials whose known expiry is inside the safety lead time.
+// prepareCredential 仅刷新已启用、可刷新且已知到期时间进入安全提前量的凭据。
+func (s *Service) prepareCredential(ctx context.Context, definition providerconfig.ProviderDefinition, credential providerconfig.Credential, now time.Time) (providerconfig.Credential, error) {
+	if credential.Status != providerconfig.CredentialActive || credential.ExpiresAt == nil || credential.ExpiresAt.After(now.Add(credentialRefreshLeadTime)) {
+		return credential, nil
+	}
+	authMethod, authMethodExists := definition.AuthMethod(credential.AuthMethodID)
+	if !authMethodExists || !authMethod.Refreshable {
+		return credential, nil
+	}
+	refresher, refresherExists := s.credentialRefreshers[definition.ID]
+	if !refresherExists {
+		return credential, nil
+	}
+	refreshed, errRefresh := refresher.RefreshCredential(ctx, credential.ProviderInstanceID, credential.ID)
+	if errRefresh != nil {
+		return providerconfig.Credential{}, errRefresh
+	}
+	if refreshed.ID != credential.ID || refreshed.ProviderInstanceID != credential.ProviderInstanceID || refreshed.AuthMethodID != credential.AuthMethodID {
+		return providerconfig.Credential{}, errors.New("credential refresher changed immutable ownership")
+	}
+	if !refreshed.RuntimeEligibleAt(now) {
+		return providerconfig.Credential{}, errors.New("credential refresher returned an ineligible credential")
+	}
+	return refreshed, nil
+}
+
 // validateCredentialMetadataOwnership verifies that one reader cannot attach account metadata to another credential or unbound shared scope.
 // validateCredentialMetadataOwnership 校验一个读取器不能把账号元数据挂到其他凭据或未绑定的共享作用域。
-func validateCredentialMetadataOwnership(credential providerconfig.Credential, plan *catalog.PlanSnapshot, entitlements []catalog.ModelEntitlement, allowances []catalog.AllowanceSnapshot) error {
+func validateCredentialMetadataOwnership(credential providerconfig.Credential, plan *catalog.PlanSnapshot, entitlements []catalog.ModelEntitlement, serviceEntitlements []catalog.ServiceEntitlement, allowances []catalog.AllowanceSnapshot) error {
 	if plan != nil {
 		if plan.ProviderInstanceID != credential.ProviderInstanceID {
 			return fmt.Errorf("plan %s belongs to provider instance %s, not %s", plan.ID, plan.ProviderInstanceID, credential.ProviderInstanceID)
@@ -248,6 +393,14 @@ func validateCredentialMetadataOwnership(credential providerconfig.Credential, p
 		}
 		if entitlement.CredentialID != credential.ID {
 			return fmt.Errorf("entitlement %s belongs to credential %s, not %s", entitlement.ID, entitlement.CredentialID, credential.ID)
+		}
+	}
+	for _, entitlement := range serviceEntitlements {
+		if entitlement.ProviderInstanceID != credential.ProviderInstanceID {
+			return fmt.Errorf("service entitlement %s belongs to provider instance %s, not %s", entitlement.ID, entitlement.ProviderInstanceID, credential.ProviderInstanceID)
+		}
+		if entitlement.CredentialID != credential.ID {
+			return fmt.Errorf("service entitlement %s belongs to credential %s, not %s", entitlement.ID, entitlement.CredentialID, credential.ID)
 		}
 	}
 	for _, allowance := range allowances {
@@ -266,6 +419,57 @@ func validateCredentialMetadataOwnership(credential providerconfig.Credential, p
 		}
 	}
 	return nil
+}
+
+// preserveCredentialMetadata retains only unexpired last-known-good account facts after one credential refresh failure.
+// preserveCredentialMetadata 在单个凭据刷新失败后仅保留未过期的最后可信账号事实。
+func preserveCredentialMetadata(credential providerconfig.Credential, current catalog.Snapshot, now time.Time, planByID map[string]catalog.PlanSnapshot, plans *[]catalog.PlanSnapshot, entitlementByID map[string]catalog.ModelEntitlement, entitlements *[]catalog.ModelEntitlement, allowanceByID map[string]catalog.AllowanceSnapshot, allowances *[]catalog.AllowanceSnapshot) error {
+	for _, plan := range current.Plans {
+		if plan.CredentialID == credential.ID && metadataCurrent(plan.ObservedAt, plan.ExpiresAt, now) {
+			if errAppend := appendUnique(plan.ID, plan, planByID, plans); errAppend != nil {
+				return errAppend
+			}
+		}
+	}
+	for _, entitlement := range current.Entitlements {
+		if entitlement.CredentialID == credential.ID && metadataCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, now) {
+			if errAppend := appendUnique(entitlement.ID, entitlement, entitlementByID, entitlements); errAppend != nil {
+				return errAppend
+			}
+		}
+	}
+	for _, allowance := range current.Allowances {
+		owned := allowance.Scope == catalog.ScopeCredential && allowance.ScopeID == credential.ID
+		if !owned {
+			owned = credentialOwnsSharedAllowanceScope(credential, allowance)
+		}
+		if owned && metadataCurrent(allowance.ObservedAt, allowance.ExpiresAt, now) {
+			if errAppend := appendUnique(allowance.ID, allowance, allowanceByID, allowances); errAppend != nil {
+				return errAppend
+			}
+		}
+	}
+	return nil
+}
+
+// metadataCurrent reports whether provider, token, system, or operator evidence remains current.
+// metadataCurrent 报告供应商、Token、系统或操作员证据是否仍然有效。
+func metadataCurrent(observedAt time.Time, expiresAt time.Time, now time.Time) bool {
+	return !observedAt.IsZero() && !observedAt.After(now) && (expiresAt.IsZero() || expiresAt.After(now))
+}
+
+// removeCredentialServiceEntitlements replaces one credential's prior service facts before appending a fresh atomic observation.
+// removeCredentialServiceEntitlements 在追加新的原子观测前替换一个凭据之前的服务事实。
+func removeCredentialServiceEntitlements(current []catalog.ServiceEntitlement, byID map[string]catalog.ServiceEntitlement, credentialID string) []catalog.ServiceEntitlement {
+	filtered := make([]catalog.ServiceEntitlement, 0, len(current))
+	for _, entitlement := range current {
+		if entitlement.CredentialID == credentialID {
+			delete(byID, entitlement.ID)
+			continue
+		}
+		filtered = append(filtered, entitlement)
+	}
+	return filtered
 }
 
 // credentialOwnsSharedAllowanceScope reports whether one provider-reported shared allowance matches an exact stored credential scope reference.

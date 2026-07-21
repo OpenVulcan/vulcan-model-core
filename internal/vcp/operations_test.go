@@ -165,9 +165,15 @@ func TestEveryOperationAcceptsOnlyItsOwnPayload(t *testing.T) {
 	conversation := validConversationExecutionRequest().Payload.Conversation
 	search := validSearchExecutionRequest().Payload.SearchWeb
 	cases := []struct {
-		name      string
+		// name labels the closed operation test case.
+		// name 标记封闭操作测试场景。
+		name string
+		// operation is the exact operation discriminator.
+		// operation 是精确操作判别值。
 		operation OperationKind
-		payload   OperationPayload
+		// payload contains the matching typed union member.
+		// payload 包含匹配的类型化联合成员。
+		payload OperationPayload
 	}{
 		{name: "conversation", operation: OperationConversationRespond, payload: OperationPayload{Conversation: conversation}},
 		{name: "media analyze", operation: OperationMediaAnalyze, payload: OperationPayload{MediaAnalyze: &MediaAnalyzeOperation{Task: MediaAnalyzeDescribe, Inputs: []MediaInput{imageUnderstanding}}}},

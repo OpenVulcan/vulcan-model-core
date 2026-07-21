@@ -117,6 +117,7 @@ func TestExecutionStorePersistsIdempotencyEventsAndPrivateTaskAffinity(t *testin
 	queued.Status = execution.StatusQueued
 	queued.UpdatedAt = now.Add(time.Second)
 	queued.Revision = 2
+	queued.Attempts = []execution.Attempt{{Sequence: 1, Target: record.Target, StartedAt: now, EndedAt: now.Add(time.Second), Succeeded: true, SemanticOutput: true}}
 	queued.ProviderTask = &execution.ProviderTaskSnapshot{
 		ProviderTaskID: "upstream-secret-task", Target: record.Target,
 		Definition: providerconfig.ProviderDefinition{ID: record.Target.ProviderDefinitionID},
@@ -128,7 +129,7 @@ func TestExecutionStorePersistsIdempotencyEventsAndPrivateTaskAffinity(t *testin
 		t.Fatalf("save queued task: %v", errSave)
 	}
 	reopened, errGet := store.Get(ctx, record.OwnerAPIKeyID, record.ID)
-	if errGet != nil || reopened.ProviderTask == nil || reopened.ProviderTask.ProviderTaskID != "upstream-secret-task" || reopened.ProviderTask.Target.CredentialID != record.Target.CredentialID {
+	if errGet != nil || reopened.ProviderTask == nil || reopened.ProviderTask.ProviderTaskID != "upstream-secret-task" || reopened.ProviderTask.Target.CredentialID != record.Target.CredentialID || len(reopened.Attempts) != 1 || !reopened.Attempts[0].Succeeded {
 		t.Fatalf("reopened task=%+v error=%v", reopened.ProviderTask, errGet)
 	}
 	publicJSON, errJSON := json.Marshal(reopened)

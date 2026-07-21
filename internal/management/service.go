@@ -54,6 +54,12 @@ type OnboardSystemProviderInput struct {
 	// ScopeRefs contains only provider-reported scopes established by a server-owned authorization flow.
 	// ScopeRefs 仅包含由服务端拥有授权流程建立的供应商报告作用域。
 	ScopeRefs []providerconfig.ScopeReference
+	// CredentialPriority orders this account within the provider instance; lower values win.
+	// CredentialPriority 在供应商实例内排列该账号；较小值优先。
+	CredentialPriority int
+	// PlanOptionID selects one code-owned manual plan when the authentication method requires it.
+	// PlanOptionID 在认证方式要求时选择一个代码拥有的人工套餐。
+	PlanOptionID string
 	// EndpointParameters contains non-secret values declared by the selected system endpoint preset.
 	// EndpointParameters 包含所选系统端点预设声明的非秘密值。
 	EndpointParameters []providerconfig.EndpointParameterValue
@@ -347,6 +353,9 @@ func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystem
 		return providerconfig.SystemOnboarding{}, errSave
 	}
 	snapshot, errCatalog := buildSystemCatalog(onboarding, definition, s.now().UTC())
+	if errCatalog == nil && definition.ID == "system_kimi_coding_plan" && onboarding.Credential.DeclaredPlan != nil {
+		snapshot, errCatalog = providerkimi.ApplyDeclaredMembership(snapshot, onboarding.Credential)
+	}
 	if errCatalog == nil && serverAcquiredProvider == "codex" {
 		snapshot, errCatalog = appendInitialCodexMetadata(snapshot, onboarding, input.Secret)
 	}
@@ -403,9 +412,15 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 	if handle == "" {
 		handle = "provider-" + strings.TrimPrefix(instanceID, "pvi_")
 	}
+	// declaredPlan preserves the exact operator choice separately from provider-reported metadata.
+	// declaredPlan 将精确的操作员选择与供应商报告的元数据分开保存。
+	var declaredPlan *providerconfig.DeclaredPlanSelection
+	if input.PlanOptionID != "" {
+		declaredPlan = &providerconfig.DeclaredPlanSelection{PlanOptionID: input.PlanOptionID, DeclaredAt: now, Revision: 1}
+	}
 	onboarding := providerconfig.SystemOnboarding{
 		Instance:   providerconfig.ProviderInstance{ID: instanceID, DefinitionID: definition.ID, Handle: handle, DisplayName: input.DisplayName, Status: providerconfig.LifecycleReady, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now},
-		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: input.AuthMethodID, Label: input.CredentialLabel, PrincipalKey: input.PrincipalKey, SecretRef: secretReference, Fingerprint: credentialFingerprint(input.Secret), Status: providerconfig.CredentialActive, ScopeRefs: append([]providerconfig.ScopeReference(nil), input.ScopeRefs...), ExpiresAt: input.credentialExpiresAt, Revision: 1},
+		Credential: providerconfig.Credential{ID: credentialID, ProviderInstanceID: instanceID, AuthMethodID: input.AuthMethodID, Label: input.CredentialLabel, PrincipalKey: input.PrincipalKey, SecretRef: secretReference, Fingerprint: credentialFingerprint(input.Secret), Status: providerconfig.CredentialActive, ScopeRefs: append([]providerconfig.ScopeReference(nil), input.ScopeRefs...), ExpiresAt: input.credentialExpiresAt, Priority: input.CredentialPriority, DeclaredPlan: declaredPlan, Revision: 1},
 	}
 	if len(definition.EndpointPresets) != 1 {
 		return providerconfig.SystemOnboarding{}, fmt.Errorf("provider definition requires exactly one onboarding endpoint preset")
@@ -1170,6 +1185,23 @@ type RotateCredentialSecretInput struct {
 	Secret []byte
 }
 
+// ReauthorizeCredentialInput contains one server-acquired replacement token and its exact acquisition method.
+// ReauthorizeCredentialInput 包含一个服务端获取的替代 Token 及其精确获取方式。
+type ReauthorizeCredentialInput struct {
+	// ProviderInstanceID owns the existing credential.
+	// ProviderInstanceID 拥有既有凭据。
+	ProviderInstanceID string
+	// CredentialID identifies the credential whose secret is replaced.
+	// CredentialID 标识需要替换 Secret 的凭据。
+	CredentialID string
+	// AuthMethodID binds the completed flow to the original credential method.
+	// AuthMethodID 将已完成流程绑定到原始凭据方式。
+	AuthMethodID string
+	// Secret is the validated provider-issued protected document.
+	// Secret 是经过校验的供应商签发受保护文档。
+	Secret []byte
+}
+
 // RotateCredentialSecret writes a replacement secret before changing metadata and cleans up the old secret afterwards.
 // RotateCredentialSecret 在变更元数据前写入替换 Secret，并在之后清理旧 Secret。
 func (s *Service) RotateCredentialSecret(ctx context.Context, input RotateCredentialSecretInput) (providerconfig.Credential, error) {
@@ -1184,6 +1216,147 @@ func (s *Service) RotateCredentialSecret(ctx context.Context, input RotateCreden
 		return providerconfig.Credential{}, fmt.Errorf("replacement provider credential secret is required")
 	}
 	return persistCredentialSecretReplacement(ctx, s.configurations, s.secrets, credential, input.Secret)
+}
+
+// ReauthorizeCredential replaces one provider-owned token only after immutable account identity validation.
+// ReauthorizeCredential 仅在不可变账号身份校验后替换一个供应商拥有的 Token。
+func (s *Service) ReauthorizeCredential(ctx context.Context, input ReauthorizeCredentialInput) (providerconfig.Credential, error) {
+	credential, errCredential := s.credential(ctx, input.ProviderInstanceID, input.CredentialID)
+	if errCredential != nil {
+		return providerconfig.Credential{}, errCredential
+	}
+	if credential.AuthMethodID != input.AuthMethodID {
+		return providerconfig.Credential{}, errors.New("reauthorization method does not match the existing credential")
+	}
+	instance, errInstance := s.configurations.GetInstance(ctx, input.ProviderInstanceID)
+	if errInstance != nil {
+		return providerconfig.Credential{}, errInstance
+	}
+	if len(input.Secret) == 0 {
+		return providerconfig.Credential{}, errors.New("reauthorization credential is required")
+	}
+	var expiresAt *time.Time
+	switch instance.DefinitionID {
+	case "system_kimi_coding_plan":
+		if input.AuthMethodID != "device_flow" {
+			return providerconfig.Credential{}, errors.New("Kimi reauthorization requires device_flow")
+		}
+		token, errToken := providerkimi.UnmarshalToken(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		if credential.PrincipalKey != "" || len(credential.ScopeRefs) != 0 {
+			return providerconfig.Credential{}, errors.New("Kimi credential identity is inconsistent")
+		}
+		expiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "system_xai_oauth":
+		token, errToken := providerxai.UnmarshalToken(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		principal := token.Subject
+		if principal == "" {
+			principal = token.Email
+		}
+		if principal == "" || principal != credential.PrincipalKey {
+			return providerconfig.Credential{}, errors.New("xAI reauthorization account does not match the existing credential")
+		}
+		expiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "system_openai_codex":
+		token, errToken := provideropenai.UnmarshalCodexToken(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		if token.AccountID == "" || token.AccountID != credential.PrincipalKey {
+			return providerconfig.Credential{}, errors.New("Codex reauthorization account does not match the existing credential")
+		}
+		expiresAt = providerTokenExpiry(token.ExpiresAt.Unix())
+	case "system_anthropic_claude_code":
+		token, errToken := provideranthropic.UnmarshalClaudeToken(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		principal := token.AccountID
+		if principal == "" {
+			principal = token.Email
+		}
+		if principal == "" || principal != credential.PrincipalKey {
+			return providerconfig.Credential{}, errors.New("Claude reauthorization account does not match the existing credential")
+		}
+		expectedScopes := []providerconfig.ScopeReference(nil)
+		if token.OrganizationID != "" {
+			expectedScopes = []providerconfig.ScopeReference{{Kind: "organization", ID: token.OrganizationID}}
+		}
+		if !slices.Equal(expectedScopes, credential.ScopeRefs) {
+			return providerconfig.Credential{}, errors.New("Claude reauthorization organization does not match the existing credential")
+		}
+		expiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "system_google_antigravity":
+		token, errToken := providergoogle.UnmarshalAntigravityToken(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		expectedScopes := []providerconfig.ScopeReference{{Kind: "project", ID: token.ProjectID}}
+		if token.Email == "" || token.Email != credential.PrincipalKey || !slices.Equal(expectedScopes, credential.ScopeRefs) {
+			return providerconfig.Credential{}, errors.New("Antigravity reauthorization account or project does not match the existing credential")
+		}
+		expiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "system_google_vertex":
+		if input.AuthMethodID != "service_account" {
+			return providerconfig.Credential{}, errors.New("Vertex reauthorization requires service_account")
+		}
+		vertexCredential, errToken := providergoogle.UnmarshalVertexCredential(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		currentProtectedValue, errCurrentSecret := s.secrets.Get(ctx, credential.SecretRef)
+		if errCurrentSecret != nil {
+			return providerconfig.Credential{}, errCurrentSecret
+		}
+		currentVertexCredential, errCurrentCredential := providergoogle.UnmarshalVertexCredential(currentProtectedValue)
+		clear(currentProtectedValue)
+		if errCurrentCredential != nil {
+			return providerconfig.Credential{}, errCurrentCredential
+		}
+		expectedScopes := []providerconfig.ScopeReference{{Kind: "project", ID: vertexCredential.ProjectID}}
+		if vertexCredential.Email == "" || vertexCredential.Email != credential.PrincipalKey || !slices.Equal(expectedScopes, credential.ScopeRefs) {
+			return providerconfig.Credential{}, errors.New("Vertex replacement account or project does not match the existing credential")
+		}
+		// The endpoint region belongs to the immutable instance route, so credential rotation preserves the verified current location.
+		// 入口区域属于不可变实例路由，因此凭据轮换保留已验证的当前区域。
+		vertexCredential.Location = currentVertexCredential.Location
+		normalizedReplacement, errReplacement := providergoogle.MarshalVertexCredential(vertexCredential)
+		if errReplacement != nil {
+			return providerconfig.Credential{}, errReplacement
+		}
+		defer clear(normalizedReplacement)
+		input.Secret = normalizedReplacement
+	default:
+		return providerconfig.Credential{}, errors.New("provider credential does not support server-owned reauthorization")
+	}
+	credential.ExpiresAt = expiresAt
+	credential.Status = providerconfig.CredentialActive
+	credential.CoolingUntil = nil
+	return persistCredentialSecretReplacement(ctx, s.configurations, s.secrets, credential, input.Secret)
+}
+
+// DeleteCredential removes one credential graph and its protected secret, deleting an empty instance catalog.
+// DeleteCredential 删除一个凭据图及其受保护 Secret，并删除空实例目录。
+func (s *Service) DeleteCredential(ctx context.Context, providerInstanceID string, credentialID string) (providerconfig.CredentialDeletion, error) {
+	deletion, errDelete := s.configurations.DeleteCredentialGraph(ctx, providerInstanceID, credentialID)
+	if errDelete != nil {
+		return providerconfig.CredentialDeletion{}, errDelete
+	}
+	cleanupContext := context.WithoutCancel(ctx)
+	if deletion.InstanceDeleted {
+		if errCatalog := s.catalogs.Delete(cleanupContext, providerInstanceID); errCatalog != nil && !errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
+			return deletion, fmt.Errorf("deleted credential configuration but could not delete provider catalog: %w", errCatalog)
+		}
+	}
+	if errSecret := s.secrets.Delete(cleanupContext, deletion.Credential.SecretRef); errSecret != nil {
+		return deletion, fmt.Errorf("deleted credential configuration but could not delete protected secret: %w", errSecret)
+	}
+	return deletion, nil
 }
 
 // validateDirectSecretAuthMethod permits operator-supplied bytes only for operator-managed authentication methods declared by the exact instance definition.

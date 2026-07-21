@@ -28,6 +28,7 @@ import (
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routingstate"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
@@ -137,7 +138,8 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 		t.Fatalf("create configuration store: %v", errConfigurations)
 	}
 	catalogs := catalog.NewMemoryStore()
-	targets, errTargets := resolve.New(configurations, catalogs)
+	routingStates := routingstate.NewMemoryStore(time.Now().UTC())
+	targets, errTargets := resolve.NewWithRuntimeState(configurations, catalogs, routingStates)
 	if errTargets != nil {
 		t.Fatalf("create target resolver: %v", errTargets)
 	}
@@ -148,6 +150,10 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 	commands, errCommands := management.NewService(configurations, secret.NewMemoryStore(), catalogs)
 	if errCommands != nil {
 		t.Fatalf("create management command service: %v", errCommands)
+	}
+	routingManagement, errRoutingManagement := management.NewRoutingService(configurations, catalogs, routingStates)
+	if errRoutingManagement != nil {
+		t.Fatalf("create routing management service: %v", errRoutingManagement)
 	}
 	modelAccess, errModelAccess := management.NewModelAccessService(configurations, catalogs)
 	if errModelAccess != nil {
@@ -183,6 +189,7 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 		InputPlans:            staticControlAccess{},
 		Executions:            staticExecutionAccess{},
 		Targets:               targets,
+		Routing:               routingManagement,
 		KimiDeviceFlows:       kimiFlows,
 		XAIDeviceFlows:        xaiFlows,
 		CodexDeviceFlows:      codexDeviceFlows,
@@ -242,6 +249,44 @@ func TestSystemProviderOnboardingHTTPCommitsFixedKimiCatalog(t *testing.T) {
 	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
 	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://api.moonshot.cn") || strings.Contains(endpoints.Body.String(), "private-kimi-key") {
 		t.Fatalf("endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
+	}
+}
+
+// TestKimiManualPlanAndRoutingHTTPRoundTrip verifies plan selection, account priority, and scheduling settings through authenticated routes.
+// TestKimiManualPlanAndRoutingHTTPRoundTrip 通过认证路由验证套餐选择、账号优先级与调度设置。
+func TestKimiManualPlanAndRoutingHTTPRoundTrip(t *testing.T) {
+	server := newControlPlaneIntegrationServer(t)
+	groups := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-groups", "admin-control-key", "")
+	if groups.Code != http.StatusOK || !strings.Contains(groups.Body.String(), `"plan_acquisition":"manual_required"`) || !strings.Contains(groups.Body.String(), `"id":"kimi_allegro"`) {
+		t.Fatalf("Kimi plan discovery status=%d body=%s", groups.Code, groups.Body.String())
+	}
+	missingPlan := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_coding_plan","name":"Kimi Plan","auth_method_id":"api_key","secret":"private-kimi-plan-key"}`)
+	if missingPlan.Code != http.StatusBadRequest {
+		t.Fatalf("missing Kimi plan status=%d body=%s", missingPlan.Code, missingPlan.Body.String())
+	}
+	onboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_coding_plan","name":"Kimi Plan","auth_method_id":"api_key","secret":"private-kimi-plan-key","plan_option_id":"kimi_allegro"}`)
+	if onboarding.Code != http.StatusCreated || strings.Contains(onboarding.Body.String(), "private-kimi-plan-key") {
+		t.Fatalf("Kimi plan onboarding status=%d body=%s", onboarding.Code, onboarding.Body.String())
+	}
+	var created onboardSystemProviderResponse
+	if errDecode := json.Unmarshal(onboarding.Body.Bytes(), &created); errDecode != nil {
+		t.Fatalf("decode Kimi plan onboarding: %v", errDecode)
+	}
+	settings := serveControlRequest(server, http.MethodPut, "/vulcan/manage/settings/routing", "admin-control-key", `{"strategy":"fill_first"}`)
+	if settings.Code != http.StatusOK || !strings.Contains(settings.Body.String(), `"strategy":"fill_first"`) {
+		t.Fatalf("routing settings status=%d body=%s", settings.Code, settings.Body.String())
+	}
+	priority := serveControlRequest(server, http.MethodPut, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/credentials/"+created.CredentialID+"/priority", "admin-control-key", `{"priority":4}`)
+	if priority.Code != http.StatusOK || !strings.Contains(priority.Body.String(), `"priority":4`) {
+		t.Fatalf("credential priority status=%d body=%s", priority.Code, priority.Body.String())
+	}
+	plan := serveControlRequest(server, http.MethodPut, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/credentials/"+created.CredentialID+"/plan", "admin-control-key", `{"plan_option_id":"kimi_andante"}`)
+	if plan.Code != http.StatusOK || !strings.Contains(plan.Body.String(), `"plan_option_id":"kimi_andante"`) {
+		t.Fatalf("credential plan status=%d body=%s", plan.Code, plan.Body.String())
+	}
+	catalogResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/catalog", "admin-control-key", "")
+	if catalogResponse.Code != http.StatusOK || !strings.Contains(catalogResponse.Body.String(), `"plan_code":"kimi_andante"`) || !strings.Contains(catalogResponse.Body.String(), `"authorization_status":"denied"`) || !strings.Contains(catalogResponse.Body.String(), `"reasoning_efforts":["low","high","max"]`) {
+		t.Fatalf("updated Kimi catalog status=%d body=%s", catalogResponse.Code, catalogResponse.Body.String())
 	}
 }
 
@@ -490,11 +535,11 @@ func TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate(t *testin
 	if apiKey.Code != http.StatusCreated || !strings.Contains(apiKey.Body.String(), "call-control-key") {
 		t.Fatalf("create call-plane key status=%d body=%s", apiKey.Code, apiKey.Body.String())
 	}
-	managementCall := serveControlRequest(server, http.MethodGet, "/vulcan/v1/models", "admin-control-key", "")
+	managementCall := serveControlRequest(server, http.MethodPost, "/vulcan/v1/info", "admin-control-key", `{"get":"models"}`)
 	if managementCall.Code != http.StatusUnauthorized {
 		t.Fatalf("call route with management key status=%d, want %d", managementCall.Code, http.StatusUnauthorized)
 	}
-	callModels := serveControlRequest(server, http.MethodGet, "/vulcan/v1/models", "call-control-key", "")
+	callModels := serveControlRequest(server, http.MethodPost, "/vulcan/v1/info", "call-control-key", `{"get":"models"}`)
 	if callModels.Code != http.StatusOK || !strings.Contains(callModels.Body.String(), "model_control") {
 		t.Fatalf("call model list status=%d body=%s", callModels.Code, callModels.Body.String())
 	}
@@ -502,7 +547,7 @@ func TestControlPlaneHTTPMutationsKeepSecretsScopedAndCallKeysSeparate(t *testin
 	if disableModel.Code != http.StatusOK {
 		t.Fatalf("disable model status=%d body=%s", disableModel.Code, disableModel.Body.String())
 	}
-	callModels = serveControlRequest(server, http.MethodGet, "/vulcan/v1/models", "call-control-key", "")
+	callModels = serveControlRequest(server, http.MethodPost, "/vulcan/v1/info", "call-control-key", `{"get":"models"}`)
 	if callModels.Code != http.StatusOK || strings.Contains(callModels.Body.String(), "model_control") {
 		t.Fatalf("disabled call model list status=%d body=%s", callModels.Code, callModels.Body.String())
 	}
@@ -523,6 +568,52 @@ func TestKimiDeviceFlowHTTPKeepsTokensServerSideAndOnboardsCoding(t *testing.T) 
 	}
 	if !flows.wasCancelled("flow-test") {
 		t.Fatal("completed device flow was not consumed")
+	}
+}
+
+// TestKimiDeviceFlowHTTPReauthorizesExistingCredential verifies target identifiers replace one credential instead of creating a duplicate instance.
+// TestKimiDeviceFlowHTTPReauthorizesExistingCredential 验证目标标识会替换一个凭据而不是创建重复实例。
+func TestKimiDeviceFlowHTTPReauthorizesExistingCredential(t *testing.T) {
+	flows := &staticKimiDeviceFlows{token: providerkimi.Token{AccessToken: "device-access-before", RefreshToken: "device-refresh-before", TokenType: "Bearer", DeviceID: "device-id", Type: "kimi"}}
+	server := newControlPlaneIntegrationServerWithFlows(t, flows)
+	onboarded := serveControlRequest(server, http.MethodPost, "/vulcan/manage/kimi/device-flows/flow-test/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_coding_plan","name":"Kimi Account"}`)
+	if onboarded.Code != http.StatusCreated {
+		t.Fatalf("initial Kimi onboarding status=%d body=%s", onboarded.Code, onboarded.Body.String())
+	}
+	var created onboardSystemProviderResponse
+	if errDecode := json.NewDecoder(onboarded.Body).Decode(&created); errDecode != nil {
+		t.Fatalf("decode initial Kimi onboarding: %v", errDecode)
+	}
+	flows.token = providerkimi.Token{AccessToken: "device-access-after", RefreshToken: "device-refresh-after", TokenType: "Bearer", DeviceID: "device-id", Type: "kimi"}
+	reauthorizationBody, errBody := json.Marshal(map[string]string{
+		"provider_definition_id": "system_kimi_coding_plan",
+		"name":                   "",
+		"provider_instance_id":   created.ProviderInstanceID,
+		"credential_id":          created.CredentialID,
+	})
+	if errBody != nil {
+		t.Fatalf("encode Kimi reauthorization body: %v", errBody)
+	}
+	reauthorized := serveControlRequest(server, http.MethodPost, "/vulcan/manage/kimi/device-flows/flow-test/onboard", "admin-control-key", string(reauthorizationBody))
+	if reauthorized.Code != http.StatusOK || strings.Contains(reauthorized.Body.String(), "device-access-after") || strings.Contains(reauthorized.Body.String(), "device-refresh-after") {
+		t.Fatalf("Kimi reauthorization status=%d body=%s", reauthorized.Code, reauthorized.Body.String())
+	}
+	var replaced onboardSystemProviderResponse
+	if errDecode := json.NewDecoder(reauthorized.Body).Decode(&replaced); errDecode != nil {
+		t.Fatalf("decode Kimi reauthorization: %v", errDecode)
+	}
+	if replaced.ProviderInstanceID != created.ProviderInstanceID || replaced.CredentialID != created.CredentialID || replaced.EndpointIDs == nil || replaced.BindingIDs == nil || len(replaced.EndpointIDs) != 0 || len(replaced.BindingIDs) != 0 {
+		t.Fatalf("Kimi reauthorization response=%#v", replaced)
+	}
+	instancesResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances", "admin-control-key", "")
+	var instances providerInstanceListResponse
+	if errDecode := json.NewDecoder(instancesResponse.Body).Decode(&instances); errDecode != nil || len(instances.ProviderInstances) != 1 {
+		t.Fatalf("provider instances after reauthorization=%#v error=%v", instances, errDecode)
+	}
+	credentialsResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/credentials", "admin-control-key", "")
+	var credentials credentialListResponse
+	if errDecode := json.NewDecoder(credentialsResponse.Body).Decode(&credentials); errDecode != nil || len(credentials.Credentials) != 1 || credentials.Credentials[0].ID != created.CredentialID || credentials.Credentials[0].Revision != 2 {
+		t.Fatalf("Kimi credentials after reauthorization=%#v error=%v", credentials, errDecode)
 	}
 }
 

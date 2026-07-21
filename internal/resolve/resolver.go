@@ -10,6 +10,8 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routing"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routingstate"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -22,15 +24,38 @@ type Resolver struct {
 	// catalogs resolves atomic provider model and allowance snapshots.
 	// catalogs 解析原子供应商模型和资源快照。
 	catalogs catalog.Store
+	// selector applies CLIProxyAPI-derived balanced or first-account scheduling after eligibility filtering.
+	// selector 在资格过滤后应用源自 CLIProxyAPI 的均衡或首账号调度。
+	selector *routing.Selector
+	// runtimeState supplies persistent global policy and credential-model cooldown state when configured.
+	// runtimeState 在配置后提供持久化全局策略与凭据模型冷却状态。
+	runtimeState routingstate.Store
+}
+
+// runtimeScopeIdentity identifies one exact provider-owned runtime availability boundary.
+// runtimeScopeIdentity 标识一个精确的供应商所属运行时可用性边界。
+type runtimeScopeIdentity struct {
+	// scope is the classified runtime resource boundary.
+	// scope 是分类后的运行时资源边界。
+	scope routingstate.RuntimeScope
+	// scopeID is the immutable identifier inside that boundary.
+	// scopeID 是该边界内的不可变标识。
+	scopeID string
 }
 
 // New creates a provider-scoped target resolver without any protocol implementation.
 // New 创建一个不包含任何协议实现的供应商作用域目标解析器。
 func New(configurations providerconfig.Store, catalogs catalog.Store) (*Resolver, error) {
+	return NewWithRuntimeState(configurations, catalogs, nil)
+}
+
+// NewWithRuntimeState creates a resolver that applies persistent global routing and model cooldown state.
+// NewWithRuntimeState 创建一个应用持久化全局路由与模型冷却状态的解析器。
+func NewWithRuntimeState(configurations providerconfig.Store, catalogs catalog.Store, runtimeState routingstate.Store) (*Resolver, error) {
 	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
 		return nil, errors.New("provider configuration and catalog stores are required")
 	}
-	return &Resolver{configurations: configurations, catalogs: catalogs}, nil
+	return &Resolver{configurations: configurations, catalogs: catalogs, selector: routing.NewSelector(), runtimeState: runtimeState}, nil
 }
 
 // SummarizeSnapshot derives client-safe credential pool state for every execution profile.
@@ -72,11 +97,16 @@ func (r *Resolver) SummarizeSnapshot(ctx context.Context, snapshot catalog.Snaps
 	for _, offering := range snapshot.Offerings {
 		offeringsByID[offering.ID] = offering
 	}
+	servicesByID := make(map[string]catalog.ProviderService, len(snapshot.Services))
+	for _, service := range snapshot.Services {
+		servicesByID[service.ID] = service
+	}
+	serviceOfferingsByID := make(map[string]catalog.ServiceOffering, len(snapshot.ServiceOfferings))
+	for _, offering := range snapshot.ServiceOfferings {
+		serviceOfferingsByID[offering.ID] = offering
+	}
 	pools := make([]catalog.PoolSummary, 0, len(snapshot.Profiles))
 	for _, profile := range snapshot.Profiles {
-		offering := offeringsByID[profile.OfferingID]
-		model := modelsByID[offering.ProviderModelID]
-		entitlements := entitlementsByCredential(snapshot.Entitlements, model.ID)
 		blockingKinds := make(map[catalog.AllowanceKind]struct{})
 		pool := catalog.PoolSummary{
 			ProviderInstanceID:    snapshot.ProviderInstanceID,
@@ -85,37 +115,68 @@ func (r *Resolver) SummarizeSnapshot(ctx context.Context, snapshot catalog.Snaps
 			Revision:              revision,
 			ObservedAt:            now,
 		}
-		for _, credential := range credentials {
-			if !credentialBoundToReadyEndpoint(credential.ID, offering, model.ID, bindings, endpointByID) {
-				continue
-			}
-			entitlement, entitled := entitlementForProfile(model, profile, entitlements[credential.ID], now)
-			if !entitled {
-				continue
-			}
-			pool.EntitledCredentials++
-			if credential.Status == providerconfig.CredentialCooling && credential.CoolingUntil != nil && credential.CoolingUntil.After(now) {
-				pool.CoolingCredentials++
-				continue
-			}
-			if !credential.RuntimeEligibleAt(now) {
-				pool.InvalidCredentials++
-				continue
-			}
-			effectiveContext := effectiveContextWindow(profile.Capabilities.Tokens.ContextWindow, entitlement.LimitOverrides.ContextWindow)
-			if profile.Capabilities.Tokens.ContextWindow.Known && (!effectiveContext.Known || effectiveContext.Value < profile.Capabilities.Tokens.ContextWindow.Value) {
-				continue
-			}
-			blocked, earliestResetAt := blockedByAllowance(snapshot.Allowances, credential, model.ID, profile.ID, nil)
-			if len(blocked) > 0 {
-				pool.ExhaustedCredentials++
-				for _, allowanceKind := range blocked {
-					blockingKinds[allowanceKind] = struct{}{}
+		if profile.OfferingID != "" {
+			offering := offeringsByID[profile.OfferingID]
+			model := modelsByID[offering.ProviderModelID]
+			entitlements := entitlementsByCredential(snapshot.Entitlements, model.ID)
+			for _, credential := range credentials {
+				if !credentialBoundToReadyModelEndpoint(credential.ID, offering, model.ID, bindings, endpointByID) {
+					continue
 				}
-				pool.EarliestResetAt = earlierTime(pool.EarliestResetAt, earliestResetAt)
-				continue
+				entitlement, entitled := entitlementForProfile(model, profile, entitlements[credential.ID], now)
+				if !entitled {
+					continue
+				}
+				pool.EntitledCredentials++
+				if !credentialPoolEligible(credential, now, &pool) {
+					continue
+				}
+				effectiveContext := effectiveContextWindow(profile.Capabilities.Tokens.ContextWindow, entitlement.LimitOverrides.ContextWindow)
+				if profile.Capabilities.Tokens.ContextWindow.Known && (!effectiveContext.Known || effectiveContext.Value < profile.Capabilities.Tokens.ContextWindow.Value) {
+					continue
+				}
+				if allowanceBlocksPool(snapshot.Allowances, credential, model.ID, profile.ID, blockingKinds, &pool) {
+					continue
+				}
+				pathEligible, errPath := r.modelPoolPathEligible(ctx, snapshot.ProviderInstanceID, credential, offering, model.ID, bindings, endpointByID, now)
+				if errPath != nil {
+					return nil, errPath
+				}
+				modelEligible, errModel := r.modelRuntimeEligible(ctx, snapshot.ProviderInstanceID, credential.ID, model.ID, now)
+				if errModel != nil {
+					return nil, errModel
+				}
+				if !pathEligible || !modelEligible {
+					pool.CoolingCredentials++
+					continue
+				}
+				pool.ReadyCredentials++
 			}
-			pool.ReadyCredentials++
+		} else {
+			offering := serviceOfferingsByID[profile.ServiceOfferingID]
+			service := servicesByID[offering.ProviderServiceID]
+			entitlements := serviceEntitlementsByCredential(snapshot.ServiceEntitlements, service.ID)
+			for _, credential := range credentials {
+				if !credentialBoundToReadyServiceEndpoint(credential.ID, offering, service.ID, bindings, endpointByID) || !serviceEntitled(service, profile, entitlements[credential.ID], now) {
+					continue
+				}
+				pool.EntitledCredentials++
+				if !credentialPoolEligible(credential, now, &pool) {
+					continue
+				}
+				if allowanceBlocksPool(snapshot.Allowances, credential, service.ID, profile.ID, blockingKinds, &pool) {
+					continue
+				}
+				pathEligible, errPath := r.servicePoolPathEligible(ctx, snapshot.ProviderInstanceID, credential, offering, service.ID, bindings, endpointByID, now)
+				if errPath != nil {
+					return nil, errPath
+				}
+				if !pathEligible {
+					pool.CoolingCredentials++
+					continue
+				}
+				pool.ReadyCredentials++
+			}
 		}
 		pool.BlockingAllowanceKinds = sortedAllowanceKinds(blockingKinds)
 		pools = append(pools, pool)
@@ -126,9 +187,217 @@ func (r *Resolver) SummarizeSnapshot(ctx context.Context, snapshot catalog.Snaps
 	return pools, nil
 }
 
-// credentialBoundToReadyEndpoint reports whether one credential has a usable channel binding.
-// credentialBoundToReadyEndpoint 返回一个凭据是否具有可用通道绑定。
-func credentialBoundToReadyEndpoint(credentialID string, offering catalog.ModelOffering, modelID string, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint) bool {
+// InspectModelContexts returns every model profile and its exact authorized configured accounts without selecting one target.
+// InspectModelContexts 返回每个模型规格及其精确已授权配置账号，且不选择单一目标。
+func (r *Resolver) InspectModelContexts(ctx context.Context, instanceID string, modelID string, now time.Time) ([]ModelContextState, error) {
+	if ctx == nil {
+		return nil, errors.New("context is required")
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+	if instanceID == "" || modelID == "" || now.IsZero() {
+		return nil, errors.New("provider instance, model, and evaluation time are required")
+	}
+	instance, errInstance := r.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return nil, errInstance
+	}
+	if instance.Status != providerconfig.LifecycleReady && instance.Status != providerconfig.LifecycleDegraded {
+		return nil, ErrInstanceNotExecutable
+	}
+	if modelDisabled(instance.DisabledModelIDs, modelID) {
+		return nil, ErrModelDisabled
+	}
+	snapshot, errSnapshot := r.catalogs.Get(ctx, instanceID)
+	if errSnapshot != nil {
+		return nil, errSnapshot
+	}
+	model, modelExists := providerModelByID(snapshot.Models, modelID)
+	if !modelExists {
+		return nil, ErrModelNotFound
+	}
+	credentials, errCredentials := r.configurations.ListCredentials(ctx, instanceID)
+	if errCredentials != nil {
+		return nil, errCredentials
+	}
+	bindings, errBindings := r.configurations.ListBindings(ctx, instanceID)
+	if errBindings != nil {
+		return nil, errBindings
+	}
+	endpoints, errEndpoints := r.configurations.ListEndpoints(ctx, instanceID)
+	if errEndpoints != nil {
+		return nil, errEndpoints
+	}
+	endpointByID := make(map[string]providerconfig.Endpoint, len(endpoints))
+	for _, endpoint := range endpoints {
+		endpointByID[endpoint.ID] = endpoint
+	}
+	offeringByID := make(map[string]catalog.ModelOffering)
+	for _, offering := range snapshot.Offerings {
+		if offering.ProviderModelID == model.ID {
+			offeringByID[offering.ID] = offering
+		}
+	}
+	entitlements := entitlementsByCredential(snapshot.Entitlements, model.ID)
+	contexts := make([]ModelContextState, 0)
+	for _, profile := range snapshot.Profiles {
+		offering, belongsToModel := offeringByID[profile.OfferingID]
+		if !belongsToModel {
+			continue
+		}
+		contextState := ModelContextState{ProfileID: profile.ID, Accounts: make([]ModelContextAccountState, 0)}
+		for _, credential := range credentials {
+			entitlement, entitled := entitlementForProfile(model, profile, entitlements[credential.ID], now)
+			if !entitled {
+				continue
+			}
+			// Explicit provider entitlement proves context ownership even when a local endpoint is currently unavailable; all-bound models still require a configured association.
+			// 显式供应商授权即使本地入口当前不可用也能证明上下文归属；全部绑定模型仍要求存在配置关联。
+			if entitlement.ID == "" && !credentialBoundToModelEndpoint(credential.ID, offering, model.ID, bindings, endpointByID) {
+				continue
+			}
+			effectiveContext := effectiveContextWindow(profile.Capabilities.Tokens.ContextWindow, entitlement.LimitOverrides.ContextWindow)
+			if profile.Capabilities.Tokens.ContextWindow.Known && (!effectiveContext.Known || effectiveContext.Value < profile.Capabilities.Tokens.ContextWindow.Value) {
+				continue
+			}
+			accountState, errState := r.inspectModelContextAccount(ctx, snapshot, credential, offering, model.ID, profile.ID, entitlement.EntitlementClass, effectiveContext, bindings, endpointByID, now)
+			if errState != nil {
+				return nil, errState
+			}
+			contextState.Accounts = append(contextState.Accounts, accountState)
+		}
+		sort.Slice(contextState.Accounts, func(left int, right int) bool {
+			if contextState.Accounts[left].Priority != contextState.Accounts[right].Priority {
+				return contextState.Accounts[left].Priority < contextState.Accounts[right].Priority
+			}
+			return contextState.Accounts[left].CredentialID < contextState.Accounts[right].CredentialID
+		})
+		contexts = append(contexts, contextState)
+	}
+	sort.Slice(contexts, func(left int, right int) bool { return contexts[left].ProfileID < contexts[right].ProfileID })
+	return contexts, nil
+}
+
+// inspectModelContextAccount derives one concrete account state using the same eligibility rules as target selection.
+// inspectModelContextAccount 使用与目标选择相同的资格规则派生一个具体账号状态。
+func (r *Resolver) inspectModelContextAccount(ctx context.Context, snapshot catalog.Snapshot, credential providerconfig.Credential, offering catalog.ModelOffering, modelID string, profileID string, entitlementClass string, effectiveContext catalog.OptionalTokenLimit, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint, now time.Time) (ModelContextAccountState, error) {
+	state := ModelContextAccountState{CredentialID: credential.ID, CredentialStatus: credential.Status, Priority: credential.Priority, EntitlementClass: entitlementClass, EffectiveContextWindow: effectiveContext, RuntimeStatus: ContextAccountUnavailable, CoolingUntil: cloneTimePointer(credential.CoolingUntil)}
+	if credential.Status == providerconfig.CredentialCooling && credential.CoolingUntil != nil && credential.CoolingUntil.After(now) {
+		state.RuntimeStatus = ContextAccountCooling
+		return state, nil
+	}
+	if !credential.RuntimeEligibleAt(now) {
+		state.RuntimeStatus = ContextAccountInvalid
+		return state, nil
+	}
+	blockedKinds, earliestResetAt := blockedByAllowance(snapshot.Allowances, credential, modelID, profileID, nil)
+	state.BlockingAllowanceKinds = blockedKinds
+	state.EarliestResetAt = cloneTimePointer(earliestResetAt)
+	if len(blockedKinds) > 0 {
+		state.RuntimeStatus = ContextAccountExhausted
+		return state, nil
+	}
+	if !credentialBoundToReadyModelEndpoint(credential.ID, offering, modelID, bindings, endpoints) {
+		state.RuntimeStatus = ContextAccountUnavailable
+		return state, nil
+	}
+	pathEligible, errPath := r.modelPoolPathEligible(ctx, snapshot.ProviderInstanceID, credential, offering, modelID, bindings, endpoints, now)
+	if errPath != nil {
+		return ModelContextAccountState{}, errPath
+	}
+	modelEligible, errModel := r.modelRuntimeEligible(ctx, snapshot.ProviderInstanceID, credential.ID, modelID, now)
+	if errModel != nil {
+		return ModelContextAccountState{}, errModel
+	}
+	if !pathEligible || !modelEligible {
+		state.RuntimeStatus = ContextAccountCooling
+		return state, nil
+	}
+	state.RuntimeStatus = ContextAccountReady
+	return state, nil
+}
+
+// AllowanceAppliesToModelContext reports exact allowance applicability for one credential, model, profile, and capability set.
+// AllowanceAppliesToModelContext 报告额度对一个凭据、模型、规格与能力集合的精确适用性。
+func AllowanceAppliesToModelContext(allowance catalog.AllowanceSnapshot, credential providerconfig.Credential, modelID string, profileID string, requiredCapabilities []string) bool {
+	return allowanceApplies(allowance, credential, modelID, profileID, requiredCapabilities)
+}
+
+// CapabilitiesSatisfy reports whether one model profile supports every normalized capability identifier.
+// CapabilitiesSatisfy 报告一个模型规格是否支持全部规范化能力标识。
+func CapabilitiesSatisfy(capabilities catalog.ModelCapabilities, required []string) bool {
+	return capabilitiesSatisfy(capabilities, required)
+}
+
+// credentialBoundToModelEndpoint reports whether one enabled binding associates an account with the model channel.
+// credentialBoundToModelEndpoint 报告一个已启用 Binding 是否将账号关联到模型通道。
+func credentialBoundToModelEndpoint(credentialID string, offering catalog.ModelOffering, modelID string, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint) bool {
+	for _, binding := range bindings {
+		if !binding.Enabled || binding.CredentialID != credentialID || binding.ChannelID != offering.ChannelID || !allowsModel(binding.AllowedModelIDs, modelID) {
+			continue
+		}
+		endpoint, exists := endpoints[binding.EndpointID]
+		if exists && endpoint.ChannelID == offering.ChannelID {
+			return true
+		}
+	}
+	return false
+}
+
+// providerModelByID resolves one exact model inside an already validated snapshot.
+// providerModelByID 在一个已验证快照中解析一个精确模型。
+func providerModelByID(models []catalog.ProviderModel, modelID string) (catalog.ProviderModel, bool) {
+	for _, model := range models {
+		if model.ID == modelID {
+			return model, true
+		}
+	}
+	return catalog.ProviderModel{}, false
+}
+
+// cloneTimePointer isolates one optional timestamp from mutable persistence state.
+// cloneTimePointer 将一个可选时间戳与可变持久化状态隔离。
+func cloneTimePointer(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// credentialPoolEligible classifies configured credential cooldown and invalid states for one pool.
+// credentialPoolEligible 为一个账号池分类已配置凭据的冷却与无效状态。
+func credentialPoolEligible(credential providerconfig.Credential, now time.Time, pool *catalog.PoolSummary) bool {
+	if credential.Status == providerconfig.CredentialCooling && credential.CoolingUntil != nil && credential.CoolingUntil.After(now) {
+		pool.CoolingCredentials++
+		return false
+	}
+	if !credential.RuntimeEligibleAt(now) {
+		pool.InvalidCredentials++
+		return false
+	}
+	return true
+}
+
+// allowanceBlocksPool records whether mandatory resource exhaustion blocks one pool candidate.
+// allowanceBlocksPool 记录强制资源耗尽是否阻塞一个账号池候选项。
+func allowanceBlocksPool(allowances []catalog.AllowanceSnapshot, credential providerconfig.Credential, subjectID string, profileID string, blockingKinds map[catalog.AllowanceKind]struct{}, pool *catalog.PoolSummary) bool {
+	blocked, earliestResetAt := blockedByAllowance(allowances, credential, subjectID, profileID, nil)
+	if len(blocked) == 0 {
+		return false
+	}
+	pool.ExhaustedCredentials++
+	for _, allowanceKind := range blocked {
+		blockingKinds[allowanceKind] = struct{}{}
+	}
+	pool.EarliestResetAt = earlierTime(pool.EarliestResetAt, earliestResetAt)
+	return true
+}
+
+// credentialBoundToReadyModelEndpoint reports whether one credential has a statically usable model channel binding.
+// credentialBoundToReadyModelEndpoint 返回一个凭据是否具有静态可用的模型通道绑定。
+func credentialBoundToReadyModelEndpoint(credentialID string, offering catalog.ModelOffering, modelID string, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint) bool {
 	for _, binding := range bindings {
 		if !binding.Enabled || binding.CredentialID != credentialID || binding.ChannelID != offering.ChannelID || !allowsModel(binding.AllowedModelIDs, modelID) {
 			continue
@@ -139,6 +408,65 @@ func credentialBoundToReadyEndpoint(credentialID string, offering catalog.ModelO
 		}
 	}
 	return false
+}
+
+// credentialBoundToReadyServiceEndpoint reports whether one credential has a statically usable service channel binding.
+// credentialBoundToReadyServiceEndpoint 返回一个凭据是否具有静态可用的服务通道绑定。
+func credentialBoundToReadyServiceEndpoint(credentialID string, offering catalog.ServiceOffering, serviceID string, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint) bool {
+	for _, binding := range bindings {
+		if !binding.Enabled || binding.CredentialID != credentialID || binding.ChannelID != offering.ChannelID || !allowsService(binding.AllowedServiceIDs, serviceID) {
+			continue
+		}
+		endpoint, exists := endpoints[binding.EndpointID]
+		if exists && endpoint.Status == providerconfig.EndpointReady && endpoint.ChannelID == offering.ChannelID {
+			return true
+		}
+	}
+	return false
+}
+
+// modelPoolPathEligible reports whether at least one bound model endpoint remains runtime eligible.
+// modelPoolPathEligible 报告至少一个已绑定模型入口是否仍具备运行时资格。
+func (r *Resolver) modelPoolPathEligible(ctx context.Context, instanceID string, credential providerconfig.Credential, offering catalog.ModelOffering, modelID string, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint, now time.Time) (bool, error) {
+	for _, binding := range bindings {
+		if !binding.Enabled || binding.CredentialID != credential.ID || binding.ChannelID != offering.ChannelID || !allowsModel(binding.AllowedModelIDs, modelID) {
+			continue
+		}
+		endpoint, exists := endpoints[binding.EndpointID]
+		if !exists || endpoint.Status != providerconfig.EndpointReady || endpoint.ChannelID != offering.ChannelID {
+			continue
+		}
+		eligible, errEligible := r.runtimePathEligible(ctx, instanceID, credential, endpoint.ID, now)
+		if errEligible != nil {
+			return false, errEligible
+		}
+		if eligible {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// servicePoolPathEligible reports whether at least one bound service endpoint remains runtime eligible.
+// servicePoolPathEligible 报告至少一个已绑定服务入口是否仍具备运行时资格。
+func (r *Resolver) servicePoolPathEligible(ctx context.Context, instanceID string, credential providerconfig.Credential, offering catalog.ServiceOffering, serviceID string, bindings []providerconfig.AccessBinding, endpoints map[string]providerconfig.Endpoint, now time.Time) (bool, error) {
+	for _, binding := range bindings {
+		if !binding.Enabled || binding.CredentialID != credential.ID || binding.ChannelID != offering.ChannelID || !allowsService(binding.AllowedServiceIDs, serviceID) {
+			continue
+		}
+		endpoint, exists := endpoints[binding.EndpointID]
+		if !exists || endpoint.Status != providerconfig.EndpointReady || endpoint.ChannelID != offering.ChannelID {
+			continue
+		}
+		eligible, errEligible := r.runtimePathEligible(ctx, instanceID, credential, endpoint.ID, now)
+		if errEligible != nil {
+			return false, errEligible
+		}
+		if eligible {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // Resolve selects one exact target inside the requested provider instance only.
@@ -231,6 +559,15 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID || (len(actionAuthMethodIDs) > 0 && !containsString(actionAuthMethodIDs, credential.AuthMethodID)) {
 			continue
 		}
+		if request.RequiredCredentialID != "" && credential.ID != request.RequiredCredentialID {
+			continue
+		}
+		if containsString(request.ExcludedCredentialIDs, credential.ID) {
+			continue
+		}
+		if containsString(request.ExcludedEndpointIDs, endpoint.ID) {
+			continue
+		}
 		diagnostics.BoundCandidates++
 		entitlement, entitled := entitlementForProfile(model, profile, entitlements[credential.ID], request.Now)
 		if !entitled {
@@ -254,6 +591,20 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		if endpoint.Status != providerconfig.EndpointReady || !credential.RuntimeEligibleAt(request.Now) {
 			continue
 		}
+		pathEligible, errPathState := r.runtimePathEligible(ctx, instance.ID, credential, endpoint.ID, request.Now)
+		if errPathState != nil {
+			return Target{}, diagnostics, errPathState
+		}
+		if !pathEligible {
+			continue
+		}
+		modelEligible, errRuntimeState := r.modelRuntimeEligible(ctx, instance.ID, credential.ID, model.ID, request.Now)
+		if errRuntimeState != nil {
+			return Target{}, diagnostics, errRuntimeState
+		}
+		if !modelEligible {
+			continue
+		}
 		diagnostics.ReadyCandidates++
 		candidates = append(candidates, candidate{
 			binding:           binding,
@@ -267,8 +618,10 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 	if len(candidates) == 0 {
 		return Target{}, diagnostics, ErrNoEligibleTarget
 	}
-	sortCandidates(candidates, profile.PoolPolicy)
-	selected := candidates[0]
+	selected, errSelect := r.selectCandidate(ctx, instance, model.ID+":"+profile.ID, profile.PoolPolicy, candidates)
+	if errSelect != nil {
+		return Target{}, diagnostics, errSelect
+	}
 	return Target{
 		ProviderDefinitionID:   instance.DefinitionID,
 		ProviderInstanceID:     instance.ID,
@@ -364,6 +717,15 @@ func (r *Resolver) resolveService(ctx context.Context, request Request) (Target,
 		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID || (len(action.AuthMethodIDs) > 0 && !containsString(action.AuthMethodIDs, credential.AuthMethodID)) {
 			continue
 		}
+		if request.RequiredCredentialID != "" && credential.ID != request.RequiredCredentialID {
+			continue
+		}
+		if containsString(request.ExcludedCredentialIDs, credential.ID) {
+			continue
+		}
+		if containsString(request.ExcludedEndpointIDs, endpoint.ID) {
+			continue
+		}
 		diagnostics.BoundCandidates++
 		if !serviceEntitled(service, profile, entitlements[credential.ID], request.Now) {
 			continue
@@ -382,6 +744,13 @@ func (r *Resolver) resolveService(ctx context.Context, request Request) (Target,
 		if endpoint.Status != providerconfig.EndpointReady || !credential.RuntimeEligibleAt(request.Now) {
 			continue
 		}
+		pathEligible, errPathState := r.runtimePathEligible(ctx, instance.ID, credential, endpoint.ID, request.Now)
+		if errPathState != nil {
+			return Target{}, diagnostics, errPathState
+		}
+		if !pathEligible {
+			continue
+		}
 		diagnostics.ReadyCandidates++
 		candidates = append(candidates, candidate{binding: binding, endpoint: endpoint, credential: credential})
 	}
@@ -389,8 +758,10 @@ func (r *Resolver) resolveService(ctx context.Context, request Request) (Target,
 	if len(candidates) == 0 {
 		return Target{}, diagnostics, ErrNoEligibleTarget
 	}
-	sortCandidates(candidates, profile.PoolPolicy)
-	selected := candidates[0]
+	selected, errSelect := r.selectCandidate(ctx, instance, service.ID+":"+profile.ID, profile.PoolPolicy, candidates)
+	if errSelect != nil {
+		return Target{}, diagnostics, errSelect
+	}
 	capabilities := cloneServiceCapabilities(*profile.ServiceCapabilities)
 	return Target{
 		ProviderDefinitionID:   instance.DefinitionID,
@@ -469,6 +840,89 @@ type candidate struct {
 	selectionCapacity catalog.OptionalTokenLimit
 }
 
+// selectCandidate applies account-level routing before deterministic endpoint selection for the chosen credential.
+// selectCandidate 在为选中凭据确定性选择入口之前应用账号级路由。
+func (r *Resolver) selectCandidate(ctx context.Context, instance providerconfig.ProviderInstance, subjectKey string, policy catalog.PoolPolicy, candidates []candidate) (candidate, error) {
+	byCredential := make(map[string][]candidate)
+	routingCandidates := make([]routing.Candidate, 0, len(candidates))
+	for _, current := range candidates {
+		paths := byCredential[current.credential.ID]
+		if len(paths) == 0 {
+			routingCandidates = append(routingCandidates, routing.Candidate{ID: current.credential.ID, Priority: current.credential.Priority, CapacityKnown: current.selectionCapacity.Known, Capacity: current.selectionCapacity.Value})
+		}
+		byCredential[current.credential.ID] = append(paths, current)
+	}
+	strategy := instance.RoutingStrategy
+	if strategy == "" {
+		strategy = providerconfig.RoutingRoundRobin
+		if r.runtimeState != nil {
+			settings, errSettings := r.runtimeState.GetSettings(ctx)
+			if errSettings != nil {
+				return candidate{}, fmt.Errorf("read Router routing settings: %w", errSettings)
+			}
+			strategy = settings.DefaultRoutingStrategy
+		}
+	}
+	selectedCredential, errSelect := r.selector.Pick(instance.ID+":"+subjectKey, routing.SelectionOptions{Strategy: strategy, PreferSmallestSufficient: policy == catalog.PoolPreferSmallestSufficient}, routingCandidates)
+	if errSelect != nil {
+		return candidate{}, ErrNoEligibleTarget
+	}
+	paths := byCredential[selectedCredential.ID]
+	sort.Slice(paths, func(left int, right int) bool {
+		if paths[left].binding.Priority != paths[right].binding.Priority {
+			return paths[left].binding.Priority < paths[right].binding.Priority
+		}
+		return paths[left].endpoint.ID < paths[right].endpoint.ID
+	})
+	return paths[0], nil
+}
+
+// modelRuntimeEligible applies only exact credential-model runtime state and treats absent state as ready.
+// modelRuntimeEligible 仅应用精确凭据模型运行状态，并将缺失状态视为就绪。
+func (r *Resolver) modelRuntimeEligible(ctx context.Context, instanceID string, credentialID string, modelID string, now time.Time) (bool, error) {
+	if r.runtimeState == nil {
+		return true, nil
+	}
+	state, errState := r.runtimeState.GetCredentialModelState(ctx, instanceID, credentialID, modelID)
+	if errors.Is(errState, routingstate.ErrNotFound) {
+		return true, nil
+	}
+	if errState != nil {
+		return false, fmt.Errorf("read credential model state: %w", errState)
+	}
+	return state.EligibleAt(now), nil
+}
+
+// runtimePathEligible applies provider, endpoint, credential, subscription, and billing-account state to one exact candidate path.
+// runtimePathEligible 将供应商、入口、凭据、订阅与计费账号状态应用到一个精确候选路径。
+func (r *Resolver) runtimePathEligible(ctx context.Context, instanceID string, credential providerconfig.Credential, endpointID string, now time.Time) (bool, error) {
+	if r.runtimeState == nil {
+		return true, nil
+	}
+	identities := []runtimeScopeIdentity{{routingstate.ScopeProvider, instanceID}, {routingstate.ScopeEndpoint, endpointID}, {routingstate.ScopeCredential, credential.ID}}
+	for _, scopeReference := range credential.ScopeRefs {
+		switch scopeReference.Kind {
+		case string(routingstate.ScopeSubscription):
+			identities = append(identities, runtimeScopeIdentity{routingstate.ScopeSubscription, scopeReference.ID})
+		case string(routingstate.ScopeBillingAccount):
+			identities = append(identities, runtimeScopeIdentity{routingstate.ScopeBillingAccount, scopeReference.ID})
+		}
+	}
+	for _, identity := range identities {
+		state, errState := r.runtimeState.GetRuntimeScopeState(ctx, instanceID, identity.scope, identity.scopeID)
+		if errors.Is(errState, routingstate.ErrNotFound) {
+			continue
+		}
+		if errState != nil {
+			return false, fmt.Errorf("read %s runtime state: %w", identity.scope, errState)
+		}
+		if !state.EligibleAt(now) {
+			return false, nil
+		}
+	}
+	return true, nil
+}
+
 // findModel returns one exact provider model from an atomic snapshot.
 // findModel 从原子快照返回一个精确供应商模型。
 func findModel(models []catalog.ProviderModel, modelID string) (catalog.ProviderModel, bool) {
@@ -532,7 +986,7 @@ func serviceEntitled(service catalog.ProviderService, profile catalog.ExecutionP
 	if service.EntitlementMode == catalog.EntitlementAllBoundCredentials {
 		return true
 	}
-	if entitlement.ProviderServiceID != service.ID || entitlement.Availability != catalog.AvailabilityAllowed || now.Before(entitlement.ObservedAt) || now.After(entitlement.ExpiresAt) {
+	if entitlement.ProviderServiceID != service.ID || entitlement.Availability != catalog.AvailabilityAllowed || !metadataCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, now) {
 		return false
 	}
 	return len(entitlement.AllowedProfileIDs) == 0 || contains(entitlement.AllowedProfileIDs, profile.ID)
@@ -603,7 +1057,7 @@ func entitlementForProfile(model catalog.ProviderModel, profile catalog.Executio
 		}
 		return catalog.ModelEntitlement{}, true
 	}
-	if entitlement.Availability != catalog.AvailabilityAllowed || !entitlement.ExpiresAt.After(now) {
+	if entitlement.Availability != catalog.AvailabilityAllowed || !metadataCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, now) {
 		return catalog.ModelEntitlement{}, false
 	}
 	if len(entitlement.AllowedProfileIDs) > 0 && !contains(entitlement.AllowedProfileIDs, profile.ID) {
@@ -613,6 +1067,15 @@ func entitlementForProfile(model catalog.ProviderModel, profile catalog.Executio
 		return catalog.ModelEntitlement{}, false
 	}
 	return entitlement, true
+}
+
+// metadataCurrent reports whether one observed commercial fact is active at the evaluation time.
+// metadataCurrent 报告一个已观测商业事实在评估时刻是否有效。
+func metadataCurrent(observedAt time.Time, expiresAt time.Time, now time.Time) bool {
+	if observedAt.IsZero() || now.Before(observedAt) {
+		return false
+	}
+	return expiresAt.IsZero() || expiresAt.After(now)
 }
 
 // effectiveContextWindow returns the smallest known profile and account context ceiling.

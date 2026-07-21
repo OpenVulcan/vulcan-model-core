@@ -9,6 +9,7 @@ import (
 	"math"
 	"sort"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 )
 
@@ -643,12 +644,197 @@ func (s *ConfigurationStore) SaveCredential(ctx context.Context, credential prov
 		credential.ProviderInstanceID, credential.AuthMethodID, credential.PrincipalKey, credential.Fingerprint, credential.Status)
 }
 
+// SaveCredentialAndCatalog atomically commits one credential mutation and its exact derived catalog revision.
+// SaveCredentialAndCatalog 原子提交一次凭据变更及其精确派生目录修订。
+func (s *ConfigurationStore) SaveCredentialAndCatalog(ctx context.Context, credential providerconfig.Credential, snapshot catalog.Snapshot) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	if errCredential := credential.Validate(); errCredential != nil {
+		return errCredential
+	}
+	if errSnapshot := snapshot.Validate(); errSnapshot != nil {
+		return errSnapshot
+	}
+	if snapshot.ProviderInstanceID != credential.ProviderInstanceID {
+		return invalidConfiguration("credential and catalog provider instances do not match")
+	}
+	if credential.Revision > math.MaxInt64 || snapshot.Revision > math.MaxInt64 {
+		return invalidConfiguration("credential or catalog revision exceeds SQLite integer range")
+	}
+	_, definition, errOwner := s.instanceDefinition(ctx, credential.ProviderInstanceID)
+	if errOwner != nil {
+		return errOwner
+	}
+	if !definition.HasAuthMethod(credential.AuthMethodID) {
+		return invalidConfiguration("credential references auth method outside its provider definition")
+	}
+	credentialPayload, errCredentialPayload := marshalPayload(credential)
+	if errCredentialPayload != nil {
+		return errCredentialPayload
+	}
+	catalogPayload, errCatalogPayload := marshalPayload(snapshot)
+	if errCatalogPayload != nil {
+		return errCatalogPayload
+	}
+	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return fmt.Errorf("begin credential plan transaction: %w", errBegin)
+	}
+	defer transaction.Rollback()
+	var currentPayload []byte
+	if errQuery := transaction.QueryRowContext(ctx, `SELECT payload FROM provider_credentials WHERE id = ?`, credential.ID).Scan(&currentPayload); errors.Is(errQuery, sql.ErrNoRows) {
+		return fmt.Errorf("%w: provider credential %s", providerconfig.ErrNotFound, credential.ID)
+	} else if errQuery != nil {
+		return fmt.Errorf("query credential for plan transaction: %w", errQuery)
+	}
+	var current providerconfig.Credential
+	if errDecode := unmarshalPayload(currentPayload, &current); errDecode != nil {
+		return errDecode
+	}
+	if errMutation := current.ValidateMutation(credential); errMutation != nil {
+		return errMutation
+	}
+	if errDuplicate := checkCredentialDuplicateInTransaction(ctx, transaction, credential); errDuplicate != nil {
+		return errDuplicate
+	}
+	credentialResult, errCredentialWrite := transaction.ExecContext(ctx, `
+		UPDATE provider_credentials SET principal_key = ?, fingerprint = ?, status = ?, revision = ?, payload = ?
+		WHERE id = ? AND provider_instance_id = ? AND auth_method_id = ? AND revision < ?`,
+		credential.PrincipalKey, credential.Fingerprint, credential.Status, int64(credential.Revision), credentialPayload,
+		credential.ID, credential.ProviderInstanceID, credential.AuthMethodID, int64(credential.Revision))
+	if errCredentialWrite != nil {
+		return fmt.Errorf("save provider credential plan: %w", errCredentialWrite)
+	}
+	if errRows := requireSingleMutation(credentialResult, "provider credential plan"); errRows != nil {
+		return errRows
+	}
+	catalogResult, errCatalogWrite := transaction.ExecContext(ctx, `
+		UPDATE catalog_snapshots SET revision = ?, observed_at = ?, payload = ?
+		WHERE provider_instance_id = ? AND revision < ?`,
+		int64(snapshot.Revision), snapshot.ObservedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"), catalogPayload,
+		snapshot.ProviderInstanceID, int64(snapshot.Revision))
+	if errCatalogWrite != nil {
+		return fmt.Errorf("save provider credential plan catalog: %w", errCatalogWrite)
+	}
+	if errRows := requireSingleMutation(catalogResult, "provider credential plan catalog"); errRows != nil {
+		return errRows
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit credential plan transaction: %w", errCommit)
+	}
+	return nil
+}
+
+// checkCredentialDuplicateInTransaction enforces account uniqueness inside the atomic plan mutation.
+// checkCredentialDuplicateInTransaction 在原子套餐变更内强制执行账号唯一性。
+func checkCredentialDuplicateInTransaction(ctx context.Context, transaction *sql.Tx, credential providerconfig.Credential) error {
+	var conflictingID string
+	errFingerprint := transaction.QueryRowContext(ctx, `SELECT id FROM provider_credentials WHERE provider_instance_id = ? AND fingerprint = ? AND id <> ?`, credential.ProviderInstanceID, credential.Fingerprint, credential.ID).Scan(&conflictingID)
+	if errFingerprint == nil {
+		return fmt.Errorf("%w: credential fingerprint", providerconfig.ErrAlreadyRegistered)
+	}
+	if !errors.Is(errFingerprint, sql.ErrNoRows) {
+		return fmt.Errorf("check credential fingerprint: %w", errFingerprint)
+	}
+	if credential.PrincipalKey == "" {
+		return nil
+	}
+	errPrincipal := transaction.QueryRowContext(ctx, `SELECT id FROM provider_credentials WHERE provider_instance_id = ? AND principal_key = ? AND id <> ?`, credential.ProviderInstanceID, credential.PrincipalKey, credential.ID).Scan(&conflictingID)
+	if errPrincipal == nil {
+		return fmt.Errorf("%w: credential principal", providerconfig.ErrAlreadyRegistered)
+	}
+	if !errors.Is(errPrincipal, sql.ErrNoRows) {
+		return fmt.Errorf("check credential principal: %w", errPrincipal)
+	}
+	return nil
+}
+
 // ListCredentials returns stable non-secret credential snapshots for one provider instance.
 // ListCredentials 返回一个供应商实例稳定的非秘密凭据快照。
 func (s *ConfigurationStore) ListCredentials(ctx context.Context, instanceID string) ([]providerconfig.Credential, error) {
 	return listPayloads[providerconfig.Credential](ctx, s.database.sql, `SELECT payload FROM provider_credentials WHERE provider_instance_id = ? ORDER BY id`, []any{instanceID}, func(credential providerconfig.Credential) error {
 		return credential.Validate()
 	})
+}
+
+// DeleteCredentialGraph atomically removes one credential, its bindings, and an instance left without credentials.
+// DeleteCredentialGraph 原子删除一个凭据及其绑定，并删除失去全部凭据的实例。
+func (s *ConfigurationStore) DeleteCredentialGraph(ctx context.Context, instanceID string, credentialID string) (providerconfig.CredentialDeletion, error) {
+	if err := validateContext(ctx); err != nil {
+		return providerconfig.CredentialDeletion{}, err
+	}
+	credential, errCredential := s.getCredential(ctx, credentialID)
+	if errCredential != nil {
+		return providerconfig.CredentialDeletion{}, errCredential
+	}
+	if credential.ProviderInstanceID != instanceID {
+		return providerconfig.CredentialDeletion{}, fmt.Errorf("%w: provider credential %s", providerconfig.ErrNotFound, credentialID)
+	}
+	instance, errInstance := s.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return providerconfig.CredentialDeletion{}, errInstance
+	}
+	definition, errDefinition := s.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return providerconfig.CredentialDeletion{}, errDefinition
+	}
+	transaction, errTransaction := s.database.sql.BeginTx(ctx, nil)
+	if errTransaction != nil {
+		return providerconfig.CredentialDeletion{}, fmt.Errorf("begin credential deletion: %w", errTransaction)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	if _, errBindings := transaction.ExecContext(ctx, `DELETE FROM access_bindings WHERE provider_instance_id = ? AND credential_id = ?`, instanceID, credentialID); errBindings != nil {
+		return providerconfig.CredentialDeletion{}, fmt.Errorf("delete credential bindings: %w", errBindings)
+	}
+	credentialResult, errDeleteCredential := transaction.ExecContext(ctx, `DELETE FROM provider_credentials WHERE id = ? AND provider_instance_id = ? AND revision = ?`, credentialID, instanceID, credential.Revision)
+	if errDeleteCredential != nil {
+		return providerconfig.CredentialDeletion{}, fmt.Errorf("delete provider credential: %w", errDeleteCredential)
+	}
+	if errRows := requireSingleMutation(credentialResult, "provider credential deletion"); errRows != nil {
+		return providerconfig.CredentialDeletion{}, errRows
+	}
+	var remainingCredentials int
+	if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_credentials WHERE provider_instance_id = ?`, instanceID).Scan(&remainingCredentials); errCount != nil {
+		return providerconfig.CredentialDeletion{}, fmt.Errorf("count remaining provider credentials: %w", errCount)
+	}
+	deletion := providerconfig.CredentialDeletion{Credential: credential}
+	if remainingCredentials == 0 {
+		if _, errBindings := transaction.ExecContext(ctx, `DELETE FROM access_bindings WHERE provider_instance_id = ?`, instanceID); errBindings != nil {
+			return providerconfig.CredentialDeletion{}, fmt.Errorf("delete empty instance bindings: %w", errBindings)
+		}
+		if _, errEndpoints := transaction.ExecContext(ctx, `DELETE FROM provider_endpoints WHERE provider_instance_id = ?`, instanceID); errEndpoints != nil {
+			return providerconfig.CredentialDeletion{}, fmt.Errorf("delete empty instance endpoints: %w", errEndpoints)
+		}
+		instanceResult, errDeleteInstance := transaction.ExecContext(ctx, `DELETE FROM provider_instances WHERE id = ? AND definition_id = ? AND revision = ?`, instance.ID, instance.DefinitionID, instance.Revision)
+		if errDeleteInstance != nil {
+			return providerconfig.CredentialDeletion{}, fmt.Errorf("delete empty provider instance: %w", errDeleteInstance)
+		}
+		if errRows := requireSingleMutation(instanceResult, "empty provider instance deletion"); errRows != nil {
+			return providerconfig.CredentialDeletion{}, errRows
+		}
+		deletion.InstanceDeleted = true
+		if definition.Kind == providerconfig.DefinitionKindCustom {
+			var remainingInstances int
+			if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_instances WHERE definition_id = ?`, definition.ID).Scan(&remainingInstances); errCount != nil {
+				return providerconfig.CredentialDeletion{}, fmt.Errorf("count remaining custom provider instances: %w", errCount)
+			}
+			if remainingInstances == 0 {
+				definitionResult, errDeleteDefinition := transaction.ExecContext(ctx, `DELETE FROM custom_provider_definitions WHERE id = ? AND revision = ?`, definition.ID, definition.Revision)
+				if errDeleteDefinition != nil {
+					return providerconfig.CredentialDeletion{}, fmt.Errorf("delete orphaned custom provider definition: %w", errDeleteDefinition)
+				}
+				if errRows := requireSingleMutation(definitionResult, "orphaned custom provider definition deletion"); errRows != nil {
+					return providerconfig.CredentialDeletion{}, errRows
+				}
+				deletion.DefinitionDeleted = true
+			}
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return providerconfig.CredentialDeletion{}, fmt.Errorf("commit credential deletion: %w", errCommit)
+	}
+	return deletion, nil
 }
 
 // SaveBinding creates or updates one same-instance endpoint and credential binding.

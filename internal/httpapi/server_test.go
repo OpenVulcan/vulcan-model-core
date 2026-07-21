@@ -89,7 +89,7 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 	return management.CatalogView{
 		ProviderInstanceID: "pvi_test",
 		Models: []management.ModelView{{
-			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit, Enabled: true, ProviderAuthorized: true,
+			ID: "model_test", UpstreamModelID: "test", DisplayName: "Test", EntitlementMode: catalog.EntitlementExplicit, Enabled: true, AuthorizationStatus: catalog.AuthorizationAuthorized,
 			Offerings: []management.OfferingView{{ID: "offer_test", UpstreamModelID: "test", Profiles: []management.ExecutionProfileView{
 				{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{
 					ContextWindow: management.TokenLimitView{Known: true, Value: 262144},
@@ -99,7 +99,7 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 			}}},
 		}},
 		Services: []management.ServiceView{{
-			ID: "service_search", DisplayName: "Search", Operation: vcp.OperationSearchWeb, EntitlementMode: catalog.EntitlementAllBoundCredentials, Enabled: true, ProviderAuthorized: true,
+			ID: "service_search", DisplayName: "Search", Operation: vcp.OperationSearchWeb, EntitlementMode: catalog.EntitlementAllBoundCredentials, Enabled: true, AuthorizationStatus: catalog.AuthorizationAuthorized,
 			Offerings: []management.ServiceOfferingView{{
 				ID: "service_offer_search", UpstreamServiceID: "search",
 				Capabilities: catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest, OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}}},
@@ -113,6 +113,22 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 		}},
 		Revision: 1,
 	}, nil
+}
+
+// GetModelContexts returns two exact context profiles with concrete account membership.
+// GetModelContexts 返回两个具有具体账号成员关系的精确上下文规格。
+func (staticManagementQuery) GetModelContexts(context.Context, string, string) (management.ModelContextsView, error) {
+	return management.ModelContextsView{ProviderInstanceID: "pvi_test", ProviderModelID: "model_test", UpstreamModelID: "test", DisplayName: "Test", ContextProfiles: []management.ModelContextProfileView{
+		{ID: "profile_test_256k", DisplayName: "256K", Default: true, Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 262144}}, Accounts: []management.ModelContextAccountView{{CredentialID: "cred_test", Label: "Primary", CredentialStatus: providerconfig.CredentialActive, RuntimeStatus: resolve.ContextAccountReady, UsageAvailable: true}}},
+		{ID: "profile_test_1m", DisplayName: "1M", Capabilities: management.CapabilityView{ContextWindow: management.TokenLimitView{Known: true, Value: 1048576}}, Accounts: []management.ModelContextAccountView{{CredentialID: "cred_test_high", Label: "High", CredentialStatus: providerconfig.CredentialActive, RuntimeStatus: resolve.ContextAccountReady}}},
+	}, CatalogRevision: 1, ObservedAt: time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)}, nil
+}
+
+// GetModelCredentialUsage returns one exact account-scoped usage observation.
+// GetModelCredentialUsage 返回一条精确账号作用域用量观测。
+func (staticManagementQuery) GetModelCredentialUsage(context.Context, string, string, string) (management.ModelCredentialUsageView, error) {
+	remaining := "75"
+	return management.ModelCredentialUsageView{ProviderInstanceID: "pvi_test", ProviderModelID: "model_test", CredentialID: "cred_test", CredentialLabel: "Primary", CredentialStatus: providerconfig.CredentialActive, SupportedContextProfileIDs: []string{"profile_test_256k"}, Allowances: []management.ModelUsageAllowanceView{{Usage: management.AllowanceView{Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, Metric: "weekly_usage", Unit: catalog.UnitProviderDefined, Remaining: &remaining, Status: catalog.AllowanceAvailable}, ContextProfileIDs: []string{"profile_test_256k"}}}, CatalogRevision: 1}, nil
 }
 
 // ListEndpoints returns no endpoint details for the focused route fixture.
@@ -264,6 +280,18 @@ func (staticManagementCommands) UpdateCredential(context.Context, management.Upd
 // RotateCredentialSecret 报告静态夹具不执行变更流程。
 func (staticManagementCommands) RotateCredentialSecret(context.Context, management.RotateCredentialSecretInput) (providerconfig.Credential, error) {
 	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// ReauthorizeCredential reports that the static fixture does not execute mutation flows.
+// ReauthorizeCredential 报告静态夹具不执行变更流程。
+func (staticManagementCommands) ReauthorizeCredential(context.Context, management.ReauthorizeCredentialInput) (providerconfig.Credential, error) {
+	return providerconfig.Credential{}, errors.New("static command fixture")
+}
+
+// DeleteCredential reports that the static fixture does not execute mutation flows.
+// DeleteCredential 报告静态夹具不执行变更流程。
+func (staticManagementCommands) DeleteCredential(context.Context, string, string) (providerconfig.CredentialDeletion, error) {
+	return providerconfig.CredentialDeletion{}, errors.New("static command fixture")
 }
 
 // SetCredentialStatus reports that the static fixture does not execute mutation flows.
@@ -658,23 +686,47 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	}
 	// callRequest proves a management credential cannot authorize the call plane.
 	// callRequest 证明管理凭据不能授权调用面。
-	callRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/models", nil)
+	callRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"models"}`))
 	callRequest.Header.Set("Authorization", "Bearer manage-key")
 	callRecorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(callRecorder, callRequest)
 	if callRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("management credential call-plane status=%d, want %d", callRecorder.Code, http.StatusUnauthorized)
 	}
+	callRequest = httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"models"}`))
 	callRequest.Header.Set("Authorization", "Bearer call-key")
 	callRecorder = httptest.NewRecorder()
 	server.Handler().ServeHTTP(callRecorder, callRequest)
 	if callRecorder.Code != http.StatusOK {
 		t.Fatalf("call-plane status=%d body=%s", callRecorder.Code, callRecorder.Body.String())
 	}
-	if !strings.Contains(callRecorder.Body.String(), `"max_item_bytes":{"known":true,"value":1024}`) || strings.Contains(callRecorder.Body.String(), `"MaxItemBytes"`) {
+	if !strings.Contains(callRecorder.Body.String(), `"get":"models"`) || !strings.Contains(callRecorder.Body.String(), `"max_item_bytes":{"known":true,"value":1024}`) || strings.Contains(callRecorder.Body.String(), `"MaxItemBytes"`) {
 		t.Fatalf("model discovery did not preserve the snake-case capability contract: %s", callRecorder.Body.String())
 	}
-	serviceRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/services", nil)
+	// instancesRequest verifies another information shape uses the same authenticated protocol entry.
+	// instancesRequest 验证另一种信息形态使用相同的已认证协议入口。
+	instancesRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"instances"}`))
+	instancesRequest.Header.Set("Authorization", "Bearer call-key")
+	instancesRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(instancesRecorder, instancesRequest)
+	if instancesRecorder.Code != http.StatusOK || !strings.Contains(instancesRecorder.Body.String(), `"get":"instances"`) || !strings.Contains(instancesRecorder.Body.String(), `"instances"`) {
+		t.Fatalf("instances information status=%d body=%s", instancesRecorder.Code, instancesRecorder.Body.String())
+	}
+	contextRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"accounts","provider_instance_id":"pvi_test","provider_model_id":"model_test"}`))
+	contextRequest.Header.Set("Authorization", "Bearer call-key")
+	contextRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(contextRecorder, contextRequest)
+	if contextRecorder.Code != http.StatusOK || !strings.Contains(contextRecorder.Body.String(), `"context_profiles"`) || !strings.Contains(contextRecorder.Body.String(), `"credential_id":"cred_test"`) || !strings.Contains(contextRecorder.Body.String(), `"runtime_status":"ready"`) {
+		t.Fatalf("model contexts status=%d body=%s", contextRecorder.Code, contextRecorder.Body.String())
+	}
+	usageRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"usage","provider_instance_id":"pvi_test","provider_model_id":"model_test","credential_id":"cred_test"}`))
+	usageRequest.Header.Set("Authorization", "Bearer call-key")
+	usageRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(usageRecorder, usageRequest)
+	if usageRecorder.Code != http.StatusOK || !strings.Contains(usageRecorder.Body.String(), `"metric":"weekly_usage"`) || !strings.Contains(usageRecorder.Body.String(), `"remaining":"75"`) || !strings.Contains(usageRecorder.Body.String(), `"context_profile_ids":["profile_test_256k"]`) {
+		t.Fatalf("model account usage status=%d body=%s", usageRecorder.Code, usageRecorder.Body.String())
+	}
+	serviceRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"services"}`))
 	serviceRequest.Header.Set("Authorization", "Bearer call-key")
 	serviceRecorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(serviceRecorder, serviceRequest)
@@ -683,13 +735,39 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	}
 	// ambiguousCallRequest proves the same duplicate-header rejection protects the call plane.
 	// ambiguousCallRequest 证明相同的重复请求头拒绝规则也保护调用面。
-	ambiguousCallRequest := httptest.NewRequest(http.MethodGet, "/vulcan/v1/models", nil)
+	ambiguousCallRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"models"}`))
 	ambiguousCallRequest.Header.Add("Authorization", "Bearer call-key")
 	ambiguousCallRequest.Header.Add("Authorization", "Bearer conflicting-key")
 	ambiguousCallRecorder := httptest.NewRecorder()
 	server.Handler().ServeHTTP(ambiguousCallRecorder, ambiguousCallRequest)
 	if ambiguousCallRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("duplicate call authorization status=%d, want %d", ambiguousCallRecorder.Code, http.StatusUnauthorized)
+	}
+	// invalidInformationRequest verifies selectors cannot cross the closed information branches.
+	// invalidInformationRequest 验证选择器不能跨越封闭信息分支。
+	invalidInformationRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"accounts","provider_instance_id":"pvi_test"}`))
+	invalidInformationRequest.Header.Set("Authorization", "Bearer call-key")
+	invalidInformationRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(invalidInformationRecorder, invalidInformationRequest)
+	if invalidInformationRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid information status=%d body=%s", invalidInformationRecorder.Code, invalidInformationRecorder.Body.String())
+	}
+	// legacyInformationRequest verifies the replaced REST-style discovery route is not retained as an alias.
+	// legacyInformationRequest 验证被替换的 REST 风格发现路由不会作为别名保留。
+	legacyInformationPaths := []string{
+		"/vulcan/v1/models",
+		"/vulcan/v1/services",
+		"/vulcan/v1/provider-instances/pvi_test/models/model_test/contexts",
+		"/vulcan/v1/provider-instances/pvi_test/models/model_test/accounts/cred_test/usage",
+	}
+	for _, legacyInformationPath := range legacyInformationPaths {
+		legacyInformationRequest := httptest.NewRequest(http.MethodGet, legacyInformationPath, nil)
+		legacyInformationRequest.Header.Set("Authorization", "Bearer call-key")
+		legacyInformationRecorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(legacyInformationRecorder, legacyInformationRequest)
+		if legacyInformationRecorder.Code != http.StatusNotFound {
+			t.Fatalf("legacy information route %s status=%d, want %d", legacyInformationPath, legacyInformationRecorder.Code, http.StatusNotFound)
+		}
 	}
 	// legacyRequest verifies the old read-only management namespace is not exposed beside the authenticated surface.
 	// legacyRequest 验证旧只读管理命名空间不会与认证接口面并存。

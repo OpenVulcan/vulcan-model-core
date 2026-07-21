@@ -277,7 +277,7 @@ func (s *ExecutionStore) Create(ctx context.Context, record execution.Record, ac
 			cleanupCreatedExecutionSecrets(ctx, s.secrets, encoded.createdSecretRefs)
 		}
 	}()
-	if _, errInsert := transaction.ExecContext(ctx, `INSERT INTO executions(id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_task_secret_ref, provider_preparation_secret_ref) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, record.OwnerAPIKeyID, record.RequestHash, record.IdempotencyKey, record.Status, record.Operation, record.Revision, formatExecutionTime(record.CreatedAt), formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.request, encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef)); errInsert != nil {
+	if _, errInsert := transaction.ExecContext(ctx, `INSERT INTO executions(id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_task_secret_ref, provider_preparation_secret_ref, attempts_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, record.OwnerAPIKeyID, record.RequestHash, record.IdempotencyKey, record.Status, record.Operation, record.Revision, formatExecutionTime(record.CreatedAt), formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.request, encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), encoded.attempts); errInsert != nil {
 		if record.IdempotencyKey != "" {
 			existing, found, errExisting := getExecutionByIdempotency(ctx, s.secrets, transaction, record.OwnerAPIKeyID, record.IdempotencyKey)
 			if errExisting == nil && found {
@@ -361,7 +361,7 @@ func (s *ExecutionStore) Save(ctx context.Context, record execution.Record, expe
 			cleanupCreatedExecutionSecrets(ctx, s.secrets, encoded.createdSecretRefs)
 		}
 	}()
-	result, errUpdate := transaction.ExecContext(ctx, `UPDATE executions SET status = ?, revision = ?, updated_at = ?, expires_at = ?, result_payload = ?, failure_payload = ?, provider_task_payload = ?, provider_preparation_payload = ?, provider_task_secret_ref = ?, provider_preparation_secret_ref = ? WHERE id = ? AND owner_api_key_id = ? AND revision = ?`, record.Status, record.Revision, formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), record.ID, record.OwnerAPIKeyID, expectedRevision)
+	result, errUpdate := transaction.ExecContext(ctx, `UPDATE executions SET status = ?, revision = ?, updated_at = ?, expires_at = ?, target_payload = ?, result_payload = ?, failure_payload = ?, provider_task_payload = ?, provider_preparation_payload = ?, provider_task_secret_ref = ?, provider_preparation_secret_ref = ?, attempts_payload = ? WHERE id = ? AND owner_api_key_id = ? AND revision = ?`, record.Status, record.Revision, formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), encoded.attempts, record.ID, record.OwnerAPIKeyID, expectedRevision)
 	if errUpdate != nil {
 		return fmt.Errorf("update execution: %w", errUpdate)
 	}
@@ -479,6 +479,9 @@ type executionEncodedRecord struct {
 	// failure stores optional safe failure facts.
 	// failure 保存可选安全错误事实。
 	failure []byte
+	// attempts stores private exact-target dispatch audit records.
+	// attempts 保存私有精确 Target 分派审计记录。
+	attempts []byte
 	// providerTask stores optional private asynchronous recovery facts.
 	// providerTask 保存可选私有异步恢复事实。
 	providerTask []byte
@@ -498,7 +501,7 @@ type executionEncodedRecord struct {
 
 // executionSelect is the sole column order accepted by scanExecution.
 // executionSelect 是 scanExecution 接受的唯一列顺序。
-const executionSelect = `SELECT id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_task_secret_ref, provider_preparation_secret_ref FROM executions`
+const executionSelect = `SELECT id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_task_secret_ref, provider_preparation_secret_ref, attempts_payload FROM executions`
 
 // rowScanner abstracts QueryRow and Rows without weakening typed record decoding.
 // rowScanner 在不削弱类型化记录解码的情况下抽象 QueryRow 与 Rows。
@@ -523,7 +526,8 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 	var providerPreparationPayload []byte
 	var providerTaskSecretRef sql.NullString
 	var providerPreparationSecretRef sql.NullString
-	errScan := scanner.Scan(&record.ID, &record.OwnerAPIKeyID, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.Operation, &record.Revision, &createdAt, &updatedAt, &expiresAt, &requestPayload, &targetPayload, &resultPayload, &failurePayload, &providerTaskPayload, &providerPreparationPayload, &providerTaskSecretRef, &providerPreparationSecretRef)
+	var attemptsPayload []byte
+	errScan := scanner.Scan(&record.ID, &record.OwnerAPIKeyID, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.Operation, &record.Revision, &createdAt, &updatedAt, &expiresAt, &requestPayload, &targetPayload, &resultPayload, &failurePayload, &providerTaskPayload, &providerPreparationPayload, &providerTaskSecretRef, &providerPreparationSecretRef, &attemptsPayload)
 	if errScan != nil {
 		return execution.Record{}, errScan
 	}
@@ -553,6 +557,11 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 		record.Failure = &execution.Failure{}
 		if errDecode = json.Unmarshal(failurePayload, record.Failure); errDecode != nil {
 			return execution.Record{}, fmt.Errorf("decode execution failure: %w", errDecode)
+		}
+	}
+	if len(attemptsPayload) > 0 {
+		if errDecode = json.Unmarshal(attemptsPayload, &record.Attempts); errDecode != nil {
+			return execution.Record{}, fmt.Errorf("decode execution attempts: %w", errDecode)
 		}
 	}
 	if len(providerTaskPayload) > 0 {
@@ -599,6 +608,10 @@ func encodeExecutionRecord(ctx context.Context, secrets secret.Store, record exe
 	if errFailure != nil {
 		return executionEncodedRecord{}, fmt.Errorf("encode execution failure: %w", errFailure)
 	}
+	attemptsPayload, errAttempts := json.Marshal(record.Attempts)
+	if errAttempts != nil {
+		return executionEncodedRecord{}, fmt.Errorf("encode execution attempts: %w", errAttempts)
+	}
 	providerTaskPayload, providerTaskSecretRef, taskSecretCreated, errTask := marshalProviderTask(ctx, secrets, record.ProviderTask)
 	if errTask != nil {
 		return executionEncodedRecord{}, fmt.Errorf("encode execution provider task: %w", errTask)
@@ -617,7 +630,7 @@ func encodeExecutionRecord(ctx context.Context, secrets secret.Store, record exe
 	if preparationSecretCreated {
 		createdSecretRefs = append(createdSecretRefs, providerPreparationSecretRef)
 	}
-	return executionEncodedRecord{request: requestPayload, target: targetPayload, result: resultPayload, failure: failurePayload, providerTask: providerTaskPayload, providerPreparation: providerPreparationPayload, providerTaskSecretRef: providerTaskSecretRef, providerPreparationSecretRef: providerPreparationSecretRef, createdSecretRefs: createdSecretRefs}, nil
+	return executionEncodedRecord{request: requestPayload, target: targetPayload, result: resultPayload, failure: failurePayload, attempts: attemptsPayload, providerTask: providerTaskPayload, providerPreparation: providerPreparationPayload, providerTaskSecretRef: providerTaskSecretRef, providerPreparationSecretRef: providerPreparationSecretRef, createdSecretRefs: createdSecretRefs}, nil
 }
 
 // executionProviderTaskPayload is the private persisted asynchronous affinity shape.

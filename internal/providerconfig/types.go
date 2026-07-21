@@ -149,6 +149,38 @@ const (
 	AuthMethodNone AuthMethodType = "none"
 )
 
+// PlanAcquisitionMode identifies how one authentication method obtains commercial-plan evidence.
+// PlanAcquisitionMode 标识一种认证方式如何获得商业套餐证据。
+type PlanAcquisitionMode string
+
+const (
+	// PlanAcquisitionUnavailable means the authentication method has no trusted plan source.
+	// PlanAcquisitionUnavailable 表示该认证方式没有可信套餐来源。
+	PlanAcquisitionUnavailable PlanAcquisitionMode = "unavailable"
+	// PlanAcquisitionProviderDetected means protected provider evidence determines the plan.
+	// PlanAcquisitionProviderDetected 表示由受保护的供应商证据确定套餐。
+	PlanAcquisitionProviderDetected PlanAcquisitionMode = "provider_detected"
+	// PlanAcquisitionManualRequired requires one code-owned plan choice during credential onboarding.
+	// PlanAcquisitionManualRequired 表示录入凭据时必须选择一个代码拥有的套餐。
+	PlanAcquisitionManualRequired PlanAcquisitionMode = "manual_required"
+	// PlanAcquisitionManualOptional allows an operator choice while preserving unknown when omitted.
+	// PlanAcquisitionManualOptional 表示允许操作员选择套餐，省略时保持未知。
+	PlanAcquisitionManualOptional PlanAcquisitionMode = "manual_optional"
+)
+
+// RoutingStrategy identifies one same-provider credential selection algorithm.
+// RoutingStrategy 标识一种同供应商凭据选择算法。
+type RoutingStrategy string
+
+const (
+	// RoutingRoundRobin balances requests across equally eligible credentials.
+	// RoutingRoundRobin 在资格相同的凭据之间均衡分配请求。
+	RoutingRoundRobin RoutingStrategy = "round_robin"
+	// RoutingFillFirst keeps using the first eligible credential until it becomes unavailable.
+	// RoutingFillFirst 持续使用首个合格凭据，直至其不可用。
+	RoutingFillFirst RoutingStrategy = "fill_first"
+)
+
 // CredentialStatus describes whether one credential can participate in resolution.
 // CredentialStatus 描述单个凭据是否可以参与解析。
 type CredentialStatus string
@@ -271,6 +303,41 @@ type AuthMethodDefinition struct {
 	// MultipleCredentials reports whether one instance may store multiple credentials of this method.
 	// MultipleCredentials 表示一个实例是否可以存储该认证方式的多个凭据。
 	MultipleCredentials bool
+	// PlanAcquisition declares the trusted plan source for this exact authentication method.
+	// PlanAcquisition 声明该精确认证方式使用的可信套餐来源。
+	PlanAcquisition PlanAcquisitionMode
+}
+
+// PlanOptionDefinition describes one immutable commercial plan selectable for declared credentials.
+// PlanOptionDefinition 描述一个可供声明式凭据选择的不可变商业套餐。
+type PlanOptionDefinition struct {
+	// ID is stable within one provider definition.
+	// ID 在一个供应商定义内保持稳定。
+	ID string
+	// DisplayName is the locale-neutral provider plan name.
+	// DisplayName 是与区域设置无关的供应商套餐名称。
+	DisplayName string
+	// DisplayNameKey identifies authored management-client localization.
+	// DisplayNameKey 标识管理客户端编写的本地化文本。
+	DisplayNameKey string
+	// AuthMethodIDs lists exact methods permitted to declare this plan.
+	// AuthMethodIDs 列出允许声明此套餐的精确认证方式。
+	AuthMethodIDs []string
+	// ManuallySelectable reports whether management clients may submit this option.
+	// ManuallySelectable 表示管理客户端是否可以提交该选项。
+	ManuallySelectable bool
+	// ProviderPlanCodes lists exact upstream codes mapped to this plan without fuzzy matching.
+	// ProviderPlanCodes 列出精确映射到该套餐且禁止模糊匹配的上游代码。
+	ProviderPlanCodes []string
+	// SortOrder is the stable management ordering.
+	// SortOrder 是稳定的管理排序值。
+	SortOrder int
+	// Revision identifies the immutable evidence revision.
+	// Revision 标识不可变证据修订号。
+	Revision uint64
+	// EvidenceRevision identifies provider-product evidence independently from schema changes.
+	// EvidenceRevision 独立于 Schema 变更标识供应商产品证据版本。
+	EvidenceRevision uint64
 }
 
 // EndpointParameterKind identifies one closed validation rule for a non-secret endpoint parameter.
@@ -400,6 +467,9 @@ type ProviderDefinition struct {
 	// AuthMethods lists authentication methods declared by the provider.
 	// AuthMethods 列出供应商声明的认证方式。
 	AuthMethods []AuthMethodDefinition
+	// PlanOptions lists code-owned plans available to manual credential onboarding.
+	// PlanOptions 列出人工凭据录入可选择的代码拥有套餐。
+	PlanOptions []PlanOptionDefinition
 	// Features describes optional system-provider management capabilities.
 	// Features 描述系统供应商的可选管理能力。
 	Features ProviderFeatureSet
@@ -435,6 +505,9 @@ type ProviderInstance struct {
 	// DisabledServiceIDs lists provider-scoped services intentionally hidden from call-plane resolution.
 	// DisabledServiceIDs 列出被有意从调用面解析中隐藏的供应商作用域服务。
 	DisabledServiceIDs []string
+	// RoutingStrategy optionally overrides the Router-wide credential selection strategy.
+	// RoutingStrategy 可选地覆盖 Router 全局凭据选择策略。
+	RoutingStrategy RoutingStrategy
 	// Revision is the latest persisted instance revision.
 	// Revision 是最新持久化实例修订号。
 	Revision uint64
@@ -489,6 +562,20 @@ type ScopeReference struct {
 	ID string
 }
 
+// DeclaredPlanSelection stores one operator-authored choice constrained by a code-owned plan option.
+// DeclaredPlanSelection 存储一个受代码拥有套餐选项约束的操作员声明选择。
+type DeclaredPlanSelection struct {
+	// PlanOptionID references one immutable option on the provider definition.
+	// PlanOptionID 引用供应商定义中的一个不可变选项。
+	PlanOptionID string `json:"plan_option_id"`
+	// DeclaredAt records when the operator confirmed the plan.
+	// DeclaredAt 记录操作员确认套餐的时间。
+	DeclaredAt time.Time `json:"declared_at"`
+	// Revision identifies the latest operator declaration revision.
+	// Revision 标识最新的操作员声明修订号。
+	Revision uint64 `json:"revision"`
+}
+
 // Credential stores non-secret metadata for one OAuth account or API key.
 // Credential 存储一个 OAuth 账号或 API Key 的非秘密元数据。
 type Credential struct {
@@ -525,6 +612,12 @@ type Credential struct {
 	// CoolingUntil is the earliest known recovery time for a cooling credential.
 	// CoolingUntil 是冷却凭据最早的已知恢复时间。
 	CoolingUntil *time.Time
+	// Priority orders this account before endpoint-specific binding priority; lower values win.
+	// Priority 在入口专属 Binding 优先级之前排列账号；较小值优先。
+	Priority int
+	// DeclaredPlan stores one code-owned manual plan selection when required.
+	// DeclaredPlan 在需要时存储一个代码拥有的人工套餐选择。
+	DeclaredPlan *DeclaredPlanSelection
 	// Revision is the latest persisted credential revision.
 	// Revision 是最新持久化凭据修订号。
 	Revision uint64

@@ -14,7 +14,11 @@ import (
 
 // fixedResolver returns one mutable fixture target for planning and drift tests.
 // fixedResolver 为规划与漂移测试返回一个可变夹具 Target。
-type fixedResolver struct{ target resolve.Target }
+type fixedResolver struct {
+	// target is the exact planning fixture.
+	// target 是精确规划夹具。
+	target resolve.Target
+}
 
 // Resolve returns the exact fixture target.
 // Resolve 返回精确夹具 Target。
@@ -24,7 +28,11 @@ func (r *fixedResolver) Resolve(context.Context, resolve.Request) (resolve.Targe
 
 // fixedResourceReader returns one owner-scoped fixture resource.
 // fixedResourceReader 返回一个所有者作用域夹具资源。
-type fixedResourceReader struct{ value routerresource.Resource }
+type fixedResourceReader struct {
+	// value is the exact owner-scoped resource fixture.
+	// value 是精确所有者作用域资源夹具。
+	value routerresource.Resource
+}
 
 // Get returns the fixture only for its exact owner and identifier.
 // Get 仅为精确所有者与标识返回夹具。

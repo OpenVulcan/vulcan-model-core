@@ -45,6 +45,12 @@ type ManagementQuery interface {
 	// GetCatalog returns one safe atomic provider model catalog.
 	// GetCatalog 返回一个安全原子供应商模型目录。
 	GetCatalog(context.Context, string) (management.CatalogView, error)
+	// GetModelContexts returns exact model context profiles and their concrete authorized accounts.
+	// GetModelContexts 返回精确模型上下文规格及其具体已授权账号。
+	GetModelContexts(context.Context, string, string) (management.ModelContextsView, error)
+	// GetModelCredentialUsage returns usage applicable to one exact model-account pair.
+	// GetModelCredentialUsage 返回适用于一个精确模型账号组合的用量。
+	GetModelCredentialUsage(context.Context, string, string, string) (management.ModelCredentialUsageView, error)
 	// ListEndpoints returns management-safe endpoint records.
 	// ListEndpoints 返回管理安全端点记录。
 	ListEndpoints(context.Context, string) ([]management.EndpointView, error)
@@ -146,6 +152,7 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateCredential)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/secret", server.requireManagement(http.HandlerFunc(server.handleRotateCredentialSecret)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/status", server.requireManagement(http.HandlerFunc(server.handleSetCredentialStatus)))
+		mux.Handle("DELETE /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}", server.requireManagement(http.HandlerFunc(server.handleDeleteCredential)))
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleBindings)))
 		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleCreateBinding)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/bindings/{binding_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateBinding)))
@@ -185,6 +192,13 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		if control.MetadataRefresh != nil {
 			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/catalog/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderMetadata)))
 		}
+		if control.Routing != nil {
+			mux.Handle("GET /vulcan/manage/settings/routing", server.requireManagement(http.HandlerFunc(server.handleRoutingSettings)))
+			mux.Handle("PUT /vulcan/manage/settings/routing", server.requireManagement(http.HandlerFunc(server.handleSetRoutingSettings)))
+			mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/routing", server.requireManagement(http.HandlerFunc(server.handleSetInstanceRouting)))
+			mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/priority", server.requireManagement(http.HandlerFunc(server.handleSetCredentialPriority)))
+			mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/plan", server.requireManagement(http.HandlerFunc(server.handleSetCredentialPlan)))
+		}
 		mux.Handle("GET /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleAPIKeys)))
 		mux.Handle("POST /vulcan/manage/api-keys", server.requireManagement(http.HandlerFunc(server.handleCreateAPIKey)))
 		mux.Handle("PUT /vulcan/manage/api-keys/{api_key_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateAPIKey)))
@@ -197,8 +211,7 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		}
 		// call routes are protected exclusively by enabled call-plane API keys.
 		// call 路由仅受启用的调用面 API 密钥保护。
-		mux.Handle("GET /vulcan/v1/models", server.requireAPIKey(http.HandlerFunc(server.handleCallModels)))
-		mux.Handle("GET /vulcan/v1/services", server.requireAPIKey(http.HandlerFunc(server.handleCallServices)))
+		mux.Handle("POST /vulcan/v1/info", server.requireAPIKey(http.HandlerFunc(server.handleCallInformation)))
 		mux.Handle("POST /vulcan/v1/resources", server.requireAPIKey(http.HandlerFunc(server.handleCreateResource)))
 		mux.Handle("POST /vulcan/v1/resources/import", server.requireAPIKey(http.HandlerFunc(server.handleImportResource)))
 		mux.Handle("GET /vulcan/v1/resources/{resource_id}", server.requireAPIKey(http.HandlerFunc(server.handleGetResource)))

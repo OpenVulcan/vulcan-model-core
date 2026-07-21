@@ -54,8 +54,7 @@ The service is expected to report `503` from `/readyz` until a production provid
 | `GET`, `POST`, `PUT` | `/vulcan/manage/provider-instances/...` | Management-only instances, endpoints, credentials, bindings, activation, and local model enablement |
 | `GET`, `PUT` | `/vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog` | Management-only complete user-declared model catalog for a custom provider instance; system provider catalogs remain read-only |
 | `GET`, `POST`, `PUT`, `DELETE` | `/vulcan/manage/api-keys/...` | Management-only plaintext call-plane API key lifecycle |
-| `GET` | `/vulcan/v1/models` | Call-plane provider-scoped enabled models and capabilities |
-| `GET` | `/vulcan/v1/services` | Call-plane provider-scoped special services, including unified `search.web` offerings |
+| `POST` | `/vulcan/v1/info` | Strongly typed call-plane information getter selected by `get: instances | models | accounts | services | usage`; exact provider, model, service, and account identifiers are body selectors |
 | `POST`, `GET`, `DELETE` | `/vulcan/v1/resources...` | Call-plane resource upload/import, safe metadata, content retrieval, and deletion |
 | `POST` | `/vulcan/v1/input-plans` | Resolve and freeze one deterministic media materialization plan |
 | `POST`, `GET` | `/vulcan/v1/executions...` | Create, inspect, cancel, and replay typed execution events |

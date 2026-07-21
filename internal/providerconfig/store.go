@@ -59,12 +59,29 @@ type Store interface {
 	// ListCredentials returns credentials owned by one provider instance.
 	// ListCredentials 返回一个供应商实例拥有的凭据。
 	ListCredentials(context.Context, string) ([]Credential, error)
+	// DeleteCredentialGraph atomically removes one credential and its bindings, deleting the empty instance when it was last.
+	// DeleteCredentialGraph 原子删除一个凭据及其绑定，并在它是最后一个凭据时删除空实例。
+	DeleteCredentialGraph(context.Context, string, string) (CredentialDeletion, error)
 	// SaveBinding creates or updates one access binding.
 	// SaveBinding 创建或更新一个访问绑定。
 	SaveBinding(context.Context, AccessBinding) error
 	// ListBindings returns bindings owned by one provider instance.
 	// ListBindings 返回一个供应商实例拥有的访问绑定。
 	ListBindings(context.Context, string) ([]AccessBinding, error)
+}
+
+// CredentialDeletion describes the exact configuration scope removed by one credential deletion.
+// CredentialDeletion 描述一次凭据删除所移除的精确配置范围。
+type CredentialDeletion struct {
+	// Credential is the deleted non-secret credential metadata needed for secret cleanup.
+	// Credential 是秘密清理所需的已删除非秘密凭据元数据。
+	Credential Credential
+	// InstanceDeleted reports whether the credential was the final account of its instance.
+	// InstanceDeleted 报告该凭据是否为其实例的最后一个账号。
+	InstanceDeleted bool
+	// DefinitionDeleted reports whether an orphaned custom definition was also removed.
+	// DefinitionDeleted 报告是否同时删除了孤立的自定义定义。
+	DefinitionDeleted bool
 }
 
 // SaveSystemOnboarding atomically commits one new system-provider configuration in memory.
@@ -223,6 +240,66 @@ func (s *MemoryStore) DeleteCustomOnboarding(ctx context.Context, onboarding Cus
 	delete(s.instances, onboarding.Instance.ID)
 	delete(s.customDefinitions, onboarding.Definition.ID)
 	return nil
+}
+
+// DeleteCredentialGraph atomically removes one credential-owned access graph from memory.
+// DeleteCredentialGraph 从内存中原子删除一个凭据拥有的访问图。
+func (s *MemoryStore) DeleteCredentialGraph(ctx context.Context, instanceID string, credentialID string) (CredentialDeletion, error) {
+	if err := contextError(ctx); err != nil {
+		return CredentialDeletion{}, err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	credential, existsCredential := s.credentials[credentialID]
+	if !existsCredential || credential.ProviderInstanceID != instanceID {
+		return CredentialDeletion{}, fmt.Errorf("%w: provider credential %s", ErrNotFound, credentialID)
+	}
+	instance, existsInstance := s.instances[instanceID]
+	if !existsInstance {
+		return CredentialDeletion{}, fmt.Errorf("%w: provider instance %s", ErrNotFound, instanceID)
+	}
+	for bindingID, binding := range s.bindings {
+		if binding.ProviderInstanceID == instanceID && binding.CredentialID == credentialID {
+			delete(s.bindings, bindingID)
+		}
+	}
+	delete(s.credentials, credentialID)
+	remainingCredentials := 0
+	for _, candidate := range s.credentials {
+		if candidate.ProviderInstanceID == instanceID {
+			remainingCredentials++
+		}
+	}
+	deletion := CredentialDeletion{Credential: cloneCredential(credential)}
+	if remainingCredentials > 0 {
+		return deletion, nil
+	}
+	for bindingID, binding := range s.bindings {
+		if binding.ProviderInstanceID == instanceID {
+			delete(s.bindings, bindingID)
+		}
+	}
+	for endpointID, endpoint := range s.endpoints {
+		if endpoint.ProviderInstanceID == instanceID {
+			delete(s.endpoints, endpointID)
+		}
+	}
+	delete(s.instances, instanceID)
+	deletion.InstanceDeleted = true
+	if definition, custom := s.customDefinitions[instance.DefinitionID]; custom {
+		definitionInUse := false
+		for _, candidate := range s.instances {
+			if candidate.DefinitionID == definition.ID {
+				definitionInUse = true
+				break
+			}
+		}
+		if !definitionInUse {
+			delete(s.customDefinitions, definition.ID)
+			deletion.DefinitionDeleted = true
+		}
+	}
+	return deletion, nil
 }
 
 // ListProviderGroups returns code-owned groups without reading persisted execution configuration.
@@ -635,6 +712,10 @@ func (s *MemoryStore) ListBindings(ctx context.Context, instanceID string) ([]Ac
 // cloneCredential 返回一个防止外部修改的凭据值。
 func cloneCredential(credential Credential) Credential {
 	credential.ScopeRefs = append([]ScopeReference(nil), credential.ScopeRefs...)
+	if credential.DeclaredPlan != nil {
+		declaredPlan := *credential.DeclaredPlan
+		credential.DeclaredPlan = &declaredPlan
+	}
 	return credential
 }
 

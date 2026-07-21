@@ -5,11 +5,16 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"reflect"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
+	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -41,10 +46,6 @@ func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providercon
 		if errDefinition != nil {
 			return changedInstances, fmt.Errorf("get Kimi definition %s: %w", instance.DefinitionID, errDefinition)
 		}
-		action, errAction := definitionActionForOperation(definition, vcp.OperationConversationRespond)
-		if errAction != nil {
-			return changedInstances, fmt.Errorf("resolve Kimi Chat action %s: %w", instance.DefinitionID, errAction)
-		}
 		current, errCatalog := catalogs.Get(ctx, instance.ID)
 		if errors.Is(errCatalog, catalog.ErrSnapshotNotFound) {
 			continue
@@ -52,7 +53,11 @@ func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providercon
 		if errCatalog != nil {
 			return changedInstances, fmt.Errorf("get Kimi catalog %s: %w", instance.ID, errCatalog)
 		}
-		migrated, changed, errMigrate := migrateKimiCatalogToChat(current, action)
+		credentials, errCredentials := configurations.ListCredentials(ctx, instance.ID)
+		if errCredentials != nil {
+			return changedInstances, fmt.Errorf("list Kimi credentials %s: %w", instance.ID, errCredentials)
+		}
+		migrated, changed, errMigrate := rebuildKimiSystemCatalog(ctx, configurations, catalogs, instance, definition, credentials, current, time.Now().UTC())
 		if errMigrate != nil {
 			return changedInstances, fmt.Errorf("migrate Kimi catalog %s: %w", instance.ID, errMigrate)
 		}
@@ -65,6 +70,222 @@ func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providercon
 		changedInstances++
 	}
 	return changedInstances, nil
+}
+
+// ReconcileCodexUnknownPlanEntitlements removes historical privilege-bearing entitlements from missing, expired, or unknown Codex plans.
+// ReconcileCodexUnknownPlanEntitlements 删除历史上由缺失、过期或未知 Codex 套餐持有的提权权益。
+func ReconcileCodexUnknownPlanEntitlements(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("context is required")
+	}
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
+		return 0, errors.New("provider configuration and catalog stores are required")
+	}
+	instances, errInstances := configurations.ListInstances(ctx, bootstrap.OpenAICodexDefinitionID)
+	if errInstances != nil {
+		return 0, errInstances
+	}
+	targetResolver, errResolver := resolve.New(configurations, catalogs)
+	if errResolver != nil {
+		return 0, errResolver
+	}
+	now := time.Now().UTC()
+	changedInstances := 0
+	for _, instance := range instances {
+		current, errCurrent := catalogs.Get(ctx, instance.ID)
+		if errors.Is(errCurrent, catalog.ErrSnapshotNotFound) {
+			continue
+		}
+		if errCurrent != nil {
+			return changedInstances, errCurrent
+		}
+		credentials, errCredentials := configurations.ListCredentials(ctx, instance.ID)
+		if errCredentials != nil {
+			return changedInstances, errCredentials
+		}
+		knownPlanCredentials := make(map[string]struct{}, len(current.Plans))
+		for _, plan := range current.Plans {
+			if provideropenai.CodexPlanKnown(plan.PlanCode) && catalogMetadataCurrent(plan.ObservedAt, plan.ExpiresAt, now) {
+				knownPlanCredentials[plan.CredentialID] = struct{}{}
+			}
+		}
+		unknownCredentials := make(map[string]struct{}, len(credentials))
+		for _, credential := range credentials {
+			if _, known := knownPlanCredentials[credential.ID]; !known {
+				unknownCredentials[credential.ID] = struct{}{}
+			}
+		}
+		filtered := make([]catalog.ModelEntitlement, 0, len(current.Entitlements))
+		for _, entitlement := range current.Entitlements {
+			if _, unknown := unknownCredentials[entitlement.CredentialID]; unknown {
+				continue
+			}
+			filtered = append(filtered, entitlement)
+		}
+		if len(filtered) == len(current.Entitlements) {
+			continue
+		}
+		if current.Revision == math.MaxUint64 {
+			return changedInstances, errors.New("Codex catalog revision is exhausted")
+		}
+		current.Entitlements = filtered
+		current.Revision++
+		current.ObservedAt = now
+		pools, errPools := targetResolver.SummarizeSnapshot(ctx, current, now, current.Revision)
+		if errPools != nil {
+			return changedInstances, errPools
+		}
+		current.Pools = pools
+		if errSave := catalogs.Save(ctx, current); errSave != nil {
+			return changedInstances, errSave
+		}
+		changedInstances++
+	}
+	return changedInstances, nil
+}
+
+// rebuildKimiSystemCatalog converges historical model, profile, and API-key entitlement data to the current code-owned template.
+// rebuildKimiSystemCatalog 将历史模型、规格与 API Key 权益数据收敛到当前代码拥有模板。
+func rebuildKimiSystemCatalog(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition, credentials []providerconfig.Credential, current catalog.Snapshot, now time.Time) (catalog.Snapshot, bool, error) {
+	desired, errDesired := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: instance}, definition, now)
+	if errDesired != nil {
+		return catalog.Snapshot{}, false, errDesired
+	}
+	credentialByID := make(map[string]providerconfig.Credential, len(credentials))
+	for _, credential := range credentials {
+		credentialByID[credential.ID] = credential
+		if credential.AuthMethodID == "api_key" && credential.DeclaredPlan != nil && definition.ID == bootstrap.KimiCodingDefinitionID {
+			var errApply error
+			desired, errApply = providerkimi.ApplyDeclaredMembership(desired, credential)
+			if errApply != nil {
+				return catalog.Snapshot{}, false, errApply
+			}
+		}
+	}
+	if definition.ID == bootstrap.KimiCodingDefinitionID {
+		preserveDetectedKimiMetadata(&desired, current, credentialByID, now)
+	}
+	if kimiCatalogEquivalent(current, desired) {
+		return current, false, nil
+	}
+	if current.Revision == math.MaxUint64 {
+		return catalog.Snapshot{}, false, errors.New("Kimi catalog revision is exhausted")
+	}
+	desired.Revision = current.Revision + 1
+	desired.ObservedAt = now
+	targetResolver, errResolver := resolve.New(configurations, catalogs)
+	if errResolver != nil {
+		return catalog.Snapshot{}, false, errResolver
+	}
+	pools, errPools := targetResolver.SummarizeSnapshot(ctx, desired, now, desired.Revision)
+	if errPools != nil {
+		return catalog.Snapshot{}, false, errPools
+	}
+	desired.Pools = pools
+	if errValidate := desired.Validate(); errValidate != nil {
+		return catalog.Snapshot{}, false, errValidate
+	}
+	return desired, true, nil
+}
+
+// preserveDetectedKimiMetadata retains only current device-flow evidence that still references the rebuilt catalog.
+// preserveDetectedKimiMetadata 仅保留仍引用重建目录的当前设备授权证据。
+func preserveDetectedKimiMetadata(desired *catalog.Snapshot, current catalog.Snapshot, credentials map[string]providerconfig.Credential, now time.Time) {
+	modelIDs := make(map[string]struct{}, len(desired.Models))
+	profileIDs := make(map[string]struct{}, len(desired.Profiles))
+	for _, model := range desired.Models {
+		modelIDs[model.ID] = struct{}{}
+	}
+	for _, profile := range desired.Profiles {
+		profileIDs[profile.ID] = struct{}{}
+	}
+	for _, plan := range current.Plans {
+		credential, exists := credentials[plan.CredentialID]
+		if exists && credential.AuthMethodID == "device_flow" && catalogMetadataCurrent(plan.ObservedAt, plan.ExpiresAt, now) {
+			desired.Plans = append(desired.Plans, plan)
+		}
+	}
+	for _, entitlement := range current.Entitlements {
+		credential, exists := credentials[entitlement.CredentialID]
+		_, modelExists := modelIDs[entitlement.ProviderModelID]
+		if !exists || credential.AuthMethodID != "device_flow" || !modelExists || !catalogMetadataCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, now) || !allStringsExist(entitlement.AllowedProfileIDs, profileIDs) {
+			continue
+		}
+		desired.Entitlements = append(desired.Entitlements, entitlement)
+	}
+	for _, allowance := range current.Allowances {
+		if !catalogMetadataCurrent(allowance.ObservedAt, allowance.ExpiresAt, now) {
+			continue
+		}
+		credential, directlyOwned := credentials[allowance.ScopeID]
+		if allowance.Scope == catalog.ScopeCredential && directlyOwned && credential.AuthMethodID == "device_flow" {
+			desired.Allowances = append(desired.Allowances, allowance)
+			continue
+		}
+		if allowance.Scope == catalog.ScopeExecutionProfile {
+			if _, exists := profileIDs[allowance.ScopeID]; exists {
+				desired.Allowances = append(desired.Allowances, allowance)
+			}
+		}
+	}
+}
+
+// allStringsExist reports whether every non-empty profile reference exists in the current template.
+// allStringsExist 表示每个非空 Profile 引用是否都存在于当前模板。
+func allStringsExist(values []string, existing map[string]struct{}) bool {
+	for _, value := range values {
+		if _, exists := existing[value]; !exists {
+			return false
+		}
+	}
+	return true
+}
+
+// catalogMetadataCurrent reports whether one persisted provider or operator observation remains usable.
+// catalogMetadataCurrent 表示一个已持久化供应商或操作员观测是否仍可用。
+func catalogMetadataCurrent(observedAt time.Time, expiresAt time.Time, now time.Time) bool {
+	return !observedAt.IsZero() && !observedAt.After(now) && (expiresAt.IsZero() || expiresAt.After(now))
+}
+
+// kimiCatalogEquivalent compares semantic catalog data while ignoring storage revisions, observation time, and derived pools.
+// kimiCatalogEquivalent 比较语义目录数据，同时忽略存储修订、观测时间与派生账号池。
+func kimiCatalogEquivalent(current catalog.Snapshot, desired catalog.Snapshot) bool {
+	return reflect.DeepEqual(normalizedKimiCatalog(current), normalizedKimiCatalog(desired))
+}
+
+// normalizedKimiCatalog removes non-semantic persistence counters from one comparison copy.
+// normalizedKimiCatalog 从一个比较副本移除非语义持久化计数。
+func normalizedKimiCatalog(snapshot catalog.Snapshot) catalog.Snapshot {
+	snapshot.Models = append([]catalog.ProviderModel(nil), snapshot.Models...)
+	snapshot.Offerings = append([]catalog.ModelOffering(nil), snapshot.Offerings...)
+	snapshot.Profiles = append([]catalog.ExecutionProfile(nil), snapshot.Profiles...)
+	snapshot.Plans = append([]catalog.PlanSnapshot(nil), snapshot.Plans...)
+	snapshot.Entitlements = append([]catalog.ModelEntitlement(nil), snapshot.Entitlements...)
+	snapshot.Allowances = append([]catalog.AllowanceSnapshot(nil), snapshot.Allowances...)
+	snapshot.Revision = 0
+	snapshot.ObservedAt = time.Time{}
+	snapshot.Pools = nil
+	for index := range snapshot.Models {
+		snapshot.Models[index].Revision = 0
+	}
+	for index := range snapshot.Offerings {
+		snapshot.Offerings[index].Revision = 0
+		snapshot.Offerings[index].CapabilityRevision = 0
+	}
+	for index := range snapshot.Profiles {
+		snapshot.Profiles[index].Revision = 0
+		snapshot.Profiles[index].CapabilityRevision = 0
+	}
+	for index := range snapshot.Plans {
+		snapshot.Plans[index].Revision = 0
+	}
+	for index := range snapshot.Entitlements {
+		snapshot.Entitlements[index].Revision = 0
+	}
+	for index := range snapshot.Allowances {
+		snapshot.Allowances[index].Revision = 0
+	}
+	return snapshot
 }
 
 // isKimiSystemDefinition reports whether one immutable definition belongs to the three built-in Kimi products.

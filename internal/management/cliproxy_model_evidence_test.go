@@ -82,7 +82,6 @@ func TestSystemModelTemplatesMatchCopiedCLIProxyModels(t *testing.T) {
 		{modelCatalogID: "google_antigravity", sourceCatalogID: "antigravity", excludedModelIDs: []string{"gemini-3.1-flash-image"}},
 		{modelCatalogID: "xai_api", sourceCatalogID: "xai", additionalOperationCount: 7},
 		{modelCatalogID: "xai_account", sourceCatalogID: "xai"},
-		{modelCatalogID: "kimi_coding", sourceCatalogID: "kimi"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.modelCatalogID, func(t *testing.T) {
