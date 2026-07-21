@@ -48,8 +48,8 @@ func (staticManagementQuery) ListProviderGroups(context.Context) ([]management.P
 // staticProtocolProfiles 为认证路由测试提供不可变协议元数据。
 type staticProtocolProfiles struct{}
 
-// List returns one selectable standard profile and one hidden special profile.
-// List 返回一个可选标准 Profile 与一个隐藏特殊 Profile。
+// List returns one selectable standard profile and one system-only special profile.
+// List 返回一个可选标准 Profile 与一个仅供系统使用的特殊 Profile。
 func (staticProtocolProfiles) List() []providerconfig.ProtocolProfile {
 	return []providerconfig.ProtocolProfile{
 		{
@@ -64,9 +64,9 @@ func (staticProtocolProfiles) List() []providerconfig.ProtocolProfile {
 	}
 }
 
-// TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols verifies special native protocols never enter generic-provider selection data.
-// TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols 验证特殊原生协议不会进入通用供应商选择数据。
-func TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols(t *testing.T) {
+// TestHandleProtocolProfilesReturnsCompleteDisplayCatalog verifies system-only profiles remain visible without becoming user configurable.
+// TestHandleProtocolProfilesReturnsCompleteDisplayCatalog 验证仅供系统使用的 Profile 保持可见且不会变成用户可配置。
+func TestHandleProtocolProfilesReturnsCompleteDisplayCatalog(t *testing.T) {
 	server := &Server{control: &ControlPlane{Protocols: staticProtocolProfiles{}}}
 	recorder := httptest.NewRecorder()
 	server.handleProtocolProfiles(recorder, httptest.NewRequest(http.MethodGet, "/vulcan/manage/protocol-profiles", nil))
@@ -77,7 +77,7 @@ func TestHandleProtocolProfilesReturnsOnlySelectableStandardProtocols(t *testing
 	if errDecode := json.NewDecoder(recorder.Body).Decode(&payload); errDecode != nil {
 		t.Fatalf("decode response: %v", errDecode)
 	}
-	if len(payload.ProtocolProfiles) != 1 || payload.ProtocolProfiles[0].ID != "openai.responses" {
+	if len(payload.ProtocolProfiles) != 2 || payload.ProtocolProfiles[0].ID != "google.interactions" || payload.ProtocolProfiles[0].UserConfigurable || payload.ProtocolProfiles[1].ID != "openai.responses" || !payload.ProtocolProfiles[1].UserConfigurable {
 		t.Fatalf("protocol profiles = %#v", payload.ProtocolProfiles)
 	}
 }

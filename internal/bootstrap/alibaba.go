@@ -49,7 +49,7 @@ func registerAlibabaProviderCatalog(registry *providerconfig.SystemRegistry) err
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{
 		ID:             AlibabaGroupID,
 		DisplayName:    "Alibaba Cloud Model Studio",
-		Description:    "Alibaba Cloud Model Studio coding subscriptions across CN and Global sites.",
+		Description:    "Alibaba Cloud Model Studio APIs and coding subscriptions across CN and Global sites.",
 		DescriptionKey: "providers.alibaba.description",
 		SortOrder:      60,
 		Revision:       1,
@@ -162,9 +162,9 @@ func alibabaProviderDefinitions() []providerconfig.ProviderDefinition {
 		alibabaProviderDefinition(AlibabaTokenPlanTeamGlobalDefinitionID, "Alibaba Token Plan Team Global", "Token Plan Team Global", "Team Token Plan service hosted at the Global site.", "providers.alibaba.tokenPlanTeamGlobalDescription", "alibaba_token_plan_team_global", "token_plan_team_global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1", "Global", 50, apiKey, unsupportedFeatures),
 	}
 	definitions = append(definitions,
-		alibabaEmbeddingProviderDefinition(AlibabaModelStudioCNDefinitionID, "Alibaba Model Studio CN", "Model Studio CN", "Alibaba Model Studio compatible embedding API hosted at the CN site.", "providers.alibaba.modelStudioCNDescription", "alibaba_model_studio_cn", providerconfig.EndpointPreset{ID: "model_studio_cn", BaseURL: "https://dashscope.aliyuncs.com", Region: "CN"}, 60, apiKey, unsupportedFeatures),
-		alibabaEmbeddingProviderDefinition(AlibabaModelStudioGlobalDefinitionID, "Alibaba Model Studio Global", "Model Studio Global", "Alibaba Model Studio compatible embedding API hosted at the Global site.", "providers.alibaba.modelStudioGlobalDescription", "alibaba_model_studio_global", providerconfig.EndpointPreset{ID: "model_studio_global", BaseURL: "https://dashscope-intl.aliyuncs.com", Region: "Global"}, 70, apiKey, unsupportedFeatures),
-		alibabaEmbeddingProviderDefinition(AlibabaModelStudioWorkspaceGlobalDefinitionID, "Alibaba Model Studio Workspace Global", "Model Studio Workspace Global", "Alibaba Model Studio API hosted in Singapore and isolated by workspace ID.", "providers.alibaba.modelStudioWorkspaceGlobalDescription", "alibaba_model_studio_workspace_global", providerconfig.EndpointPreset{ID: "model_studio_workspace_global", Region: "Global", BaseURLTemplate: "https://{workspace_id}.ap-southeast-1.maas.aliyuncs.com", Parameters: []providerconfig.EndpointParameterDefinition{{ID: "workspace_id", Kind: providerconfig.EndpointParameterHostnameLabel, Required: true}}}, 80, apiKey, unsupportedFeatures),
+		alibabaEmbeddingProviderDefinition(AlibabaModelStudioCNDefinitionID, "Alibaba Cloud Model Studio CN", "Model Studio CN", "Alibaba Cloud Model Studio compatible embedding API hosted at the CN site.", "providers.alibaba.modelStudioCNDescription", "alibaba_model_studio_cn", providerconfig.EndpointPreset{ID: "model_studio_cn", BaseURL: "https://dashscope.aliyuncs.com", Region: "CN"}, 60, apiKey, unsupportedFeatures),
+		alibabaEmbeddingProviderDefinition(AlibabaModelStudioGlobalDefinitionID, "Alibaba Cloud Model Studio Global", "Model Studio Global", "Alibaba Cloud Model Studio compatible embedding API hosted at the Global site.", "providers.alibaba.modelStudioGlobalDescription", "alibaba_model_studio_global", providerconfig.EndpointPreset{ID: "model_studio_global", BaseURL: "https://dashscope-intl.aliyuncs.com", Region: "Global"}, 70, apiKey, unsupportedFeatures),
+		alibabaEmbeddingProviderDefinition(AlibabaModelStudioWorkspaceGlobalDefinitionID, "Alibaba Cloud Model Studio Workspace Global", "Model Studio Workspace Global", "Alibaba Cloud Model Studio API hosted in Singapore and isolated by workspace ID.", "providers.alibaba.modelStudioWorkspaceGlobalDescription", "alibaba_model_studio_workspace_global", providerconfig.EndpointPreset{ID: "model_studio_workspace_global", Region: "Global", BaseURLTemplate: "https://{workspace_id}.ap-southeast-1.maas.aliyuncs.com", Parameters: []providerconfig.EndpointParameterDefinition{{ID: "workspace_id", Kind: providerconfig.EndpointParameterHostnameLabel, Required: true}}}, 80, apiKey, unsupportedFeatures),
 	)
 	return definitions
 }

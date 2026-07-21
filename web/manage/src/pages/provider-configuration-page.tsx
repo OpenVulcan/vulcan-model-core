@@ -46,7 +46,7 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip";
-import { useI18n } from "@/i18n";
+import { type TranslationKey, useI18n } from "@/i18n";
 import { ProviderIcon } from "@/lib/provider-icons";
 import { ProviderOnboardingPanel, providerStatusLabel } from "@/pages/provider-management-page";
 import {
@@ -160,6 +160,25 @@ function HelpLabel({ htmlFor, label, help }: { htmlFor: string; label: string; h
       </Tooltip>
     </div>
   );
+}
+
+// localizedProviderGroupDescription resolves only authored provider-family keys and preserves the server description for unknown future groups.
+// localizedProviderGroupDescription 仅解析已编写的供应商系列键，并为未知的未来分组保留服务端说明。
+function localizedProviderGroupDescription(
+  t: (key: TranslationKey) => string,
+  group: ProviderGroup,
+): string {
+  switch (group.description_key) {
+    case "providers.kimi.description":
+    case "providers.alibaba.description":
+    case "providers.openai.description":
+    case "providers.anthropic.description":
+    case "providers.google.description":
+    case "providers.xai.description":
+      return t(group.description_key);
+    default:
+      return group.description;
+  }
 }
 
 // ProviderConfigurationPageProps identifies the authenticated management session used for provider-only requests.
@@ -1005,7 +1024,7 @@ export function ProviderConfigurationPage({
                   </TableCell>
                   <TableCell className="whitespace-normal py-3">
                     <div className="space-y-2">
-                      <p className="text-sm text-muted-foreground">{group.description}</p>
+                      <p className="text-sm text-muted-foreground">{localizedProviderGroupDescription(t, group)}</p>
                       <div className="flex flex-wrap gap-1.5">
                         {group.provider_definitions.map((definition) => (
                           <Badge key={definition.id} variant="outline">

@@ -487,8 +487,8 @@ type protocolProfileListResponse struct {
 	ProtocolProfiles []protocolProfileView `json:"protocol_profiles"`
 }
 
-// protocolProfileView describes one custom-provider selectable protocol without exposing internal adapters.
-// protocolProfileView 描述一个可供自定义供应商选择的协议且不暴露内部 Adapter。
+// protocolProfileView describes one management-safe protocol without exposing internal adapters.
+// protocolProfileView 描述一个不暴露内部 Adapter 的管理安全协议。
 type protocolProfileView struct {
 	// ID is the stable protocol profile identifier.
 	// ID 是稳定协议 Profile 标识。
@@ -1506,8 +1506,8 @@ func writeControlError(writer http.ResponseWriter, err error) {
 	writeJSON(writer, statusCode, errorResponse{Error: errorCode})
 }
 
-// handleProtocolProfiles returns immutable metadata for profiles selectable by custom provider definitions.
-// handleProtocolProfiles 返回可供自定义供应商定义选择的不可变 Profile 元数据。
+// handleProtocolProfiles returns the complete immutable protocol display catalog; clients separately filter custom-provider choices.
+// handleProtocolProfiles 返回完整的不可变协议显示目录；客户端另行过滤自定义供应商选项。
 func (s *Server) handleProtocolProfiles(writer http.ResponseWriter, _ *http.Request) {
 	// profiles isolates the registry snapshot before it is translated into the HTTP contract.
 	// profiles 在转换为 HTTP 合同前隔离注册表快照。
@@ -1515,13 +1515,10 @@ func (s *Server) handleProtocolProfiles(writer http.ResponseWriter, _ *http.Requ
 	sort.Slice(profiles, func(left int, right int) bool {
 		return profiles[left].ID < profiles[right].ID
 	})
-	// views contains only data that management needs to create or edit a provider definition.
-	// views 仅包含管理面创建或编辑供应商定义所需的数据。
+	// views contains every registered profile so system definitions always resolve their exact interface names.
+	// views 包含每个已注册 Profile，确保系统 Definition 始终能解析其精确接口名称。
 	views := make([]protocolProfileView, 0, len(profiles))
 	for _, profile := range profiles {
-		if !profile.UserConfigurable || !profile.RuntimeReady {
-			continue
-		}
 		views = append(views, protocolProfileViewFrom(profile))
 	}
 	writeJSON(writer, http.StatusOK, protocolProfileListResponse{ProtocolProfiles: views})
