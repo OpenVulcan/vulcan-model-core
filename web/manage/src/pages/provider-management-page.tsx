@@ -59,6 +59,7 @@ import {
   deleteProviderCredential,
   fetchAuthorizedProviders,
   fetchCustomProtocolProfiles,
+  fetchProviderCatalog,
   fetchProviderDefinitions,
   fetchProviderGroups,
   onboardAntigravityOAuthFlow,
@@ -111,6 +112,46 @@ interface ProviderManagementPageProps {
   mode?: "provider" | "credential";
 }
 
+// CredentialProviderDefinition joins every selectable provider definition with its ownership kind.
+// CredentialProviderDefinition 将每个可选择供应商 Definition 与其所有权类型组合起来。
+interface CredentialProviderDefinition extends ProviderDefinitionIdentity {
+  // kind distinguishes code-owned providers from user-owned custom providers.
+  // kind 区分代码拥有供应商与用户拥有的自定义供应商。
+  kind: "system" | "custom";
+  // endpoint_presets preserves code-owned endpoint parameters required during first credential onboarding.
+  // endpoint_presets 保留首次凭据录入期间所需的代码拥有入口参数。
+  endpoint_presets?: ProviderDefinition["endpoint_presets"];
+  // variant_name is the category-local site or product label authored by native provider groups.
+  // variant_name 是原生供应商分组编写的分类内站点或产品标签。
+  variant_name?: string;
+  // variant_description explains the exact site or product when authored by the server catalog.
+  // variant_description 在服务端目录提供时说明精确站点或产品。
+  variant_description?: string;
+  // variant_description_key identifies the localized description for one native subtype.
+  // variant_description_key 标识一个原生子类的本地化说明。
+  variant_description_key?: string;
+}
+
+// CredentialProviderCategory represents one top-level provider family in credential navigation.
+// CredentialProviderCategory 表示凭据导航中的一个顶层供应商大类。
+interface CredentialProviderCategory {
+  // id is the frontend-stable category identity derived from an authoritative group or custom definition.
+  // id 是从权威分组或自定义 Definition 派生的前端稳定分类标识。
+  id: string;
+  // display_name is the top-level provider name shown in the left directory.
+  // display_name 是左侧目录显示的顶层供应商名称。
+  display_name: string;
+  // kind distinguishes native grouped providers from user-owned custom providers.
+  // kind 区分原生分组供应商与用户拥有的自定义供应商。
+  kind: "system" | "custom";
+  // group_id binds native category icons without leaking presentation ownership into the backend.
+  // group_id 绑定原生分类图标，且不将展示职责泄漏到后端。
+  group_id?: string;
+  // definitions contains the exact subtypes selected only during credential creation.
+  // definitions 包含仅在创建凭据时选择的精确子类。
+  definitions: CredentialProviderDefinition[];
+}
+
 // CredentialReauthorizationSelection binds one local credential to its immutable provider definition.
 // CredentialReauthorizationSelection 将一个本地凭据绑定到其不可变供应商定义。
 export interface CredentialReauthorizationSelection {
@@ -158,9 +199,9 @@ export function ProviderManagementPage({
   const [authorizedProviders, setAuthorizedProviders] = useState<
     AuthorizedProvider[]
   >([]);
-  // selectedProviderInstanceID identifies the provider shown in the right-side credential workspace.
-  // selectedProviderInstanceID 标识右侧凭据工作区显示的供应商。
-  const [selectedProviderInstanceID, setSelectedProviderInstanceID] =
+  // selectedCredentialCategoryID identifies the top-level provider family selected in the credential directory.
+  // selectedCredentialCategoryID 标识凭据目录中选中的顶层供应商大类。
+  const [selectedCredentialCategoryID, setSelectedCredentialCategoryID] =
     useState("");
   // adding reports whether the explicit two-level provider creation workflow is open.
   // adding 表示显式的两级供应商新增流程是否打开。
@@ -225,6 +266,13 @@ export function ProviderManagementPage({
   // attachmentTarget 标识接收新凭据的既有供应商配置。
   const [attachmentTarget, setAttachmentTarget] =
     useState<CredentialAttachmentSelection | null>(null);
+  // credentialIntent reports that credential creation must also create the first system-provider instance.
+  // credentialIntent 表示新增凭据还必须创建首个系统供应商实例。
+  const [credentialIntent, setCredentialIntent] = useState(false);
+  // credentialCreationCategoryID preserves the selected top-level category while its subtype is chosen in the dialog.
+  // credentialCreationCategoryID 在 Dialog 中选择子类期间保留所选顶层分类。
+  const [credentialCreationCategoryID, setCredentialCreationCategoryID] =
+    useState("");
   // deletingCredentialIDs prevents duplicate destructive requests.
   // deletingCredentialIDs 防止重复的破坏性请求。
   const [deletingCredentialIDs, setDeletingCredentialIDs] = useState<
@@ -259,13 +307,6 @@ export function ProviderManagementPage({
         }
         if (configuredProvidersResult.status === "fulfilled") {
           setAuthorizedProviders(configuredProvidersResult.value);
-          setSelectedProviderInstanceID((current) =>
-            configuredProvidersResult.value.some(
-              (provider) => provider.instance.id === current,
-            )
-              ? current
-              : (configuredProvidersResult.value[0]?.instance.id ?? ""),
-          );
         } else {
           setAuthorizedFailed(true);
         }
@@ -294,16 +335,114 @@ export function ProviderManagementPage({
     return () => controller.abort();
   }, [managementAuthToken, refreshRevision]);
 
+  useEffect(() => {
+    // controller cancels only local cached-catalog reads when the provider inventory changes or the page unmounts.
+    // controller 仅在供应商清单变化或页面卸载时取消本地缓存目录读取。
+    const controller = new AbortController();
+    if (authorizedProviders.length === 0) {
+      setProviderMetadata({});
+      return () => controller.abort();
+    }
+    // activeProviderIDs prevents removed provider snapshots from surviving a refreshed authorization inventory.
+    // activeProviderIDs 防止已删除供应商的快照残留在刷新的授权清单中。
+    const activeProviderIDs = new Set(
+      authorizedProviders.map((provider) => provider.instance.id),
+    );
+    Promise.all(
+      authorizedProviders.map(async (provider) => {
+        try {
+          // metadata is loaded from the persisted local catalog and never invokes an upstream provider.
+          // metadata 从持久化本地目录读取，绝不调用上游供应商。
+          const metadata = await fetchProviderCatalog(
+            managementAuthToken,
+            provider.instance.id,
+            controller.signal,
+          );
+          return [provider.instance.id, metadata] as const;
+        } catch {
+          return null;
+        }
+      }),
+    ).then((entries) => {
+      if (controller.signal.aborted) return;
+      setProviderMetadata((current) => {
+        // next retains only active instances and never replaces a newer explicit refresh with an older cached response.
+        // next 仅保留活跃实例，且绝不使用更旧缓存响应覆盖更新的显式刷新。
+        const next: Record<string, ProviderCatalogMetadata> = {};
+        for (const [providerInstanceID, metadata] of Object.entries(current)) {
+          if (activeProviderIDs.has(providerInstanceID)) {
+            next[providerInstanceID] = metadata;
+          }
+        }
+        for (const entry of entries) {
+          if (!entry) continue;
+          const [providerInstanceID, metadata] = entry;
+          if (!next[providerInstanceID] || metadata.revision >= next[providerInstanceID].revision) {
+            next[providerInstanceID] = metadata;
+          }
+        }
+        return next;
+      });
+    });
+    return () => controller.abort();
+  }, [authorizedProviders, managementAuthToken]);
+
+  // credentialCategories is the custom-first top-level directory followed by native provider families.
+  // credentialCategories 是自定义供应商优先、随后为原生供应商大类的顶层目录。
+  const credentialCategories = buildCredentialProviderCategories(
+    definitions,
+    groups,
+  );
+  // defaultCredentialCategory is the first category with configured account data, otherwise the first supported category.
+  // defaultCredentialCategory 是首个拥有已配置账号数据的分类，否则为首个受支持分类。
+  const defaultCredentialCategory =
+    credentialCategories.find((category) =>
+      category.definitions.some((definition) =>
+        authorizedProviders.some(
+          (provider) => provider.instance.definition_id === definition.id,
+        ),
+      ),
+    ) ?? credentialCategories[0];
+  // activeCredentialCategoryID avoids an empty intermediate workspace while asynchronous inventories settle.
+  // activeCredentialCategoryID 在异步清单稳定期间避免出现空白的中间工作区。
+  const activeCredentialCategoryID = credentialCategories.some(
+    (category) => category.id === selectedCredentialCategoryID,
+  )
+    ? selectedCredentialCategoryID
+    : (defaultCredentialCategory?.id ?? "");
+
+  useEffect(() => {
+    if (!credentialMode) return;
+    setSelectedCredentialCategoryID((current) => {
+      if (credentialCategories.some((category) => category.id === current)) {
+        return current;
+      }
+      return defaultCredentialCategory?.id ?? "";
+    });
+  }, [authorizedProviders, credentialMode, definitions, groups]);
+
   // selectedDefinition is the exact immutable variant passed to the onboarding command.
   // selectedDefinition 是传递给录入命令的精确不可变变体。
   const selectedDefinition = groups
     .flatMap((group) => group.provider_definitions)
     .find((definition) => definition.id === selectedDefinitionID) ??
     definitions.find((definition) => definition.id === selectedDefinitionID);
-  // selectedAuthorizedProvider is the exact provider instance selected in the credential tree.
-  // selectedAuthorizedProvider 是凭据树中选择的精确供应商实例。
-  const selectedAuthorizedProvider = authorizedProviders.find(
-    (provider) => provider.instance.id === selectedProviderInstanceID,
+  // selectedCredentialCategory is the top-level native family or custom provider selected in the directory.
+  // selectedCredentialCategory 是目录中选中的顶层原生系列或自定义供应商。
+  const selectedCredentialCategory = credentialCategories.find(
+    (category) => category.id === activeCredentialCategoryID,
+  );
+  // selectedCredentialProviders contains every configured subtype instance owned by the selected category.
+  // selectedCredentialProviders 包含所选大类拥有的每个已配置子类实例。
+  const selectedCredentialProviders = authorizedProviders.filter(
+    (provider) => selectedCredentialCategory?.definitions.some(
+      (definition) => definition.id === provider.instance.definition_id,
+    ),
+  );
+  // credentialCreationCategory is the top-level category whose subtype chooser is active in the dialog.
+  // credentialCreationCategory 是其子类选择器当前显示在 Dialog 中的顶层分类。
+  const credentialCreationCategory = credentialCategories.find(
+    (category) => category.id === credentialCreationCategoryID,
   );
   // normalizedSearch is compared only with locale-neutral provider identifiers and authored names.
   // normalizedSearch 仅与区域无关的供应商标识和编写名称比较。
@@ -335,17 +474,70 @@ export function ProviderManagementPage({
     setConfiguringCustom(false);
     setReauthorizationTarget(null);
     setAttachmentTarget(null);
+    setCredentialIntent(false);
+    setCredentialCreationCategoryID("");
   }
 
   // beginCredentialAttachment opens the authorization workflow for the selected existing provider configuration.
   // beginCredentialAttachment 为所选既有供应商配置打开授权流程。
-  function beginCredentialAttachment(): void {
-    if (!selectedAuthorizedProvider) return;
+  function beginCredentialAttachment(provider: AuthorizedProvider): void {
     setAttachmentTarget({
-      providerInstanceID: selectedAuthorizedProvider.instance.id,
+      providerInstanceID: provider.instance.id,
     });
-    setSelectedDefinitionID(selectedAuthorizedProvider.instance.definition_id);
+    setCredentialIntent(false);
+    setCredentialCreationCategoryID("");
+    setSelectedDefinitionID(provider.instance.definition_id);
     setAdding(true);
+  }
+
+  // beginSelectedCredentialCreation opens subtype selection for native families or direct attachment for one custom instance.
+  // beginSelectedCredentialCreation 为原生大类打开子类选择，或为一个自定义实例直接打开凭据附加流程。
+  function beginSelectedCredentialCreation(): void {
+    if (!selectedCredentialCategory) return;
+    if (
+      selectedCredentialCategory.kind === "custom" &&
+      selectedCredentialProviders.length === 1
+    ) {
+      beginCredentialAttachment(selectedCredentialProviders[0]);
+      return;
+    }
+    if (selectedCredentialCategory.kind === "system") {
+      setAttachmentTarget(null);
+      setReauthorizationTarget(null);
+      setCredentialIntent(false);
+      setSelectedDefinitionID("");
+      setCredentialCreationCategoryID(selectedCredentialCategory.id);
+      setAdding(true);
+    }
+  }
+
+  // selectCredentialSubtype resolves one native subtype to its existing instance or first-onboarding workflow.
+  // selectCredentialSubtype 将一个原生子类解析到其既有实例或首次录入流程。
+  function selectCredentialSubtype(definitionID: string): void {
+    if (!credentialCreationCategory) return;
+    // definition is selected only from the active category's authoritative subtype set.
+    // definition 仅从当前分类的权威子类集合中选择。
+    const definition = credentialCreationCategory.definitions.find(
+      (candidate) => candidate.id === definitionID,
+    );
+    if (!definition) return;
+    // configuredProviders identifies the exact existing subtype configuration, if present.
+    // configuredProviders 标识该精确子类已有的配置（如存在）。
+    const configuredProviders = authorizedProviders.filter(
+      (provider) => provider.instance.definition_id === definition.id,
+    );
+    if (configuredProviders.length === 1) {
+      setAttachmentTarget({
+        providerInstanceID: configuredProviders[0].instance.id,
+      });
+      setCredentialIntent(false);
+    } else if (configuredProviders.length === 0) {
+      setAttachmentTarget(null);
+      setCredentialIntent(true);
+    } else {
+      return;
+    }
+    setSelectedDefinitionID(definition.id);
   }
 
   // beginCredentialReauthorization opens the exact provider workflow for one existing credential.
@@ -357,6 +549,7 @@ export function ProviderManagementPage({
   ) {
     setReauthorizationTarget({ providerInstanceID, credential });
     setAttachmentTarget(null);
+    setCredentialCreationCategoryID("");
     setSelectedDefinitionID(definitionID);
     setAdding(true);
   }
@@ -402,6 +595,14 @@ export function ProviderManagementPage({
   function returnToProviderCatalog() {
     setSelectedDefinitionID("");
     setConfiguringCustom(false);
+  }
+
+  // returnToCredentialSubtypeSelection leaves authorization while preserving the selected native provider category.
+  // returnToCredentialSubtypeSelection 离开授权步骤，同时保留选中的原生供应商大类。
+  function returnToCredentialSubtypeSelection(): void {
+    setSelectedDefinitionID("");
+    setAttachmentTarget(null);
+    setCredentialIntent(false);
   }
 
   // completeOnboarding returns to the authorized list and reloads committed server state.
@@ -570,6 +771,11 @@ export function ProviderManagementPage({
         onReauthorizeCredential={beginCredentialReauthorization}
         onDeleteCredential={deleteCredential}
         deletingCredentialIDs={deletingCredentialIDs}
+        onAddCredential={
+          credentialMode && selectedCredentialProviders.length > 1
+            ? () => beginCredentialAttachment(provider)
+            : undefined
+        }
       />
     );
   }
@@ -582,17 +788,26 @@ export function ProviderManagementPage({
             {t(credentialMode ? "credentials.title" : "providers.title")}
           </h2>
           <p className="text-muted-foreground mt-1 text-sm">
-            {t("providers.authorizedDescription")}
+            {t(
+              credentialMode
+                ? "credentials.description"
+                : "providers.authorizedDescription",
+            )}
           </p>
         </div>
         {!adding &&
         !loading &&
         !catalogFailed &&
-        (!credentialMode || selectedAuthorizedProvider) ? (
+        (!credentialMode ||
+          (selectedCredentialCategory &&
+            ((selectedCredentialCategory.kind === "system" &&
+              selectedCredentialCategory.definitions.length > 0) ||
+              (selectedCredentialCategory.kind === "custom" &&
+                selectedCredentialProviders.length === 1)))) ? (
           <Button
             onClick={
               credentialMode
-                ? beginCredentialAttachment
+                ? beginSelectedCredentialCreation
                 : () => setAdding(true)
             }
           >
@@ -619,54 +834,101 @@ export function ProviderManagementPage({
       ) : null}
 
       {!loading && !authorizedFailed ? (
-        authorizedProviders.length > 0 ? (
-          credentialMode && selectedAuthorizedProvider ? (
+        credentialMode ? (
+          credentialCategories.length > 0 ? (
             <div className="grid min-h-[32rem] overflow-hidden rounded-xl border lg:grid-cols-[16rem_minmax(0,1fr)]">
               <aside className="border-b bg-muted/20 p-2 lg:border-b-0 lg:border-r">
                 <div className="space-y-1" role="tree" aria-label={t("credentials.title")}>
-                  {authorizedProviders.map((provider) => {
-                    // definition supplies the stable family key used by the frontend-only icon library.
-                    // definition 提供前端专用图标库使用的稳定系列键。
-                    const definition = findProviderDefinition(
-                      definitions,
-                      groups,
-                      provider.instance.definition_id,
+                  {credentialCategories.map((category) => {
+                    // configuredProviders contains every configured subtype owned by this top-level category.
+                    // configuredProviders 包含此顶层大类拥有的每个已配置子类。
+                    const configuredProviders = authorizedProviders.filter(
+                      (provider) => category.definitions.some(
+                        (definition) =>
+                          definition.id === provider.instance.definition_id,
+                      ),
                     );
+                    // credentialCount summarizes every account attached across all category subtypes.
+                    // credentialCount 汇总此大类所有子类附加的账号。
+                    const credentialCount = configuredProviders.reduce(
+                      (count, provider) => count + provider.credentials.length,
+                      0,
+                    );
+                    const selected =
+                      category.id === activeCredentialCategoryID;
                     return (
                       <button
-                        key={provider.instance.id}
+                        key={category.id}
                         type="button"
                         role="treeitem"
-                        aria-selected={provider.instance.id === selectedProviderInstanceID}
-                        className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${provider.instance.id === selectedProviderInstanceID ? "bg-muted/80 text-foreground ring-1 ring-inset ring-border" : "hover:bg-muted"}`}
-                        onClick={() => setSelectedProviderInstanceID(provider.instance.id)}
+                        aria-selected={selected}
+                        className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${selected ? "bg-muted/80 text-foreground ring-1 ring-inset ring-border" : "hover:bg-muted"}`}
+                        onClick={() =>
+                          setSelectedCredentialCategoryID(category.id)
+                        }
                       >
                         <span className="flex min-w-0 items-center gap-2.5">
                           <ProviderIcon
-                            definitionID={provider.instance.definition_id}
-                            groupID={definition?.group_id}
+                            definitionID={category.definitions[0]?.id}
+                            groupID={category.group_id}
                             className="size-[26px]"
                           />
-                          <span className="min-w-0">
-                            <span className="block truncate font-medium">{provider.instance.display_name}</span>
-                            <span className="block truncate text-xs opacity-70">{provider.instance.handle}</span>
+                          <span className="min-w-0 truncate font-medium">
+                            {category.display_name}
                           </span>
                         </span>
-                        <Badge variant="secondary">{provider.credentials.length}</Badge>
+                        <Badge variant="secondary">{credentialCount}</Badge>
                       </button>
                     );
                   })}
                 </div>
               </aside>
-              <main className="p-3 lg:p-4">
-                {renderAuthorizedProviderCard(selectedAuthorizedProvider)}
+              <main className="min-w-0 p-3 lg:p-4">
+                {selectedCredentialProviders.length > 0 ? (
+                  <div className="grid gap-4">
+                    {selectedCredentialProviders.map(
+                      renderAuthorizedProviderCard,
+                    )}
+                  </div>
+                ) : selectedCredentialCategory ? (
+                  <Card>
+                    <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
+                      <ProviderIcon
+                        definitionID={
+                          selectedCredentialCategory.definitions[0]?.id
+                        }
+                        groupID={selectedCredentialCategory.group_id}
+                        className="size-8"
+                      />
+                      <div>
+                        <p className="font-medium">
+                          {selectedCredentialCategory.display_name}
+                        </p>
+                        <p className="text-muted-foreground mt-1 text-sm">
+                          {t(
+                            selectedCredentialCategory.kind === "custom"
+                              ? "credentials.configureCustomFirst"
+                              : "providers.noCredentialsForProvider",
+                          )}
+                        </p>
+                      </div>
+                    </CardContent>
+                  </Card>
+                ) : null}
               </main>
             </div>
           ) : (
-            <div className="grid gap-4 lg:grid-cols-2">
-              {authorizedProviders.map(renderAuthorizedProviderCard)}
-            </div>
+            <Card>
+              <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
+                <ShieldCheckIcon className="text-muted-foreground size-8" />
+                <p className="font-medium">{t("credentials.noProviders")}</p>
+              </CardContent>
+            </Card>
           )
+        ) : authorizedProviders.length > 0 ? (
+          <div className="grid gap-4 lg:grid-cols-2">
+            {authorizedProviders.map(renderAuthorizedProviderCard)}
+          </div>
         ) : (
           <Card>
             <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
@@ -685,17 +947,29 @@ export function ProviderManagementPage({
         }}
       >
         {!catalogFailed ? (
-          <DialogContent className="h-[min(80vh,600px)] max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
+          <DialogContent
+            className={
+              credentialMode
+                ? "max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
+                : "h-[min(80vh,600px)] max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
+            }
+          >
             <DialogHeader>
-              {(selectedDefinition || configuringCustom) &&
-              !attachmentTarget &&
-              !reauthorizationTarget ? (
+              {((credentialCreationCategory && selectedDefinition) ||
+                ((selectedDefinition || configuringCustom) &&
+                  !attachmentTarget &&
+                  !reauthorizationTarget &&
+                  !credentialIntent)) ? (
                 <Button
                   type="button"
                   variant="ghost"
                   size="icon"
                   aria-label={t("providers.backToProviders")}
-                  onClick={returnToProviderCatalog}
+                  onClick={
+                    credentialCreationCategory
+                      ? returnToCredentialSubtypeSelection
+                      : returnToProviderCatalog
+                  }
                 >
                   <ArrowLeftIcon className="size-4" />
                 </Button>
@@ -704,7 +978,7 @@ export function ProviderManagementPage({
                 <DialogTitle>
                   {reauthorizationTarget
                     ? t("providers.reauthorizeCredential")
-                    : attachmentTarget
+                    : attachmentTarget || credentialIntent || credentialCreationCategory
                       ? t("providers.addCredential")
                     : selectedDefinition || configuringCustom
                     ? t("providers.configureProvider")
@@ -713,6 +987,8 @@ export function ProviderManagementPage({
                 <DialogDescription>
                   {selectedDefinition
                     ? selectedDefinition.display_name
+                    : credentialCreationCategory
+                      ? credentialCreationCategory.display_name
                     : configuringCustom
                       ? t("providers.customDescription")
                       : t("providers.description")}
@@ -726,7 +1002,19 @@ export function ProviderManagementPage({
               </DialogClose>
             </DialogHeader>
 
-            {!selectedDefinition && !configuringCustom ? (
+            {!selectedDefinition && credentialCreationCategory ? (
+              <div className="min-h-0 overflow-y-auto">
+                <div className="grid overflow-hidden rounded-lg border">
+                  {credentialCreationCategory.definitions.map((definition) => (
+                    <CredentialSubtypeSelectionRow
+                      key={definition.id}
+                      definition={definition}
+                      onSelect={selectCredentialSubtype}
+                    />
+                  ))}
+                </div>
+              </div>
+            ) : !selectedDefinition && !configuringCustom ? (
               <div className="grid min-h-0 grid-rows-[auto_minmax(0,1fr)] gap-5 pr-1">
                 <div className="relative">
                   <SearchIcon className="text-muted-foreground absolute left-3 top-1/2 size-4 -translate-y-1/2" />
@@ -788,6 +1076,7 @@ export function ProviderManagementPage({
                     onComplete={completeOnboarding}
                     reauthorizationTarget={reauthorizationTarget}
                     attachmentTarget={attachmentTarget}
+                    credentialIntent={credentialIntent}
                   />
                 ) : null}
               </div>
@@ -848,6 +1137,66 @@ function findProviderDefinition(
     groups
       .flatMap((group) => group.provider_definitions)
       .find((definition) => definition.id === definitionID);
+}
+
+// buildCredentialProviderCategories returns custom providers and native families as top-level credential navigation entries.
+// buildCredentialProviderCategories 将自定义供应商与原生供应商大类作为顶层凭据导航项返回。
+function buildCredentialProviderCategories(
+  definitions: ProviderDefinitionSummary[],
+  groups: ProviderGroup[],
+): CredentialProviderCategory[] {
+  // categories preserves custom-first presentation while retaining server-authored native group order.
+  // categories 保持自定义供应商优先展示，同时保留服务端编写的原生分组顺序。
+  const categories: CredentialProviderCategory[] = [];
+  // seenDefinitionIDs prevents grouped and ungrouped inventories from duplicating one native subtype.
+  // seenDefinitionIDs 防止分组与未分组清单重复展示同一个原生子类。
+  const seenDefinitionIDs = new Set<string>();
+
+  for (const definition of definitions) {
+    if (definition.kind !== "custom") continue;
+    seenDefinitionIDs.add(definition.id);
+    categories.push({
+      id: `custom:${definition.id}`,
+      display_name: definition.display_name,
+      kind: "custom",
+      group_id: definition.group_id,
+      definitions: [definition],
+    });
+  }
+  for (const group of groups) {
+    // groupDefinitions contains the exact native subtypes owned by this server-authored provider family.
+    // groupDefinitions 包含此服务端编写供应商大类拥有的精确原生子类。
+    const groupDefinitions = group.provider_definitions.map((definition) => {
+      seenDefinitionIDs.add(definition.id);
+      return { ...definition, kind: "system" as const };
+    });
+    if (groupDefinitions.length > 0) {
+      categories.push({
+        id: `system-group:${group.id}`,
+        display_name: group.display_name,
+        kind: "system",
+        group_id: group.id,
+        definitions: groupDefinitions,
+      });
+    }
+  }
+  for (const definition of definitions) {
+    if (
+      definition.kind !== "system" ||
+      seenDefinitionIDs.has(definition.id)
+    ) {
+      continue;
+    }
+    seenDefinitionIDs.add(definition.id);
+    categories.push({
+      id: `system-definition:${definition.id}`,
+      display_name: definition.display_name,
+      kind: "system",
+      group_id: definition.group_id,
+      definitions: [definition],
+    });
+  }
+  return categories;
 }
 
 // CustomProviderSelectionCardProps defines the direct custom-provider entry inside the shared catalog dialog.
@@ -1086,6 +1435,9 @@ interface AuthorizedProviderCardProps {
   // deletingCredentialIDs identifies credentials with an active delete request.
   // deletingCredentialIDs 标识正在执行删除请求的凭据。
   deletingCredentialIDs: ReadonlySet<string>;
+  // onAddCredential opens credential acquisition for this exact configured instance when supplied.
+  // onAddCredential 在提供时为此精确已配置实例打开凭据获取流程。
+  onAddCredential?: () => void;
 }
 
 // AuthorizedProviderCard renders one configured provider and its complete redacted authorization list.
@@ -1106,6 +1458,7 @@ function AuthorizedProviderCard({
   onReauthorizeCredential,
   onDeleteCredential,
   deletingCredentialIDs,
+  onAddCredential,
 }: AuthorizedProviderCardProps) {
   const { t } = useI18n();
   // accountMetadataStatuses is the complete server-authored capability state set relevant to account refresh.
@@ -1143,25 +1496,38 @@ function AuthorizedProviderCard({
               </CardDescription>
             </div>
           </div>
-          <Badge variant="secondary">
-            {providerStatusLabel(t, provider.instance.status)}
-          </Badge>
-          {supportsAccountMetadata ? (
-            <Button
-              type="button"
-              variant="outline"
-              size="sm"
-              disabled={refreshingMetadata}
-              onClick={() => onRefreshMetadata(provider.instance.id)}
-            >
-              <RefreshCwIcon
-                className={`size-3.5 ${refreshingMetadata ? "animate-spin" : ""}`}
-              />
-              {refreshingMetadata
-                ? t("providers.refreshingMetadata")
-                : t("providers.refreshMetadata")}
-            </Button>
-          ) : null}
+          <div className="flex flex-wrap items-center justify-end gap-2">
+            <Badge variant="secondary">
+              {providerStatusLabel(t, provider.instance.status)}
+            </Badge>
+            {supportsAccountMetadata ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                disabled={refreshingMetadata}
+                onClick={() => onRefreshMetadata(provider.instance.id)}
+              >
+                <RefreshCwIcon
+                  className={`size-3.5 ${refreshingMetadata ? "animate-spin" : ""}`}
+                />
+                {refreshingMetadata
+                  ? t("providers.refreshingMetadata")
+                  : t("providers.refreshMetadata")}
+              </Button>
+            ) : null}
+            {onAddCredential ? (
+              <Button
+                type="button"
+                variant="outline"
+                size="sm"
+                onClick={onAddCredential}
+              >
+                <PlusIcon className="size-3.5" />
+                {t("providers.addCredential")}
+              </Button>
+            ) : null}
+          </div>
         </div>
         {!supportsAccountMetadata ? (
           <p className="text-muted-foreground text-xs">
@@ -1545,7 +1911,7 @@ function AllowanceDisplay({
         <div className="flex items-center justify-between gap-3">
           <span className="flex min-w-0 items-center gap-2">
             <span className="truncate font-medium">
-              {allowanceMetricLabel(t, allowance.metric)}
+              {allowanceMetricLabel(t, allowance.metric, allowance.window)}
             </span>
             <AllowanceCredentialBadge allowance={allowance} />
           </span>
@@ -1558,7 +1924,11 @@ function AllowanceDisplay({
             <div
               className="bg-muted h-2 overflow-hidden rounded-full"
               role="progressbar"
-              aria-label={allowanceMetricLabel(t, allowance.metric)}
+              aria-label={allowanceMetricLabel(
+                t,
+                allowance.metric,
+                allowance.window,
+              )}
               aria-valuemin={0}
               aria-valuemax={100}
               aria-valuenow={Math.round(progress)}
@@ -1601,7 +1971,7 @@ function AllowanceDisplay({
         <div>
           <div className="flex items-center gap-2">
             <span className="font-medium">
-              {allowanceMetricLabel(t, allowance.metric)}
+              {allowanceMetricLabel(t, allowance.metric, allowance.window)}
             </span>
             <AllowanceCredentialBadge allowance={allowance} />
             <Badge variant="outline">
@@ -1632,7 +2002,7 @@ function AllowanceDisplay({
     <li className="flex items-center justify-between gap-4 px-3 py-3 text-sm">
       <div>
         <p className="font-medium">
-          {allowanceMetricLabel(t, allowance.metric)}
+          {allowanceMetricLabel(t, allowance.metric, allowance.window)}
         </p>
         <AllowanceCredentialBadge allowance={allowance} />
         <AllowanceValueSummary allowance={allowance} t={t} />
@@ -1730,6 +2100,7 @@ function formatMinorCurrency(
 function allowanceMetricLabel(
   t: (key: TranslationKey) => string,
   metric: string,
+  window?: ProviderAllowanceWindow,
 ): string {
   const known: Partial<Record<string, TranslationKey>> = {
     codex_primary: "providers.allowanceMetrics.codexPrimary",
@@ -1738,6 +2109,7 @@ function allowanceMetricLabel(
     code_review_secondary: "providers.allowanceMetrics.codeReviewSecondary",
     rate_limit_reset_credits: "providers.allowanceMetrics.resetCredits",
     five_hour: "providers.allowanceMetrics.fiveHour",
+    five_hour_usage: "providers.allowanceMetrics.fiveHour",
     seven_day: "providers.allowanceMetrics.sevenDay",
     seven_day_oauth_apps: "providers.allowanceMetrics.sevenDayOAuthApps",
     seven_day_opus: "providers.allowanceMetrics.sevenDayOpus",
@@ -1752,6 +2124,15 @@ function allowanceMetricLabel(
   };
   const translationKey = known[metric];
   if (translationKey) return t(translationKey);
+  // An unnamed Kimi limit is identified by its explicit five-hour rolling duration, matching already persisted snapshots.
+  // 未命名 Kimi 限额通过其显式五小时滚动时长识别，从而兼容已经持久化的快照。
+  if (
+    /^limit_\d+$/.test(metric) &&
+    window?.kind === "rolling" &&
+    window.duration === "18000000000000"
+  ) {
+    return t("providers.allowanceMetrics.fiveHour");
+  }
   return metric
     .split("_")
     .filter(Boolean)
@@ -1891,6 +2272,75 @@ export function providerStatusLabel(
     default:
       return status;
   }
+}
+
+// CredentialSubtypeSelectionRowProps defines one exact native subtype selected after its top-level provider category.
+// CredentialSubtypeSelectionRowProps 定义在顶层供应商大类之后选择的一个精确原生子类。
+interface CredentialSubtypeSelectionRowProps {
+  // definition contains the exact site, account product, or commercial plan.
+  // definition 包含精确站点、账号产品或商业套餐。
+  definition: CredentialProviderDefinition;
+  // onSelect advances credential creation with the immutable definition identifier.
+  // onSelect 使用不可变 Definition 标识推进凭据创建。
+  onSelect: (definitionID: string) => void;
+}
+
+// CredentialSubtypeSelectionRow renders one compact subtype choice without flattening it into the left provider directory.
+// CredentialSubtypeSelectionRow 渲染一个紧凑子类选项，且不将其平铺到左侧供应商目录。
+function CredentialSubtypeSelectionRow({
+  definition,
+  onSelect,
+}: CredentialSubtypeSelectionRowProps) {
+  const { t } = useI18n();
+  // subtypeName prefers the category-local variant label and retains the authoritative definition name as fallback.
+  // subtypeName 优先使用分类内变体标签，并以权威 Definition 名称作为回退。
+  const subtypeName = definition.variant_name ?? definition.display_name;
+  return (
+    <button
+      type="button"
+      className="group grid w-full items-center gap-2 border-b bg-background px-3 py-2 text-left outline-none transition-colors last:border-b-0 hover:bg-muted/50 focus-visible:z-10 focus-visible:ring-2 focus-visible:ring-ring sm:grid-cols-[8rem_minmax(0,1fr)_auto]"
+      aria-label={`${t("providers.select")} ${subtypeName}`}
+      onClick={() => onSelect(definition.id)}
+      data-credential-subtype={definition.id}
+    >
+      <div className="font-semibold">{subtypeName}</div>
+      <div className="min-w-0 space-y-1">
+        {definition.variant_description ? (
+          <p className="text-sm leading-tight">
+            {localizedDescription(
+              t,
+              definition.variant_description_key,
+              definition.variant_description,
+            )}
+          </p>
+        ) : null}
+        <div className="text-muted-foreground flex min-w-0 flex-wrap items-center gap-x-3 gap-y-1 text-xs">
+          <span className="flex items-center gap-1.5">
+            <CableIcon className="size-3.5 shrink-0" aria-hidden="true" />
+            <Badge variant="secondary" className="h-5 px-2 text-xs">
+              {definition.protocol_profile_id}
+            </Badge>
+          </span>
+          {(definition.endpoint_presets ?? []).map((endpoint) => (
+            <span
+              key={endpoint.id}
+              className="flex min-w-0 items-center gap-1.5"
+              data-provider-endpoint={endpoint.id}
+            >
+              <Globe2Icon className="size-3.5 shrink-0" aria-hidden="true" />
+              <span className="truncate">
+                {endpoint.base_url ||
+                  endpoint.parameters
+                    .map((parameter) => `{${parameter.id}}`)
+                    .join(" · ")}
+              </span>
+            </span>
+          ))}
+        </div>
+      </div>
+      <ChevronRightIcon className="text-muted-foreground size-4 shrink-0 justify-self-end transition-colors group-hover:text-foreground group-focus-visible:text-foreground" />
+    </button>
+  );
 }
 
 // ProviderVariantRowProps defines one exact selectable provider variant row.

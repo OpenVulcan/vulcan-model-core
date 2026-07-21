@@ -1859,9 +1859,89 @@ describe("ProviderManagementPage", () => {
     );
   });
 
-  // This test verifies provider-native plan, credit, and reset-window data is fetched only by an explicit administrator action.
-  // 此测试验证供应商原生套餐、积分与重置窗口数据仅由管理员显式操作获取。
-  it("refreshes and renders redacted provider account metadata", async () => {
+  // This test verifies persisted plan, credit, and reset-window data loads locally before any explicit upstream refresh.
+  // 此测试验证已持久化的套餐、积分与重置窗口数据会在任何显式上游刷新前从本地加载。
+  it("loads cached account metadata and still permits an explicit refresh", async () => {
+    // cachedMetadata is the redacted database snapshot returned by both local reads and a later explicit refresh.
+    // cachedMetadata 是本地读取与后续显式刷新返回的脱敏数据库快照。
+    const cachedMetadata = {
+      provider_instance_id: "pvi_antigravity",
+      models: [
+        {
+          id: "model_gemini_3_pro",
+          upstream_model_id: "gemini-3-pro-preview",
+          display_name: "Gemini 3 Pro",
+          entitlement_mode: "all_bound_credentials",
+          enabled: true,
+          authorization_status: "authorized",
+          offerings: [],
+        },
+      ],
+      plans: [
+        {
+          plan_code: "pro",
+          plan_name: "Google AI Pro",
+          status: "active",
+          credential_count: 1,
+        },
+      ],
+      allowances: [
+        {
+          credential_id: "cred_antigravity",
+          credential_label: "Google Account",
+          kind: "balance",
+          scope: "credential",
+          metric: "GOOGLE_ONE_AI",
+          unit: "provider_credits",
+          limit: "1000",
+          used: "250",
+          remaining: "750",
+          status: "available",
+          mandatory: false,
+          observed_at: "2026-07-19T12:00:00Z",
+          expires_at: "2026-07-19T12:10:00Z",
+        },
+        {
+          kind: "window_quota",
+          scope: "credential",
+          metric: "monthly_requests",
+          unit: "requests",
+          remaining_ratio: 0.5,
+          status: "low",
+          mandatory: true,
+          window: {
+            kind: "calendar",
+            duration: "0",
+            calendar_unit: "month",
+            time_zone: "Asia/Shanghai",
+            reset_at: "2026-08-01T00:00:00+08:00",
+          },
+          observed_at: "2026-07-19T12:00:00Z",
+          expires_at: "2026-07-19T12:10:00Z",
+        },
+        {
+          kind: "window_quota",
+          scope: "credential",
+          metric: "limit_1",
+          unit: "provider_defined",
+          limit: "100",
+          used: "0",
+          remaining: "100",
+          remaining_ratio: 1,
+          status: "available",
+          mandatory: false,
+          window: {
+            kind: "rolling",
+            duration: "18000000000000",
+            reset_at: "2026-07-19T17:00:00Z",
+          },
+          observed_at: "2026-07-19T12:00:00Z",
+          expires_at: "2026-07-19T12:10:00Z",
+        },
+      ],
+      revision: 2,
+      observed_at: "2026-07-19T12:00:00Z",
+    };
     const fetchMock = vi
       .fn()
       .mockImplementation(
@@ -1880,70 +1960,16 @@ describe("ProviderManagementPage", () => {
             );
           if (
             url ===
+              "/vulcan/manage/provider-instances/pvi_antigravity/catalog" &&
+            init?.method === "GET"
+          )
+            return Promise.resolve(jsonResponse(cachedMetadata));
+          if (
+            url ===
               "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh" &&
             init?.method === "POST"
           )
-            return Promise.resolve(
-              jsonResponse({
-                provider_instance_id: "pvi_antigravity",
-                models: [
-                  {
-                    id: "model_gemini_3_pro",
-                    upstream_model_id: "gemini-3-pro-preview",
-                    display_name: "Gemini 3 Pro",
-                    entitlement_mode: "all_bound_credentials",
-                    enabled: true,
-                    authorization_status: "authorized",
-                    offerings: [],
-                  },
-                ],
-                plans: [
-                  {
-                    plan_code: "pro",
-                    plan_name: "Google AI Pro",
-                    status: "active",
-                    credential_count: 1,
-                  },
-                ],
-                allowances: [
-                  {
-                    credential_id: "cred_antigravity",
-                    credential_label: "Google Account",
-                    kind: "balance",
-                    scope: "credential",
-                    metric: "GOOGLE_ONE_AI",
-                    unit: "provider_credits",
-                    limit: "1000",
-                    used: "250",
-                    remaining: "750",
-                    status: "available",
-                    mandatory: false,
-                    observed_at: "2026-07-19T12:00:00Z",
-                    expires_at: "2026-07-19T12:10:00Z",
-                  },
-                  {
-                    kind: "window_quota",
-                    scope: "credential",
-                    metric: "monthly_requests",
-                    unit: "requests",
-                    remaining_ratio: 0.5,
-                    status: "low",
-                    mandatory: true,
-                    window: {
-                      kind: "calendar",
-                      duration: "0",
-                      calendar_unit: "month",
-                      time_zone: "Asia/Shanghai",
-                      reset_at: "2026-08-01T00:00:00+08:00",
-                    },
-                    observed_at: "2026-07-19T12:00:00Z",
-                    expires_at: "2026-07-19T12:10:00Z",
-                  },
-                ],
-                revision: 2,
-                observed_at: "2026-07-19T12:00:00Z",
-              }),
-            );
+            return Promise.resolve(jsonResponse(cachedMetadata));
           return Promise.resolve(new Response(null, { status: 404 }));
         },
       );
@@ -1951,10 +1977,25 @@ describe("ProviderManagementPage", () => {
     renderPage();
 
     expect(await screen.findByText("Google Account")).toBeInTheDocument();
+    expect(await screen.findByText("Google AI Pro")).toBeInTheDocument();
+    expect(await screen.findByText("5-hour usage window")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/pvi_antigravity/catalog",
+      expect.objectContaining({ method: "GET" }),
+    );
+    expect(fetchMock).not.toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh",
+      expect.anything(),
+    );
     fireEvent.click(
       screen.getByRole("button", { name: "Refresh account data" }),
     );
-    expect(await screen.findByText("Google AI Pro")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh",
+        expect.objectContaining({ method: "POST" }),
+      ),
+    );
     expect(screen.getByText("Gemini 3 Pro")).toBeInTheDocument();
     expect(screen.getByText("gemini-3-pro-preview")).toBeInTheDocument();
     expect(screen.getByText("Google One AI credits")).toBeInTheDocument();
@@ -1964,9 +2005,7 @@ describe("ProviderManagementPage", () => {
     expect(
       screen.getByText(/Window: calendar · month · Asia\/Shanghai/),
     ).toBeInTheDocument();
-    expect(
-      screen.getByText(/Resets at:/),
-    ).toBeInTheDocument();
+    expect(screen.getAllByText(/Resets at:/).length).toBeGreaterThanOrEqual(2);
   });
 
   // This test verifies one refreshable account credential is rotated only through its exact protected management route.

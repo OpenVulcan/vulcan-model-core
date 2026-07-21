@@ -70,6 +70,25 @@ func TestKimiAllowanceAcceptsObservedMinuteEnum(t *testing.T) {
 	}
 }
 
+// TestKimiAllowancesIdentifiesUnnamedFiveHourWindow verifies the official duration-only response becomes a stable metric.
+// TestKimiAllowancesIdentifiesUnnamedFiveHourWindow 验证官方仅含时长的响应会转换为稳定指标。
+func TestKimiAllowancesIdentifiesUnnamedFiveHourWindow(t *testing.T) {
+	var payload kimiUsageResponse
+	if errDecode := json.Unmarshal([]byte(`{"usage":{"used":2,"limit":100,"remaining":98},"limits":[{"window":{"duration":300,"timeUnit":"TIME_UNIT_MINUTE"},"detail":{"used":0,"limit":100,"remaining":100}}]}`), &payload); errDecode != nil {
+		t.Fatalf("decode Kimi duration-only usage fixture: %v", errDecode)
+	}
+	allowances, errAllowances := kimiAllowances(payload, providerconfig.ProviderInstance{ID: "pvi_kimi"}, providerconfig.Credential{ID: "cred_kimi"}, time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC))
+	if errAllowances != nil {
+		t.Fatalf("kimiAllowances() error = %v", errAllowances)
+	}
+	if len(allowances) != 2 || allowances[0].Metric != "weekly_usage" || allowances[1].Metric != "five_hour_usage" {
+		t.Fatalf("Kimi allowance metrics = %#v", allowances)
+	}
+	if allowances[1].Window == nil || allowances[1].Window.Kind != catalog.WindowRolling || allowances[1].Window.Duration != 5*time.Hour {
+		t.Fatalf("Kimi five-hour window = %#v", allowances[1].Window)
+	}
+}
+
 // TestReadCredentialMetadataDetectsAllegrettoAndSendsProvenHeaders verifies one response updates plan, entitlements, and usage atomically.
 // TestReadCredentialMetadataDetectsAllegrettoAndSendsProvenHeaders 验证一份响应会原子更新套餐、授权与用量，并发送已验证请求头。
 func TestReadCredentialMetadataDetectsAllegrettoAndSendsProvenHeaders(t *testing.T) {

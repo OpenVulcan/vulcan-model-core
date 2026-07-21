@@ -316,10 +316,6 @@ func kimiAllowances(payload kimiUsageResponse, instance providerconfig.ProviderI
 		if item.Detail != nil {
 			detail = *item.Detail
 		}
-		name := firstKimiMetric(item.Name, item.Title, item.Scope, detail.Name, detail.Title)
-		if name == "" {
-			name = "limit_" + strconv.Itoa(index+1)
-		}
 		window := item.Window
 		if window == nil {
 			duration := firstKimiDecimal(item.Duration, detail.Duration)
@@ -328,7 +324,12 @@ func kimiAllowances(payload kimiUsageResponse, instance providerconfig.ProviderI
 				window = &kimiLimitWindow{Duration: duration, TimeUnit: timeUnit}
 			}
 		}
-		allowance, present, errAllowance := kimiAllowanceFromDetail(detail, window, kimiMetric(name), instance, credential, observedAt)
+		name := firstKimiMetric(item.Name, item.Title, item.Scope, detail.Name, detail.Title)
+		metric := kimiMetric(name)
+		if name == "" {
+			metric = kimiUnnamedLimitMetric(window, index)
+		}
+		allowance, present, errAllowance := kimiAllowanceFromDetail(detail, window, metric, instance, credential, observedAt)
 		if errAllowance != nil {
 			return nil, errAllowance
 		}
@@ -337,6 +338,31 @@ func kimiAllowances(payload kimiUsageResponse, instance providerconfig.ProviderI
 		}
 	}
 	return allowances, nil
+}
+
+// kimiUnnamedLimitMetric derives a canonical metric only from an explicit provider-reported window duration.
+// kimiUnnamedLimitMetric 仅根据供应商显式报告的窗口时长派生规范指标。
+func kimiUnnamedLimitMetric(window *kimiLimitWindow, index int) string {
+	if window == nil || !window.Duration.Set() {
+		return "limit_" + strconv.Itoa(index+1)
+	}
+	multiplier := time.Second
+	switch strings.ToUpper(strings.TrimSpace(window.TimeUnit)) {
+	case "", "SECONDS":
+	case "MINUTES", "TIME_UNIT_MINUTE":
+		multiplier = time.Minute
+	case "HOURS":
+		multiplier = time.Hour
+	case "DAYS":
+		multiplier = 24 * time.Hour
+	default:
+		return "limit_" + strconv.Itoa(index+1)
+	}
+	duration := time.Duration(window.Duration.Float64() * float64(multiplier))
+	if duration == 5*time.Hour {
+		return "five_hour_usage"
+	}
+	return "limit_" + strconv.Itoa(index+1)
 }
 
 // firstKimiDecimal returns the first explicitly reported numeric variant.

@@ -125,6 +125,11 @@ const englishMessages = {
   "providers.creating": "Creating…",
   "providers.noMatches": "No providers match this filter.",
   "providers.noAuthorized": "No authorized providers yet.",
+  "credentials.description":
+    "Select a supported native or custom provider category, then manage its credentials.",
+  "credentials.noProviders": "No supported providers are available.",
+  "credentials.configureCustomFirst":
+    "Configure this custom provider's API endpoint in Provider Management before adding credentials.",
   "providers.authorizations": "Authorizations",
   "providers.instanceHandle": "Instance handle",
   "providers.loading": "Loading provider data…",
@@ -300,7 +305,7 @@ const englishMessages = {
   "providers.allowanceMetrics.codeReviewPrimary": "Code review short window",
   "providers.allowanceMetrics.codeReviewSecondary": "Code review long window",
   "providers.allowanceMetrics.resetCredits": "Rate-limit reset credits",
-  "providers.allowanceMetrics.fiveHour": "5-hour window",
+  "providers.allowanceMetrics.fiveHour": "5-hour usage window",
   "providers.allowanceMetrics.sevenDay": "7-day window",
   "providers.allowanceMetrics.sevenDayOAuthApps": "OAuth apps · 7-day window",
   "providers.allowanceMetrics.sevenDayOpus": "Opus · 7-day window",
@@ -601,6 +606,11 @@ const chineseMessages: Messages = {
   "providers.creating": "正在创建…",
   "providers.noMatches": "没有符合过滤条件的供应商。",
   "providers.noAuthorized": "暂无已授权供应商。",
+  "credentials.description":
+    "选择受支持的原生或自定义供应商大类，然后管理其凭据。",
+  "credentials.noProviders": "暂无可用的受支持供应商。",
+  "credentials.configureCustomFirst":
+    "请先在供应商管理中配置此自定义供应商的 API 接口，再添加凭据。",
   "providers.authorizations": "授权列表",
   "providers.instanceHandle": "实例标识",
   "providers.loading": "正在加载供应商数据…",
@@ -764,7 +774,7 @@ const chineseMessages: Messages = {
   "providers.allowanceMetrics.codeReviewPrimary": "代码审查短周期",
   "providers.allowanceMetrics.codeReviewSecondary": "代码审查长周期",
   "providers.allowanceMetrics.resetCredits": "限额重置次数",
-  "providers.allowanceMetrics.fiveHour": "5 小时周期",
+  "providers.allowanceMetrics.fiveHour": "5 小时用量窗口",
   "providers.allowanceMetrics.sevenDay": "7 天周期",
   "providers.allowanceMetrics.sevenDayOAuthApps": "OAuth 应用 · 7 天周期",
   "providers.allowanceMetrics.sevenDayOpus": "Opus · 7 天周期",

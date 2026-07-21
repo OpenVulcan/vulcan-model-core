@@ -467,6 +467,7 @@ describe("separated provider and credential management", () => {
 
     expect(await screen.findByRole("tree", { name: "Credential Management" })).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
+    fireEvent.click(screen.getByRole("button", { name: "Select Global" }));
     fireEvent.change(screen.getByLabelText("Credential name"), {
       target: { value: "Primary key" },
     });
@@ -487,6 +488,144 @@ describe("separated provider and credential management", () => {
           }),
         }),
       ),
+    );
+  });
+
+  // This test verifies credential navigation shows provider categories while native subtypes remain in the creation dialog.
+  // 此测试验证凭据导航显示供应商大类，而原生子类仅保留在创建 Dialog 中。
+  it("groups native subtypes and lists custom providers in credential navigation", async () => {
+    // unconfiguredDefinition is one supported native provider with no local instance or credential.
+    // unconfiguredDefinition 是一个尚无本地实例或凭据的受支持原生供应商。
+    const unconfiguredDefinition = {
+      ...definition,
+      id: "system_unconfigured_provider",
+      display_name: "Unconfigured Native",
+      variant_name: "Unconfigured",
+    };
+    // customDefinition is one user-owned provider definition returned by the complete definition inventory.
+    // customDefinition 是完整 Definition 清单返回的一个用户拥有供应商定义。
+    const customDefinition = {
+      id: "custom_deepseek",
+      kind: "custom",
+      display_name: "DeepSeek",
+      protocol_profile_id: "openai.chat",
+      auth_methods: [
+        {
+          id: "default",
+          type: "bearer",
+          refreshable: false,
+          multiple_credentials: true,
+          plan_acquisition: "unavailable",
+        },
+      ],
+      plan_options: [],
+      features: unavailableFeatures,
+    };
+    // fetchMock serves one configured instance while retaining two additional supported definitions.
+    // fetchMock 提供一个已配置实例，同时保留另外两个受支持 Definition。
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        const method =
+          init?.method ?? (input instanceof Request ? input.method : "GET");
+        if (url.endsWith("/provider-groups")) {
+          return Promise.resolve(
+            jsonResponse({
+              provider_groups: [
+                {
+                  id: "test",
+                  display_name: "Test",
+                  description: "Native test providers.",
+                  provider_definitions: [definition, unconfiguredDefinition],
+                },
+              ],
+            }),
+          );
+        }
+        if (url.endsWith("/provider-definitions")) {
+          return Promise.resolve(
+            jsonResponse({
+              provider_definitions: [
+                {
+                  id: definition.id,
+                  kind: "system",
+                  display_name: definition.display_name,
+                  group_id: definition.group_id,
+                  protocol_profile_id: definition.protocol_profile_id,
+                  auth_methods: definition.auth_methods,
+                  plan_options: [],
+                  features: unavailableFeatures,
+                },
+                {
+                  id: unconfiguredDefinition.id,
+                  kind: "system",
+                  display_name: unconfiguredDefinition.display_name,
+                  group_id: unconfiguredDefinition.group_id,
+                  protocol_profile_id:
+                    unconfiguredDefinition.protocol_profile_id,
+                  auth_methods: unconfiguredDefinition.auth_methods,
+                  plan_options: [],
+                  features: unavailableFeatures,
+                },
+                customDefinition,
+              ],
+            }),
+          );
+        }
+        if (url.endsWith("/provider-instances")) {
+          return Promise.resolve(
+            jsonResponse({ provider_instances: [instance] }),
+          );
+        }
+        if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
+          return Promise.resolve(jsonResponse({ credentials: [] }));
+        }
+        if (
+          url.endsWith("/provider-instances/onboard") &&
+          method === "POST"
+        ) {
+          return Promise.resolve(
+            jsonResponse(
+              {
+                provider_instance_id: "pvi_unconfigured",
+                credential_id: "cred_unconfigured",
+                endpoint_ids: ["ep_unconfigured"],
+                binding_ids: ["bind_unconfigured"],
+              },
+              201,
+            ),
+          );
+        }
+        if (url.endsWith("/protocol-profiles")) {
+          return Promise.resolve(jsonResponse({ protocol_profiles: [] }));
+        }
+        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    render(
+      <I18nProvider>
+        <CredentialManagementPage managementAuthToken="management-token" />
+      </I18nProvider>,
+    );
+
+    // providerTree is the complete definition-backed navigation directory.
+    // providerTree 是由完整 Definition 驱动的导航目录。
+    const providerTree = await screen.findByRole("tree", {
+      name: "Credential Management",
+    });
+    expect(within(providerTree).getByText("Test")).toBeInTheDocument();
+    expect(within(providerTree).queryByText("Test Provider")).not.toBeInTheDocument();
+    expect(within(providerTree).queryByText("Unconfigured Native")).not.toBeInTheDocument();
+    expect(within(providerTree).getByText("DeepSeek")).toBeInTheDocument();
+
+    fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
+    expect(screen.getByRole("button", { name: "Select Global" })).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: "Select Unconfigured" })).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Select Unconfigured" }));
+    expect(screen.getByRole("heading", { name: "Add credential" })).toBeInTheDocument();
+    expect(screen.getByLabelText("Credential name")).toHaveValue(
+      "Unconfigured Native",
     );
   });
 });
