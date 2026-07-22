@@ -48,7 +48,7 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 	}
 	for _, definition := range definitions {
 		if definition.ID == TavilySearchDefinitionID {
-			if len(definition.ActionBindings) != 1 || definition.ActionBindings[0].Operation != vcp.OperationSearchWeb || definition.ActionBindings[0].Search == nil || definition.ActionBindings[0].Search.BackendKind != vcp.SearchBackendDirectAPI {
+			if len(definition.ActionBindings) != 2 || definition.ActionBindings[0].Operation != vcp.OperationSearchWeb || definition.ActionBindings[0].Search == nil || definition.ActionBindings[0].Search.BackendKind != vcp.SearchBackendDirectAPI || definition.ActionBindings[1].Operation != vcp.OperationWebExtract || definition.ActionBindings[1].Search != nil {
 				t.Fatalf("definition %q Tavily actions = %#v", definition.ID, definition.ActionBindings)
 			}
 			continue

@@ -427,14 +427,19 @@ func cloneMediaInputCapability(capability MediaInputCapability) MediaInputCapabi
 // cloneServiceCapabilities returns one mutation-safe special-service capability value.
 // cloneServiceCapabilities 返回一个防止外部修改的特殊服务能力值。
 func cloneServiceCapabilities(capabilities ServiceCapabilities) ServiceCapabilities {
-	if capabilities.WebSearch == nil {
-		return capabilities
+	if capabilities.WebSearch != nil {
+		webSearch := *capabilities.WebSearch
+		webSearch.OutputModes = append([]vcp.WebSearchOutputMode(nil), webSearch.OutputModes...)
+		webSearch.EvidenceKinds = append([]vcp.SearchEvidenceKind(nil), webSearch.EvidenceKinds...)
+		webSearch.EvidenceRequirements = append([]vcp.SearchEvidenceRequirement(nil), webSearch.EvidenceRequirements...)
+		capabilities.WebSearch = &webSearch
 	}
-	webSearch := *capabilities.WebSearch
-	webSearch.OutputModes = append([]vcp.WebSearchOutputMode(nil), webSearch.OutputModes...)
-	webSearch.EvidenceKinds = append([]vcp.SearchEvidenceKind(nil), webSearch.EvidenceKinds...)
-	webSearch.EvidenceRequirements = append([]vcp.SearchEvidenceRequirement(nil), webSearch.EvidenceRequirements...)
-	capabilities.WebSearch = &webSearch
+	if capabilities.WebExtract != nil {
+		webExtract := *capabilities.WebExtract
+		webExtract.Depths = append([]vcp.WebExtractDepth(nil), webExtract.Depths...)
+		webExtract.Formats = append([]vcp.WebExtractFormat(nil), webExtract.Formats...)
+		capabilities.WebExtract = &webExtract
+	}
 	return capabilities
 }
 

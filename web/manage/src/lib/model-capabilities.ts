@@ -149,10 +149,34 @@ export const modelCapabilitiesSchema = z.object({
 
 // modelCatalogSchema validates one complete provider-scoped management catalog.
 // modelCatalogSchema 校验一个完整的供应商作用域管理目录。
+const webSearchCapabilitiesSchema = z.object({ backend_kind: z.string().min(1), invocation_mode: z.string().min(1), output_modes: z.array(z.string()), evidence_kinds: z.array(z.string()), evidence_requirements: z.array(z.string()) }).passthrough()
+
+// webExtractCapabilitiesSchema validates one exact direct content-extraction contract.
+// webExtractCapabilitiesSchema 校验一个精确的直接内容提取合同。
+const webExtractCapabilitiesSchema = z.object({
+  max_urls: z.number().int().positive(),
+  depths: z.array(z.enum(["basic", "advanced"])).min(1),
+  formats: z.array(z.enum(["markdown", "text"])).min(1),
+  query_relevance: z.boolean(),
+  minimum_chunks_per_source: z.number().int().nonnegative(),
+  maximum_chunks_per_source: z.number().int().nonnegative(),
+  include_images: z.boolean(),
+  include_favicon: z.boolean(),
+  minimum_timeout_seconds: z.number().positive(),
+  maximum_timeout_seconds: z.number().positive(),
+}).passthrough()
+
+// serviceCapabilitiesSchema validates the closed special-service capability union.
+// serviceCapabilitiesSchema 校验封闭的特殊服务能力联合体。
+const serviceCapabilitiesSchema = z.object({
+  web_search: webSearchCapabilitiesSchema.optional(),
+  web_extract: webExtractCapabilitiesSchema.optional(),
+}).passthrough()
+
 export const modelCatalogSchema = z.object({
   provider_instance_id: z.string().min(1),
   models: z.array(z.object({ id: z.string().min(1), upstream_model_id: z.string().min(1), display_name: z.string().min(1), entitlement_mode: z.string(), enabled: z.boolean(), authorization_status: z.enum(["authorized", "denied", "unknown"]), offerings: z.array(z.object({ id: z.string().min(1), upstream_model_id: z.string().min(1), profiles: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), default: z.boolean(), operation: z.string().min(1).optional().default(""), action_binding_id: z.string().min(1).optional().default(""), capabilities: modelCapabilitiesSchema, pool: poolSchema.nullable().optional() }).passthrough()) }).passthrough()) }).passthrough()),
-  services: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), operation: z.string().min(1), enabled: z.boolean(), authorization_status: z.enum(["authorized", "denied", "unknown"]), offerings: z.array(z.object({ id: z.string().min(1), upstream_service_id: z.string().min(1), capabilities: z.object({ web_search: z.object({ backend_kind: z.string().min(1), invocation_mode: z.string().min(1), output_modes: z.array(z.string()), evidence_kinds: z.array(z.string()), evidence_requirements: z.array(z.string()) }).passthrough().optional() }).passthrough(), profiles: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), operation: z.string().min(1), action_binding_id: z.string().min(1), capabilities: z.object({ web_search: z.object({ backend_kind: z.string().min(1), invocation_mode: z.string().min(1), output_modes: z.array(z.string()), evidence_kinds: z.array(z.string()), evidence_requirements: z.array(z.string()) }).passthrough().optional() }).passthrough(), pool: poolSchema.nullable().optional() }).passthrough()) }).passthrough()) }).passthrough()),
+  services: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), operation: z.string().min(1), enabled: z.boolean(), authorization_status: z.enum(["authorized", "denied", "unknown"]), offerings: z.array(z.object({ id: z.string().min(1), upstream_service_id: z.string().min(1), capabilities: serviceCapabilitiesSchema, profiles: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), operation: z.string().min(1), action_binding_id: z.string().min(1), capabilities: serviceCapabilitiesSchema, pool: poolSchema.nullable().optional() }).passthrough()) }).passthrough()) }).passthrough()),
   revision: z.number().int().positive(),
   observed_at: z.string().min(1),
 }).passthrough()
@@ -166,6 +190,165 @@ export interface ProviderCapabilityCatalog {
   // catalog is the complete typed management catalog.
   // catalog 是完整的类型化管理目录。
   catalog: z.infer<typeof modelCatalogSchema>
+}
+
+// webSearchResultSchema validates one provider-returned ranked search item.
+// webSearchResultSchema 校验一个供应商返回的排序搜索项。
+const webSearchResultSchema = z.object({
+  id: z.string().min(1),
+  rank: z.number().int().positive(),
+  title: z.string().optional(),
+  url: z.string().url(),
+  source_domain: z.string().optional(),
+  snippet: z.string().optional(),
+  published_at: z.string().optional(),
+  updated_at: z.string().optional(),
+  author: z.string().optional(),
+  provider_score: z.number().finite().optional(),
+})
+
+// webSearchCitationSchema validates one provider-returned answer citation.
+// webSearchCitationSchema 校验一个供应商返回的答案引用。
+const webSearchCitationSchema = z.object({
+  id: z.string().min(1),
+  result_id: z.string().optional(),
+  url: z.string().url(),
+  title: z.string().optional(),
+  location: z.object({
+    output_item_id: z.string().optional(),
+    start: z.number().int().nonnegative().optional(),
+    end: z.number().int().nonnegative().optional(),
+  }),
+})
+
+// managementSearchTestResponseSchema validates the real unified search result returned by the management diagnostic endpoint.
+// managementSearchTestResponseSchema 校验管理诊断端点返回的真实统一搜索结果。
+const managementSearchTestResponseSchema = z.object({
+  execution_id: z.string().min(1),
+  search: z.object({
+    query: z.string(),
+    queries: stringArraySchema,
+    evidence: z.object({
+      status: z.enum(["confirmed", "requested_unverified", "not_performed"]),
+      kinds: stringArraySchema,
+    }),
+    results: z.array(webSearchResultSchema).nullish().transform((values) => values ?? []),
+    answer: z.string().optional(),
+    citations: z.array(webSearchCitationSchema).nullish().transform((values) => values ?? []),
+    sources: z.array(z.object({ type: z.string().min(1), url: z.string().url() })).nullish().transform((values) => values ?? []),
+    usage: z.record(z.string(), z.unknown()).optional(),
+  }),
+})
+
+// SearchServiceTestInput selects one exact typed profile and query.
+// SearchServiceTestInput 选择一个精确类型化规格及查询。
+export interface SearchServiceTestInput {
+  // providerInstanceID fixes the configured provider owner.
+  // providerInstanceID 固定已配置供应商所有者。
+  providerInstanceID: string
+  // providerServiceID fixes the logical search service.
+  // providerServiceID 固定逻辑搜索服务。
+  providerServiceID: string
+  // serviceOfferingID fixes the concrete provider channel.
+  // serviceOfferingID 固定具体供应商通道。
+  serviceOfferingID: string
+  // executionProfileID fixes the typed execution shape.
+  // executionProfileID 固定类型化执行形态。
+  executionProfileID: string
+  // query is the operator-entered search text.
+  // query 是操作员输入的搜索文本。
+  query: string
+  // outputMode is selected from the profile-authored capability list.
+  // outputMode 从规格编写的能力列表中选择。
+  outputMode: string
+  // evidenceRequirement is selected from the profile-authored policy list.
+  // evidenceRequirement 从规格编写的策略列表中选择。
+  evidenceRequirement: string
+}
+
+// SearchServiceTestResult is the validated management search diagnostic response.
+// SearchServiceTestResult 是经过校验的管理搜索诊断响应。
+export type SearchServiceTestResult = z.infer<typeof managementSearchTestResponseSchema>
+
+// testSearchService executes one real provider search through the management diagnostic boundary.
+// testSearchService 通过管理诊断边界执行一次真实供应商搜索。
+export async function testSearchService(managementAuthToken: string, input: SearchServiceTestInput): Promise<SearchServiceTestResult> {
+  const response = await fetch(`/vulcan/manage/provider-instances/${encodeURIComponent(input.providerInstanceID)}/services/${encodeURIComponent(input.providerServiceID)}/search-test`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${managementAuthToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      query: input.query,
+      service_offering_id: input.serviceOfferingID,
+      execution_profile_id: input.executionProfileID,
+      output_mode: input.outputMode,
+      evidence_requirement: input.evidenceRequirement,
+    }),
+  })
+  if (!response.ok) {
+    const failure = z.object({ error: z.string().min(1) }).safeParse(await response.json().catch(() => null))
+    throw new Error(failure.success ? failure.data.error : `search test failed with status ${response.status}`)
+  }
+  return managementSearchTestResponseSchema.parse(await response.json())
+}
+
+// managementExtractTestResponseSchema validates one real provider extraction diagnostic.
+// managementExtractTestResponseSchema 校验一次真实供应商内容提取诊断。
+const managementExtractTestResponseSchema = z.object({
+  execution_id: z.string().min(1),
+  extract: z.object({
+    results: z.array(z.object({ url: z.string().url(), raw_content: z.string(), images: z.array(z.string()).nullish().transform((values) => values ?? []), favicon: z.string().optional() })),
+    failed_results: z.array(z.object({ url: z.string().url(), error: z.string().min(1) })).nullish().transform((values) => values ?? []),
+    provider_request_id: z.string().optional(),
+    response_time_seconds: z.number().nonnegative().optional(),
+    usage: z.record(z.string(), z.unknown()).optional(),
+  }),
+})
+
+// ExtractServiceTestInput selects one exact typed profile and bounded extraction request.
+// ExtractServiceTestInput 选择一个精确类型化规格及有界内容提取请求。
+export interface ExtractServiceTestInput {
+  providerInstanceID: string
+  providerServiceID: string
+  serviceOfferingID: string
+  executionProfileID: string
+  urls: string[]
+  query: string
+  chunksPerSource?: number
+  depth: "basic" | "advanced"
+  format: "markdown" | "text"
+  includeImages: boolean
+  includeFavicon: boolean
+  timeoutSeconds?: number
+}
+
+// ExtractServiceTestResult is the validated management extraction diagnostic response.
+// ExtractServiceTestResult 是经过校验的管理内容提取诊断响应。
+export type ExtractServiceTestResult = z.infer<typeof managementExtractTestResponseSchema>
+
+// testExtractService executes one real provider extraction through the management diagnostic boundary.
+// testExtractService 通过管理诊断边界执行一次真实供应商内容提取。
+export async function testExtractService(managementAuthToken: string, input: ExtractServiceTestInput): Promise<ExtractServiceTestResult> {
+  const response = await fetch(`/vulcan/manage/provider-instances/${encodeURIComponent(input.providerInstanceID)}/services/${encodeURIComponent(input.providerServiceID)}/extract-test`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${managementAuthToken}`, "Content-Type": "application/json" },
+    body: JSON.stringify({
+      service_offering_id: input.serviceOfferingID,
+      execution_profile_id: input.executionProfileID,
+      urls: input.urls,
+      query: input.query || undefined,
+      chunks_per_source: input.chunksPerSource,
+      depth: input.depth,
+      format: input.format,
+      include_images: input.includeImages,
+      include_favicon: input.includeFavicon,
+      timeout_seconds: input.timeoutSeconds,
+    }),
+  })
+  if (!response.ok) {
+    const failure = z.object({ error: z.string().min(1) }).safeParse(await response.json().catch(() => null))
+    throw new Error(failure.success ? failure.data.error : `extraction test failed with status ${response.status}`)
+  }
+  return managementExtractTestResponseSchema.parse(await response.json())
 }
 
 // fetchCapabilityCatalogs loads every authorized provider and parses each complete catalog independently.

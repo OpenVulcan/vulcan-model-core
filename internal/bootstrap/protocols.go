@@ -138,6 +138,15 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			AllowedAuthMethods: nil,
 		},
 		{
+			ID:                 providertavily.ExtractProtocolProfileID,
+			Version:            "1",
+			DisplayName:        "Tavily Extract API",
+			UserConfigurable:   false,
+			RuntimeReady:       true,
+			ModelDiscovery:     providerconfig.SupportUnsupported,
+			AllowedAuthMethods: nil,
+		},
+		{
 			ID:                 providergoogle.EmbeddingProtocolProfileID,
 			Version:            "1",
 			DisplayName:        "Google AI Studio Embeddings",

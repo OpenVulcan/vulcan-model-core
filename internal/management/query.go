@@ -332,9 +332,35 @@ type CredentialView struct {
 	// DeclaredPlan contains safe operator-authored membership metadata when present.
 	// DeclaredPlan 在存在时包含安全的操作员声明会员元数据。
 	DeclaredPlan *providerconfig.DeclaredPlanSelection `json:"declared_plan,omitempty"`
+	// DetectedPlan contains provider-reported membership metadata for this exact credential when present.
+	// DetectedPlan 在存在时包含供应商为此精确凭据报告的会员元数据。
+	DetectedPlan *CredentialPlanView `json:"detected_plan,omitempty"`
 	// Revision identifies the persisted credential revision.
 	// Revision 标识持久化凭据修订号。
 	Revision uint64 `json:"revision"`
+}
+
+// CredentialPlanView contains provider-detected commercial plan metadata for one exact management credential.
+// CredentialPlanView 包含一个精确管理凭据的供应商自动识别商业套餐元数据。
+type CredentialPlanView struct {
+	// PlanCode is the provider-normalized commercial tier code.
+	// PlanCode 是供应商规范化商业等级代码。
+	PlanCode string `json:"plan_code"`
+	// PlanName is the provider-facing plan name.
+	// PlanName 是供应商显示套餐名称。
+	PlanName string `json:"plan_name"`
+	// Status is the normalized plan lifecycle state.
+	// Status 是规范化套餐生命周期状态。
+	Status string `json:"status"`
+	// EvidenceSource identifies how the provider plan was obtained.
+	// EvidenceSource 标识供应商套餐的获取方式。
+	EvidenceSource catalog.MetadataEvidenceSource `json:"evidence_source"`
+	// ObservedAt records when the provider plan was obtained.
+	// ObservedAt 记录获得供应商套餐的时间。
+	ObservedAt time.Time `json:"observed_at"`
+	// ExpiresAt records when the provider plan observation becomes stale.
+	// ExpiresAt 记录供应商套餐观测变为过期的时间。
+	ExpiresAt time.Time `json:"expires_at,omitempty"`
 }
 
 // BindingView contains one management-safe access binding without any secret material.
@@ -895,8 +921,8 @@ type ModelUsageAllowanceView struct {
 	RequiredCapability string `json:"required_capability,omitempty"`
 }
 
-// PlanView aggregates equal commercial plans without returning credential identities.
-// PlanView 聚合相同商业套餐且不返回凭据身份。
+// PlanView aggregates equal commercial plans without exposing credential identity.
+// PlanView 聚合相同商业套餐且不暴露凭据身份。
 type PlanView struct {
 	// PlanCode is the provider-normalized commercial tier code.
 	// PlanCode 是供应商规范化商业等级代码。
@@ -1227,8 +1253,34 @@ func (q *QueryService) ListCredentials(ctx context.Context, instanceID string) (
 	if errCredentials != nil {
 		return nil, errCredentials
 	}
+	// detectedPlansByCredential joins the singular current-plan snapshot to its exact authenticated management row.
+	// detectedPlansByCredential 将单一当前套餐快照关联到其精确的已认证管理行。
+	detectedPlansByCredential := make(map[string]CredentialPlanView)
+	snapshot, errSnapshot := q.catalogs.Get(ctx, instanceID)
+	if errSnapshot != nil && !errors.Is(errSnapshot, catalog.ErrSnapshotNotFound) {
+		return nil, errSnapshot
+	}
+	if errSnapshot == nil {
+		for _, plan := range snapshot.Plans {
+			detectedPlansByCredential[plan.CredentialID] = CredentialPlanView{
+				PlanCode:       plan.PlanCode,
+				PlanName:       plan.PlanName,
+				Status:         plan.Status,
+				EvidenceSource: plan.EvidenceSource,
+				ObservedAt:     plan.ObservedAt,
+				ExpiresAt:      plan.ExpiresAt,
+			}
+		}
+	}
 	views := make([]CredentialView, 0, len(credentials))
 	for _, credential := range credentials {
+		// detectedPlan is copied so each view owns an immutable response value.
+		// detectedPlan 会被复制，使每个视图拥有不可变的响应值。
+		var detectedPlan *CredentialPlanView
+		if plan, exists := detectedPlansByCredential[credential.ID]; exists {
+			planCopy := plan
+			detectedPlan = &planCopy
+		}
 		views = append(views, CredentialView{
 			ID:                 credential.ID,
 			ProviderInstanceID: credential.ProviderInstanceID,
@@ -1239,6 +1291,7 @@ func (q *QueryService) ListCredentials(ctx context.Context, instanceID string) (
 			CoolingUntil:       cloneTime(credential.CoolingUntil),
 			Priority:           credential.Priority,
 			DeclaredPlan:       cloneDeclaredPlan(credential.DeclaredPlan),
+			DetectedPlan:       detectedPlan,
 			Revision:           credential.Revision,
 		})
 	}

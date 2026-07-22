@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math"
 	"reflect"
+	"slices"
 	"sort"
 	"time"
 
@@ -23,6 +24,12 @@ const (
 	// legacyKimiChatChannelID is the exact Chat channel persisted by the pre-profile Kimi catalog implementation.
 	// legacyKimiChatChannelID 是旧版 Kimi 目录实现在引入 Profile 前持久化的精确 Chat 通道标识。
 	legacyKimiChatChannelID = "chat"
+	// tavilySearchServiceID identifies the code-owned Tavily search service.
+	// tavilySearchServiceID 标识代码拥有的 Tavily 搜索服务。
+	tavilySearchServiceID = "service_web_search"
+	// tavilyExtractServiceID identifies the code-owned Tavily extraction service.
+	// tavilyExtractServiceID 标识代码拥有的 Tavily 内容提取服务。
+	tavilyExtractServiceID = "service_web_extract"
 )
 
 // ReconcileMiniMaxSharedOrigins collapses historical per-action endpoint copies into one regional Origin per MiniMax instance.
@@ -157,6 +164,280 @@ func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providercon
 		changedInstances++
 	}
 	return changedInstances, nil
+}
+
+// ReconcileTavilyExtractCatalogs adds the typed Extract service contract to Tavily snapshots created before extraction support existed.
+// ReconcileTavilyExtractCatalogs 为内容提取支持出现前创建的 Tavily 快照补充类型化 Extract 服务合同。
+func ReconcileTavilyExtractCatalogs(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("context is required")
+	}
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
+		return 0, errors.New("provider configuration and catalog stores are required")
+	}
+	instances, errInstances := configurations.ListInstances(ctx, bootstrap.TavilySearchDefinitionID)
+	if errInstances != nil {
+		return 0, fmt.Errorf("list Tavily instances for Extract reconciliation: %w", errInstances)
+	}
+	targetResolver, errResolver := resolve.New(configurations, catalogs)
+	if errResolver != nil {
+		return 0, errResolver
+	}
+	changedInstances := 0
+	for _, instance := range instances {
+		definition, errDefinition := configurations.GetDefinition(ctx, instance.DefinitionID)
+		if errDefinition != nil {
+			return changedInstances, fmt.Errorf("get Tavily definition %s: %w", instance.DefinitionID, errDefinition)
+		}
+		accessGraphChanged, errAccessGraph := reconcileTavilyExtractAccessGraph(ctx, configurations, instance, definition)
+		if errAccessGraph != nil {
+			return changedInstances, fmt.Errorf("reconcile Tavily Extract access graph %s: %w", instance.ID, errAccessGraph)
+		}
+		current, errCurrent := catalogs.Get(ctx, instance.ID)
+		if errors.Is(errCurrent, catalog.ErrSnapshotNotFound) {
+			if accessGraphChanged {
+				changedInstances++
+			}
+			continue
+		}
+		if errCurrent != nil {
+			return changedInstances, fmt.Errorf("get Tavily catalog %s: %w", instance.ID, errCurrent)
+		}
+		desired, errDesired := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: instance}, definition, time.Now().UTC())
+		if errDesired != nil {
+			return changedInstances, fmt.Errorf("build Tavily catalog %s: %w", instance.ID, errDesired)
+		}
+		desiredService, desiredOffering, desiredProfile, desiredExists := tavilyExtractContract(desired)
+		if !desiredExists {
+			return changedInstances, errors.New("current Tavily definition omitted its Extract service contract")
+		}
+		currentService, currentOffering, currentProfile, currentExists := tavilyExtractContract(current)
+		contractCurrent := currentExists && reflect.DeepEqual(currentService, desiredService) && reflect.DeepEqual(currentOffering, desiredOffering) && reflect.DeepEqual(currentProfile, desiredProfile)
+		upgraded := current
+		upgraded.Services = removeProviderService(upgraded.Services, desiredService.ID)
+		upgraded.ServiceOfferings = removeServiceOffering(upgraded.ServiceOfferings, desiredOffering.ID)
+		upgraded.Profiles = removeExecutionProfile(upgraded.Profiles, desiredProfile.ID)
+		upgraded.Services = append(upgraded.Services, desiredService)
+		upgraded.ServiceOfferings = append(upgraded.ServiceOfferings, desiredOffering)
+		upgraded.Profiles = append(upgraded.Profiles, desiredProfile)
+		probeObservedAt := time.Now().UTC()
+		probePools, errProbePools := targetResolver.SummarizeSnapshot(ctx, upgraded, probeObservedAt, current.Revision)
+		if errProbePools != nil {
+			return changedInstances, fmt.Errorf("probe upgraded Tavily catalog %s: %w", instance.ID, errProbePools)
+		}
+		if contractCurrent && !accessGraphChanged && tavilyExtractPoolEquivalent(current.Pools, probePools) {
+			continue
+		}
+		if current.Revision == math.MaxUint64 {
+			return changedInstances, errors.New("Tavily catalog revision is exhausted")
+		}
+		upgraded.Revision++
+		upgraded.ObservedAt = probeObservedAt
+		pools, errPools := targetResolver.SummarizeSnapshot(ctx, upgraded, upgraded.ObservedAt, upgraded.Revision)
+		if errPools != nil {
+			return changedInstances, fmt.Errorf("summarize upgraded Tavily catalog %s: %w", instance.ID, errPools)
+		}
+		upgraded.Pools = pools
+		if errValidate := upgraded.Validate(); errValidate != nil {
+			return changedInstances, fmt.Errorf("validate upgraded Tavily catalog %s: %w", instance.ID, errValidate)
+		}
+		if errSave := catalogs.Save(ctx, upgraded); errSave != nil {
+			return changedInstances, fmt.Errorf("save upgraded Tavily catalog %s: %w", instance.ID, errSave)
+		}
+		changedInstances++
+	}
+	return changedInstances, nil
+}
+
+// reconcileTavilyExtractAccessGraph adds one Extract-channel binding for every historical Search-channel binding that does not already own one.
+// reconcileTavilyExtractAccessGraph 为每条尚未拥有提取通道的历史搜索通道 Binding 补建一条 Extract 通道 Binding。
+func reconcileTavilyExtractAccessGraph(ctx context.Context, configurations providerconfig.Store, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition) (bool, error) {
+	searchAction, errSearchAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
+	if errSearchAction != nil {
+		return false, errSearchAction
+	}
+	extractAction, errExtractAction := definitionActionForOperation(definition, vcp.OperationWebExtract)
+	if errExtractAction != nil {
+		return false, errExtractAction
+	}
+	if searchAction.ProtocolProfileID == extractAction.ProtocolProfileID {
+		return false, nil
+	}
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return false, errEndpoints
+	}
+	bindings, errBindings := configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return false, errBindings
+	}
+	// extractPaths records exact endpoint and credential pairs so an operator-disabled Extract path is preserved instead of duplicated.
+	// extractPaths 记录精确的入口与凭据组合，避免重复创建操作员已禁用的 Extract 路径。
+	extractPaths := make(map[string]struct{}, len(bindings))
+	for _, binding := range bindings {
+		if binding.ChannelID == extractAction.ProtocolProfileID {
+			extractPaths[tavilyBindingPathKey(binding.EndpointID, binding.CredentialID)] = struct{}{}
+		}
+	}
+	replacementBindings := append([]providerconfig.AccessBinding(nil), bindings...)
+	for _, searchBinding := range bindings {
+		if searchBinding.ChannelID != searchAction.ProtocolProfileID {
+			continue
+		}
+		pathKey := tavilyBindingPathKey(searchBinding.EndpointID, searchBinding.CredentialID)
+		if _, exists := extractPaths[pathKey]; exists {
+			continue
+		}
+		allowedServices := append([]string(nil), searchBinding.AllowedServiceIDs...)
+		if len(allowedServices) > 0 {
+			searchAllowed := slices.Contains(allowedServices, tavilySearchServiceID)
+			extractAllowed := slices.Contains(allowedServices, tavilyExtractServiceID)
+			if !searchAllowed && !extractAllowed {
+				continue
+			}
+			if !extractAllowed {
+				allowedServices = append(allowedServices, tavilyExtractServiceID)
+			}
+		}
+		bindingID, errBindingID := generateID("bind_")
+		if errBindingID != nil {
+			return false, errBindingID
+		}
+		extractBinding := searchBinding
+		extractBinding.ID = bindingID
+		extractBinding.ChannelID = extractAction.ProtocolProfileID
+		extractBinding.AllowedServiceIDs = allowedServices
+		extractBinding.Revision = 1
+		replacementBindings = append(replacementBindings, extractBinding)
+		extractPaths[pathKey] = struct{}{}
+	}
+	if len(replacementBindings) == len(bindings) {
+		return false, nil
+	}
+	replacement := providerconfig.AccessGraphReplacement{
+		ProviderInstanceID: instance.ID,
+		ExpectedEndpoints:  endpoints,
+		ExpectedBindings:   bindings,
+		Endpoints:          endpoints,
+		Bindings:           replacementBindings,
+	}
+	if errReplace := configurations.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		return false, errReplace
+	}
+	return true, nil
+}
+
+// tavilyBindingPathKey returns one collision-free key for an endpoint and credential pair.
+// tavilyBindingPathKey 为入口与凭据组合返回一个无冲突键。
+func tavilyBindingPathKey(endpointID string, credentialID string) string {
+	return endpointID + "\x00" + credentialID
+}
+
+// tavilyExtractPoolEquivalent compares the authoritative Extract pool state while ignoring snapshot revision timestamps.
+// tavilyExtractPoolEquivalent 比较权威的 Extract 池状态，同时忽略快照修订号与时间戳。
+func tavilyExtractPoolEquivalent(current []catalog.PoolSummary, desired []catalog.PoolSummary) bool {
+	currentPool, currentExists := executionProfilePool(current, "profile_tavily_extract")
+	desiredPool, desiredExists := executionProfilePool(desired, "profile_tavily_extract")
+	if currentExists != desiredExists {
+		return false
+	}
+	if !currentExists {
+		return true
+	}
+	resetEquivalent := currentPool.EarliestResetAt == nil && desiredPool.EarliestResetAt == nil
+	if currentPool.EarliestResetAt != nil && desiredPool.EarliestResetAt != nil {
+		resetEquivalent = currentPool.EarliestResetAt.Equal(*desiredPool.EarliestResetAt)
+	}
+	return currentPool.ProviderInstanceID == desiredPool.ProviderInstanceID &&
+		currentPool.ExecutionProfileID == desiredPool.ExecutionProfileID &&
+		currentPool.ConfiguredCredentials == desiredPool.ConfiguredCredentials &&
+		currentPool.EntitledCredentials == desiredPool.EntitledCredentials &&
+		currentPool.ReadyCredentials == desiredPool.ReadyCredentials &&
+		currentPool.CoolingCredentials == desiredPool.CoolingCredentials &&
+		currentPool.ExhaustedCredentials == desiredPool.ExhaustedCredentials &&
+		currentPool.InvalidCredentials == desiredPool.InvalidCredentials &&
+		slices.Equal(currentPool.BlockingAllowanceKinds, desiredPool.BlockingAllowanceKinds) &&
+		resetEquivalent
+}
+
+// executionProfilePool returns the one pool owned by an execution profile identifier.
+// executionProfilePool 返回指定执行规格标识拥有的唯一池。
+func executionProfilePool(pools []catalog.PoolSummary, profileID string) (catalog.PoolSummary, bool) {
+	for _, pool := range pools {
+		if pool.ExecutionProfileID == profileID {
+			return pool, true
+		}
+	}
+	return catalog.PoolSummary{}, false
+}
+
+// tavilyExtractContract returns the exact service, offering, and profile that form one executable Extract contract.
+// tavilyExtractContract 返回组成一个可执行 Extract 合同的精确服务、供应与规格。
+func tavilyExtractContract(snapshot catalog.Snapshot) (catalog.ProviderService, catalog.ServiceOffering, catalog.ExecutionProfile, bool) {
+	var service catalog.ProviderService
+	var offering catalog.ServiceOffering
+	var profile catalog.ExecutionProfile
+	serviceFound := false
+	offeringFound := false
+	profileFound := false
+	for _, candidate := range snapshot.Services {
+		if candidate.ID == "service_web_extract" {
+			service = candidate
+			serviceFound = true
+			break
+		}
+	}
+	for _, candidate := range snapshot.ServiceOfferings {
+		if candidate.ID == "service_offer_tavily_extract" {
+			offering = candidate
+			offeringFound = true
+			break
+		}
+	}
+	for _, candidate := range snapshot.Profiles {
+		if candidate.ID == "profile_tavily_extract" {
+			profile = candidate
+			profileFound = true
+			break
+		}
+	}
+	return service, offering, profile, serviceFound && offeringFound && profileFound
+}
+
+// removeProviderService removes one exact code-owned service before inserting its current definition.
+// removeProviderService 在插入当前定义前删除一个精确的代码拥有服务。
+func removeProviderService(services []catalog.ProviderService, serviceID string) []catalog.ProviderService {
+	filtered := make([]catalog.ProviderService, 0, len(services))
+	for _, service := range services {
+		if service.ID != serviceID {
+			filtered = append(filtered, service)
+		}
+	}
+	return filtered
+}
+
+// removeServiceOffering removes one exact code-owned service offering before inserting its current definition.
+// removeServiceOffering 在插入当前定义前删除一个精确的代码拥有服务供应。
+func removeServiceOffering(offerings []catalog.ServiceOffering, offeringID string) []catalog.ServiceOffering {
+	filtered := make([]catalog.ServiceOffering, 0, len(offerings))
+	for _, offering := range offerings {
+		if offering.ID != offeringID {
+			filtered = append(filtered, offering)
+		}
+	}
+	return filtered
+}
+
+// removeExecutionProfile removes one exact code-owned execution profile before inserting its current definition.
+// removeExecutionProfile 在插入当前定义前删除一个精确的代码拥有执行规格。
+func removeExecutionProfile(profiles []catalog.ExecutionProfile, profileID string) []catalog.ExecutionProfile {
+	filtered := make([]catalog.ExecutionProfile, 0, len(profiles))
+	for _, profile := range profiles {
+		if profile.ID != profileID {
+			filtered = append(filtered, profile)
+		}
+	}
+	return filtered
 }
 
 // reconcileKimiAccessGraph converges legacy Chat and Anthropic paths to one exact current Chat endpoint and one binding per associated credential.

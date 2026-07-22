@@ -16,6 +16,12 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import type { SearchServiceTestTarget } from "@/components/search-service-test-dialog";
+import type { ExtractServiceTestTarget } from "@/components/extract-service-test-dialog";
+import {
+  ServiceTestDialog,
+  type ServiceTestTarget,
+} from "@/components/service-test-dialog";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -84,6 +90,7 @@ import {
   onboardCustomProvider,
   onboardSystemProvider,
   onboardVertexServiceAccount,
+  providerCatalogHasModels,
   refreshProviderCredential,
   refreshProviderMetadata,
   rotateProviderCredentialSecret,
@@ -1538,6 +1545,10 @@ function CredentialManagementTable({
   // modelProviderInstanceID opens one provider-scoped supported-model dialog without duplicating model details in the table.
   // modelProviderInstanceID 打开一个供应商作用域的支持模型对话框，而不在表格中重复模型详情。
   const [modelProviderInstanceID, setModelProviderInstanceID] = useState("");
+  // serviceTestTarget opens one provider-scoped selector for every typed diagnostic supported by that provider.
+  // serviceTestTarget 打开一个供应商作用域选择器，包含该供应商支持的全部类型化诊断。
+  const [serviceTestTarget, setServiceTestTarget] =
+    useState<ServiceTestTarget | null>(null);
   // resourceTarget constrains the resource dialog to one exact local credential.
   // resourceTarget 将资源对话框限定到一个精确的本地凭据。
   const [resourceTarget, setResourceTarget] =
@@ -1792,28 +1803,38 @@ function CredentialManagementTable({
               // metadata is the latest local catalog snapshot shared by the provider's credential rows.
               // metadata 是由该供应商凭据行共享的最新本地目录快照。
               const metadata = metadataByProviderID[provider.instance.id];
-              const supportsMetadata = providerSupportsAccountMetadata(definition);
+              const supportsMetadata =
+                providerSupportsAccountMetadata(definition);
+              // searchAction exists only when the catalog declares one typed search.web service profile.
+              // searchAction 仅在目录声明一个类型化 search.web 服务规格时存在。
+              const searchAction = providerSearchTestAction(provider, metadata);
+              // extractAction exists only when the catalog declares one typed web.extract service profile.
+              // extractAction 仅在目录声明一个类型化 web.extract 服务规格时存在。
+              const extractAction = providerExtractTestAction(provider, metadata);
+              // hasModelCatalog prevents search-only providers from displaying a model discovery action.
+              // hasModelCatalog 防止仅搜索供应商显示模型发现操作。
+              const hasModelCatalog = providerCatalogHasModels(metadata);
               if (provider.credentials.length === 0) {
-                return [
-                  <TableRow key={provider.instance.id}>
-                    <TableCell className="whitespace-normal py-3 align-top">
-                      <div className="flex items-center gap-3">
-                        <ProviderIcon
-                          definitionID={provider.instance.definition_id}
-                          groupID={definition?.group_id}
-                          className="size-[26px]"
-                        />
-                        <div className="min-w-0">
-                          <p className="font-medium">
-                            {provider.instance.display_name}
-                          </p>
-                          <p className="text-muted-foreground mt-1 text-xs">
-                            {definition?.display_name ??
-                              provider.instance.definition_id}
-                          </p>
+                  return [
+                    <TableRow key={provider.instance.id}>
+                      <TableCell className="whitespace-normal py-3 align-top">
+                        <div className="flex items-center gap-3">
+                          <ProviderIcon
+                            definitionID={provider.instance.definition_id}
+                            groupID={definition?.group_id}
+                            className="size-[26px]"
+                          />
+                          <div className="min-w-0">
+                            <p className="font-medium">
+                              {provider.instance.display_name}
+                            </p>
+                            <p className="text-muted-foreground mt-1 text-xs">
+                              {definition?.display_name ??
+                                provider.instance.definition_id}
+                            </p>
+                          </div>
                         </div>
-                      </div>
-                    </TableCell>
+                      </TableCell>
                     <TableCell
                       colSpan={6}
                       className="whitespace-normal py-3 align-middle"
@@ -1877,16 +1898,13 @@ function CredentialManagementTable({
                         )}
                       </p>
                     </TableCell>
-                    <TableCell className="whitespace-normal py-3 align-top">
+                    <TableCell className="whitespace-normal py-3 align-middle">
                       {authMethod?.plan_acquisition === "manual_required" ? (
                         <ReadonlyCombobox
-                          value={
-                            credential.declared_plan?.plan_option_id ?? ""
-                          }
+                          value={credential.declared_plan?.plan_option_id ?? ""}
                           onValueChange={(value) => {
                             if (
-                              value !==
-                              credential.declared_plan?.plan_option_id
+                              value !== credential.declared_plan?.plan_option_id
                             ) {
                               void onChangeCredentialPlan(
                                 provider.instance.id,
@@ -1912,7 +1930,10 @@ function CredentialManagementTable({
                         />
                       ) : (
                         <span className="text-muted-foreground text-sm">
-                          {credentialPlanLabel(definition, credential) ?? "—"}
+                          {credentialPlanLabel(
+                            definition,
+                            credential,
+                          ) ?? "—"}
                         </span>
                       )}
                     </TableCell>
@@ -1962,14 +1983,37 @@ function CredentialManagementTable({
                             />
                           </Button>
                         ) : null}
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() => openModelCatalog(provider, definition)}
-                        >
-                          {t("providers.getSupportedModels")}
-                        </Button>
+                        {hasModelCatalog ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              openModelCatalog(provider, definition)
+                            }
+                          >
+                            {t("providers.getSupportedModels")}
+                          </Button>
+                        ) : null}
+                        {searchAction || extractAction ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={
+                              !searchAction?.ready && !extractAction?.ready
+                            }
+                            onClick={() =>
+                              setServiceTestTarget({
+                                providerName: provider.instance.display_name,
+                                search: searchAction ?? undefined,
+                                extract: extractAction ?? undefined,
+                              })
+                            }
+                          >
+                            {t("services.test")}
+                          </Button>
+                        ) : null}
                         {canListResources ? (
                           <Button
                             type="button"
@@ -2187,9 +2231,7 @@ function CredentialManagementTable({
                                 ? t("providers.modelAuthorized")
                                 : model.authorization_status === "denied"
                                   ? t("providers.modelUnauthorized")
-                                  : t(
-                                      "providers.modelAuthorizationUnknown",
-                                    )}
+                                  : t("providers.modelAuthorizationUnknown")}
                             </Badge>
                           ) : (
                             <span className="text-muted-foreground">—</span>
@@ -2304,7 +2346,9 @@ function CredentialManagementTable({
                             <Table>
                               <TableHeader className="bg-muted/40">
                                 <TableRow>
-                                  <TableHead>{t("providers.fileName")}</TableHead>
+                                  <TableHead>
+                                    {t("providers.fileName")}
+                                  </TableHead>
                                   <TableHead>
                                     {t("providers.resourcePurpose")}
                                   </TableHead>
@@ -2438,8 +2482,112 @@ function CredentialManagementTable({
           </div>
         </DialogContent>
       </Dialog>
+      <ServiceTestDialog
+        managementAuthToken={managementAuthToken}
+        target={serviceTestTarget}
+        onClose={() => setServiceTestTarget(null)}
+      />
     </>
   );
+}
+
+// ProviderSearchTestAction binds a catalog-authored search target to its current aggregate readiness.
+// ProviderSearchTestAction 将目录编写的搜索目标绑定到其当前聚合就绪状态。
+interface ProviderSearchTestAction {
+  // target contains the exact service, offering, profile, and declared policies.
+  // target 包含精确的服务、供应、规格及声明策略。
+  target: SearchServiceTestTarget;
+  // ready reports whether the current pool can execute the diagnostic immediately.
+  // ready 表示当前凭据池是否能够立即执行诊断。
+  ready: boolean;
+}
+
+// providerSearchTestAction selects one ready typed search profile, or the first declared profile when credentials are unavailable.
+// providerSearchTestAction 选择一个就绪的类型化搜索规格；凭据不可用时返回首个已声明规格。
+function providerSearchTestAction(
+  provider: AuthorizedProvider,
+  metadata: ProviderCatalogMetadata | undefined,
+): ProviderSearchTestAction | null {
+  // candidates preserve the authoritative catalog order while excluding non-search and incomplete contracts.
+  // candidates 保留权威目录顺序，同时排除非搜索及不完整合同。
+  const candidates = (metadata?.services ?? []).flatMap((service) => {
+    if (service.operation !== "search.web") return [];
+    return service.offerings.flatMap((offering) =>
+      offering.profiles.flatMap((profile) => {
+        const search = profile.capabilities.web_search;
+        if (
+          profile.operation !== "search.web" ||
+          !search ||
+          search.output_modes.length === 0 ||
+          search.evidence_requirements.length === 0
+        ) {
+          return [];
+        }
+        return [
+          {
+            target: {
+              providerInstanceID: provider.instance.id,
+              providerName: provider.instance.display_name,
+              providerServiceID: service.id,
+              serviceName: service.display_name,
+              serviceOfferingID: offering.id,
+              executionProfileID: profile.id,
+              outputMode: search.output_modes[0],
+              evidenceRequirement: search.evidence_requirements[0],
+            },
+            ready:
+              service.enabled && (profile.pool?.ready_credentials ?? 0) > 0,
+          },
+        ];
+      }),
+    );
+  });
+  // selected prefers an executable profile while retaining a disabled action for a configured search service without ready credentials.
+  // selected 优先选择可执行规格，同时为暂无就绪凭据的已配置搜索服务保留禁用操作。
+  const selected =
+    candidates.find((candidate) => candidate.ready) ?? candidates[0];
+  return selected ?? null;
+}
+
+// ProviderExtractTestAction binds a catalog-authored extraction target to its current aggregate readiness.
+// ProviderExtractTestAction 将目录编写的内容提取目标绑定到其当前聚合就绪状态。
+interface ProviderExtractTestAction {
+  target: ExtractServiceTestTarget;
+  ready: boolean;
+}
+
+// providerExtractTestAction selects one ready typed extraction profile, or the first declared profile when credentials are unavailable.
+// providerExtractTestAction 选择一个就绪的类型化内容提取规格；凭据不可用时返回首个已声明规格。
+function providerExtractTestAction(provider: AuthorizedProvider, metadata: ProviderCatalogMetadata | undefined): ProviderExtractTestAction | null {
+  const candidates = (metadata?.services ?? []).flatMap((service) => {
+    if (service.operation !== "web.extract") return [];
+    return service.offerings.flatMap((offering) => offering.profiles.flatMap((profile) => {
+      const extract = profile.capabilities.web_extract;
+      if (profile.operation !== "web.extract" || !extract || extract.depths.length === 0 || extract.formats.length === 0) return [];
+      return [{
+        target: {
+          providerInstanceID: provider.instance.id,
+          providerName: provider.instance.display_name,
+          providerServiceID: service.id,
+          serviceName: service.display_name,
+          serviceOfferingID: offering.id,
+          executionProfileID: profile.id,
+          maxURLs: extract.max_urls,
+          depths: extract.depths,
+          formats: extract.formats,
+          queryRelevance: extract.query_relevance,
+          minimumChunksPerSource: extract.minimum_chunks_per_source,
+          maximumChunksPerSource: extract.maximum_chunks_per_source,
+          includeImages: extract.include_images,
+          includeFavicon: extract.include_favicon,
+          minimumTimeoutSeconds: extract.minimum_timeout_seconds,
+          maximumTimeoutSeconds: extract.maximum_timeout_seconds,
+        },
+        ready: service.enabled && (profile.pool?.ready_credentials ?? 0) > 0,
+      }];
+    }));
+  });
+  return candidates.find((candidate) => candidate.ready) ?? candidates[0] ?? null;
 }
 
 // providerSupportsAccountMetadata follows only the server-authored native reader capability contract.
@@ -2464,7 +2612,8 @@ function supportsMiniMaxProviderFileList(
   definitionID: string | undefined,
 ): boolean {
   return (
-    definitionID === "system_minimax_api" || definitionID === "system_minimax_cn"
+    definitionID === "system_minimax_api" ||
+    definitionID === "system_minimax_cn"
   );
 }
 
@@ -2480,18 +2629,20 @@ function supportsCredentialResourceList(
   );
 }
 
-// credentialPlanLabel returns the exact manually declared plan display label without inferring provider-detected ownership.
-// credentialPlanLabel 返回精确人工声明的套餐展示标签，而不推断供应商检测到的归属关系。
-function credentialPlanLabel(
-  definition: ProviderDefinitionIdentity | undefined,
-  credential: ProviderCredential,
+// credentialPlanLabel returns the exact manual selection or provider-detected plan bound to this local credential.
+// credentialPlanLabel 返回绑定到此本地凭据的精确人工选择或供应商自动识别套餐。
+export function credentialPlanLabel(
+  definition: Pick<ProviderDefinitionIdentity, "plan_options"> | undefined,
+  credential: Pick<ProviderCredential, "declared_plan" | "detected_plan">,
 ): string | undefined {
   const planOptionID = credential.declared_plan?.plan_option_id;
-  if (!planOptionID) return undefined;
-  return (
-    definition?.plan_options.find((option) => option.id === planOptionID)
-      ?.display_name ?? planOptionID
-  );
+  if (planOptionID) {
+    return (
+      definition?.plan_options.find((option) => option.id === planOptionID)
+        ?.display_name ?? planOptionID
+    );
+  }
+  return credential.detected_plan?.plan_name || credential.detected_plan?.plan_code;
 }
 
 // CompactAllowanceSummaryProps defines the limited quota visualization placed inside one credential table field.
@@ -2525,6 +2676,80 @@ interface MiniMaxAllowanceRow {
   weekly?: ProviderAllowance;
 }
 
+// TavilyAllowanceSummaryData selects the dynamic account plan fact appropriate for the compact credential table.
+// TavilyAllowanceSummaryData 选择适合凭据紧凑表格的动态账号套餐事实。
+interface TavilyAllowanceSummaryData {
+  // accountPlan is the account plan usage and plan limit.
+  // accountPlan 是账号套餐用量及套餐上限。
+  accountPlan?: ProviderAllowance;
+}
+
+// tavilyAllowanceSummary recognizes Tavily metadata while projecting only compact account-level facts; detailed counters remain in the catalog.
+// tavilyAllowanceSummary 识别 Tavily 元数据但只投影紧凑的账号级事实；详细计数器仍保留在目录中。
+function tavilyAllowanceSummary(
+  allowances: ProviderAllowance[],
+): TavilyAllowanceSummaryData | undefined {
+  const metrics = new Map(
+    allowances
+      .filter((allowance) => allowance.metric.startsWith("tavily."))
+      .map((allowance) => [allowance.metric, allowance]),
+  );
+  if (metrics.size === 0) return undefined;
+  return {
+    accountPlan: metrics.get("tavily.account.plan"),
+  };
+}
+
+// tavilyCounterValue renders provider-reported usage and its optional limit without substituting remaining credits.
+// tavilyCounterValue 渲染供应商报告的已用量及其可选上限，且不以剩余积分替代已用量。
+function tavilyCounterValue(allowance: ProviderAllowance | undefined): string {
+  if (!allowance || allowance.used === undefined) return "—";
+  return allowance.limit === undefined
+    ? allowance.used
+    : `${allowance.used} / ${allowance.limit}`;
+}
+
+// TavilyAllowanceSummary renders only dynamic plan consumption while the catalog retains PAYGO configuration and detailed counters.
+// TavilyAllowanceSummary 仅渲染动态套餐消费，同时目录保留 PAYGO 配置与全部详细计数器。
+export function TavilyAllowanceSummary({
+  summary,
+  t,
+}: {
+  summary: TavilyAllowanceSummaryData;
+  t: (key: TranslationKey) => string;
+}) {
+  const planRatio = allowanceDisplayRatio(summary.accountPlan);
+  return (
+    <div className="w-72 max-w-full space-y-1 text-[11px]">
+      <div className="space-y-0.5">
+        <div className="flex items-center justify-between gap-2">
+          <span className="font-medium">
+            {t("providers.allowanceMetrics.tavilyPlan")}
+          </span>
+          <span className="tabular-nums">
+            {t("providers.used")} {tavilyCounterValue(summary.accountPlan)}
+          </span>
+        </div>
+        {planRatio !== undefined ? (
+          <div
+            aria-label={`${t("providers.allowanceMetrics.tavilyPlan")}: ${Math.round(planRatio * 100)}%`}
+            aria-valuemax={100}
+            aria-valuemin={0}
+            aria-valuenow={Math.round(planRatio * 100)}
+            className="bg-muted h-1.5 overflow-hidden rounded-full"
+            role="progressbar"
+          >
+            <div
+              className={`h-full rounded-full ${planRatio <= 0.1 ? "bg-destructive" : planRatio <= 0.3 ? "bg-amber-500" : "bg-emerald-500"}`}
+              style={{ width: `${Math.min(1, planRatio) * 100}%` }}
+            />
+          </div>
+        ) : null}
+      </div>
+    </div>
+  );
+}
+
 // miniMaxAllowanceRows recognizes only the exact metric namespace emitted by the MiniMax allowance driver.
 // miniMaxAllowanceRows 仅识别 MiniMax 额度 Driver 发出的精确指标命名空间。
 function miniMaxAllowanceRows(
@@ -2543,8 +2768,12 @@ function miniMaxAllowanceRows(
     rows.set(name, row);
   }
   return [...rows.values()].sort((left, right) => {
-    const order = (name: string) => (name === "general" ? 0 : name === "video" ? 1 : 2);
-    return order(left.name) - order(right.name) || left.name.localeCompare(right.name);
+    const order = (name: string) =>
+      name === "general" ? 0 : name === "video" ? 1 : 2;
+    return (
+      order(left.name) - order(right.name) ||
+      left.name.localeCompare(right.name)
+    );
   });
 }
 
@@ -2700,7 +2929,10 @@ function miniMaxAllowanceValue(
 // miniMaxResetDuration 渲染 minimax-cli 使用的当前周期重置倒计时。
 function miniMaxResetDuration(resetAt: string | undefined): string {
   if (!resetAt) return "—";
-  const remainingMilliseconds = Math.max(0, new Date(resetAt).getTime() - Date.now());
+  const remainingMilliseconds = Math.max(
+    0,
+    new Date(resetAt).getTime() - Date.now(),
+  );
   const hours = Math.floor(remainingMilliseconds / 3_600_000);
   const minutes = Math.floor((remainingMilliseconds % 3_600_000) / 60_000);
   return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
@@ -2735,11 +2967,16 @@ function CompactAllowanceSummary({
   if (miniMaxRows.length > 0) {
     return <MiniMaxAllowanceSummary rows={miniMaxRows} t={t} />;
   }
+  const tavilySummary = tavilyAllowanceSummary(scopedAllowances);
+  if (tavilySummary) {
+    return <TavilyAllowanceSummary summary={tavilySummary} t={t} />;
+  }
   // visibleAllowances caps table density while retaining the full detailed contract in the model and resource dialogs.
   // visibleAllowances 限制表格密度，同时在模型与资源对话框中保留完整详情契约。
   const visibleAllowances = scopedAllowances.slice(0, 3);
   const hiddenAllowanceCount =
-    credentialAllowances.length + sharedAllowances.length -
+    credentialAllowances.length +
+    sharedAllowances.length -
     visibleAllowances.length;
   if (visibleAllowances.length === 0) {
     return (
@@ -2764,7 +3001,14 @@ function CompactAllowanceSummary({
             className="space-y-0.5"
           >
             <div className="flex items-center justify-between gap-2 text-[11px] leading-none">
-              <span className="min-w-0 truncate" title={allowanceMetricLabel(t, allowance.metric, allowance.window)}>
+              <span
+                className="min-w-0 truncate"
+                title={allowanceMetricLabel(
+                  t,
+                  allowance.metric,
+                  allowance.window,
+                )}
+              >
                 {allowanceMetricLabel(t, allowance.metric, allowance.window)}
                 {shared ? ` · ${t("providers.sharedUsage")}` : ""}
               </span>
@@ -2812,7 +3056,7 @@ function compactAllowanceValue(
   t: (key: TranslationKey) => string,
 ): string {
   if (allowance.status === "unlimited") return t("providers.unlimited");
-  const value = allowance.remaining ?? allowance.limit;
+  const value = allowance.remaining ?? allowance.limit ?? allowance.used;
   if (value === undefined) return t("providers.unknownAmount");
   if (allowance.unit === "minor_currency_units") {
     return formatMinorCurrency(value, allowance.currency) ?? value;
@@ -3100,9 +3344,7 @@ function AuthorizedProviderCard({
                   className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
                 >
                   <div className="min-w-0">
-                    <p className="truncate font-medium">
-                      {voice.display_name}
-                    </p>
+                    <p className="truncate font-medium">{voice.display_name}</p>
                     <p className="text-muted-foreground truncate font-mono text-xs">
                       {t("providers.voiceIdentifier")}: {voice.voice_id}
                     </p>
@@ -3629,6 +3871,13 @@ function allowanceMetricLabel(
     code_review_primary: "providers.allowanceMetrics.codeReviewPrimary",
     code_review_secondary: "providers.allowanceMetrics.codeReviewSecondary",
     rate_limit_reset_credits: "providers.allowanceMetrics.resetCredits",
+    "tavily.key.total": "providers.allowanceMetrics.tavilyKeyTotal",
+    "tavily.account.plan": "providers.allowanceMetrics.tavilyAccountPlan",
+    "tavily.account.paygo": "providers.allowanceMetrics.tavilyAccountPaygo",
+    "tavily.key.search": "providers.allowanceMetrics.tavilyKeySearch",
+    "tavily.key.extract": "providers.allowanceMetrics.tavilyKeyExtract",
+    "tavily.account.search": "providers.allowanceMetrics.tavilyAccountSearch",
+    "tavily.account.extract": "providers.allowanceMetrics.tavilyAccountExtract",
     five_hour: "providers.allowanceMetrics.fiveHour",
     five_hour_usage: "providers.allowanceMetrics.fiveHour",
     seven_day: "providers.allowanceMetrics.sevenDay",

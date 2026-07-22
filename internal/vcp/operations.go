@@ -46,6 +46,9 @@ const (
 	// OperationSearchWeb performs one unified web-search execution.
 	// OperationSearchWeb 执行一次统一网页搜索。
 	OperationSearchWeb OperationKind = "search.web"
+	// OperationWebExtract extracts content from explicit web resources.
+	// OperationWebExtract 从明确指定的网页资源中提取内容。
+	OperationWebExtract OperationKind = "web.extract"
 	// OperationMusicGenerate generates music.
 	// OperationMusicGenerate 生成音乐。
 	OperationMusicGenerate OperationKind = "music.generate"
@@ -250,6 +253,9 @@ type OperationPayload struct {
 	// SearchWeb contains unified web-search input.
 	// SearchWeb 包含统一网页搜索输入。
 	SearchWeb *WebSearchOperation `json:"search_web,omitempty"`
+	// WebExtract contains direct web-content extraction input.
+	// WebExtract 包含直接网页内容提取输入。
+	WebExtract *WebExtractOperation `json:"web_extract,omitempty"`
 	// MusicGenerate contains music-generation input.
 	// MusicGenerate 包含音乐生成输入。
 	MusicGenerate *MusicGenerateOperation `json:"music_generate,omitempty"`
@@ -411,9 +417,9 @@ func (t TargetSelection) validate(operation OperationKind) error {
 	if (t.Model == nil) == (t.Service == nil) {
 		return fmt.Errorf("%w: target requires exactly one model or service selection", ErrInvalidRequest)
 	}
-	if operation == OperationSearchWeb {
+	if operation == OperationSearchWeb || operation == OperationWebExtract {
 		if t.Service == nil {
-			return fmt.Errorf("%w: search.web requires service selection", ErrInvalidRequest)
+			return fmt.Errorf("%w: operation %q requires service selection", ErrInvalidRequest, operation)
 		}
 		return t.Service.validate()
 	}
@@ -479,6 +485,9 @@ func (p OperationPayload) validate(operation OperationKind, envelope ExecutionRe
 		count++
 	}
 	if p.SearchWeb != nil {
+		count++
+	}
+	if p.WebExtract != nil {
 		count++
 	}
 	if p.MusicGenerate != nil {
@@ -554,6 +563,11 @@ func (p OperationPayload) validate(operation OperationKind, envelope ExecutionRe
 			return payloadMismatch(operation)
 		}
 		return p.SearchWeb.Validate()
+	case OperationWebExtract:
+		if p.WebExtract == nil {
+			return payloadMismatch(operation)
+		}
+		return p.WebExtract.Validate()
 	case OperationMusicGenerate:
 		if p.MusicGenerate == nil {
 			return payloadMismatch(operation)

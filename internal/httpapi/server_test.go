@@ -107,6 +107,12 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 	// resetAt fixes the client-visible provider recovery boundary.
 	// resetAt 固定客户端可见的供应商恢复边界。
 	resetAt := time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC)
+	// searchCapabilities is the complete effective contract shared by the fixture offering and profile.
+	// searchCapabilities 是测试产品与规格共享的完整有效合同。
+	searchCapabilities := catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest, OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}, EvidenceRequirements: []vcp.SearchEvidenceRequirement{vcp.SearchEvidenceVerified}}}
+	// extractCapabilities is the complete effective extraction contract shared by the fixture offering and profile.
+	// extractCapabilities 是测试产品与规格共享的完整有效提取合同。
+	extractCapabilities := catalog.ServiceCapabilities{WebExtract: &catalog.WebExtractCapabilities{MaxURLs: 20, Depths: []vcp.WebExtractDepth{vcp.WebExtractDepthBasic, vcp.WebExtractDepthAdvanced}, Formats: []vcp.WebExtractFormat{vcp.WebExtractFormatMarkdown, vcp.WebExtractFormatText}, QueryRelevance: true, MinimumChunksPerSource: 1, MaximumChunksPerSource: 5, IncludeImages: true, IncludeFavicon: true, MinimumTimeoutSeconds: 1, MaximumTimeoutSeconds: 60}}
 	return management.CatalogView{
 		ProviderInstanceID: "pvi_test",
 		Models: []management.ModelView{{
@@ -123,8 +129,15 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 			ID: "service_search", DisplayName: "Search", Operation: vcp.OperationSearchWeb, EntitlementMode: catalog.EntitlementAllBoundCredentials, Enabled: true, AuthorizationStatus: catalog.AuthorizationAuthorized,
 			Offerings: []management.ServiceOfferingView{{
 				ID: "service_offer_search", UpstreamServiceID: "search",
-				Capabilities: catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest, OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}}},
-				Profiles:     []management.ServiceExecutionProfileView{{ID: "profile_search", DisplayName: "Search", Default: true, Operation: vcp.OperationSearchWeb, ActionBindingID: "action_search", Pool: &management.PoolView{ReadyCredentials: 1}}},
+				Capabilities: searchCapabilities,
+				Profiles:     []management.ServiceExecutionProfileView{{ID: "profile_search", DisplayName: "Search", Default: true, Operation: vcp.OperationSearchWeb, ActionBindingID: "action_search", Capabilities: searchCapabilities, Pool: &management.PoolView{ReadyCredentials: 1}}},
+			}},
+		}, {
+			ID: "service_extract", DisplayName: "Extract", Operation: vcp.OperationWebExtract, EntitlementMode: catalog.EntitlementAllBoundCredentials, Enabled: true, AuthorizationStatus: catalog.AuthorizationAuthorized,
+			Offerings: []management.ServiceOfferingView{{
+				ID: "service_offer_extract", UpstreamServiceID: "extract",
+				Capabilities: extractCapabilities,
+				Profiles:     []management.ServiceExecutionProfileView{{ID: "profile_extract", DisplayName: "Extract", Default: true, Operation: vcp.OperationWebExtract, ActionBindingID: "action_extract", Capabilities: extractCapabilities, Pool: &management.PoolView{ReadyCredentials: 1}}},
 			}},
 		}},
 		Allowances: []management.AllowanceView{{

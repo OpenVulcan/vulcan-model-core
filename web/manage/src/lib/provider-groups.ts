@@ -701,6 +701,16 @@ export interface ProviderCredential {
     declared_at: string;
     revision: number;
   };
+  // detected_plan contains provider-reported membership metadata for this exact credential.
+  // detected_plan 包含供应商为此精确凭据报告的会员元数据。
+  detected_plan?: {
+    plan_code: string;
+    plan_name: string;
+    status: string;
+    evidence_source: ProviderPlan["evidence_source"];
+    observed_at: string;
+    expires_at?: string;
+  };
   // revision is the persisted credential revision.
   // revision 是持久化凭据修订号。
   revision: number;
@@ -771,8 +781,106 @@ export interface ProviderCatalogModel {
   }>;
 }
 
-// ProviderPlan contains one identity-free commercial plan aggregate.
-// ProviderPlan 包含一个不带身份信息的商业套餐聚合。
+// ProviderCatalogWebSearchCapabilities contains the closed search policy required by one executable service profile.
+// ProviderCatalogWebSearchCapabilities 包含一个可执行服务规格所需的封闭搜索策略。
+export interface ProviderCatalogWebSearchCapabilities {
+  // backend_kind identifies the provider-backed search implementation kind.
+  // backend_kind 标识由供应商支持的搜索实现类型。
+  backend_kind: string;
+  // invocation_mode identifies direct API search or model-mediated search.
+  // invocation_mode 标识直接 API 搜索或模型介导搜索。
+  invocation_mode: string;
+  // output_modes contains the exact supported unified result modes.
+  // output_modes 包含精确支持的统一结果模式。
+  output_modes: string[];
+  // evidence_kinds contains the evidence forms the provider can return.
+  // evidence_kinds 包含供应商能够返回的证据形式。
+  evidence_kinds: string[];
+  // evidence_requirements contains the selectable evidence validation policies.
+  // evidence_requirements 包含可选择的证据校验策略。
+  evidence_requirements: string[];
+}
+
+// ProviderCatalogWebExtractCapabilities contains the closed extraction policy required by one executable service profile.
+// ProviderCatalogWebExtractCapabilities 包含一个可执行服务规格所需的封闭内容提取策略。
+export interface ProviderCatalogWebExtractCapabilities {
+  max_urls: number;
+  depths: Array<"basic" | "advanced">;
+  formats: Array<"markdown" | "text">;
+  query_relevance: boolean;
+  minimum_chunks_per_source: number;
+  maximum_chunks_per_source: number;
+  include_images: boolean;
+  include_favicon: boolean;
+  minimum_timeout_seconds: number;
+  maximum_timeout_seconds: number;
+}
+
+// ProviderCatalogServiceProfile contains one executable typed service profile and aggregate credential readiness.
+// ProviderCatalogServiceProfile 包含一个可执行的类型化服务规格及聚合凭据就绪状态。
+export interface ProviderCatalogServiceProfile {
+  // id is the provider-scoped execution profile identifier.
+  // id 是供应商作用域的执行规格标识。
+  id: string;
+  // display_name is the management-facing profile name.
+  // display_name 是管理界面显示的规格名称。
+  display_name: string;
+  // operation is the closed Vulcan service operation.
+  // operation 是封闭的 Vulcan 服务操作。
+  operation: string;
+  // action_binding_id identifies the exact provider action binding.
+  // action_binding_id 标识精确的供应商动作绑定。
+  action_binding_id: string;
+  // capabilities contains typed special-service contracts.
+  // capabilities 包含类型化特殊服务合同。
+  capabilities: {
+    web_search?: ProviderCatalogWebSearchCapabilities;
+    web_extract?: ProviderCatalogWebExtractCapabilities;
+  };
+  // pool contains aggregate non-secret credential readiness when available.
+  // pool 包含可用时的聚合非秘密凭据就绪状态。
+  pool?: { ready_credentials: number } | null;
+}
+
+// ProviderCatalogServiceOffering contains one concrete upstream service channel.
+// ProviderCatalogServiceOffering 包含一个具体的上游服务通道。
+export interface ProviderCatalogServiceOffering {
+  // id is the provider-scoped service offering identifier.
+  // id 是供应商作用域的服务供应标识。
+  id: string;
+  // upstream_service_id is the exact provider service identifier.
+  // upstream_service_id 是精确的供应商服务标识。
+  upstream_service_id: string;
+  // profiles contains executable typed service profiles.
+  // profiles 包含可执行的类型化服务规格。
+  profiles: ProviderCatalogServiceProfile[];
+}
+
+// ProviderCatalogService contains one provider-owned non-model service.
+// ProviderCatalogService 包含一个由供应商拥有的非模型服务。
+export interface ProviderCatalogService {
+  // id is the provider-scoped logical service identifier.
+  // id 是供应商作用域的逻辑服务标识。
+  id: string;
+  // display_name is the management-facing service name.
+  // display_name 是管理界面显示的服务名称。
+  display_name: string;
+  // operation is the closed Vulcan service operation.
+  // operation 是封闭的 Vulcan 服务操作。
+  operation: string;
+  // enabled reports whether local policy allows this service.
+  // enabled 表示本地策略是否允许该服务。
+  enabled: boolean;
+  // authorization_status preserves authorized, denied, and unknown evidence.
+  // authorization_status 保留已授权、已拒绝与未知证据。
+  authorization_status: "authorized" | "denied" | "unknown";
+  // offerings contains concrete selectable service implementations.
+  // offerings 包含具体可选择的服务实现。
+  offerings: ProviderCatalogServiceOffering[];
+}
+
+// ProviderPlan contains one commercial plan aggregate and its management-safe local credential ownership.
+// ProviderPlan 包含一个商业套餐聚合及其管理安全的本地凭据归属。
 export interface ProviderPlan {
   // plan_code is the provider-issued stable plan identifier.
   // plan_code 是供应商签发的稳定套餐标识。
@@ -893,6 +1001,9 @@ export interface ProviderCatalogMetadata {
   // models contains the refreshed provider model inventory and local eligibility.
   // models 包含已刷新的供应商模型清单与本地可用性。
   models: ProviderCatalogModel[];
+  // services contains provider-owned non-model capability contracts.
+  // services 包含由供应商拥有的非模型能力合同。
+  services: ProviderCatalogService[];
   // plans contains normalized identity-free commercial plan aggregates.
   // plans 包含规范化且不带身份信息的商业套餐聚合。
   plans: ProviderPlan[];
@@ -908,6 +1019,14 @@ export interface ProviderCatalogMetadata {
   // observed_at is the server timestamp for the complete refresh.
   // observed_at 是完整刷新操作的服务端时间戳。
   observed_at: string;
+}
+
+// providerCatalogHasModels reports model discovery availability only from actual catalog entries.
+// providerCatalogHasModels 仅依据实际目录条目报告模型发现是否可用。
+export function providerCatalogHasModels(
+  metadata: Pick<ProviderCatalogMetadata, "models"> | undefined,
+): boolean {
+  return Boolean(metadata?.models.length);
 }
 
 // ProviderVoice contains one provider voice and the exact configured account exposing it.
@@ -1305,6 +1424,62 @@ const providerCatalogMetadataSchema = z.object({
         .optional(),
     }),
   ),
+  services: z
+    .array(
+      z.object({
+        id: z.string().min(1),
+        display_name: z.string().min(1),
+        operation: z.string().min(1),
+        enabled: z.boolean(),
+        authorization_status: z.enum(["authorized", "denied", "unknown"]),
+        offerings: z.array(
+          z.object({
+            id: z.string().min(1),
+            upstream_service_id: z.string().min(1),
+            profiles: z.array(
+              z.object({
+                id: z.string().min(1),
+                display_name: z.string().min(1),
+                operation: z.string().min(1),
+                action_binding_id: z.string().min(1),
+                capabilities: z.object({
+                  web_search: z
+                    .object({
+                      backend_kind: z.string().min(1),
+                      invocation_mode: z.string().min(1),
+                      output_modes: z.array(z.string().min(1)),
+                      evidence_kinds: z.array(z.string().min(1)),
+                      evidence_requirements: z.array(z.string().min(1)),
+                    })
+                    .optional(),
+                  web_extract: z
+                    .object({
+                      max_urls: z.number().int().positive(),
+                      depths: z.array(z.enum(["basic", "advanced"])).min(1),
+                      formats: z.array(z.enum(["markdown", "text"])).min(1),
+                      query_relevance: z.boolean(),
+                      minimum_chunks_per_source: z.number().int().nonnegative(),
+                      maximum_chunks_per_source: z.number().int().nonnegative(),
+                      include_images: z.boolean(),
+                      include_favicon: z.boolean(),
+                      minimum_timeout_seconds: z.number().positive(),
+                      maximum_timeout_seconds: z.number().positive(),
+                    })
+                    .optional(),
+                }),
+                pool: z
+                  .object({ ready_credentials: z.number().int().nonnegative() })
+                  .passthrough()
+                  .nullable()
+                  .optional(),
+              }),
+            ),
+          }),
+        ),
+      }),
+    )
+    .optional()
+    .default([]),
   plans: z.array(
     z.object({
       plan_code: z.string().min(1),
@@ -1375,7 +1550,7 @@ const providerCatalogMetadataSchema = z.object({
         "exhausted",
         "unknown_sufficiency",
         "unavailable",
-		"not_included",
+        "not_included",
       ]),
       mandatory: z.boolean(),
       window: z
@@ -1750,6 +1925,22 @@ const providerCredentialSchema = z.object({
       plan_option_id: z.string().min(1),
       declared_at: z.string().datetime({ offset: true }),
       revision: z.number().int().positive(),
+    })
+    .optional(),
+  detected_plan: z
+    .object({
+      plan_code: z.string().min(1),
+      plan_name: z.string().min(1),
+      status: z.string().min(1),
+      evidence_source: z.enum([
+        "provider_api",
+        "protected_token_claim",
+        "operator_declared",
+        "system_rule",
+        "runtime_observation",
+      ]),
+      observed_at: z.string().datetime({ offset: true }),
+      expires_at: z.string().datetime({ offset: true }).optional(),
     })
     .optional(),
   revision: z.number().int().positive(),

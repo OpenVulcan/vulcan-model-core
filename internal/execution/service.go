@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -181,6 +182,9 @@ type Service struct {
 	// activeCancels maps execution identities to their exact running context cancellation.
 	// activeCancels 将执行身份映射到其精确运行 Context 取消函数。
 	activeCancels map[string]context.CancelFunc
+	// activeExecutions records immediate executions owned by this process before and during provider dispatch.
+	// activeExecutions 记录当前进程在供应商分派前及分派期间拥有的即时执行。
+	activeExecutions map[string]struct{}
 	// leases coordinates optional multi-instance recovery ownership.
 	// leases 协调可选的多实例恢复所有权。
 	leases LeaseStore
@@ -220,10 +224,10 @@ func NewService(store Store, resolver TargetResolver, configurations Configurati
 	if options.Retention <= 0 {
 		options.Retention = 24 * time.Hour
 	}
+	if options.LeaseTTL <= 0 {
+		options.LeaseTTL = 30 * time.Second
+	}
 	if options.Leases != nil {
-		if options.LeaseTTL <= 0 {
-			options.LeaseTTL = 30 * time.Second
-		}
 		if strings.TrimSpace(options.WorkerID) == "" {
 			identity, errIdentity := options.NewID()
 			if errIdentity != nil {
@@ -239,7 +243,7 @@ func NewService(store Store, resolver TargetResolver, configurations Configurati
 		}
 		options.EventDistributor = defaultDistributor
 	}
-	return &Service{store: store, resolver: resolver, configurations: configurations, plans: plans, materializer: materializer, providers: providers, options: options, activeCancels: make(map[string]context.CancelFunc), leases: options.Leases, workerID: options.WorkerID, leaseTTL: options.LeaseTTL, eventDistributor: options.EventDistributor}, nil
+	return &Service{store: store, resolver: resolver, configurations: configurations, plans: plans, materializer: materializer, providers: providers, options: options, activeCancels: make(map[string]context.CancelFunc), activeExecutions: make(map[string]struct{}), leases: options.Leases, workerID: options.WorkerID, leaseTTL: options.LeaseTTL, eventDistributor: options.EventDistributor}, nil
 }
 
 // Create durably admits and executes one validated VCP request or returns an exact idempotent replay.
@@ -295,16 +299,65 @@ func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.
 	if errID != nil {
 		return Record{}, false, fmt.Errorf("create execution identifier: %w", errID)
 	}
+	immediate := request.DispatchMode != vcp.DispatchDeferred
+	if immediate {
+		s.registerActiveExecution(executionID)
+		defer s.unregisterActiveExecution(executionID)
+	}
 	record := Record{ID: executionID, OwnerAPIKeyID: ownerAPIKeyID, RequestHash: requestHash, IdempotencyKey: request.IdempotencyKey, Request: request, Target: target, Status: StatusAccepted, Operation: request.Operation, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.options.Retention), Revision: 1}
 	accepted := lifecycleEvent(record.ID, 1, now, EventExecutionAccepted, StatusAccepted, nil)
 	created, replayed, errCreate := s.store.Create(ctx, record, accepted)
 	if errCreate != nil || replayed {
 		return created, replayed, errCreate
 	}
-	if request.DispatchMode == vcp.DispatchDeferred {
+	if !immediate {
 		return created, false, nil
 	}
-	return s.execute(ctx, created)
+	return s.executeAdmitted(ctx, created)
+}
+
+// executeAdmitted owns one immediate execution under a distinct durable lease so recovery cannot replay its provider side effect.
+// executeAdmitted 通过独立持久租约拥有一次即时执行，防止恢复器重放其供应商副作用。
+func (s *Service) executeAdmitted(ctx context.Context, record Record) (Record, bool, error) {
+	var executed Record
+	var replayed bool
+	acquired, errLease := s.withExecutionLease(ctx, record.ID, s.workerID+"_direct", func(leaseContext context.Context) error {
+		var errExecute error
+		executed, replayed, errExecute = s.execute(leaseContext, record)
+		return errExecute
+	})
+	if errLease != nil {
+		return Record{}, false, errLease
+	}
+	if !acquired {
+		return Record{}, false, ErrRevisionConflict
+	}
+	return executed, replayed, nil
+}
+
+// registerActiveExecution reserves an immediate execution locally before its durable admission becomes visible to recovery.
+// registerActiveExecution 在即时执行的持久接收对恢复器可见前于本地预留该执行。
+func (s *Service) registerActiveExecution(executionID string) {
+	s.activeMu.Lock()
+	s.activeExecutions[executionID] = struct{}{}
+	s.activeMu.Unlock()
+}
+
+// unregisterActiveExecution releases one process-local immediate-execution reservation.
+// unregisterActiveExecution 释放一个进程内即时执行预留。
+func (s *Service) unregisterActiveExecution(executionID string) {
+	s.activeMu.Lock()
+	delete(s.activeExecutions, executionID)
+	s.activeMu.Unlock()
+}
+
+// executionActive reports whether this process currently owns immediate dispatch for an execution.
+// executionActive 报告当前进程是否正在拥有某次执行的即时分派。
+func (s *Service) executionActive(executionID string) bool {
+	s.activeMu.Lock()
+	defer s.activeMu.Unlock()
+	_, exists := s.activeExecutions[executionID]
+	return exists
 }
 
 // Get returns one owner-scoped execution without private recovery fields.
@@ -973,12 +1026,13 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 	hasGenerated := len(result.GeneratedResources) > 0
 	hasTranscript := result.Transcript != nil
 	hasMusicPreparation := result.MusicCoverPreparation != nil
+	hasExtract := result.Extract != nil
 	switch request.Operation {
 	case vcp.OperationEmbeddingCreate:
 		operation := *request.Payload.EmbeddingCreate
 		if (complete && len(result.Embeddings) != len(operation.Inputs)) ||
 			(!complete && (len(result.Embeddings) == 0 || len(result.Embeddings) > len(operation.Inputs))) ||
-			len(result.Rerank) != 0 || result.Search != nil || hasGenerated || hasTranscript || hasMusicPreparation {
+			len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: embedding result union or batch count is invalid", ErrInvalidProviderResult)
 		}
 		for index, item := range result.Embeddings {
@@ -994,7 +1048,7 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationRerankDocuments:
-		if len(result.Embeddings) != 0 || result.Search != nil || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: rerank result union is invalid", ErrInvalidProviderResult)
 		}
 		if errValidate := request.Payload.RerankDocuments.ValidateResults(result.Rerank); errValidate != nil {
@@ -1002,17 +1056,22 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationSearchWeb:
-		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search == nil || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search == nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: search result union is invalid", ErrInvalidProviderResult)
 		}
 		return nil
+	case vcp.OperationWebExtract:
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || !hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
+			return fmt.Errorf("%w: web extraction result union is invalid", ErrInvalidProviderResult)
+		}
+		return validateWebExtractResponse(*result.Extract)
 	case vcp.OperationImageGenerate, vcp.OperationImageEdit:
-		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaImage) || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasTranscript || hasMusicPreparation {
+		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaImage) || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: image result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationVideoGenerate, vcp.OperationVideoEdit, vcp.OperationVideoExtend:
-		if hasTranscript || hasMusicPreparation {
+		if hasTranscript || hasMusicPreparation || hasExtract {
 			return fmt.Errorf("%w: video result union is invalid", ErrInvalidProviderResult)
 		}
 		if complete && (!hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaVideo)) {
@@ -1023,18 +1082,18 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationSpeechSynthesize:
-		if !hasGenerated || !generatedSpeechKindsAre(result.GeneratedResources) || hasTranscript || hasMusicPreparation {
+		if !hasGenerated || !generatedSpeechKindsAre(result.GeneratedResources) || hasTranscript || hasMusicPreparation || hasExtract {
 			return fmt.Errorf("%w: speech result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationMusicGenerate, vcp.OperationMusicCover:
-		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaAudio) || hasTranscript || hasMusicPreparation {
+		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaAudio) || hasTranscript || hasMusicPreparation || hasExtract {
 			return fmt.Errorf("%w: audio result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationMusicCoverPrepare:
 		preparation := result.MusicCoverPreparation
-		if hasGenerated || hasTranscript || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || preparation == nil || strings.TrimSpace(preparation.ProviderHandle) == "" || strings.TrimSpace(preparation.FormattedLyrics) == "" || preparation.AudioDurationSeconds <= 0 || preparation.ExpiresAt.IsZero() || len(preparation.Structure) == 0 {
+		if hasGenerated || hasTranscript || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || preparation == nil || strings.TrimSpace(preparation.ProviderHandle) == "" || strings.TrimSpace(preparation.FormattedLyrics) == "" || preparation.AudioDurationSeconds <= 0 || preparation.ExpiresAt.IsZero() || len(preparation.Structure) == 0 {
 			return fmt.Errorf("%w: music cover preparation result union is invalid", ErrInvalidProviderResult)
 		}
 		for _, segment := range preparation.Structure {
@@ -1044,7 +1103,7 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationSpeechTranscribe:
-		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || !hasTranscript || hasMusicPreparation {
+		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || !hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: speech transcription result union is invalid", ErrInvalidProviderResult)
 		}
 		if errTranscript := result.Transcript.Validate(); errTranscript != nil {
@@ -1055,16 +1114,49 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationConversationRespond, vcp.OperationMediaAnalyze:
-		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasTranscript || hasMusicPreparation {
+		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: operation returned a mismatched typed result", ErrInvalidProviderResult)
 		}
 		return nil
 	default:
-		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: operation returned a mismatched typed result", ErrInvalidProviderResult)
 		}
 		return nil
 	}
+}
+
+// validateWebExtractResponse verifies provider URLs and complete per-item extraction facts.
+// validateWebExtractResponse 校验供应商 URL 与完整的逐项提取事实。
+func validateWebExtractResponse(response vcp.WebExtractResponse) error {
+	if len(response.Results) == 0 && len(response.FailedResults) == 0 {
+		return fmt.Errorf("%w: web extraction result is empty", ErrInvalidProviderResult)
+	}
+	seenURLs := make(map[string]struct{}, len(response.Results)+len(response.FailedResults))
+	for _, item := range response.Results {
+		operation := vcp.WebExtractOperation{URLs: []string{item.URL}}
+		if errURL := operation.Validate(); errURL != nil {
+			return fmt.Errorf("%w: web extraction success item is invalid", ErrInvalidProviderResult)
+		}
+		if _, exists := seenURLs[item.URL]; exists {
+			return fmt.Errorf("%w: duplicate web extraction result URL", ErrInvalidProviderResult)
+		}
+		seenURLs[item.URL] = struct{}{}
+	}
+	for _, item := range response.FailedResults {
+		operation := vcp.WebExtractOperation{URLs: []string{item.URL}}
+		if errURL := operation.Validate(); errURL != nil || strings.TrimSpace(item.Error) == "" {
+			return fmt.Errorf("%w: web extraction failure item is invalid", ErrInvalidProviderResult)
+		}
+		if _, exists := seenURLs[item.URL]; exists {
+			return fmt.Errorf("%w: duplicate web extraction result URL", ErrInvalidProviderResult)
+		}
+		seenURLs[item.URL] = struct{}{}
+	}
+	if response.ResponseTimeSeconds != nil && (math.IsNaN(*response.ResponseTimeSeconds) || math.IsInf(*response.ResponseTimeSeconds, 0) || *response.ResponseTimeSeconds < 0) {
+		return fmt.Errorf("%w: web extraction response time is negative", ErrInvalidProviderResult)
+	}
+	return nil
 }
 
 // validateGeneratedResources enforces stable identities and exact-one private acquisition sources before ingestion.
@@ -1329,10 +1421,10 @@ func (s *Service) RecoverOnce(ctx context.Context) error {
 	taskExecutor, taskExecutionSupported := s.providers.(ProviderTaskExecutor)
 	for _, record := range records {
 		now := s.options.Now().UTC()
-		if !recoveryDue(record, now) {
+		if s.executionActive(record.ID) || !recoveryDue(record, now) {
 			continue
 		}
-		errRecover := s.withRecoveryLease(ctx, record.ID, func(leaseContext context.Context) error {
+		_, errRecover := s.withExecutionLease(ctx, record.ID, s.workerID, func(leaseContext context.Context) error {
 			return s.recoverRecordOnce(leaseContext, record, taskExecutor, taskExecutionSupported, now)
 		})
 		if errRecover != nil && !errors.Is(errRecover, ErrRevisionConflict) {
@@ -1449,16 +1541,16 @@ func (s *Service) cancelProviderTaskOnce(ctx context.Context, record Record, tas
 	return updated, false, errApply
 }
 
-// withRecoveryLease acquires, heartbeats, and releases one optional multi-instance execution lease.
-// withRecoveryLease 获取、续约并释放一个可选的多实例执行租约。
-func (s *Service) withRecoveryLease(ctx context.Context, executionID string, run func(context.Context) error) error {
+// withExecutionLease acquires, heartbeats, and releases one optional execution-owner lease.
+// withExecutionLease 获取、续约并释放一个可选的执行所有者租约。
+func (s *Service) withExecutionLease(ctx context.Context, executionID string, ownerID string, run func(context.Context) error) (bool, error) {
 	if s.leases == nil {
-		return run(ctx)
+		return true, run(ctx)
 	}
 	now := s.options.Now().UTC()
-	acquired, errAcquire := s.leases.AcquireLease(ctx, executionID, s.workerID, now, now.Add(s.leaseTTL))
+	acquired, errAcquire := s.leases.AcquireLease(ctx, executionID, ownerID, now, now.Add(s.leaseTTL))
 	if errAcquire != nil || !acquired {
-		return errAcquire
+		return acquired, errAcquire
 	}
 	leaseContext, cancelLease := context.WithCancel(ctx)
 	heartbeatResult := make(chan error, 1)
@@ -1472,7 +1564,7 @@ func (s *Service) withRecoveryLease(ctx context.Context, executionID string, run
 				return
 			case <-ticker.C:
 				renewedAt := s.options.Now().UTC()
-				renewed, errRenew := s.leases.RenewLease(leaseContext, executionID, s.workerID, renewedAt, renewedAt.Add(s.leaseTTL))
+				renewed, errRenew := s.leases.RenewLease(leaseContext, executionID, ownerID, renewedAt, renewedAt.Add(s.leaseTTL))
 				if errRenew != nil {
 					heartbeatResult <- errRenew
 					cancelLease()
@@ -1489,14 +1581,14 @@ func (s *Service) withRecoveryLease(ctx context.Context, executionID string, run
 	errRun := run(leaseContext)
 	cancelLease()
 	errHeartbeat := <-heartbeatResult
-	errRelease := s.leases.ReleaseLease(context.WithoutCancel(ctx), executionID, s.workerID)
+	errRelease := s.leases.ReleaseLease(context.WithoutCancel(ctx), executionID, ownerID)
 	if errRun != nil {
-		return errRun
+		return true, errRun
 	}
 	if errHeartbeat != nil {
-		return errHeartbeat
+		return true, errHeartbeat
 	}
-	return errRelease
+	return true, errRelease
 }
 
 // taskPollBackoff returns a bounded deterministic delay after an upstream poll transport failure.
@@ -1991,7 +2083,7 @@ func classifiedRetryable(classified provider.ClassifiedError, classifiedOK bool)
 // providerResultHasSemanticOutput reports whether an errored dispatch already returned any provider-accepted state or client-visible result.
 // providerResultHasSemanticOutput 表示失败分派是否已经返回任何供应商接收状态或客户端可见结果。
 func providerResultHasSemanticOutput(result provider.ExecutionResult) bool {
-	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || result.ContinuationUpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Transcript != nil || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
+	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || result.ContinuationUpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Extract != nil || result.Transcript != nil || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
 }
 
 // appendUniqueString appends one exact identifier only when it has not already been recorded.
@@ -2115,7 +2207,7 @@ func (s *Service) succeedWithStatus(ctx context.Context, record Record, provider
 	if errUsage != nil {
 		return Record{}, false, errUsage
 	}
-	result := Result{Embeddings: append([]vcp.EmbeddingItem(nil), providerResult.Embeddings...), Rerank: append([]vcp.RerankResult(nil), providerResult.Rerank...), Search: providerResult.Search, Transcript: providerResult.Transcript, Resources: append([]resource.Resource(nil), resources...), Usage: usage}
+	result := Result{Embeddings: append([]vcp.EmbeddingItem(nil), providerResult.Embeddings...), Rerank: append([]vcp.RerankResult(nil), providerResult.Rerank...), Search: providerResult.Search, Extract: providerResult.Extract, Transcript: providerResult.Transcript, Resources: append([]resource.Resource(nil), resources...), Usage: usage}
 	if providerResult.MusicCoverPreparation != nil {
 		preparation := providerResult.MusicCoverPreparation
 		publicPreparation := vcp.MusicCoverPreparation{PreparationID: record.ID, FormattedLyrics: preparation.FormattedLyrics, Structure: append([]vcp.MusicStructureSegment(nil), preparation.Structure...), AudioDurationSeconds: preparation.AudioDurationSeconds, ExpiresAt: preparation.ExpiresAt}
@@ -2196,6 +2288,9 @@ func usageObservationForResult(result provider.ExecutionResult) (*vcp.UsageObser
 	}
 	if result.Search != nil && result.Search.Usage != nil {
 		observations = append(observations, result.Search.Usage)
+	}
+	if result.Extract != nil && result.Extract.Usage != nil {
+		observations = append(observations, result.Extract.Usage)
 	}
 	if len(observations) == 0 {
 		return nil, nil

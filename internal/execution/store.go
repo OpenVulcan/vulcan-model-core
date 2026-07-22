@@ -311,6 +311,7 @@ func cloneRecord(record Record) (Record, error) {
 		result.Embeddings = cloneEmbeddingItems(record.Result.Embeddings)
 		result.Rerank = cloneRerankResults(record.Result.Rerank)
 		result.Search = cloneWebSearchResponse(record.Result.Search)
+		result.Extract = cloneWebExtractResponse(record.Result.Extract)
 		result.Transcript = cloneTranscript(record.Result.Transcript)
 		result.Resources = cloneResources(record.Result.Resources)
 		result.Usage = cloneUsageObservation(record.Result.Usage)
@@ -427,6 +428,23 @@ func cloneWebSearchResponse(source *vcp.WebSearchResponse) *vcp.WebSearchRespons
 		cloned.Citations[index].Location.End = cloneIntPointer(source.Citations[index].Location.End)
 	}
 	cloned.Sources = append([]vcp.SearchSource(nil), source.Sources...)
+	cloned.Usage = cloneUsageObservation(source.Usage)
+	return &cloned
+}
+
+// cloneWebExtractResponse deep-copies one optional extraction result and all nested values.
+// cloneWebExtractResponse 深拷贝一个可选提取结果及其全部嵌套值。
+func cloneWebExtractResponse(source *vcp.WebExtractResponse) *vcp.WebExtractResponse {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.Results = append([]vcp.WebExtractResult(nil), source.Results...)
+	for index := range cloned.Results {
+		cloned.Results[index].Images = append([]string(nil), source.Results[index].Images...)
+	}
+	cloned.FailedResults = append([]vcp.WebExtractFailure(nil), source.FailedResults...)
+	cloned.ResponseTimeSeconds = cloneFloat64Pointer(source.ResponseTimeSeconds)
 	cloned.Usage = cloneUsageObservation(source.Usage)
 	return &cloned
 }

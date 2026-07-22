@@ -70,8 +70,8 @@ func (r ExecutionSelectionRequest) Validate() error {
 	if r.RequiredRegion != strings.TrimSpace(r.RequiredRegion) {
 		return fmt.Errorf("%w: required region cannot contain surrounding whitespace", ErrInvalidRequest)
 	}
-	if r.Operation == OperationSearchWeb && (r.RequiredContextTokens != 0 || r.RequiredMaxOutputTokens != 0 || len(r.RequiredInputModalities) != 0 || len(r.RequiredOutputModalities) != 0 || len(r.RequiredCapabilities) != 0 || len(r.PreferredCapabilities) != 0 || len(r.PreferredModelIDs) != 0) {
-		return fmt.Errorf("%w: search service selection accepts only provider instance and region constraints", ErrInvalidRequest)
+	if (r.Operation == OperationSearchWeb || r.Operation == OperationWebExtract) && (r.RequiredContextTokens != 0 || r.RequiredMaxOutputTokens != 0 || len(r.RequiredInputModalities) != 0 || len(r.RequiredOutputModalities) != 0 || len(r.RequiredCapabilities) != 0 || len(r.PreferredCapabilities) != 0 || len(r.PreferredModelIDs) != 0) {
+		return fmt.Errorf("%w: special service selection accepts only provider instance and region constraints", ErrInvalidRequest)
 	}
 	return nil
 }
@@ -98,7 +98,7 @@ func validateSelectionModalities(label string, values []string) error {
 // validSelectionOperation 报告可参与执行前选择的每个封闭操作。
 func validSelectionOperation(operation OperationKind) bool {
 	switch operation {
-	case OperationConversationRespond, OperationMediaAnalyze, OperationImageGenerate, OperationImageEdit, OperationVideoGenerate, OperationVideoEdit, OperationVideoExtend, OperationSpeechSynthesize, OperationSpeechTranscribe, OperationEmbeddingCreate, OperationRerankDocuments, OperationSearchWeb, OperationMusicGenerate, OperationMusicCoverPrepare, OperationMusicCover:
+	case OperationConversationRespond, OperationMediaAnalyze, OperationImageGenerate, OperationImageEdit, OperationVideoGenerate, OperationVideoEdit, OperationVideoExtend, OperationSpeechSynthesize, OperationSpeechTranscribe, OperationEmbeddingCreate, OperationRerankDocuments, OperationSearchWeb, OperationWebExtract, OperationMusicGenerate, OperationMusicCoverPrepare, OperationMusicCover:
 		return true
 	default:
 		return false

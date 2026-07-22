@@ -1,4 +1,10 @@
-import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "@/i18n";
@@ -103,16 +109,18 @@ function commonReadResponse(url: string): Response | null {
   }
   if (url.endsWith("/protocol-profiles")) {
     return jsonResponse({
-      protocol_profiles: [{
-        id: "openai.chat",
-        version: "1",
-        display_name: "OpenAI Chat Completions",
-        user_configurable: true,
-        runtime_ready: true,
-        model_discovery: "unsupported",
-        capabilities: [],
-        allowed_auth_methods: ["bearer"],
-      }],
+      protocol_profiles: [
+        {
+          id: "openai.chat",
+          version: "1",
+          display_name: "OpenAI Chat Completions",
+          user_configurable: true,
+          runtime_ready: true,
+          model_discovery: "unsupported",
+          capabilities: [],
+          allowed_auth_methods: ["bearer"],
+        },
+      ],
     });
   }
   if (url.endsWith("/provider-instances")) {
@@ -129,59 +137,118 @@ describe("separated provider and credential management", () => {
   it("offers exactly three standard protocols when adding a provider", async () => {
     // fetchMock serves the inventory and records the exact provider-only creation payload.
     // fetchMock 提供供应商清单并记录精确的仅供应商创建载荷。
-    const fetchMock = vi.fn().mockImplementation(
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        const method = init?.method ?? (input instanceof Request ? input.method : "GET");
-        if (url.endsWith("/provider-groups")) {
-          return Promise.resolve(jsonResponse({
-            provider_groups: [{
-              id: "test",
-              display_name: "Test",
-              description: "Native test providers.",
-              provider_definitions: [definition],
-            }],
-          }));
-        }
-        if (url.endsWith("/provider-definitions")) {
-          if (method === "POST") {
-            return Promise.resolve(jsonResponse({ id: "custom_deepseek" }, 201));
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const method =
+            init?.method ?? (input instanceof Request ? input.method : "GET");
+          if (url.endsWith("/provider-groups")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_groups: [
+                  {
+                    id: "test",
+                    display_name: "Test",
+                    description: "Native test providers.",
+                    provider_definitions: [definition],
+                  },
+                ],
+              }),
+            );
           }
-          return Promise.resolve(jsonResponse({ provider_definitions: [] }));
-        }
-        if (url.endsWith("/provider-configurations") && method === "POST") {
-          return Promise.resolve(jsonResponse({
-            provider_instance_id: "pvi_deepseek",
-            endpoint_ids: ["ep_deepseek"],
-          }, 201));
-        }
-        if (
-          url.endsWith("/provider-instances/pvi_deepseek/credentials/attach") &&
-          method === "POST"
-        ) {
-          return Promise.resolve(jsonResponse({
-            provider_instance_id: "pvi_deepseek",
-            credential_id: "cred_deepseek",
-            endpoint_ids: [],
-            binding_ids: ["bind_deepseek"],
-          }, 201));
-        }
-        if (url.endsWith("/provider-instances")) {
-          return Promise.resolve(jsonResponse({ provider_instances: [] }));
-        }
-        if (url.endsWith("/protocol-profiles")) {
-          return Promise.resolve(jsonResponse({
-            protocol_profiles: [
-              { id: "openai.chat", version: "1", display_name: "OpenAI Chat Completions", user_configurable: true, runtime_ready: true, model_discovery: "unsupported", capabilities: [], allowed_auth_methods: ["bearer"] },
-              { id: "openai.responses", version: "1", display_name: "OpenAI Responses", user_configurable: true, runtime_ready: true, model_discovery: "unsupported", capabilities: [], allowed_auth_methods: ["bearer"] },
-              { id: "anthropic.messages", version: "1", display_name: "Anthropic Messages", user_configurable: true, runtime_ready: true, model_discovery: "unsupported", capabilities: [], allowed_auth_methods: ["header_api_key"] },
-              { id: "google.aistudio", version: "1", display_name: "Google AI Studio", user_configurable: true, runtime_ready: true, model_discovery: "unsupported", capabilities: [], allowed_auth_methods: ["header_api_key"] },
-            ],
-          }));
-        }
-        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
-      },
-    );
+          if (url.endsWith("/provider-definitions")) {
+            if (method === "POST") {
+              return Promise.resolve(
+                jsonResponse({ id: "custom_deepseek" }, 201),
+              );
+            }
+            return Promise.resolve(jsonResponse({ provider_definitions: [] }));
+          }
+          if (url.endsWith("/provider-configurations") && method === "POST") {
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  provider_instance_id: "pvi_deepseek",
+                  endpoint_ids: ["ep_deepseek"],
+                },
+                201,
+              ),
+            );
+          }
+          if (
+            url.endsWith(
+              "/provider-instances/pvi_deepseek/credentials/attach",
+            ) &&
+            method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  provider_instance_id: "pvi_deepseek",
+                  credential_id: "cred_deepseek",
+                  endpoint_ids: [],
+                  binding_ids: ["bind_deepseek"],
+                },
+                201,
+              ),
+            );
+          }
+          if (url.endsWith("/provider-instances")) {
+            return Promise.resolve(jsonResponse({ provider_instances: [] }));
+          }
+          if (url.endsWith("/protocol-profiles")) {
+            return Promise.resolve(
+              jsonResponse({
+                protocol_profiles: [
+                  {
+                    id: "openai.chat",
+                    version: "1",
+                    display_name: "OpenAI Chat Completions",
+                    user_configurable: true,
+                    runtime_ready: true,
+                    model_discovery: "unsupported",
+                    capabilities: [],
+                    allowed_auth_methods: ["bearer"],
+                  },
+                  {
+                    id: "openai.responses",
+                    version: "1",
+                    display_name: "OpenAI Responses",
+                    user_configurable: true,
+                    runtime_ready: true,
+                    model_discovery: "unsupported",
+                    capabilities: [],
+                    allowed_auth_methods: ["bearer"],
+                  },
+                  {
+                    id: "anthropic.messages",
+                    version: "1",
+                    display_name: "Anthropic Messages",
+                    user_configurable: true,
+                    runtime_ready: true,
+                    model_discovery: "unsupported",
+                    capabilities: [],
+                    allowed_auth_methods: ["header_api_key"],
+                  },
+                  {
+                    id: "google.aistudio",
+                    version: "1",
+                    display_name: "Google AI Studio",
+                    user_configurable: true,
+                    runtime_ready: true,
+                    model_discovery: "unsupported",
+                    capabilities: [],
+                    allowed_auth_methods: ["header_api_key"],
+                  },
+                ],
+              }),
+            );
+          }
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        },
+      );
     vi.stubGlobal("fetch", fetchMock);
     render(
       <I18nProvider>
@@ -196,19 +263,35 @@ describe("separated provider and credential management", () => {
     const protocolCombobox = screen.getAllByRole("combobox")[0];
 
     expect(protocolCombobox).toHaveValue("OpenAI Chat Completions");
-    expect(screen.queryByLabelText("Upstream model ID")).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Model display name")).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Upstream model ID"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Model display name"),
+    ).not.toBeInTheDocument();
 
     fireEvent.click(protocolCombobox);
 
     expect(screen.getAllByRole("option")).toHaveLength(3);
-    expect(screen.getByRole("option", { name: "OpenAI Chat Completions" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "OpenAI Responses" })).toBeInTheDocument();
-    expect(screen.getByRole("option", { name: "Anthropic Messages" })).toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: "Google AI Studio" })).not.toBeInTheDocument();
-    expect(screen.queryByRole("option", { name: /Test Provider/ })).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "OpenAI Chat Completions" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "OpenAI Responses" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("option", { name: "Anthropic Messages" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: "Google AI Studio" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("option", { name: /Test Provider/ }),
+    ).not.toBeInTheDocument();
 
-    fireEvent.click(screen.getByRole("option", { name: "OpenAI Chat Completions" }));
+    fireEvent.click(
+      screen.getByRole("option", { name: "OpenAI Chat Completions" }),
+    );
     fireEvent.change(screen.getByLabelText("Provider name"), {
       target: { value: "DeepSeek" },
     });
@@ -234,11 +317,14 @@ describe("separated provider and credential management", () => {
     // configurationCall 包含独立于凭据的供应商一级创建载荷。
     const configurationCall = fetchMock.mock.calls.find(
       ([input, init]) =>
-        String(input).endsWith("/provider-configurations") && init?.method === "POST",
+        String(input).endsWith("/provider-configurations") &&
+        init?.method === "POST",
     );
     // configurationPayload must not create any model-level state during provider creation.
     // configurationPayload 在供应商创建阶段不得创建任何模型级状态。
-    const configurationPayload = JSON.parse(String(configurationCall?.[1]?.body));
+    const configurationPayload = JSON.parse(
+      String(configurationCall?.[1]?.body),
+    );
 
     expect(configurationPayload).toEqual({
       provider_definition_id: "custom_deepseek",
@@ -269,17 +355,21 @@ describe("separated provider and credential management", () => {
       vi.fn().mockImplementation((input: string | URL | Request) => {
         const url = String(input);
         if (url.endsWith("/provider-definitions")) {
-          return Promise.resolve(jsonResponse({
-            provider_definitions: [{
-              id: definition.id,
-              kind: "custom",
-              display_name: definition.display_name,
-              protocol_profile_id: definition.protocol_profile_id,
-              auth_methods: definition.auth_methods,
-              plan_options: [],
-              features: unavailableFeatures,
-            }],
-          }));
+          return Promise.resolve(
+            jsonResponse({
+              provider_definitions: [
+                {
+                  id: definition.id,
+                  kind: "custom",
+                  display_name: definition.display_name,
+                  protocol_profile_id: definition.protocol_profile_id,
+                  auth_methods: definition.auth_methods,
+                  plan_options: [],
+                  features: unavailableFeatures,
+                },
+              ],
+            }),
+          );
         }
         const common = commonReadResponse(url);
         if (common) return Promise.resolve(common);
@@ -339,57 +429,92 @@ describe("separated provider and credential management", () => {
     const configuredRow = screen.getByText("Test Production").closest("tr");
     expect(configuredRow).not.toBeNull();
     const configuredRowQueries = within(configuredRow as HTMLTableRowElement);
-    expect(configuredRowQueries.getByText("Custom")).toHaveAttribute("data-slot", "badge");
-    expect(configuredRowQueries.getByText("OpenAI Chat Completions")).toBeInTheDocument();
+    expect(configuredRowQueries.getByText("Custom")).toHaveAttribute(
+      "data-slot",
+      "badge",
+    );
+    expect(
+      configuredRowQueries.getByText("OpenAI Chat Completions"),
+    ).toBeInTheDocument();
     expect(configuredRowQueries.getByText("Models: 1")).toBeInTheDocument();
-    expect(configuredRowQueries.getByText("Credentials: 1")).toBeInTheDocument();
-    expect(configuredRowQueries.getByText("Ready")).toHaveAttribute("data-slot", "badge");
+    expect(
+      configuredRowQueries.getByText("Credentials: 1"),
+    ).toBeInTheDocument();
+    expect(configuredRowQueries.getByText("Ready")).toHaveAttribute(
+      "data-slot",
+      "badge",
+    );
     expect(screen.queryByText("Test Model")).not.toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Configure Test Production" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Configure Test Production" }),
+    );
     expect(screen.getByText("Test Model")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Edit models" }));
-    expect(screen.getByRole("heading", { name: "Edit models" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Edit models" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
-    expect(screen.getByRole("heading", { name: "Test Production" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("heading", { name: "Test Production" }),
+    ).toBeInTheDocument();
     expect(screen.queryByText("Authorizations")).not.toBeInTheDocument();
   });
 
   // This test verifies a native provider row attaches a credential to its existing configuration instead of cloning the provider.
   // 此测试验证原生供应商行将凭据附加到既有配置，而不是克隆供应商。
   it("attaches a credential to the existing native provider configuration", async () => {
-    const fetchMock = vi.fn().mockImplementation(
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        const method = init?.method ?? (input instanceof Request ? input.method : "GET");
-        if (url.endsWith("/provider-instances")) {
-          return Promise.resolve(jsonResponse({ provider_instances: [instance] }));
-        }
-        if (url.endsWith(`/provider-instances/${instance.id}/endpoints`)) {
-          return Promise.resolve(jsonResponse({
-            endpoints: [{
-              id: "ep_test_provider",
-              provider_instance_id: instance.id,
-              base_url: "https://provider.example/v1",
-              region: "Global",
-              parameters: [],
-              status: "ready",
-              revision: 1,
-            }],
-          }));
-        }
-        if (url.endsWith(`/provider-instances/${instance.id}/credentials/attach`) && method === "POST") {
-          return Promise.resolve(jsonResponse({
-            provider_instance_id: instance.id,
-            credential_id: "cred_native_test",
-            endpoint_ids: [],
-            binding_ids: ["bind_native_test"],
-          }, 201));
-        }
-        const common = commonReadResponse(url);
-        if (common) return Promise.resolve(common);
-        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
-      },
-    );
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const method =
+            init?.method ?? (input instanceof Request ? input.method : "GET");
+          if (url.endsWith("/provider-instances")) {
+            return Promise.resolve(
+              jsonResponse({ provider_instances: [instance] }),
+            );
+          }
+          if (url.endsWith(`/provider-instances/${instance.id}/endpoints`)) {
+            return Promise.resolve(
+              jsonResponse({
+                endpoints: [
+                  {
+                    id: "ep_test_provider",
+                    provider_instance_id: instance.id,
+                    base_url: "https://provider.example/v1",
+                    region: "Global",
+                    parameters: [],
+                    status: "ready",
+                    revision: 1,
+                  },
+                ],
+              }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${instance.id}/credentials/attach`,
+            ) &&
+            method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  provider_instance_id: instance.id,
+                  credential_id: "cred_native_test",
+                  endpoint_ids: [],
+                  binding_ids: ["bind_native_test"],
+                },
+                201,
+              ),
+            );
+          }
+          const common = commonReadResponse(url);
+          if (common) return Promise.resolve(common);
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        },
+      );
     vi.stubGlobal("fetch", fetchMock);
     render(
       <I18nProvider>
@@ -398,10 +523,16 @@ describe("separated provider and credential management", () => {
     );
 
     await screen.findByText("Native providers");
-    fireEvent.click(screen.getByRole("button", { name: "New credential Test" }));
-    expect(screen.getByRole("heading", { name: "Add provider credential" })).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "New credential Test" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Add provider credential" }),
+    ).toBeInTheDocument();
     expect(screen.getAllByRole("combobox")[0]).toHaveValue("Global");
-    expect(screen.getAllByRole("combobox")[1]).toHaveValue("Test Production · test-provider");
+    expect(screen.getAllByRole("combobox")[1]).toHaveValue(
+      "Test Production · test-provider",
+    );
     fireEvent.change(screen.getByLabelText("Credential name"), {
       target: { value: "Primary test key" },
     });
@@ -423,41 +554,52 @@ describe("separated provider and credential management", () => {
         }),
       );
     });
-    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/provider-configurations"))).toBe(false);
-    expect(fetchMock.mock.calls.some(([input]) => String(input).endsWith("/provider-instances/onboard"))).toBe(false);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/provider-configurations"),
+      ),
+    ).toBe(false);
+    expect(
+      fetchMock.mock.calls.some(([input]) =>
+        String(input).endsWith("/provider-instances/onboard"),
+      ),
+    ).toBe(false);
   });
 
   // This test verifies credential management selects an existing provider and uses the attachment endpoint.
   // 此测试验证凭据管理选择既有供应商并使用附加接口。
   it("attaches a credential to the selected provider instance", async () => {
-    const fetchMock = vi.fn().mockImplementation(
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        const common = commonReadResponse(url);
-        if (common) return Promise.resolve(common);
-        if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
-          return Promise.resolve(jsonResponse({ credentials: [] }));
-        }
-        if (
-          url.endsWith(
-            `/provider-instances/${instance.id}/credentials/attach`,
-          ) && init?.method === "POST"
-        ) {
-          return Promise.resolve(
-            jsonResponse(
-              {
-                provider_instance_id: instance.id,
-                credential_id: "cred_attached",
-                endpoint_ids: [],
-                binding_ids: ["bind_attached"],
-              },
-              201,
-            ),
-          );
-        }
-        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
-      },
-    );
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const common = commonReadResponse(url);
+          if (common) return Promise.resolve(common);
+          if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
+            return Promise.resolve(jsonResponse({ credentials: [] }));
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${instance.id}/credentials/attach`,
+            ) &&
+            init?.method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  provider_instance_id: instance.id,
+                  credential_id: "cred_attached",
+                  endpoint_ids: [],
+                  binding_ids: ["bind_attached"],
+                },
+                201,
+              ),
+            );
+          }
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        },
+      );
     vi.stubGlobal("fetch", fetchMock);
     render(
       <I18nProvider>
@@ -465,7 +607,9 @@ describe("separated provider and credential management", () => {
       </I18nProvider>,
     );
 
-    expect(await screen.findByRole("tree", { name: "Credential Management" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("tree", { name: "Credential Management" }),
+    ).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
     fireEvent.click(screen.getByRole("button", { name: "Select Global" }));
     fireEvent.change(screen.getByLabelText("Credential name"), {
@@ -559,6 +703,39 @@ describe("separated provider and credential management", () => {
           authorization_status: "authorized",
         },
       ],
+      services: [
+        {
+          id: "service_web_search",
+          display_name: "Web Search",
+          operation: "search.web",
+          enabled: true,
+          authorization_status: "authorized",
+          offerings: [
+            {
+              id: "offering_web_search",
+              upstream_service_id: "web_search",
+              profiles: [
+                {
+                  id: "profile_web_search",
+                  display_name: "Web Search",
+                  operation: "search.web",
+                  action_binding_id: "action_web_search",
+                  capabilities: {
+                    web_search: {
+                      backend_kind: "search_api",
+                      invocation_mode: "direct",
+                      output_modes: ["results"],
+                      evidence_kinds: ["url"],
+                      evidence_requirements: ["verified"],
+                    },
+                  },
+                  pool: { ready_credentials: 1 },
+                },
+              ],
+            },
+          ],
+        },
+      ],
       plans: [],
       allowances: [
         {
@@ -588,7 +765,13 @@ describe("separated provider and credential management", () => {
           unit: "requests",
           status: "available",
           mandatory: false,
-          window: { kind: "calendar", duration: "0", calendar_unit: "week", start_at: "2026-07-19T00:00:00Z", reset_at: "2026-07-26T00:00:00Z" },
+          window: {
+            kind: "calendar",
+            duration: "0",
+            calendar_unit: "week",
+            start_at: "2026-07-19T00:00:00Z",
+            reset_at: "2026-07-26T00:00:00Z",
+          },
           observed_at: "2026-07-22T04:00:00Z",
           expires_at: "2026-07-22T04:30:00Z",
         },
@@ -604,7 +787,11 @@ describe("separated provider and credential management", () => {
           remaining_ratio: 0,
           status: "exhausted",
           mandatory: false,
-          window: { kind: "provider_defined", duration: "0", reset_at: "2026-07-22T10:34:00Z" },
+          window: {
+            kind: "provider_defined",
+            duration: "0",
+            reset_at: "2026-07-22T10:34:00Z",
+          },
           observed_at: "2026-07-22T04:00:00Z",
           expires_at: "2026-07-22T04:30:00Z",
         },
@@ -621,7 +808,13 @@ describe("separated provider and credential management", () => {
           display_multiplier_permille: 1500,
           status: "exhausted",
           mandatory: false,
-          window: { kind: "calendar", duration: "0", calendar_unit: "week", start_at: "2026-07-19T00:00:00Z", reset_at: "2026-07-26T00:00:00Z" },
+          window: {
+            kind: "calendar",
+            duration: "0",
+            calendar_unit: "week",
+            start_at: "2026-07-19T00:00:00Z",
+            reset_at: "2026-07-26T00:00:00Z",
+          },
           observed_at: "2026-07-22T04:00:00Z",
           expires_at: "2026-07-22T04:30:00Z",
         },
@@ -642,172 +835,206 @@ describe("separated provider and credential management", () => {
     };
     // fetchMock serves only the exact protected management paths exercised by the compact credential table.
     // fetchMock 仅提供紧凑凭据表所调用的精确受保护管理路径。
-    const fetchMock = vi.fn().mockImplementation(
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        const method =
-          init?.method ?? (input instanceof Request ? input.method : "GET");
-        if (url.endsWith("/provider-groups")) {
-          return Promise.resolve(
-            jsonResponse({
-              provider_groups: [
-                {
-                  id: "minimax",
-                  display_name: "MiniMax",
-                  description: "MiniMax native providers.",
-                  provider_definitions: [miniMaxDefinition],
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const method =
+            init?.method ?? (input instanceof Request ? input.method : "GET");
+          if (url.endsWith("/provider-groups")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_groups: [
+                  {
+                    id: "minimax",
+                    display_name: "MiniMax",
+                    description: "MiniMax native providers.",
+                    provider_definitions: [miniMaxDefinition],
+                  },
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/provider-definitions")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_definitions: [
+                  {
+                    id: miniMaxDefinition.id,
+                    kind: "system",
+                    display_name: miniMaxDefinition.display_name,
+                    group_id: miniMaxDefinition.group_id,
+                    protocol_profile_id: miniMaxDefinition.protocol_profile_id,
+                    auth_methods: miniMaxDefinition.auth_methods,
+                    plan_options: miniMaxDefinition.plan_options,
+                    features: miniMaxDefinition.features,
+                  },
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/protocol-profiles")) {
+            return Promise.resolve(
+              jsonResponse({
+                protocol_profiles: [
+                  {
+                    id: "openai.chat",
+                    version: "1",
+                    display_name: "OpenAI Chat Completions",
+                    user_configurable: true,
+                    runtime_ready: true,
+                    model_discovery: "supported",
+                    capabilities: [],
+                    allowed_auth_methods: ["bearer"],
+                  },
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/provider-instances")) {
+            return Promise.resolve(
+              jsonResponse({ provider_instances: [miniMaxInstance] }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${miniMaxInstance.id}/credentials`,
+            )
+          ) {
+            return Promise.resolve(
+              jsonResponse({
+                credentials: [
+                  {
+                    id: "cred_minimax",
+                    provider_instance_id: miniMaxInstance.id,
+                    auth_method_id: "api_key",
+                    label: "MiniMax Primary",
+                    status: "active",
+                    expires_at: null,
+                    cooling_until: null,
+                    priority: 2,
+                    revision: 1,
+                  },
+                ],
+              }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${miniMaxInstance.id}/catalog/refresh`,
+            ) &&
+            method === "POST"
+          ) {
+            return Promise.resolve(jsonResponse(miniMaxCatalog));
+          }
+          if (
+            url.endsWith(`/provider-instances/${miniMaxInstance.id}/catalog`) &&
+            method === "GET"
+          ) {
+            return Promise.resolve(jsonResponse(miniMaxCatalog));
+          }
+          if (
+            url.endsWith(`/provider-instances/${miniMaxInstance.id}/endpoints`)
+          ) {
+            return Promise.resolve(
+              jsonResponse({
+                endpoints: [
+                  {
+                    id: "endpoint_minimax",
+                    provider_instance_id: miniMaxInstance.id,
+                    base_url: "https://api.minimax.io",
+                    region: "global",
+                    parameters: [],
+                    status: "ready",
+                    revision: 1,
+                  },
+                ],
+              }),
+            );
+          }
+          if (
+            url.endsWith(`/provider-instances/${miniMaxInstance.id}/bindings`)
+          ) {
+            return Promise.resolve(
+              jsonResponse({
+                bindings: [
+                  {
+                    id: "binding_minimax",
+                    provider_instance_id: miniMaxInstance.id,
+                    endpoint_id: "endpoint_minimax",
+                    credential_id: "cred_minimax",
+                    allowed_model_ids: [],
+                    allowed_service_ids: [],
+                    priority: 0,
+                    enabled: true,
+                    revision: 1,
+                  },
+                ],
+              }),
+            );
+          }
+          if (
+            url ===
+              `/vulcan/manage/provider-instances/${miniMaxInstance.id}/credentials/cred_minimax/files?endpoint_id=endpoint_minimax` &&
+            method === "GET"
+          ) {
+            return Promise.resolve(
+              jsonResponse({
+                files: [
+                  {
+                    file_id: "file_minimax_reference",
+                    filename: "reference.png",
+                    purpose: "vision",
+                    size_bytes: 2048,
+                    created_at: "2026-07-22T04:00:00Z",
+                    download_available: false,
+                  },
+                ],
+              }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${miniMaxInstance.id}/services/service_web_search/search-test`,
+            ) &&
+            method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse({
+                execution_id: "exec_search_test",
+                search: {
+                  query: "Vulcan search",
+                  queries: ["Vulcan search"],
+                  evidence: { status: "confirmed", kinds: ["url"] },
+                  results: [
+                    {
+                      id: "result_1",
+                      rank: 1,
+                      title: "Vulcan Search Result",
+                      url: "https://example.com/vulcan",
+                      source_domain: "example.com",
+                      snippet: "Provider-backed search result.",
+                    },
+                  ],
+                  answer: "Vulcan search answer.",
+                  citations: [],
+                  sources: [],
                 },
-              ],
-            }),
-          );
-        }
-        if (url.endsWith("/provider-definitions")) {
-          return Promise.resolve(
-            jsonResponse({
-              provider_definitions: [
-                {
-                  id: miniMaxDefinition.id,
-                  kind: "system",
-                  display_name: miniMaxDefinition.display_name,
-                  group_id: miniMaxDefinition.group_id,
-                  protocol_profile_id: miniMaxDefinition.protocol_profile_id,
-                  auth_methods: miniMaxDefinition.auth_methods,
-                  plan_options: miniMaxDefinition.plan_options,
-                  features: miniMaxDefinition.features,
-                },
-              ],
-            }),
-          );
-        }
-        if (url.endsWith("/protocol-profiles")) {
-          return Promise.resolve(
-            jsonResponse({
-              protocol_profiles: [
-                {
-                  id: "openai.chat",
-                  version: "1",
-                  display_name: "OpenAI Chat Completions",
-                  user_configurable: true,
-                  runtime_ready: true,
-                  model_discovery: "supported",
-                  capabilities: [],
-                  allowed_auth_methods: ["bearer"],
-                },
-              ],
-            }),
-          );
-        }
-        if (url.endsWith("/provider-instances")) {
-          return Promise.resolve(
-            jsonResponse({ provider_instances: [miniMaxInstance] }),
-          );
-        }
-        if (
-          url.endsWith(
-            `/provider-instances/${miniMaxInstance.id}/credentials`,
-          )
-        ) {
-          return Promise.resolve(
-            jsonResponse({
-              credentials: [
-                {
-                  id: "cred_minimax",
-                  provider_instance_id: miniMaxInstance.id,
-                  auth_method_id: "api_key",
-                  label: "MiniMax Primary",
-                  status: "active",
-                  expires_at: null,
-                  cooling_until: null,
-                  priority: 2,
-                  revision: 1,
-                },
-              ],
-            }),
-          );
-        }
-        if (
-          url.endsWith(
-            `/provider-instances/${miniMaxInstance.id}/catalog/refresh`,
-          ) && method === "POST"
-        ) {
-          return Promise.resolve(jsonResponse(miniMaxCatalog));
-        }
-        if (
-          url.endsWith(`/provider-instances/${miniMaxInstance.id}/catalog`) &&
-          method === "GET"
-        ) {
-          return Promise.resolve(jsonResponse(miniMaxCatalog));
-        }
-        if (
-          url.endsWith(`/provider-instances/${miniMaxInstance.id}/endpoints`)
-        ) {
-          return Promise.resolve(
-            jsonResponse({
-              endpoints: [
-                {
-                  id: "endpoint_minimax",
-                  provider_instance_id: miniMaxInstance.id,
-                  base_url: "https://api.minimax.io",
-                  region: "global",
-                  parameters: [],
-                  status: "ready",
-                  revision: 1,
-                },
-              ],
-            }),
-          );
-        }
-        if (
-          url.endsWith(`/provider-instances/${miniMaxInstance.id}/bindings`)
-        ) {
-          return Promise.resolve(
-            jsonResponse({
-              bindings: [
-                {
-                  id: "binding_minimax",
-                  provider_instance_id: miniMaxInstance.id,
-                  endpoint_id: "endpoint_minimax",
-                  credential_id: "cred_minimax",
-                  allowed_model_ids: [],
-                  allowed_service_ids: [],
-                  priority: 0,
-                  enabled: true,
-                  revision: 1,
-                },
-              ],
-            }),
-          );
-        }
-        if (
-          url ===
-            `/vulcan/manage/provider-instances/${miniMaxInstance.id}/credentials/cred_minimax/files?endpoint_id=endpoint_minimax` &&
-          method === "GET"
-        ) {
-          return Promise.resolve(
-            jsonResponse({
-              files: [
-                {
-                  file_id: "file_minimax_reference",
-                  filename: "reference.png",
-                  purpose: "vision",
-                  size_bytes: 2048,
-                  created_at: "2026-07-22T04:00:00Z",
-                  download_available: false,
-                },
-              ],
-            }),
-          );
-        }
-        if (
-          url.endsWith(
-            `/provider-instances/${miniMaxInstance.id}/credentials/cred_minimax/priority`,
-          ) && method === "PUT"
-        ) {
-          return Promise.resolve(jsonResponse({}));
-        }
-        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
-      },
-    );
+              }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${miniMaxInstance.id}/credentials/cred_minimax/priority`,
+            ) &&
+            method === "PUT"
+          ) {
+            return Promise.resolve(jsonResponse({}));
+          }
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        },
+      );
     vi.stubGlobal("fetch", fetchMock);
     render(
       <I18nProvider>
@@ -823,8 +1050,7 @@ describe("separated provider and credential management", () => {
       screen.getByRole("progressbar", { name: "Wk left: Unlimited" }),
     ).toHaveAttribute("aria-valuenow", "100");
     expect(
-      screen
-        .getByRole("progressbar", { name: "Wk left: Unlimited" })
+      screen.getByRole("progressbar", { name: "Wk left: Unlimited" })
         .firstElementChild,
     ).toHaveStyle({ width: "100%" });
     expect(screen.getByText("Video")).toBeInTheDocument();
@@ -842,6 +1068,35 @@ describe("separated provider and credential management", () => {
     ).toBeInTheDocument();
     expect(screen.getByText("MiniMax M2.5")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Cancel" }));
+
+    fireEvent.click(screen.getByRole("button", { name: "Test" }));
+    expect(
+      screen.getByRole("heading", { name: "Service test" }),
+    ).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: /Search/ }));
+    fireEvent.change(screen.getByLabelText("Search query"), {
+      target: { value: "Vulcan search" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Test search" }));
+    expect(
+      await screen.findByText("Vulcan search answer."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Vulcan Search Result")).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/pvi_minimax/services/service_web_search/search-test",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({
+          query: "Vulcan search",
+          service_offering_id: "offering_web_search",
+          execution_profile_id: "profile_web_search",
+          output_mode: "results",
+          evidence_requirement: "verified",
+        }),
+      }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Close test" }));
+    fireEvent.click(screen.getByRole("button", { name: "Close test" }));
 
     fireEvent.click(screen.getByRole("button", { name: "Resources" }));
     expect(
@@ -904,85 +1159,87 @@ describe("separated provider and credential management", () => {
     };
     // fetchMock serves one configured instance while retaining two additional supported definitions.
     // fetchMock 提供一个已配置实例，同时保留另外两个受支持 Definition。
-    const fetchMock = vi.fn().mockImplementation(
-      (input: string | URL | Request, init?: RequestInit) => {
-        const url = String(input);
-        const method =
-          init?.method ?? (input instanceof Request ? input.method : "GET");
-        if (url.endsWith("/provider-groups")) {
-          return Promise.resolve(
-            jsonResponse({
-              provider_groups: [
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          const method =
+            init?.method ?? (input instanceof Request ? input.method : "GET");
+          if (url.endsWith("/provider-groups")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_groups: [
+                  {
+                    id: "test",
+                    display_name: "Test",
+                    description: "Native test providers.",
+                    provider_definitions: [definition, unconfiguredDefinition],
+                  },
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/provider-definitions")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_definitions: [
+                  {
+                    id: definition.id,
+                    kind: "system",
+                    display_name: definition.display_name,
+                    group_id: definition.group_id,
+                    protocol_profile_id: definition.protocol_profile_id,
+                    auth_methods: definition.auth_methods,
+                    plan_options: [],
+                    features: unavailableFeatures,
+                  },
+                  {
+                    id: unconfiguredDefinition.id,
+                    kind: "system",
+                    display_name: unconfiguredDefinition.display_name,
+                    group_id: unconfiguredDefinition.group_id,
+                    protocol_profile_id:
+                      unconfiguredDefinition.protocol_profile_id,
+                    auth_methods: unconfiguredDefinition.auth_methods,
+                    plan_options: [],
+                    features: unavailableFeatures,
+                  },
+                  customDefinition,
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/provider-instances")) {
+            return Promise.resolve(
+              jsonResponse({ provider_instances: [instance] }),
+            );
+          }
+          if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
+            return Promise.resolve(jsonResponse({ credentials: [] }));
+          }
+          if (
+            url.endsWith("/provider-instances/onboard") &&
+            method === "POST"
+          ) {
+            return Promise.resolve(
+              jsonResponse(
                 {
-                  id: "test",
-                  display_name: "Test",
-                  description: "Native test providers.",
-                  provider_definitions: [definition, unconfiguredDefinition],
+                  provider_instance_id: "pvi_unconfigured",
+                  credential_id: "cred_unconfigured",
+                  endpoint_ids: ["ep_unconfigured"],
+                  binding_ids: ["bind_unconfigured"],
                 },
-              ],
-            }),
-          );
-        }
-        if (url.endsWith("/provider-definitions")) {
-          return Promise.resolve(
-            jsonResponse({
-              provider_definitions: [
-                {
-                  id: definition.id,
-                  kind: "system",
-                  display_name: definition.display_name,
-                  group_id: definition.group_id,
-                  protocol_profile_id: definition.protocol_profile_id,
-                  auth_methods: definition.auth_methods,
-                  plan_options: [],
-                  features: unavailableFeatures,
-                },
-                {
-                  id: unconfiguredDefinition.id,
-                  kind: "system",
-                  display_name: unconfiguredDefinition.display_name,
-                  group_id: unconfiguredDefinition.group_id,
-                  protocol_profile_id:
-                    unconfiguredDefinition.protocol_profile_id,
-                  auth_methods: unconfiguredDefinition.auth_methods,
-                  plan_options: [],
-                  features: unavailableFeatures,
-                },
-                customDefinition,
-              ],
-            }),
-          );
-        }
-        if (url.endsWith("/provider-instances")) {
-          return Promise.resolve(
-            jsonResponse({ provider_instances: [instance] }),
-          );
-        }
-        if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
-          return Promise.resolve(jsonResponse({ credentials: [] }));
-        }
-        if (
-          url.endsWith("/provider-instances/onboard") &&
-          method === "POST"
-        ) {
-          return Promise.resolve(
-            jsonResponse(
-              {
-                provider_instance_id: "pvi_unconfigured",
-                credential_id: "cred_unconfigured",
-                endpoint_ids: ["ep_unconfigured"],
-                binding_ids: ["bind_unconfigured"],
-              },
-              201,
-            ),
-          );
-        }
-        if (url.endsWith("/protocol-profiles")) {
-          return Promise.resolve(jsonResponse({ protocol_profiles: [] }));
-        }
-        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
-      },
-    );
+                201,
+              ),
+            );
+          }
+          if (url.endsWith("/protocol-profiles")) {
+            return Promise.resolve(jsonResponse({ protocol_profiles: [] }));
+          }
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        },
+      );
     vi.stubGlobal("fetch", fetchMock);
     render(
       <I18nProvider>
@@ -996,15 +1253,27 @@ describe("separated provider and credential management", () => {
       name: "Credential Management",
     });
     expect(within(providerTree).getByText("Test")).toBeInTheDocument();
-    expect(within(providerTree).queryByText("Test Provider")).not.toBeInTheDocument();
-    expect(within(providerTree).queryByText("Unconfigured Native")).not.toBeInTheDocument();
+    expect(
+      within(providerTree).queryByText("Test Provider"),
+    ).not.toBeInTheDocument();
+    expect(
+      within(providerTree).queryByText("Unconfigured Native"),
+    ).not.toBeInTheDocument();
     expect(within(providerTree).getByText("DeepSeek")).toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
-    expect(screen.getByRole("button", { name: "Select Global" })).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Select Unconfigured" })).toBeInTheDocument();
-    fireEvent.click(screen.getByRole("button", { name: "Select Unconfigured" }));
-    expect(screen.getByRole("heading", { name: "Add credential" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Select Global" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Select Unconfigured" }),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Select Unconfigured" }),
+    );
+    expect(
+      screen.getByRole("heading", { name: "Add credential" }),
+    ).toBeInTheDocument();
     expect(screen.getByLabelText("Credential name")).toHaveValue(
       "Unconfigured Native",
     );

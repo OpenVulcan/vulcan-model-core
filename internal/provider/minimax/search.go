@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -62,6 +61,9 @@ type searchResponse struct {
 	// Organic contains at most ten provider results.
 	// Organic 包含最多十条供应商结果。
 	Organic []searchResult `json:"organic"`
+	// BaseResponse carries MiniMax's application-level success status.
+	// BaseResponse 携带 MiniMax 的应用层成功状态。
+	BaseResponse baseResponse `json:"base_resp"`
 }
 
 // searchResult contains one provider-returned result.
@@ -76,8 +78,8 @@ type searchResult struct {
 	// Snippet is the provider-returned excerpt.
 	// Snippet 是供应商返回摘要。
 	Snippet string `json:"snippet"`
-	// Date is retained only for validation evidence because its wire format is undocumented.
-	// Date 仅保留作校验证据，因为其 wire 格式未记录。
+	// Date is decoded for wire compatibility but cannot become an absolute VCP timestamp without provider timezone evidence.
+	// Date 为 wire 兼容而解码，但在缺少供应商时区证据时不能转换为 VCP 绝对时间戳。
 	Date string `json:"date"`
 }
 
@@ -139,6 +141,9 @@ func (d *SearchDriver) Execute(ctx context.Context, execution provider.Execution
 	if errTrailing := rejectTrailingJSON(decoder, ErrInvalidSearchDriver); errTrailing != nil {
 		return provider.ExecutionResult{}, errTrailing
 	}
+	if upstream.BaseResponse.StatusCode != 0 {
+		return provider.ExecutionResult{}, fmt.Errorf("%w: provider status %d", ErrInvalidSearchDriver, upstream.BaseResponse.StatusCode)
+	}
 	limit := len(upstream.Organic)
 	if operation.MaxResults != nil && *operation.MaxResults < limit {
 		limit = *operation.MaxResults
@@ -146,31 +151,13 @@ func (d *SearchDriver) Execute(ctx context.Context, execution provider.Execution
 	results := make([]vcp.WebSearchResult, limit)
 	for index := 0; index < limit; index++ {
 		item := upstream.Organic[index]
-		parsed, errParse := url.Parse(item.Link)
-		if errParse != nil || parsed.Scheme != "https" || parsed.Hostname() == "" || parsed.User != nil {
-			return provider.ExecutionResult{}, fmt.Errorf("%w: result %d has invalid HTTPS URL", ErrInvalidSearchDriver, index)
+		normalizedURL, errValidateURL := transport.ValidateAbsoluteHTTPURL(item.Link)
+		if errValidateURL != nil {
+			return provider.ExecutionResult{}, fmt.Errorf("%w: result %d has invalid HTTP URL", ErrInvalidSearchDriver, index)
 		}
-		publishedAt, errDate := miniMaxSearchPublishedAt(item.Date)
-		if errDate != nil {
-			return provider.ExecutionResult{}, fmt.Errorf("%w: result %d has an unsupported date", ErrInvalidSearchDriver, index)
-		}
-		results[index] = vcp.WebSearchResult{ID: fmt.Sprintf("result_%d", index+1), Rank: index + 1, Title: item.Title, URL: item.Link, SourceDomain: strings.ToLower(parsed.Hostname()), Snippet: item.Snippet, PublishedAt: publishedAt}
+		parsed, _ := url.Parse(normalizedURL)
+		results[index] = vcp.WebSearchResult{ID: fmt.Sprintf("result_%d", index+1), Rank: index + 1, Title: item.Title, URL: normalizedURL, SourceDomain: strings.ToLower(parsed.Hostname()), Snippet: item.Snippet}
 	}
 	search := &vcp.WebSearchResponse{Query: operation.Query, Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed, Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}}, Results: results}
 	return provider.ExecutionResult{Search: search}, nil
-}
-
-// miniMaxSearchPublishedAt normalizes the exact date-only shape proved by the pinned CLI fixture.
-// miniMaxSearchPublishedAt 规范化固定 CLI 夹具证明的精确纯日期形态。
-func miniMaxSearchPublishedAt(value string) (*time.Time, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	parsed, errParse := time.Parse("2006-01-02", value)
-	if errParse != nil {
-		return nil, errParse
-	}
-	parsed = parsed.UTC()
-	return &parsed, nil
 }

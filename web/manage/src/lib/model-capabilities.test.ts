@@ -1,6 +1,13 @@
-import { describe, expect, it } from "vitest"
+import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { capabilityLevelSchema, formatKnownLimit, modelCapabilitiesSchema, modelCatalogSchema } from "@/lib/model-capabilities"
+import {
+  capabilityLevelSchema,
+  formatKnownLimit,
+  modelCapabilitiesSchema,
+  modelCatalogSchema,
+  testExtractService,
+  testSearchService,
+} from "@/lib/model-capabilities";
 
 // createCapabilitiesFixture returns one complete capability contract with explicit unknown and conditional facts.
 // createCapabilitiesFixture 返回一个包含明确未知与条件事实的完整能力合同。
@@ -19,32 +26,59 @@ function createCapabilitiesFixture() {
     reasoning: "unknown",
     input_modalities: ["text", "image"],
     output_modalities: ["text"],
-    delivery: { synchronous: true, streaming: true, asynchronous: false, polling: false, cancellation: false, partial_results: false },
-    media_inputs: [{ kind: "image", level: "conditional", client_workflows: ["resource_ref"], evidence: [{ source: "official_docs", reference: "fixture", observed_at: "2026-07-20T00:00:00Z", revision: 1 }], evidence_revision: 1 }],
+    delivery: {
+      synchronous: true,
+      streaming: true,
+      asynchronous: false,
+      polling: false,
+      cancellation: false,
+      partial_results: false,
+    },
+    media_inputs: [
+      {
+        kind: "image",
+        level: "conditional",
+        client_workflows: ["resource_ref"],
+        evidence: [
+          {
+            source: "official_docs",
+            reference: "fixture",
+            observed_at: "2026-07-20T00:00:00Z",
+            revision: 1,
+          },
+        ],
+        evidence_revision: 1,
+      },
+    ],
     media_outputs: [],
     parameters: [],
     parameter_rules: [],
     usage_metrics: [{ unit: "input_tokens", accuracy: "exact" }],
-  } as const
+  } as const;
 }
 
 describe("model capability schema", () => {
   it("preserves conditional and unknown capability facts", () => {
-    const parsed = modelCapabilitiesSchema.parse(createCapabilitiesFixture())
-    expect(parsed.parallel_tool_calls).toBe("conditional")
-    expect(parsed.reasoning).toBe("unknown")
-    expect(parsed.max_input_tokens).toEqual({ known: false })
-    expect(parsed.media_inputs[0]?.level).toBe("conditional")
-  })
+    const parsed = modelCapabilitiesSchema.parse(createCapabilitiesFixture());
+    expect(parsed.parallel_tool_calls).toBe("conditional");
+    expect(parsed.reasoning).toBe("unknown");
+    expect(parsed.max_input_tokens).toEqual({ known: false });
+    expect(parsed.media_inputs[0]?.level).toBe("conditional");
+  });
 
   it("rejects contradictory known-limit objects", () => {
-    expect(() => modelCapabilitiesSchema.parse({ ...createCapabilitiesFixture(), max_input_tokens: { known: false, value: 1000 } })).toThrow()
-    expect(formatKnownLimit({ known: false }, "Unknown")).toBe("Unknown")
-  })
+    expect(() =>
+      modelCapabilitiesSchema.parse({
+        ...createCapabilitiesFixture(),
+        max_input_tokens: { known: false, value: 1000 },
+      }),
+    ).toThrow();
+    expect(formatKnownLimit({ known: false }, "Unknown")).toBe("Unknown");
+  });
 
   it("rejects unrecognized support levels", () => {
-    expect(() => capabilityLevelSchema.parse("assumed")).toThrow()
-  })
+    expect(() => capabilityLevelSchema.parse("assumed")).toThrow();
+  });
 
   // This test reproduces current Go DTO omission, nil-slice, embedding, rerank, and pool encodings.
   // 此测试复现当前 Go DTO 的省略字段、nil Slice、Embedding、Rerank 与 Pool 编码。
@@ -73,7 +107,7 @@ describe("model capability schema", () => {
         cancellation: false,
         partial_results: false,
       },
-    }
+    };
     const parsed = modelCatalogSchema.parse({
       provider_instance_id: "pvi_capabilities",
       models: [
@@ -152,26 +186,157 @@ describe("model capability schema", () => {
       services: [],
       revision: 1,
       observed_at: "2026-07-20T00:00:00Z",
-    })
+    });
 
-    const embeddingProfile = parsed.models[0]?.offerings[0]?.profiles[0]
-    expect(embeddingProfile?.capabilities.media_inputs).toEqual([])
-    expect(embeddingProfile?.capabilities.parameters).toEqual([])
+    const embeddingProfile = parsed.models[0]?.offerings[0]?.profiles[0];
+    expect(embeddingProfile?.capabilities.media_inputs).toEqual([]);
+    expect(embeddingProfile?.capabilities.parameters).toEqual([]);
     expect(embeddingProfile?.capabilities.embedding?.output_kinds).toEqual([
       "dense",
       "sparse",
-    ])
-    expect(embeddingProfile?.capabilities.embedding?.default_dimensions).toEqual({
+    ]);
+    expect(
+      embeddingProfile?.capabilities.embedding?.default_dimensions,
+    ).toEqual({
       known: false,
-    })
-    expect(embeddingProfile?.pool?.blocking_allowance_kinds).toEqual([])
+    });
+    expect(embeddingProfile?.pool?.blocking_allowance_kinds).toEqual([]);
     expect(
       parsed.models[0]?.offerings[0]?.profiles[1]?.capabilities.rerank
         ?.truncation_policies,
-    ).toEqual([])
-    expect(parsed.models[0]?.offerings[0]?.profiles[2]?.operation).toBe("")
+    ).toEqual([]);
+    expect(parsed.models[0]?.offerings[0]?.profiles[2]?.operation).toBe("");
     expect(parsed.models[0]?.offerings[0]?.profiles[2]?.action_binding_id).toBe(
       "",
-    )
-  })
-})
+    );
+  });
+});
+
+describe("search service diagnostics", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // This test verifies one exact typed search target is sent to the management diagnostic endpoint and parsed strictly.
+  // 此测试验证一个精确的类型化搜索目标会发送到管理诊断端点并被严格解析。
+  it("executes a provider-backed search without model discovery", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          execution_id: "exec-search",
+          search: {
+            query: "Vulcan",
+            queries: ["Vulcan"],
+            evidence: { status: "confirmed", kinds: ["url"] },
+            results: [
+              {
+                id: "result-1",
+                rank: 1,
+                title: "Vulcan",
+                url: "https://example.com/vulcan",
+              },
+            ],
+            citations: null,
+            sources: null,
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await testSearchService("management-token", {
+      providerInstanceID: "provider-search",
+      providerServiceID: "service-search",
+      serviceOfferingID: "offering-search",
+      executionProfileID: "profile-search",
+      query: "Vulcan",
+      outputMode: "results",
+      evidenceRequirement: "verified",
+    });
+
+    expect(result.search.results[0]?.title).toBe("Vulcan");
+    expect(result.search.citations).toEqual([]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/provider-search/services/service-search/search-test",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          Authorization: "Bearer management-token",
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  });
+});
+
+describe("extract service diagnostics", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // This test verifies one exact typed extraction target and partial provider result survive strict validation.
+  // 此测试验证一个精确类型化提取目标与供应商部分成功结果能通过严格校验。
+  it("executes provider-backed extraction without model discovery", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          execution_id: "exec-extract",
+          extract: {
+            results: [
+              {
+                url: "https://example.com/a",
+                raw_content: "content",
+                images: ["https://example.com/image.png"],
+              },
+            ],
+            failed_results: [
+              { url: "https://example.org/b", error: "blocked" },
+            ],
+            provider_request_id: "req-extract",
+            response_time_seconds: 1.25,
+            usage: {
+              service_units: 2,
+              service_unit: "credits",
+              source: "provider_reported",
+              aggregation: "snapshot",
+              phase: "terminal",
+              accounting_basis: "tavily_api_credits",
+              final: true,
+            },
+          },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const result = await testExtractService("management-token", {
+      providerInstanceID: "provider-extract",
+      providerServiceID: "service-extract",
+      serviceOfferingID: "offering-extract",
+      executionProfileID: "profile-extract",
+      urls: ["https://example.com/a", "https://example.org/b"],
+      query: "router",
+      chunksPerSource: 2,
+      depth: "advanced",
+      format: "markdown",
+      includeImages: true,
+      includeFavicon: false,
+      timeoutSeconds: 15,
+    });
+
+    expect(result.extract.results[0]?.raw_content).toBe("content");
+    expect(result.extract.failed_results[0]?.error).toBe("blocked");
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/provider-extract/services/service-extract/extract-test",
+      expect.objectContaining({
+        method: "POST",
+        headers: {
+          Authorization: "Bearer management-token",
+          "Content-Type": "application/json",
+        },
+      }),
+    );
+  });
+});

@@ -46,6 +46,28 @@ func TestSnapshotRejectsUnknownSearchBackingModel(t *testing.T) {
 	}
 }
 
+// TestSnapshotValidatesAndClonesDirectExtractionService verifies the closed extraction contract and nested slice isolation.
+// TestSnapshotValidatesAndClonesDirectExtractionService 校验封闭提取合同与嵌套切片隔离。
+func TestSnapshotValidatesAndClonesDirectExtractionService(t *testing.T) {
+	capabilities := ServiceCapabilities{WebExtract: &WebExtractCapabilities{MaxURLs: 20, Depths: []vcp.WebExtractDepth{vcp.WebExtractDepthBasic, vcp.WebExtractDepthAdvanced}, Formats: []vcp.WebExtractFormat{vcp.WebExtractFormatMarkdown, vcp.WebExtractFormatText}, QueryRelevance: true, MinimumChunksPerSource: 1, MaximumChunksPerSource: 5, IncludeImages: true, IncludeFavicon: true, MinimumTimeoutSeconds: 1, MaximumTimeoutSeconds: 60}}
+	snapshot := Snapshot{ProviderInstanceID: "pvi_extract", Services: []ProviderService{{ID: "service_web_extract", ProviderInstanceID: "pvi_extract", DisplayName: "Web Extract", Operation: vcp.OperationWebExtract, Source: ModelSourceSystem, EntitlementMode: EntitlementAllBoundCredentials, Revision: 1}}, ServiceOfferings: []ServiceOffering{{ID: "service_offer_web_extract", ProviderInstanceID: "pvi_extract", ProviderServiceID: "service_web_extract", ChannelID: "tavily_extract", UpstreamServiceID: "direct_extract", Capabilities: capabilities, CapabilityRevision: 1, Revision: 1}}, Profiles: []ExecutionProfile{{ID: "profile_web_extract", ProviderInstanceID: "pvi_extract", ServiceOfferingID: "service_offer_web_extract", Operation: vcp.OperationWebExtract, ActionBindingID: "action_web_extract", DisplayName: "Web Extract", Default: true, ServiceCapabilities: &capabilities, SwitchPolicy: ProfileSwitchReplayRequired, PoolPolicy: PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1}}, Revision: 1, ObservedAt: time.Date(2026, 7, 22, 0, 0, 0, 0, time.UTC)}
+	if errValidate := snapshot.Validate(); errValidate != nil {
+		t.Fatalf("valid extraction snapshot failed validation: %v", errValidate)
+	}
+	store := NewMemoryStore()
+	if errSave := store.Save(context.Background(), snapshot); errSave != nil {
+		t.Fatalf("save extraction snapshot: %v", errSave)
+	}
+	snapshot.ServiceOfferings[0].Capabilities.WebExtract.Depths[0] = vcp.WebExtractDepthAdvanced
+	stored, errGet := store.Get(context.Background(), snapshot.ProviderInstanceID)
+	if errGet != nil {
+		t.Fatalf("get extraction snapshot: %v", errGet)
+	}
+	if stored.ServiceOfferings[0].Capabilities.WebExtract.Depths[0] != vcp.WebExtractDepthBasic {
+		t.Fatal("stored extraction depths were mutated through caller-owned slices")
+	}
+}
+
 // validDirectSearchSnapshot creates one fully linked direct search service catalog.
 // validDirectSearchSnapshot 创建一个完整关联的直接搜索服务目录。
 func validDirectSearchSnapshot() Snapshot {

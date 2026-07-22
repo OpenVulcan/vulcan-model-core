@@ -6,69 +6,127 @@ import {
   fetchProviderFiles,
   parseAdditionalPayloadProjectionJSON,
   parseRequestProjectionJSON,
+  providerCatalogHasModels,
   refreshProviderCredential,
   refreshProviderMetadata,
   startKimiDeviceFlow,
   updateProviderEndpoint,
 } from "@/lib/provider-groups";
 
+describe("provider catalog actions", () => {
+  // This test verifies a search-only catalog cannot expose the supported-model action.
+  // 此测试验证仅搜索目录不能显示获取支持模型操作。
+  it("requires actual model entries before model discovery is available", () => {
+    expect(providerCatalogHasModels({ models: [] })).toBe(false);
+    expect(
+      providerCatalogHasModels({
+        models: [
+          {
+            id: "model-1",
+            upstream_model_id: "model-1",
+            display_name: "Model 1",
+            entitlement_mode: "all_bound_credentials",
+            enabled: true,
+            authorization_status: "authorized",
+          },
+        ],
+      }),
+    ).toBe(true);
+  });
+});
+
 describe("custom request projection validation", () => {
   // This test verifies provider-wide non-reasoning rules use the same protected-path boundary.
   // 此测试验证供应商级非推理规则使用相同的受保护路径边界。
   it("validates provider-wide additional parameters independently", () => {
-    const projection = parseAdditionalPayloadProjectionJSON(JSON.stringify({
-      default: [{ path: "temperature", value: 0.7 }],
-      override: [{ path: "provider_options.route", value: "fast" }],
-      filter: ["unsupported_parameter"],
-    }));
+    const projection = parseAdditionalPayloadProjectionJSON(
+      JSON.stringify({
+        default: [{ path: "temperature", value: 0.7 }],
+        override: [{ path: "provider_options.route", value: "fast" }],
+        filter: ["unsupported_parameter"],
+      }),
+    );
     expect(projection.override?.[0].value).toBe("fast");
-    expect(() => parseAdditionalPayloadProjectionJSON(JSON.stringify({ override: [{ path: "model", value: "other" }] }))).toThrow(/protocol or authentication boundary/);
+    expect(() =>
+      parseAdditionalPayloadProjectionJSON(
+        JSON.stringify({ override: [{ path: "model", value: "other" }] }),
+      ),
+    ).toThrow(/protocol or authentication boundary/);
   });
 
   // This test verifies a composite DeepSeek-style reasoning rule remains configurable.
   // 此测试验证 DeepSeek 风格的组合推理规则保持可配置。
   it("accepts one effort that controls multiple upstream fields", () => {
-    const projection = parseRequestProjectionJSON(JSON.stringify({
-      reasoning: {
-        effort: [{
-          value: "high",
-          set: [
-            { path: "thinking.type", value: "enabled" },
-            { path: "reasoning_effort", value: "high" },
+    const projection = parseRequestProjectionJSON(
+      JSON.stringify({
+        reasoning: {
+          effort: [
+            {
+              value: "high",
+              set: [
+                { path: "thinking.type", value: "enabled" },
+                { path: "reasoning_effort", value: "high" },
+              ],
+            },
           ],
-        }],
-      },
-      additional: {},
-    }), "openai.chat");
+        },
+        additional: {},
+      }),
+      "openai.chat",
+    );
     expect(projection.reasoning.effort).toHaveLength(1);
   });
 
   // This test verifies additional request parameters remain valid without reasoning rules.
   // 此测试验证没有推理规则时额外请求参数仍然有效。
   it("accepts additional parameters for a non-reasoning model", () => {
-    const projection = parseRequestProjectionJSON(JSON.stringify({
-      reasoning: {},
-      additional: { override: [{ path: "temperature", value: 0.2 }] },
-    }), "openai.chat");
+    const projection = parseRequestProjectionJSON(
+      JSON.stringify({
+        reasoning: {},
+        additional: { override: [{ path: "temperature", value: 0.2 }] },
+      }),
+      "openai.chat",
+    );
     expect(projection.additional.override?.[0].value).toBe(0.2);
   });
 
   // This test verifies OpenRouter nested effort cannot coexist with the Chat shorthand emitted by typed projection.
   // 此测试验证 OpenRouter 嵌套强度不能与类型化投影生成的 Chat 简写同时存在。
   it("requires deleting the Chat shorthand when nested effort is configured", () => {
-    expect(() => parseRequestProjectionJSON(JSON.stringify({
-      reasoning: { effort: [{ value: "high", set: [{ path: "reasoning.effort", value: "high" }] }] },
-      additional: {},
-    }), "openai.chat")).toThrow(/delete reasoning_effort/);
+    expect(() =>
+      parseRequestProjectionJSON(
+        JSON.stringify({
+          reasoning: {
+            effort: [
+              {
+                value: "high",
+                set: [{ path: "reasoning.effort", value: "high" }],
+              },
+            ],
+          },
+          additional: {},
+        }),
+        "openai.chat",
+      ),
+    ).toThrow(/delete reasoning_effort/);
   });
 
   // This test verifies advanced parameters cannot replace model identity or prompt content.
   // 此测试验证高级参数不能替换模型身份或提示内容。
   it("rejects protocol-owned paths", () => {
-    expect(() => parseRequestProjectionJSON(JSON.stringify({
-      reasoning: { effort: [{ value: "high", set: [{ path: "model", value: "other" }] }] },
-      additional: {},
-    }), "openai.chat")).toThrow(/protocol or authentication boundary/);
+    expect(() =>
+      parseRequestProjectionJSON(
+        JSON.stringify({
+          reasoning: {
+            effort: [
+              { value: "high", set: [{ path: "model", value: "other" }] },
+            ],
+          },
+          additional: {},
+        }),
+        "openai.chat",
+      ),
+    ).toThrow(/protocol or authentication boundary/);
   });
 });
 
@@ -483,7 +541,9 @@ describe("provider settings transport", () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    expect(url).toBe("/vulcan/manage/provider-instances/pvi_custom/endpoints/ep_custom");
+    expect(url).toBe(
+      "/vulcan/manage/provider-instances/pvi_custom/endpoints/ep_custom",
+    );
     expect(init.method).toBe("PUT");
     expect(JSON.parse(String(init.body))).toEqual({
       base_url: "https://api.example.com/v1",

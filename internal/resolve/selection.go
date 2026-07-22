@@ -72,7 +72,7 @@ func (r *Resolver) Select(ctx context.Context, request vcp.ExecutionSelectionReq
 	if errSnapshot != nil {
 		return vcp.ExecutionSelection{}, errSnapshot
 	}
-	if request.Operation == vcp.OperationSearchWeb {
+	if request.Operation == vcp.OperationSearchWeb || request.Operation == vcp.OperationWebExtract {
 		return r.selectService(ctx, request, snapshot, now)
 	}
 	preferredRanks := make(map[string]int, len(request.PreferredModelIDs))

@@ -2,6 +2,7 @@ package catalog
 
 import (
 	"fmt"
+	"math"
 	"strings"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
@@ -16,7 +17,7 @@ func (s ProviderService) Validate() error {
 	if errInstance := validatePrefixedID("provider service instance id", s.ProviderInstanceID, "pvi_"); errInstance != nil {
 		return errInstance
 	}
-	if strings.TrimSpace(s.DisplayName) == "" || s.Operation != vcp.OperationSearchWeb {
+	if strings.TrimSpace(s.DisplayName) == "" || (s.Operation != vcp.OperationSearchWeb && s.Operation != vcp.OperationWebExtract) {
 		return invalid("provider service display name and supported operation are required")
 	}
 	if !validModelSource(s.Source) || !validEntitlementMode(s.EntitlementMode) || s.Revision == 0 {
@@ -49,10 +50,85 @@ func (o ServiceOffering) Validate(operation vcp.OperationKind) error {
 // Validate verifies one closed special-service capability variant.
 // Validate 校验一个封闭特殊服务能力变体。
 func (c ServiceCapabilities) Validate(operation vcp.OperationKind) error {
-	if operation != vcp.OperationSearchWeb || c.WebSearch == nil {
-		return invalid("service capabilities must match search.web")
+	if (c.WebSearch == nil) == (c.WebExtract == nil) {
+		return invalid("service capabilities require exactly one variant")
 	}
-	return c.WebSearch.Validate()
+	switch operation {
+	case vcp.OperationSearchWeb:
+		if c.WebSearch == nil {
+			return invalid("service capabilities must match search.web")
+		}
+		return c.WebSearch.Validate()
+	case vcp.OperationWebExtract:
+		if c.WebExtract == nil {
+			return invalid("service capabilities must match web.extract")
+		}
+		return c.WebExtract.Validate()
+	default:
+		return invalid("unsupported special service operation %q", operation)
+	}
+}
+
+// Validate verifies one exact direct web-content extraction capability profile.
+// Validate 校验一个精确的直接网页内容提取能力规格。
+func (c WebExtractCapabilities) Validate() error {
+	if c.MaxURLs <= 0 || c.MaxURLs > vcp.MaximumWebExtractURLs {
+		return invalid("web extraction max URLs must be within 1..%d", vcp.MaximumWebExtractURLs)
+	}
+	if errDepths := validateWebExtractDepths(c.Depths); errDepths != nil {
+		return errDepths
+	}
+	if errFormats := validateWebExtractFormats(c.Formats); errFormats != nil {
+		return errFormats
+	}
+	if !c.QueryRelevance && (c.MinimumChunksPerSource != 0 || c.MaximumChunksPerSource != 0) {
+		return invalid("web extraction chunk limits require query relevance support")
+	}
+	if c.QueryRelevance && (c.MinimumChunksPerSource < vcp.MinimumWebExtractChunks || c.MaximumChunksPerSource > vcp.MaximumWebExtractChunks || c.MinimumChunksPerSource > c.MaximumChunksPerSource) {
+		return invalid("web extraction chunk limits are invalid")
+	}
+	if math.IsNaN(c.MinimumTimeoutSeconds) || math.IsInf(c.MinimumTimeoutSeconds, 0) || math.IsNaN(c.MaximumTimeoutSeconds) || math.IsInf(c.MaximumTimeoutSeconds, 0) || c.MinimumTimeoutSeconds < 1 || c.MaximumTimeoutSeconds > 60 || c.MinimumTimeoutSeconds > c.MaximumTimeoutSeconds {
+		return invalid("web extraction timeout range is invalid")
+	}
+	return nil
+}
+
+// validateWebExtractDepths verifies a non-empty unique extraction-depth vocabulary.
+// validateWebExtractDepths 校验非空且唯一的提取深度词汇表。
+func validateWebExtractDepths(depths []vcp.WebExtractDepth) error {
+	if len(depths) == 0 {
+		return invalid("web extraction depths are required")
+	}
+	seenDepths := make(map[vcp.WebExtractDepth]struct{}, len(depths))
+	for _, depth := range depths {
+		if depth != vcp.WebExtractDepthBasic && depth != vcp.WebExtractDepthAdvanced {
+			return invalid("web extraction depth %q is invalid", depth)
+		}
+		if _, exists := seenDepths[depth]; exists {
+			return invalid("duplicate web extraction depth %q", depth)
+		}
+		seenDepths[depth] = struct{}{}
+	}
+	return nil
+}
+
+// validateWebExtractFormats verifies a non-empty unique output-format vocabulary.
+// validateWebExtractFormats 校验非空且唯一的输出格式词汇表。
+func validateWebExtractFormats(formats []vcp.WebExtractFormat) error {
+	if len(formats) == 0 {
+		return invalid("web extraction formats are required")
+	}
+	seenFormats := make(map[vcp.WebExtractFormat]struct{}, len(formats))
+	for _, format := range formats {
+		if format != vcp.WebExtractFormatMarkdown && format != vcp.WebExtractFormatText {
+			return invalid("web extraction format %q is invalid", format)
+		}
+		if _, exists := seenFormats[format]; exists {
+			return invalid("duplicate web extraction format %q", format)
+		}
+		seenFormats[format] = struct{}{}
+	}
+	return nil
 }
 
 // Validate verifies one exact unified web-search capability profile.

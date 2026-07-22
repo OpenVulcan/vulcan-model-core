@@ -100,12 +100,50 @@ type WebSearchCapabilities struct {
 	MaxResults OptionalCountLimit `json:"max_results"`
 }
 
+// WebExtractCapabilities describes one exact direct web-content extraction shape.
+// WebExtractCapabilities 描述一个精确的直接网页内容提取形态。
+type WebExtractCapabilities struct {
+	// MaxURLs is the maximum number of HTTPS resources accepted per execution.
+	// MaxURLs 是每次执行接受的 HTTPS 资源最大数量。
+	MaxURLs int `json:"max_urls"`
+	// Depths lists supported extraction fidelity and cost tiers.
+	// Depths 列出支持的提取精度与成本档位。
+	Depths []vcp.WebExtractDepth `json:"depths"`
+	// Formats lists supported extracted-content representations.
+	// Formats 列出支持的提取内容表示形式。
+	Formats []vcp.WebExtractFormat `json:"formats"`
+	// QueryRelevance reports whether query-ranked extraction is supported.
+	// QueryRelevance 表示是否支持查询相关性提取。
+	QueryRelevance bool `json:"query_relevance"`
+	// MinimumChunksPerSource is the smallest query-ranked chunk count.
+	// MinimumChunksPerSource 是最小的查询相关片段数量。
+	MinimumChunksPerSource int `json:"minimum_chunks_per_source"`
+	// MaximumChunksPerSource is the largest query-ranked chunk count.
+	// MaximumChunksPerSource 是最大的查询相关片段数量。
+	MaximumChunksPerSource int `json:"maximum_chunks_per_source"`
+	// IncludeImages reports whether image URL extraction is supported.
+	// IncludeImages 表示是否支持提取图片 URL。
+	IncludeImages bool `json:"include_images"`
+	// IncludeFavicon reports whether favicon extraction is supported.
+	// IncludeFavicon 表示是否支持提取站点图标。
+	IncludeFavicon bool `json:"include_favicon"`
+	// MinimumTimeoutSeconds is the smallest accepted provider timeout.
+	// MinimumTimeoutSeconds 是接受的最小供应商超时时间。
+	MinimumTimeoutSeconds float64 `json:"minimum_timeout_seconds"`
+	// MaximumTimeoutSeconds is the largest accepted provider timeout.
+	// MaximumTimeoutSeconds 是接受的最大供应商超时时间。
+	MaximumTimeoutSeconds float64 `json:"maximum_timeout_seconds"`
+}
+
 // ServiceCapabilities contains one closed special-service capability variant.
 // ServiceCapabilities 包含一个封闭特殊服务能力变体。
 type ServiceCapabilities struct {
 	// WebSearch contains unified web-search capabilities.
 	// WebSearch 包含统一网页搜索能力。
 	WebSearch *WebSearchCapabilities `json:"web_search,omitempty"`
+	// WebExtract contains direct web-content extraction capabilities.
+	// WebExtract 包含直接网页内容提取能力。
+	WebExtract *WebExtractCapabilities `json:"web_extract,omitempty"`
 }
 
 // ProviderService describes one logical special service within a provider instance.

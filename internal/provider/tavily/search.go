@@ -21,13 +21,13 @@ import (
 var (
 	// ErrInvalidDriver reports an incomplete Tavily action driver.
 	// ErrInvalidDriver 表示不完整的 Tavily 动作 Driver。
-	ErrInvalidDriver = errors.New("invalid Tavily search driver")
+	ErrInvalidDriver = errors.New("invalid Tavily driver")
 	// ErrUnsupportedInput reports a policy outside the documented Tavily offering.
 	// ErrUnsupportedInput 表示策略超出已记录的 Tavily Offering。
-	ErrUnsupportedInput = errors.New("unsupported Tavily search input")
+	ErrUnsupportedInput = errors.New("unsupported Tavily input")
 	// ErrInvalidResponse reports a malformed Tavily response.
 	// ErrInvalidResponse 表示格式错误的 Tavily 响应。
-	ErrInvalidResponse = errors.New("invalid Tavily search response")
+	ErrInvalidResponse = errors.New("invalid Tavily response")
 )
 
 const (

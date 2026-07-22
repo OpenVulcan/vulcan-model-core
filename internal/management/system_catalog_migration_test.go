@@ -10,9 +10,204 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	providertavily "github.com/OpenVulcan/vulcan-model-core/internal/provider/tavily"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestReconcileTavilyExtractCatalogsUpgradesHistoricalSnapshots verifies old search-only instances gain Extract without losing account metadata.
+// TestReconcileTavilyExtractCatalogsUpgradesHistoricalSnapshots 验证旧版仅搜索实例会获得 Extract 且不会丢失账号元数据。
+func TestReconcileTavilyExtractCatalogsUpgradesHistoricalSnapshots(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := newKimiOnboardingService(t)
+	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{
+		DefinitionID:    bootstrap.TavilySearchDefinitionID,
+		Handle:          "legacy-tavily",
+		DisplayName:     "Legacy Tavily",
+		AuthMethodID:    "api_key",
+		CredentialLabel: "Tavily Primary",
+		Secret:          []byte("test-tavily-key"),
+	})
+	if errOnboard != nil {
+		t.Fatalf("onboard Tavily provider: %v", errOnboard)
+	}
+	replaceTavilyBindingsWithSearchOnly(t, ctx, configurations, onboarding)
+	current, errCurrent := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errCurrent != nil {
+		t.Fatalf("get current Tavily catalog: %v", errCurrent)
+	}
+	current.Services = removeProviderService(current.Services, "service_web_extract")
+	current.ServiceOfferings = removeServiceOffering(current.ServiceOfferings, "service_offer_tavily_extract")
+	current.Profiles = removeExecutionProfile(current.Profiles, "profile_tavily_extract")
+	observedAt := current.ObservedAt.Add(time.Second)
+	current.Plans = []catalog.PlanSnapshot{{
+		ID: "plan_tavily_researcher", ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID,
+		PlanCode: "researcher", PlanName: "Researcher", Status: "active", EvidenceSource: catalog.MetadataEvidenceProviderAPI,
+		ObservedAt: observedAt, ExpiresAt: observedAt.Add(time.Hour), Revision: 1,
+	}}
+	current.Revision++
+	current.ObservedAt = observedAt
+	if errSave := service.catalogs.Save(ctx, current); errSave != nil {
+		t.Fatalf("save historical Tavily catalog: %v", errSave)
+	}
+	changed, errReconcile := ReconcileTavilyExtractCatalogs(ctx, configurations, service.catalogs)
+	if errReconcile != nil || changed != 1 {
+		t.Fatalf("reconcile Tavily Extract catalogs changed=%d error=%v", changed, errReconcile)
+	}
+	upgraded, errUpgraded := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errUpgraded != nil {
+		t.Fatalf("get upgraded Tavily catalog: %v", errUpgraded)
+	}
+	_, _, _, extractExists := tavilyExtractContract(upgraded)
+	if !extractExists {
+		t.Fatal("upgraded Tavily catalog omitted the Extract contract")
+	}
+	if len(upgraded.Plans) != 1 || upgraded.Plans[0].PlanName != "Researcher" {
+		t.Fatalf("upgraded Tavily account metadata = %#v", upgraded.Plans)
+	}
+	assertTavilyExtractReady(t, ctx, configurations, upgraded, onboarding)
+	changedAgain, errAgain := ReconcileTavilyExtractCatalogs(ctx, configurations, service.catalogs)
+	if errAgain != nil || changedAgain != 0 {
+		t.Fatalf("second Tavily reconciliation changed=%d error=%v", changedAgain, errAgain)
+	}
+}
+
+// TestReconcileTavilyExtractCatalogsRepairsCurrentCatalogAccess verifies an already-upgraded catalog still repairs its missing historical Extract binding.
+// TestReconcileTavilyExtractCatalogsRepairsCurrentCatalogAccess 验证已经升级的目录仍会修复其缺失的历史 Extract Binding。
+func TestReconcileTavilyExtractCatalogsRepairsCurrentCatalogAccess(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := newKimiOnboardingService(t)
+	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{
+		DefinitionID:    bootstrap.TavilySearchDefinitionID,
+		Handle:          "current-catalog-legacy-tavily",
+		DisplayName:     "Current Catalog Legacy Tavily",
+		AuthMethodID:    "api_key",
+		CredentialLabel: "Tavily Primary",
+		Secret:          []byte("test-current-catalog-tavily-key"),
+	})
+	if errOnboard != nil {
+		t.Fatalf("onboard Tavily provider: %v", errOnboard)
+	}
+	replaceTavilyBindingsWithSearchOnly(t, ctx, configurations, onboarding)
+	current, errCurrent := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errCurrent != nil {
+		t.Fatalf("get current Tavily catalog: %v", errCurrent)
+	}
+	changed, errReconcile := ReconcileTavilyExtractCatalogs(ctx, configurations, service.catalogs)
+	if errReconcile != nil || changed != 1 {
+		t.Fatalf("reconcile current Tavily catalog changed=%d error=%v", changed, errReconcile)
+	}
+	upgraded, errUpgraded := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errUpgraded != nil {
+		t.Fatalf("get repaired Tavily catalog: %v", errUpgraded)
+	}
+	assertTavilyExtractReady(t, ctx, configurations, upgraded, onboarding)
+	if upgraded.Revision <= current.Revision {
+		t.Fatalf("repaired Tavily catalog revision=%d, want greater than %d", upgraded.Revision, current.Revision)
+	}
+}
+
+// TestReconcileTavilyExtractCatalogsRepairsStalePool verifies a completed access-graph migration can recover after catalog persistence was interrupted.
+// TestReconcileTavilyExtractCatalogsRepairsStalePool 验证访问图迁移完成后即使目录持久化曾中断也可以恢复。
+func TestReconcileTavilyExtractCatalogsRepairsStalePool(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := newKimiOnboardingService(t)
+	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{
+		DefinitionID:    bootstrap.TavilySearchDefinitionID,
+		Handle:          "stale-pool-tavily",
+		DisplayName:     "Stale Pool Tavily",
+		AuthMethodID:    "api_key",
+		CredentialLabel: "Tavily Primary",
+		Secret:          []byte("test-stale-pool-tavily-key"),
+	})
+	if errOnboard != nil {
+		t.Fatalf("onboard Tavily provider: %v", errOnboard)
+	}
+	current, errCurrent := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errCurrent != nil {
+		t.Fatalf("get current Tavily catalog: %v", errCurrent)
+	}
+	current.Revision++
+	current.ObservedAt = current.ObservedAt.Add(time.Second)
+	for index := range current.Pools {
+		current.Pools[index].Revision = current.Revision
+		current.Pools[index].ObservedAt = current.ObservedAt
+		if current.Pools[index].ExecutionProfileID == "profile_tavily_extract" {
+			current.Pools[index].EntitledCredentials = 0
+			current.Pools[index].ReadyCredentials = 0
+		}
+	}
+	if errSave := service.catalogs.Save(ctx, current); errSave != nil {
+		t.Fatalf("save stale Tavily pool: %v", errSave)
+	}
+	changed, errReconcile := ReconcileTavilyExtractCatalogs(ctx, configurations, service.catalogs)
+	if errReconcile != nil || changed != 1 {
+		t.Fatalf("reconcile stale Tavily pool changed=%d error=%v", changed, errReconcile)
+	}
+	repaired, errRepaired := service.catalogs.Get(ctx, onboarding.Instance.ID)
+	if errRepaired != nil {
+		t.Fatalf("get repaired Tavily pool: %v", errRepaired)
+	}
+	assertTavilyExtractReady(t, ctx, configurations, repaired, onboarding)
+}
+
+// replaceTavilyBindingsWithSearchOnly rewrites one current fixture into the exact single-binding graph persisted before Extract support existed.
+// replaceTavilyBindingsWithSearchOnly 将一个当前测试夹具改写为 Extract 支持出现前持久化的精确单 Binding 访问图。
+func replaceTavilyBindingsWithSearchOnly(t *testing.T, ctx context.Context, configurations providerconfig.Store, onboarding providerconfig.SystemOnboarding) {
+	t.Helper()
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, onboarding.Instance.ID)
+	bindings, errBindings := configurations.ListBindings(ctx, onboarding.Instance.ID)
+	if errEndpoints != nil || errBindings != nil {
+		t.Fatalf("list Tavily access graph endpoints=%v bindings=%v", errEndpoints, errBindings)
+	}
+	searchOnly := make([]providerconfig.AccessBinding, 0, len(bindings))
+	for _, binding := range bindings {
+		if binding.ChannelID == providertavily.ProtocolProfileID {
+			searchOnly = append(searchOnly, binding)
+		}
+	}
+	if len(searchOnly) != 1 || len(bindings) != 2 {
+		t.Fatalf("current Tavily bindings=%#v, want one Search and one Extract binding", bindings)
+	}
+	replacement := providerconfig.AccessGraphReplacement{
+		ProviderInstanceID: onboarding.Instance.ID,
+		ExpectedEndpoints:  endpoints,
+		ExpectedBindings:   bindings,
+		Endpoints:          endpoints,
+		Bindings:           searchOnly,
+	}
+	if errReplace := configurations.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		t.Fatalf("replace Tavily access graph with historical binding: %v", errReplace)
+	}
+}
+
+// assertTavilyExtractReady verifies migration restored one executable Extract binding and one ready profile pool.
+// assertTavilyExtractReady 验证迁移已恢复一条可执行 Extract Binding 与一个就绪规格池。
+func assertTavilyExtractReady(t *testing.T, ctx context.Context, configurations providerconfig.Store, snapshot catalog.Snapshot, onboarding providerconfig.SystemOnboarding) {
+	t.Helper()
+	bindings, errBindings := configurations.ListBindings(ctx, onboarding.Instance.ID)
+	if errBindings != nil {
+		t.Fatalf("list repaired Tavily bindings: %v", errBindings)
+	}
+	extractBindings := 0
+	for _, binding := range bindings {
+		if binding.ChannelID == providertavily.ExtractProtocolProfileID && binding.CredentialID == onboarding.Credential.ID {
+			extractBindings++
+		}
+	}
+	if extractBindings != 1 {
+		t.Fatalf("repaired Tavily bindings=%#v, want one Extract binding", bindings)
+	}
+	for _, pool := range snapshot.Pools {
+		if pool.ExecutionProfileID == "profile_tavily_extract" {
+			if pool.EntitledCredentials != 1 || pool.ReadyCredentials != 1 {
+				t.Fatalf("repaired Tavily Extract pool=%+v, want one entitled and ready credential", pool)
+			}
+			return
+		}
+	}
+	t.Fatal("repaired Tavily catalog omitted its Extract pool")
+}
 
 // legacyKimiAccessStore overlays a historical access graph on a complete in-memory provider store.
 // legacyKimiAccessStore 在完整内存供应商 Store 上覆盖一份历史访问图。

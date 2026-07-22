@@ -28,6 +28,7 @@ import (
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
+	providertavily "github.com/OpenVulcan/vulcan-model-core/internal/provider/tavily"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -203,6 +204,15 @@ func run(ctx context.Context, args []string) error {
 	if reconciledMiniMaxOrigins > 0 {
 		log.Printf("reconciled %d persisted MiniMax provider Origin(s)", reconciledMiniMaxOrigins)
 	}
+	// reconciledTavilyCatalogs adds the typed Extract contract to historical Tavily snapshots before management discovery.
+	// reconciledTavilyCatalogs 在管理发现前为历史 Tavily 快照补充类型化 Extract 合同。
+	reconciledTavilyCatalogs, errReconcileTavilyCatalogs := management.ReconcileTavilyExtractCatalogs(ctx, configurations, catalogs)
+	if errReconcileTavilyCatalogs != nil {
+		return fmt.Errorf("reconcile persisted Tavily Extract catalogs: %w", errReconcileTavilyCatalogs)
+	}
+	if reconciledTavilyCatalogs > 0 {
+		log.Printf("reconciled %d persisted Tavily catalog(s) with Extract support", reconciledTavilyCatalogs)
+	}
 	// reconciledKimiCatalogs upgrades historical multi-protocol Kimi snapshots to the current single Chat contract before any resolver reads them.
 	// reconciledKimiCatalogs 在任何 Resolver 读取历史多协议 Kimi 快照前，将其升级到当前唯一 Chat 合同。
 	reconciledKimiCatalogs, errReconcileKimiCatalogs := management.ReconcileKimiSystemCatalogs(ctx, configurations, catalogs)
@@ -304,6 +314,19 @@ func run(ctx context.Context, args []string) error {
 	metadataDrivers, errMetadataDrivers := provider.NewRegistry(systemDefinitions)
 	if errMetadataDrivers != nil {
 		return fmt.Errorf("create provider metadata driver registry: %w", errMetadataDrivers)
+	}
+	tavilyDefinition, existsTavilyDefinition := systemDefinitions.Lookup(bootstrap.TavilySearchDefinitionID)
+	if !existsTavilyDefinition {
+		return errors.New("Tavily system definition is missing")
+	}
+	// tavilyMetadataDriver reads the documented account plan and credit counters without inventing reset times.
+	// tavilyMetadataDriver 读取文档化账号套餐与 Credit 计数，且不虚构重置时间。
+	tavilyMetadataDriver, errTavilyMetadataDriver := providertavily.NewMetadataDriver(tavilyDefinition, secrets, &http.Client{Timeout: 30 * time.Second})
+	if errTavilyMetadataDriver != nil {
+		return fmt.Errorf("create Tavily metadata driver: %w", errTavilyMetadataDriver)
+	}
+	if errRegisterTavilyMetadata := metadataDrivers.Register(tavilyMetadataDriver); errRegisterTavilyMetadata != nil {
+		return fmt.Errorf("register Tavily metadata driver: %w", errRegisterTavilyMetadata)
 	}
 	antigravityDefinition, existsAntigravityDefinition := systemDefinitions.Lookup(bootstrap.GoogleAntigravityDefinitionID)
 	if !existsAntigravityDefinition {

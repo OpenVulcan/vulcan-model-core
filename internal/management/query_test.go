@@ -127,7 +127,22 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 	}
 	// queries uses a catalog store even though these configuration-only routes do not read a snapshot.
 	// queries 使用目录存储，即使这些仅配置路由不读取快照。
-	queries, errQueries := NewQueryService(configurations, catalog.NewMemoryStore())
+	// catalogs stores one provider-detected plan so the exact credential management row can expose it safely.
+	// catalogs 存储一个供应商自动识别套餐，使精确凭据管理行可以安全暴露该套餐。
+	catalogs := catalog.NewMemoryStore()
+	observedAt := time.Date(2026, time.July, 22, 4, 0, 0, 0, time.UTC)
+	if errSave := catalogs.Save(ctx, catalog.Snapshot{
+		ProviderInstanceID: instance.ID,
+		Plans: []catalog.PlanSnapshot{{
+			ID: "plan_query_researcher", ProviderInstanceID: instance.ID, CredentialID: credential.ID,
+			PlanCode: "researcher", PlanName: "Researcher", Status: "active",
+			EvidenceSource: catalog.MetadataEvidenceProviderAPI, ObservedAt: observedAt, ExpiresAt: observedAt.Add(time.Hour), Revision: 1,
+		}},
+		Revision: 1, ObservedAt: observedAt,
+	}); errSave != nil {
+		t.Fatalf("save detected credential plan: %v", errSave)
+	}
+	queries, errQueries := NewQueryService(configurations, catalogs)
 	if errQueries != nil {
 		t.Fatalf("create query service: %v", errQueries)
 	}
@@ -148,7 +163,7 @@ func TestQueryServiceRedactsCredentialSecretMetadata(t *testing.T) {
 	if errCredentials != nil {
 		t.Fatalf("list credential views: %v", errCredentials)
 	}
-	if len(credentialViews) != 1 || credentialViews[0].ID != credential.ID || credentialViews[0].Label != "Safe Label" {
+	if len(credentialViews) != 1 || credentialViews[0].ID != credential.ID || credentialViews[0].Label != "Safe Label" || credentialViews[0].DetectedPlan == nil || credentialViews[0].DetectedPlan.PlanName != "Researcher" {
 		t.Fatalf("credential views = %+v", credentialViews)
 	}
 	encodedViews, errEncode := json.Marshal(credentialViews)
@@ -337,9 +352,10 @@ func TestCatalogViewSortsPlansByEveryIdentityField(t *testing.T) {
 	// snapshot contains equal-code plans whose names and statuses exercise the complete deterministic order.
 	// snapshot 包含代码相同的套餐，其名称与状态用于覆盖完整确定性顺序。
 	snapshot := catalog.Snapshot{Plans: []catalog.PlanSnapshot{
-		{PlanCode: "pro", PlanName: "Zulu", Status: "active"},
-		{PlanCode: "pro", PlanName: "Alpha", Status: "inactive"},
-		{PlanCode: "pro", PlanName: "Alpha", Status: "active"},
+		{CredentialID: "cred_zulu", PlanCode: "pro", PlanName: "Zulu", Status: "active"},
+		{CredentialID: "cred_alpha_inactive", PlanCode: "pro", PlanName: "Alpha", Status: "inactive"},
+		{CredentialID: "cred_alpha_two", PlanCode: "pro", PlanName: "Alpha", Status: "active"},
+		{CredentialID: "cred_alpha_one", PlanCode: "pro", PlanName: "Alpha", Status: "active"},
 	}}
 	// plans is the redacted and aggregated management projection under test.
 	// plans 是待测的脱敏聚合管理投影。
@@ -349,6 +365,9 @@ func TestCatalogViewSortsPlansByEveryIdentityField(t *testing.T) {
 	}
 	if plans[0].PlanName != "Alpha" || plans[0].Status != "active" || plans[1].PlanName != "Alpha" || plans[1].Status != "inactive" || plans[2].PlanName != "Zulu" {
 		t.Fatalf("plan ordering = %#v", plans)
+	}
+	if plans[0].CredentialCount != 2 {
+		t.Fatalf("aggregated plan credential count = %#v", plans[0])
 	}
 }
 

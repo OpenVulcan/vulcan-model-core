@@ -486,6 +486,9 @@ type ExecutionResult struct {
 	// Search contains one unified typed web-search result.
 	// Search 包含一个统一类型化网页搜索结果。
 	Search *vcp.WebSearchResponse
+	// Extract contains one unified typed web-content extraction result.
+	// Extract 包含一个统一类型化网页内容提取结果。
+	Extract *vcp.WebExtractResponse
 	// Transcript contains one complete typed non-realtime recognition result.
 	// Transcript 包含一个完整的类型化非实时识别结果。
 	Transcript *vcp.Transcript

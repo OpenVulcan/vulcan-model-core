@@ -151,18 +151,26 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 		}
 	}
 	if definition.ModelCatalogID == "tavily_search_api" {
-		action, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
+		searchAction, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
 		if errAction != nil {
 			return catalog.Snapshot{}, errAction
 		}
-		capabilities := catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{
+		searchCapabilities := catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{
 			BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest,
 			OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}, EvidenceKinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}, EvidenceRequirements: []vcp.SearchEvidenceRequirement{vcp.SearchEvidenceBestEffort, vcp.SearchEvidenceVerified},
 			Filters: catalog.SearchFilterCapabilities{DomainAllow: catalog.CapabilityNative, DomainBlock: catalog.CapabilityNative, PublicationTime: catalog.CapabilityUnsupported, Language: catalog.CapabilityUnsupported, Region: catalog.CapabilityUnsupported, Location: catalog.CapabilityUnsupported, SafeSearch: catalog.CapabilityUnsupported}, MaxResults: catalog.OptionalCountLimit{Known: true, Value: 20},
 		}}
+		extractAction, errExtractAction := definitionActionForOperation(definition, vcp.OperationWebExtract)
+		if errExtractAction != nil {
+			return catalog.Snapshot{}, errExtractAction
+		}
+		extractCapabilities := catalog.ServiceCapabilities{WebExtract: &catalog.WebExtractCapabilities{MaxURLs: vcp.MaximumWebExtractURLs, Depths: []vcp.WebExtractDepth{vcp.WebExtractDepthBasic, vcp.WebExtractDepthAdvanced}, Formats: []vcp.WebExtractFormat{vcp.WebExtractFormatMarkdown, vcp.WebExtractFormatText}, QueryRelevance: true, MinimumChunksPerSource: vcp.MinimumWebExtractChunks, MaximumChunksPerSource: vcp.MaximumWebExtractChunks, IncludeImages: true, IncludeFavicon: true, MinimumTimeoutSeconds: 1, MaximumTimeoutSeconds: 60}}
 		snapshot.Services = append(snapshot.Services, catalog.ProviderService{ID: "service_web_search", ProviderInstanceID: onboarding.Instance.ID, DisplayName: "Tavily Web Search", Operation: vcp.OperationSearchWeb, Source: catalog.ModelSourceSystem, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1})
-		snapshot.ServiceOfferings = append(snapshot.ServiceOfferings, catalog.ServiceOffering{ID: "service_offer_tavily_search", ProviderInstanceID: onboarding.Instance.ID, ProviderServiceID: "service_web_search", ChannelID: action.ProtocolProfileID, UpstreamServiceID: "tavily-search", Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
-		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_tavily_search", ProviderInstanceID: onboarding.Instance.ID, ServiceOfferingID: "service_offer_tavily_search", Operation: vcp.OperationSearchWeb, ActionBindingID: action.ID, DisplayName: "Tavily Results", Default: true, ServiceCapabilities: &capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
+		snapshot.Services = append(snapshot.Services, catalog.ProviderService{ID: "service_web_extract", ProviderInstanceID: onboarding.Instance.ID, DisplayName: "Tavily Web Extract", Operation: vcp.OperationWebExtract, Source: catalog.ModelSourceSystem, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1})
+		snapshot.ServiceOfferings = append(snapshot.ServiceOfferings, catalog.ServiceOffering{ID: "service_offer_tavily_search", ProviderInstanceID: onboarding.Instance.ID, ProviderServiceID: "service_web_search", ChannelID: searchAction.ProtocolProfileID, UpstreamServiceID: "tavily-search", Capabilities: searchCapabilities, CapabilityRevision: 1, Revision: 1})
+		snapshot.ServiceOfferings = append(snapshot.ServiceOfferings, catalog.ServiceOffering{ID: "service_offer_tavily_extract", ProviderInstanceID: onboarding.Instance.ID, ProviderServiceID: "service_web_extract", ChannelID: extractAction.ProtocolProfileID, UpstreamServiceID: "tavily-extract", Capabilities: extractCapabilities, CapabilityRevision: 1, Revision: 1})
+		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_tavily_search", ProviderInstanceID: onboarding.Instance.ID, ServiceOfferingID: "service_offer_tavily_search", Operation: vcp.OperationSearchWeb, ActionBindingID: searchAction.ID, DisplayName: "Tavily Results", Default: true, ServiceCapabilities: &searchCapabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
+		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_tavily_extract", ProviderInstanceID: onboarding.Instance.ID, ServiceOfferingID: "service_offer_tavily_extract", Operation: vcp.OperationWebExtract, ActionBindingID: extractAction.ID, DisplayName: "Tavily Extract", Default: true, ServiceCapabilities: &extractCapabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
 	}
 	if definition.ModelCatalogID == "minimax_api" {
 		action, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)

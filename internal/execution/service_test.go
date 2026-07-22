@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -118,6 +119,12 @@ func (e *continuationProviderExecutor) Execute(_ context.Context, request provid
 // blockingStreamingProviderExecutor emits one semantic event before waiting so tests can observe live durability.
 // blockingStreamingProviderExecutor 在等待前发送一个语义事件，以便测试实时持久化。
 type blockingStreamingProviderExecutor struct {
+	// mu protects the provider dispatch count used to detect duplicate recovery side effects.
+	// mu 保护用于检测恢复器重复副作用的供应商分派计数。
+	mu sync.Mutex
+	// calls counts exact provider dispatches.
+	// calls 统计精确供应商分派次数。
+	calls int
 	// started closes after the first event has reached the durable sink.
 	// started 在首个事件到达持久 Sink 后关闭。
 	started chan struct{}
@@ -129,6 +136,13 @@ type blockingStreamingProviderExecutor struct {
 // Execute emits one response-start event, blocks, and then returns the complete replay sequence.
 // Execute 发送一个响应开始事件、等待，然后返回完整重放序列。
 func (e *blockingStreamingProviderExecutor) Execute(ctx context.Context, request provider.ExecutionRequest) (provider.ExecutionResult, error) {
+	e.mu.Lock()
+	e.calls++
+	call := e.calls
+	e.mu.Unlock()
+	if call != 1 {
+		return provider.ExecutionResult{}, errors.New("duplicate provider execution")
+	}
 	started := vcp.Event{ResponseID: "response_stream", EventID: "provider_stream_started", Sequence: 1, Time: request.Now, Replayable: true, Type: vcp.EventResponseStarted}
 	if errEmit := provider.EmitExecutionEvents(ctx, request.EventSink, []vcp.Event{started}); errEmit != nil {
 		return provider.ExecutionResult{}, errEmit
@@ -141,6 +155,73 @@ func (e *blockingStreamingProviderExecutor) Execute(ctx context.Context, request
 	}
 	completed := vcp.Event{ResponseID: "response_stream", EventID: "provider_stream_completed", Sequence: 2, Time: request.Now, Replayable: true, Type: vcp.EventResponseCompleted}
 	return provider.ExecutionResult{Response: vcp.Response{ResponseID: "response_stream", Status: vcp.ResponseCompleted}, Events: []vcp.Event{started, completed}}, nil
+}
+
+// callCount returns the synchronized provider dispatch count.
+// callCount 返回同步保护的供应商分派计数。
+func (e *blockingStreamingProviderExecutor) callCount() int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.calls
+}
+
+// testExecutionLease stores exact in-memory lease ownership for multi-service orchestration tests.
+// testExecutionLease 为多服务编排测试保存精确的内存租约所有权。
+type testExecutionLease struct {
+	// ownerID is the current exclusive lease owner.
+	// ownerID 是当前独占租约所有者。
+	ownerID string
+	// expiresAt is the exact takeover boundary.
+	// expiresAt 是精确接管边界。
+	expiresAt time.Time
+}
+
+// testExecutionLeaseStore implements atomic lease ownership for deterministic execution tests.
+// testExecutionLeaseStore 为确定性执行测试实现原子租约所有权。
+type testExecutionLeaseStore struct {
+	// mu protects every lease transition.
+	// mu 保护每次租约转换。
+	mu sync.Mutex
+	// leases maps execution identities to current owners.
+	// leases 将执行身份映射到当前所有者。
+	leases map[string]testExecutionLease
+}
+
+// AcquireLease creates, renews, or takes one expired test lease.
+// AcquireLease 创建、续约或接管一个已过期测试租约。
+func (s *testExecutionLeaseStore) AcquireLease(_ context.Context, executionID string, ownerID string, now time.Time, expiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.leases[executionID]
+	if exists && current.ownerID != ownerID && current.expiresAt.After(now) {
+		return false, nil
+	}
+	s.leases[executionID] = testExecutionLease{ownerID: ownerID, expiresAt: expiresAt}
+	return true, nil
+}
+
+// RenewLease extends only one unexpired test lease owned by the exact caller.
+// RenewLease 仅延长由精确调用方拥有且尚未过期的测试租约。
+func (s *testExecutionLeaseStore) RenewLease(_ context.Context, executionID string, ownerID string, now time.Time, expiresAt time.Time) (bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.leases[executionID]
+	if !exists || current.ownerID != ownerID || !current.expiresAt.After(now) {
+		return false, nil
+	}
+	s.leases[executionID] = testExecutionLease{ownerID: ownerID, expiresAt: expiresAt}
+	return true, nil
+}
+
+// ReleaseLease removes only the exact owner's test lease.
+// ReleaseLease 仅删除精确所有者的测试租约。
+func (s *testExecutionLeaseStore) ReleaseLease(_ context.Context, executionID string, ownerID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if current, exists := s.leases[executionID]; exists && current.ownerID == ownerID {
+		delete(s.leases, executionID)
+	}
+	return nil
 }
 
 // sequenceResolver returns configured targets in order and records every retry constraint.
@@ -691,6 +772,12 @@ func TestServicePersistsProviderEventsBeforeStreamingExecutionReturns(t *testing
 		completed <- createOutcome{record: record, err: errCreate}
 	}()
 	<-executor.started
+	if errRecover := service.RecoverOnce(context.Background()); errRecover != nil {
+		t.Fatalf("RecoverOnce() raced active synchronous execution: %v", errRecover)
+	}
+	if executor.callCount() != 1 {
+		t.Fatalf("active synchronous provider dispatches=%d, want 1", executor.callCount())
+	}
 	events, errEvents := service.Events(context.Background(), "api_stream", "exe_eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", 0)
 	if errEvents != nil || len(events) != 3 || events[2].Type != EventProviderSemantic || events[2].ProviderEvent == nil || events[2].ProviderEvent.EventID != "provider_stream_started" {
 		t.Fatalf("live events=%+v error=%v", events, errEvents)
@@ -703,6 +790,53 @@ func TestServicePersistsProviderEventsBeforeStreamingExecutionReturns(t *testing
 	events, errEvents = service.Events(context.Background(), "api_stream", outcome.record.ID, 0)
 	if errEvents != nil || len(events) != 5 || events[3].ProviderEvent == nil || events[3].ProviderEvent.EventID != "provider_stream_completed" || events[4].Type != EventExecutionSucceeded {
 		t.Fatalf("terminal events=%+v error=%v", events, errEvents)
+	}
+}
+
+// TestImmediateExecutionLeaseBlocksAnotherServiceRecovery verifies a second Router cannot replay one in-flight synchronous provider call.
+// TestImmediateExecutionLeaseBlocksAnotherServiceRecovery 验证第二个 Router 无法重放正在执行的同步供应商调用。
+func TestImmediateExecutionLeaseBlocksAnotherServiceRecovery(t *testing.T) {
+	now := time.Date(2026, 7, 22, 13, 0, 0, 0, time.UTC)
+	target := resolve.Target{ProviderDefinitionID: "definition_leased", ProviderInstanceID: "pvi_leased", ChannelID: "channel_leased", EndpointID: "endpoint_leased", EndpointRegion: "global", CredentialID: "credential_leased", SubjectKind: resolve.ExecutionSubjectModel, ProviderModelID: "model_leased", OfferingID: "offering_leased", Operation: vcp.OperationConversationRespond, ActionBindingID: "action_leased", ExecutionProfileID: "profile_leased", UpstreamModelID: "upstream_leased", ModelCapabilities: conversationTestCapabilities(true, false), CapabilityRevision: 1, ProviderConfigRevision: 1, CatalogRevision: 1}
+	target.ModelCapabilities.Delivery.Streaming = true
+	resolver := &staticResolver{target: target}
+	configurations := staticConfigurations{definition: providerconfig.ProviderDefinition{ID: target.ProviderDefinitionID}, endpoint: providerconfig.Endpoint{ID: target.EndpointID, ProviderInstanceID: target.ProviderInstanceID, ChannelID: target.ChannelID, BaseURL: "https://provider.example", Region: target.EndpointRegion, Status: providerconfig.EndpointReady, Revision: 1}, credential: providerconfig.Credential{ID: target.CredentialID, ProviderInstanceID: target.ProviderInstanceID, Status: providerconfig.CredentialActive, Revision: 1}}
+	executor := &blockingStreamingProviderExecutor{started: make(chan struct{}), release: make(chan struct{})}
+	store := NewMemoryStore()
+	leases := &testExecutionLeaseStore{leases: make(map[string]testExecutionLease)}
+	directService, errDirect := NewService(store, resolver, configurations, nil, nil, executor, ServiceOptions{NewID: func() (string, error) { return "exe_12121212121212121212121212121212", nil }, Now: func() time.Time { return now }, Retention: time.Hour, Leases: leases, WorkerID: "worker_direct", LeaseTTL: 30 * time.Second})
+	if errDirect != nil {
+		t.Fatalf("create direct execution service: %v", errDirect)
+	}
+	recoveryService, errRecovery := NewService(store, resolver, configurations, nil, nil, executor, ServiceOptions{NewID: func() (string, error) { return "exe_34343434343434343434343434343434", nil }, Now: func() time.Time { return now.Add(time.Second) }, Retention: time.Hour, Leases: leases, WorkerID: "worker_recovery", LeaseTTL: 30 * time.Second})
+	if errRecovery != nil {
+		t.Fatalf("create recovery execution service: %v", errRecovery)
+	}
+	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request_leased", Stream: true, Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationConversationRespond, Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{}}}
+	type createOutcome struct {
+		// record is the terminal direct execution.
+		// record 是最终即时执行。
+		record Record
+		// err is the direct execution failure.
+		// err 是即时执行失败。
+		err error
+	}
+	completed := make(chan createOutcome, 1)
+	go func() {
+		record, _, errCreate := directService.Create(context.Background(), "owner_leased", request)
+		completed <- createOutcome{record: record, err: errCreate}
+	}()
+	<-executor.started
+	if errRecover := recoveryService.RecoverOnce(context.Background()); errRecover != nil {
+		t.Fatalf("competing RecoverOnce() error = %v", errRecover)
+	}
+	if executor.callCount() != 1 {
+		t.Fatalf("leased provider dispatches=%d, want 1", executor.callCount())
+	}
+	close(executor.release)
+	outcome := <-completed
+	if outcome.err != nil || outcome.record.Status != StatusSucceeded {
+		t.Fatalf("leased direct record=%+v error=%v", outcome.record, outcome.err)
 	}
 }
 

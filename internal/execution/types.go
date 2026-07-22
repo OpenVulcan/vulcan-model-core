@@ -390,6 +390,9 @@ type Result struct {
 	// Search contains one unified web-search response.
 	// Search 包含一个统一网页搜索响应。
 	Search *vcp.WebSearchResponse `json:"search,omitempty"`
+	// Extract contains one unified web-content extraction response.
+	// Extract 包含一个统一网页内容提取响应。
+	Extract *vcp.WebExtractResponse `json:"extract,omitempty"`
 	// Transcript contains one complete typed non-realtime recognition result.
 	// Transcript 包含一个完整的类型化非实时识别结果。
 	Transcript *vcp.Transcript `json:"transcript,omitempty"`

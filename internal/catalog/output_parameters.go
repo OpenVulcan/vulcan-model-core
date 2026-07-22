@@ -403,8 +403,8 @@ func (c ModelCapabilities) ValidateOperation(operation vcp.OperationKind) error 
 		return requireMediaInputKind(c, vcp.MediaAudio, operation)
 	case vcp.OperationMusicCover:
 		return requireMediaOutput(c, vcp.MediaAudio, operation)
-	case vcp.OperationSearchWeb:
-		return fmt.Errorf("%w: search.web requires a service profile", ErrInvalidCatalog)
+	case vcp.OperationSearchWeb, vcp.OperationWebExtract:
+		return fmt.Errorf("%w: operation %q requires a service profile", ErrInvalidCatalog, operation)
 	default:
 		return fmt.Errorf("%w: unsupported model operation %q", ErrInvalidCatalog, operation)
 	}

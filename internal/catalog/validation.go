@@ -428,8 +428,8 @@ func (p ExecutionProfile) Validate() error {
 		if p.ServiceCapabilities != nil {
 			return invalid("model execution profile cannot carry service capabilities")
 		}
-		if p.Operation == vcp.OperationSearchWeb {
-			return invalid("search.web requires a service execution profile")
+		if p.Operation == vcp.OperationSearchWeb || p.Operation == vcp.OperationWebExtract {
+			return invalid("operation %q requires a service execution profile", p.Operation)
 		}
 		if p.Operation != "" && p.ActionBindingID == "" {
 			return invalid("typed model execution profile requires action binding id")

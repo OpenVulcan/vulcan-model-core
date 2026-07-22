@@ -2,7 +2,10 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import { I18nProvider } from "@/i18n";
-import { ProviderManagementPage } from "@/pages/provider-management-page";
+import {
+  credentialPlanLabel,
+  ProviderManagementPage,
+} from "@/pages/provider-management-page";
 
 // unavailableFeatures is the exact management feature contract for API-key-only test definitions.
 // unavailableFeatures 是仅 API Key 测试定义的精确管理功能合同。
@@ -575,6 +578,27 @@ function renderPage() {
 
 describe("ProviderManagementPage", () => {
   afterEach(() => vi.unstubAllGlobals());
+
+  // This test verifies an automatically detected plan is joined only to the credential that reported it.
+  // 此测试验证自动识别套餐只会关联到报告该套餐的凭据。
+  it("resolves a provider-detected membership plan by exact credential ownership", () => {
+    // detectedPlanLabel is the membership label resolved from provider metadata for the matching credential.
+    // detectedPlanLabel 是根据匹配凭据的供应商元数据解析出的会员套餐标签。
+    const detectedPlanLabel = credentialPlanLabel(
+      undefined,
+      {
+        detected_plan: {
+          plan_code: "researcher",
+          plan_name: "Researcher",
+          status: "active",
+          evidence_source: "provider_api",
+          observed_at: "2026-07-22T04:00:00Z",
+        },
+      },
+    );
+    expect(detectedPlanLabel).toBe("Researcher");
+    expect(credentialPlanLabel(undefined, {})).toBeUndefined();
+  });
 
   // This test verifies the authorized list is primary and provider filtering precedes exact variant selection.
   // 此测试验证已授权列表是主视图，且供应商过滤先于精确变体选择。
@@ -1976,7 +2000,7 @@ describe("ProviderManagementPage", () => {
     vi.stubGlobal("fetch", fetchMock);
     renderPage();
 
-    expect(await screen.findByText("Google Account")).toBeInTheDocument();
+    await screen.findAllByText("Google Account");
     expect(await screen.findByText("Google AI Pro")).toBeInTheDocument();
     expect(await screen.findByText("5-hour usage window")).toBeInTheDocument();
     expect(fetchMock).toHaveBeenCalledWith(

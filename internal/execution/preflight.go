@@ -163,6 +163,8 @@ func exactOperationMetrics(request vcp.ExecutionRequest) []vcp.PreflightMetric {
 		return []vcp.PreflightMetric{metric("rerank_documents", float64(len(request.Payload.RerankDocuments.Candidates)), "typed_candidate_count")}
 	case vcp.OperationSearchWeb:
 		return []vcp.PreflightMetric{metric("search_queries", 1, "single_typed_query")}
+	case vcp.OperationWebExtract:
+		return []vcp.PreflightMetric{metric("web_extract_urls", float64(len(request.Payload.WebExtract.URLs)), "typed_url_count")}
 	case vcp.OperationMusicGenerate:
 		if request.Payload.MusicGenerate.DurationSeconds > 0 {
 			return []vcp.PreflightMetric{metric("audio_milliseconds", request.Payload.MusicGenerate.DurationSeconds*1000, "requested_duration")}
