@@ -113,6 +113,9 @@ type MaterializedInput struct {
 	// MIMEType is authoritative.
 	// MIMEType 具有权威性。
 	MIMEType string
+	// SizeBytes is the exact verified Router resource size before projection.
+	// SizeBytes 是投影前经过验证的 Router 资源精确大小。
+	SizeBytes int64
 	// Mode is the frozen catalog-selected representation.
 	// Mode 是冻结目录选定表示。
 	Mode catalog.UpstreamMaterializationMode
@@ -182,8 +185,8 @@ type AssetUploader interface {
 	// Upload creates one provider-owned asset for the exact target.
 	// Upload 为精确 Target 创建一个供应商拥有资产。
 	Upload(context.Context, AssetUploadRequest) (AssetUploadResult, error)
-	// Delete removes a just-created provider asset during compensation.
-	// Delete 在补偿期间移除一个刚创建供应商资产。
+	// Delete idempotently removes a provider asset during compensation or durable resource cleanup.
+	// Delete 在补偿或持久资源清理期间幂等移除供应商资产。
 	Delete(context.Context, AssetBindingTarget, ProviderAssetKind, string) error
 }
 
@@ -292,7 +295,7 @@ func materializedImageMetadataMatches(planned FrozenMaterializationInput, metada
 // materializeOne realizes one frozen representation.
 // materializeOne 实现一个冻结表示。
 func (m *Materializer) materializeOne(ctx context.Context, target resolve.Target, planned FrozenMaterializationInput, value Resource) (MaterializedInput, error) {
-	result := MaterializedInput{InputID: planned.InputID, ResourceID: value.ID, Kind: value.Kind, Role: planned.Role, MIMEType: value.MIMEType, Mode: planned.Materialization, GeneratedBy: value.GeneratedBy}
+	result := MaterializedInput{InputID: planned.InputID, ResourceID: value.ID, Kind: value.Kind, Role: planned.Role, MIMEType: value.MIMEType, SizeBytes: value.SizeBytes, Mode: planned.Materialization, GeneratedBy: value.GeneratedBy}
 	switch planned.Materialization {
 	case catalog.MaterializationInlineBase64:
 		_, content, errOpen := m.resources.OpenContent(ctx, value.OwnerAPIKeyID, value.ID)

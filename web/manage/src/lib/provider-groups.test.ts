@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderCredentialRefreshError,
   ProviderMetadataRefreshError,
+  fetchProviderFiles,
   parseAdditionalPayloadProjectionJSON,
   parseRequestProjectionJSON,
   refreshProviderCredential,
@@ -166,6 +167,21 @@ describe("provider metadata transport", () => {
               {
                 kind: "window_quota",
                 scope: "credential",
+                metric: "minimax.general.weekly",
+                unit: "requests",
+                status: "unlimited",
+                mandatory: false,
+                window: {
+                  kind: "calendar",
+                  duration: "0",
+                  calendar_unit: "week",
+                },
+                observed_at: "2026-07-19T12:00:00Z",
+                expires_at: "2026-07-19T12:10:00Z",
+              },
+              {
+                kind: "window_quota",
+                scope: "credential",
                 metric: "annual_requests",
                 unit: "requests",
                 remaining: "42",
@@ -204,7 +220,112 @@ describe("provider metadata transport", () => {
       reset_at: "2026-08-01T00:00:00+08:00",
     });
     expect(metadata.allowances[0]?.remaining).toBe("1.25e2");
-    expect(metadata.allowances[1]?.window?.duration).toBe("31536000000000000");
+    // annualAllowance selects the exact rolling-window fixture independently of array insertion order.
+    // annualAllowance 独立于数组插入顺序选择精确的滚动窗口夹具。
+    const annualAllowance = metadata.allowances.find(
+      (allowance) => allowance.metric === "annual_requests",
+    );
+    // unlimitedAllowance selects the explicit canonical unlimited-state fixture.
+    // unlimitedAllowance 选择明确的规范无限状态夹具。
+    const unlimitedAllowance = metadata.allowances.find(
+      (allowance) => allowance.metric === "minimax.general.weekly",
+    );
+    expect(annualAllowance?.window?.duration).toBe("31536000000000000");
+    expect(unlimitedAllowance?.status).toBe("unlimited");
+  });
+
+  // This test verifies the one proven legacy null representation for an empty MiniMax voice description list is normalized at the Web boundary.
+  // 此测试验证 MiniMax 空声音说明列表唯一已证实的旧版 null 表示会在 Web 边界被规范化。
+  it("normalizes legacy empty MiniMax voice descriptions", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            provider_instance_id: "instance-1",
+            models: [],
+            plans: [],
+            allowances: [],
+            voices: [
+              {
+                voice_id: "voice-empty-description",
+                display_name: "Voice",
+                descriptions: null,
+                credential_id: "credential-1",
+                credential_label: "MiniMax",
+                observed_at: "2026-07-22T01:00:00Z",
+                expires_at: "2026-07-22T01:30:00Z",
+              },
+            ],
+            revision: 2,
+            observed_at: "2026-07-22T01:00:00Z",
+          }),
+          {
+            status: 200,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    // metadata is the normalized catalog returned to the provider management page.
+    // metadata 是返回供应商管理页面的规范化目录。
+    const metadata = await refreshProviderMetadata(
+      "management-token",
+      "instance-1",
+    );
+    expect(metadata.voices[0]?.descriptions).toEqual([]);
+  });
+
+  // This test verifies the protected file list stays scoped to the requested instance, endpoint, and credential.
+  // 此测试验证受保护的文件列表始终限定在所请求的实例、端点和凭据范围内。
+  it("loads credential-scoped provider file metadata", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          files: [
+            {
+              file_id: "minimax-file-1",
+              filename: "reference.png",
+              purpose: "vision",
+              size_bytes: 2048,
+              created_at: "2026-07-22T03:00:00Z",
+              download_available: true,
+            },
+          ],
+        }),
+        {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        },
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const files = await fetchProviderFiles(
+      "management-token",
+      "pvi_minimax",
+      "endpoint_minimax",
+      "credential_minimax",
+    );
+
+    expect(files).toEqual([
+      {
+        file_id: "minimax-file-1",
+        filename: "reference.png",
+        purpose: "vision",
+        size_bytes: 2048,
+        created_at: "2026-07-22T03:00:00Z",
+        download_available: true,
+      },
+    ]);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/pvi_minimax/credentials/credential_minimax/files?endpoint_id=endpoint_minimax",
+      expect.objectContaining({
+        method: "GET",
+        headers: { Authorization: "Bearer management-token" },
+      }),
+    );
   });
 
   // This test verifies non-decimal amount syntax and unknown normalized enum values cannot enter UI state.

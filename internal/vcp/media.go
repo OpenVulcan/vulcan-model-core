@@ -48,6 +48,9 @@ const (
 	// MediaRoleLastFrame supplies the last video frame.
 	// MediaRoleLastFrame 提供视频尾帧。
 	MediaRoleLastFrame MediaInputRole = "last_frame"
+	// MediaRoleSubjectReference supplies a persistent character or subject identity reference.
+	// MediaRoleSubjectReference 提供一个持续一致的角色或主体身份参考。
+	MediaRoleSubjectReference MediaInputRole = "subject_reference"
 	// MediaRoleAudioTrack supplies a video audio track.
 	// MediaRoleAudioTrack 提供视频音轨。
 	MediaRoleAudioTrack MediaInputRole = "audio_track"
@@ -168,6 +171,12 @@ type ImageGenerateOperation struct {
 	// Seed requests a deterministic provider seed when supported.
 	// Seed 在支持时请求确定性供应商种子。
 	Seed *int64 `json:"seed,omitempty"`
+	// Watermark requests an explicit provider-supported watermark preference.
+	// Watermark 请求明确且供应商支持的水印偏好。
+	Watermark *bool `json:"watermark,omitempty"`
+	// PromptExtend requests provider-native prompt rewriting when exposed by the profile.
+	// PromptExtend 在 Profile 公开该能力时请求供应商原生提示词改写。
+	PromptExtend *bool `json:"prompt_extend,omitempty"`
 }
 
 // ImageEditOperation edits one or more source images.
@@ -319,6 +328,9 @@ type SpeechSynthesizeOperation struct {
 	// Timestamps requests provider-confirmed timing metadata when available.
 	// Timestamps 请求供应商确认且可用的时间元数据。
 	Timestamps bool `json:"timestamps,omitempty"`
+	// Pronunciations contains ordered provider-compatible pronunciation mappings.
+	// Pronunciations 包含有序且与供应商兼容的发音映射。
+	Pronunciations []string `json:"pronunciations,omitempty"`
 }
 
 // SpeechSynthesisSegment binds one text span to one preset voice.
@@ -394,6 +406,21 @@ type MusicGenerateOperation struct {
 	// Count requests a supported number of outputs.
 	// Count 请求受支持数量的输出。
 	Count int `json:"count,omitempty"`
+	// LyricsOptimizer explicitly requests provider lyric generation from the prompt.
+	// LyricsOptimizer 明确请求供应商根据提示词生成歌词。
+	LyricsOptimizer *bool `json:"lyrics_optimizer,omitempty"`
+	// SampleRate requests a supported audio sample rate.
+	// SampleRate 请求受支持的音频采样率。
+	SampleRate int `json:"sample_rate,omitempty"`
+	// Bitrate requests a supported encoded bitrate in bits per second.
+	// Bitrate 请求受支持的编码码率，单位为比特每秒。
+	Bitrate int `json:"bitrate,omitempty"`
+	// Channels requests a supported channel count.
+	// Channels 请求受支持的声道数量。
+	Channels int `json:"channels,omitempty"`
+	// Watermark requests an explicit provider-supported watermark preference.
+	// Watermark 请求明确且供应商支持的水印偏好。
+	Watermark *bool `json:"watermark,omitempty"`
 }
 
 // MusicCoverPrepareOperation prepares one provider-specific cover workflow.
@@ -407,12 +434,15 @@ type MusicCoverPrepareOperation struct {
 	Lyrics string `json:"lyrics,omitempty"`
 }
 
-// MusicCoverOperation completes one prepared cover workflow.
-// MusicCoverOperation 完成一个已准备翻唱流程。
+// MusicCoverOperation creates one cover from either a direct audio source or one prepared workflow.
+// MusicCoverOperation 从直接音频来源或一个已准备工作流创建翻唱。
 type MusicCoverOperation struct {
+	// Source optionally supplies one direct audio reference when lyrics are omitted.
+	// Source 在省略歌词时可选地提供一个直接音频引用。
+	Source *MediaInput `json:"source,omitempty"`
 	// PreparationID references one Router-owned prepared workflow result.
 	// PreparationID 引用一个 Router 拥有的准备流程结果。
-	PreparationID string `json:"preparation_id"`
+	PreparationID string `json:"preparation_id,omitempty"`
 	// Prompt describes the target cover style.
 	// Prompt 描述目标翻唱风格。
 	Prompt string `json:"prompt"`
@@ -422,6 +452,21 @@ type MusicCoverOperation struct {
 	// OutputFormat requests a registered audio format.
 	// OutputFormat 请求一个已注册音频格式。
 	OutputFormat string `json:"output_format,omitempty"`
+	// Seed requests deterministic provider sampling when supported.
+	// Seed 在供应商支持时请求确定性采样。
+	Seed *int64 `json:"seed,omitempty"`
+	// SampleRate requests a supported audio sample rate.
+	// SampleRate 请求受支持的音频采样率。
+	SampleRate int `json:"sample_rate,omitempty"`
+	// Bitrate requests a supported encoded bitrate in bits per second.
+	// Bitrate 请求受支持的编码码率，单位为比特每秒。
+	Bitrate int `json:"bitrate,omitempty"`
+	// Channels requests a supported channel count.
+	// Channels 请求受支持的声道数量。
+	Channels int `json:"channels,omitempty"`
+	// Watermark requests an explicit provider-supported watermark preference.
+	// Watermark 请求明确且供应商支持的水印偏好。
+	Watermark *bool `json:"watermark,omitempty"`
 }
 
 // Validate verifies media-analysis task and ordered inputs.
@@ -521,6 +566,16 @@ func (o SpeechSynthesizeOperation) Validate() error {
 	if o.SampleRate < 0 || o.Bitrate < 0 || o.Channels < 0 {
 		return fmt.Errorf("%w: speech encoding fields cannot be negative", ErrInvalidRequest)
 	}
+	seenPronunciations := make(map[string]struct{}, len(o.Pronunciations))
+	for _, pronunciation := range o.Pronunciations {
+		if strings.TrimSpace(pronunciation) == "" || pronunciation != strings.TrimSpace(pronunciation) {
+			return fmt.Errorf("%w: speech pronunciation mappings must be normalized and non-empty", ErrInvalidRequest)
+		}
+		if _, duplicate := seenPronunciations[pronunciation]; duplicate {
+			return fmt.Errorf("%w: speech pronunciation mappings must be unique", ErrInvalidRequest)
+		}
+		seenPronunciations[pronunciation] = struct{}{}
+	}
 	return nil
 }
 
@@ -547,8 +602,11 @@ func (o MusicGenerateOperation) Validate() error {
 	if o.Instrumental && strings.TrimSpace(o.Lyrics) != "" {
 		return fmt.Errorf("%w: instrumental music cannot include lyrics", ErrInvalidRequest)
 	}
-	if o.DurationSeconds < 0 || o.Count < 0 {
-		return fmt.Errorf("%w: music duration and count cannot be negative", ErrInvalidRequest)
+	if o.LyricsOptimizer != nil && *o.LyricsOptimizer && (o.Instrumental || strings.TrimSpace(o.Lyrics) != "") {
+		return fmt.Errorf("%w: lyrics_optimizer cannot be combined with instrumental or explicit lyrics", ErrInvalidRequest)
+	}
+	if o.DurationSeconds < 0 || o.Count < 0 || o.SampleRate < 0 || o.Bitrate < 0 || o.Channels < 0 {
+		return fmt.Errorf("%w: music numeric fields cannot be negative", ErrInvalidRequest)
 	}
 	return validateMediaInputs(o.References, false)
 }
@@ -559,11 +617,26 @@ func (o MusicCoverPrepareOperation) Validate() error {
 	return validateMediaInput(o.Source)
 }
 
-// Validate verifies final music-cover preparation identity.
-// Validate 校验最终翻唱准备身份。
+// Validate verifies the exclusive direct-source or prepared music-cover workflow.
+// Validate 校验互斥的直接来源或已准备音乐翻唱工作流。
 func (o MusicCoverOperation) Validate() error {
-	if strings.TrimSpace(o.PreparationID) == "" || strings.TrimSpace(o.Prompt) == "" {
-		return fmt.Errorf("%w: preparation_id and prompt are required", ErrInvalidRequest)
+	usesDirectSource := o.Source != nil
+	usesPreparation := strings.TrimSpace(o.PreparationID) != ""
+	if usesDirectSource == usesPreparation || strings.TrimSpace(o.Prompt) == "" {
+		return fmt.Errorf("%w: music cover requires prompt and exactly one of source or preparation_id", ErrInvalidRequest)
+	}
+	if usesDirectSource {
+		if o.Source.Kind != MediaAudio || o.Source.Role != MediaRoleCoverReference {
+			return fmt.Errorf("%w: direct music cover requires an audio cover_reference", ErrInvalidRequest)
+		}
+		if errSource := validateMediaInput(*o.Source); errSource != nil {
+			return errSource
+		}
+	} else if strings.TrimSpace(o.Lyrics) == "" {
+		return fmt.Errorf("%w: prepared music cover requires lyrics", ErrInvalidRequest)
+	}
+	if o.SampleRate < 0 || o.Bitrate < 0 || o.Channels < 0 {
+		return fmt.Errorf("%w: music cover encoding fields cannot be negative", ErrInvalidRequest)
 	}
 	return nil
 }
@@ -597,7 +670,7 @@ func validateMediaInput(input MediaInput) error {
 		return fmt.Errorf("%w: invalid media kind %q", ErrInvalidRequest, input.Kind)
 	}
 	switch input.Role {
-	case MediaRoleUnderstanding, MediaRoleReference, MediaRoleEditSource, MediaRoleMask, MediaRoleFirstFrame, MediaRoleLastFrame, MediaRoleAudioTrack, MediaRoleTranscriptionSource, MediaRoleStyleReference, MediaRoleCoverReference:
+	case MediaRoleUnderstanding, MediaRoleReference, MediaRoleEditSource, MediaRoleMask, MediaRoleFirstFrame, MediaRoleLastFrame, MediaRoleSubjectReference, MediaRoleAudioTrack, MediaRoleTranscriptionSource, MediaRoleStyleReference, MediaRoleCoverReference:
 		return nil
 	default:
 		return fmt.Errorf("%w: invalid media role %q", ErrInvalidRequest, input.Role)

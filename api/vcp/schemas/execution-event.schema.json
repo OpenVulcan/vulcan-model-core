@@ -1,0 +1,140 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/execution-event.schema.json",
+  "title": "VCP Durable Execution Event",
+  "type": "object",
+  "additionalProperties": false,
+  "minProperties": 6,
+  "maxProperties": 6,
+  "required": ["execution_id", "event_id", "sequence", "time", "type"],
+  "properties": {
+    "execution_id": {"type": "string", "pattern": "^exe_[0-9a-f]{32}$"},
+    "event_id": {"type": "string", "pattern": "^evt_[0-9a-f]{32}_[1-9][0-9]*$"},
+    "sequence": {"type": "integer", "minimum": 1},
+    "time": {"type": "string", "format": "date-time"},
+    "type": {"type": "string"},
+    "lifecycle": {"$ref": "#/$defs/lifecycle"},
+    "attempt": {"$ref": "#/$defs/attempt"},
+    "retry": {"$ref": "#/$defs/retry"},
+    "provider_event": {"$ref": "./result-components.schema.json#/$defs/providerEvent"},
+    "progress": {"$ref": "#/$defs/progress"},
+    "resource": {"$ref": "#/$defs/resourceEvent"},
+    "transcript": {"$ref": "./result-components.schema.json#/$defs/transcriptSegment"},
+    "embedding": {"$ref": "./result-components.schema.json#/$defs/embeddingItem"},
+    "rerank": {"$ref": "./result-components.schema.json#/$defs/rerankResult"},
+    "search_query": {"type": "object", "additionalProperties": false, "required": ["query"], "properties": {"query": {"type": "string"}}},
+    "search_result": {"$ref": "./result-components.schema.json#/$defs/searchResult"},
+    "search_answer": {"type": "object", "additionalProperties": false, "required": ["text"], "properties": {"text": {"type": "string"}}},
+    "citation": {"$ref": "./result-components.schema.json#/$defs/citation"},
+    "usage": {"$ref": "#/$defs/usage"}
+  },
+  "oneOf": [
+    {
+      "required": ["lifecycle"],
+      "oneOf": [
+        {"properties": {"type": {"const": "execution.accepted"}, "lifecycle": {"properties": {"status": {"const": "accepted"}}}}},
+        {"properties": {"type": {"const": "input.materialization.started"}, "lifecycle": {"properties": {"status": {"const": "preparing_inputs"}}}}},
+        {"properties": {"type": {"const": "input.materialization.completed"}, "lifecycle": {"properties": {"status": {"const": "preparing_inputs"}}}}},
+        {"properties": {"type": {"const": "execution.queued"}, "lifecycle": {"properties": {"status": {"const": "queued"}}}}},
+        {"properties": {"type": {"const": "execution.running"}, "lifecycle": {"properties": {"status": {"const": "running"}}}}},
+        {"properties": {"type": {"const": "execution.cancellation.requested"}, "lifecycle": {"properties": {"status": {"enum": ["queued", "running"]}}}}},
+        {"properties": {"type": {"const": "execution.succeeded"}, "lifecycle": {"properties": {"status": {"const": "succeeded"}}}}},
+        {"properties": {"type": {"const": "execution.partially_succeeded"}, "lifecycle": {"properties": {"status": {"const": "partially_succeeded"}}}}},
+        {"properties": {"type": {"const": "execution.failed"}, "lifecycle": {"properties": {"status": {"const": "failed"}}, "required": ["failure"]}}},
+        {"properties": {"type": {"const": "execution.cancelled"}, "lifecycle": {"properties": {"status": {"const": "cancelled"}}}}},
+        {"properties": {"type": {"const": "execution.expired"}, "lifecycle": {"properties": {"status": {"const": "expired"}}}}}
+      ]
+    },
+    {"properties": {"type": {"const": "execution.attempt.completed"}}, "required": ["attempt"]},
+    {
+      "required": ["retry"],
+      "oneOf": [
+        {"properties": {"type": {"const": "retry.scheduled"}, "retry": {"required": ["next_retry_at"]}}},
+        {"properties": {"type": {"enum": ["retry.started", "retry.succeeded", "retry.aborted"]}, "retry": {"not": {"required": ["next_retry_at"]}}}}
+      ]
+    },
+    {"properties": {"type": {"const": "provider.semantic"}}, "required": ["provider_event"]},
+    {"properties": {"type": {"const": "progress.updated"}}, "required": ["progress"]},
+    {"properties": {"type": {"const": "resource.partial"}, "resource": {"required": ["kind", "mime_type", "partial_bytes"], "not": {"anyOf": [{"required": ["resource_id"]}, {"required": ["resource"]}]}}}, "required": ["resource"]},
+    {"properties": {"type": {"const": "resource.completed"}, "resource": {"required": ["resource_id", "resource"], "not": {"required": ["partial_bytes"]}}}, "required": ["resource"]},
+    {"properties": {"type": {"const": "transcript.segment"}}, "required": ["transcript"]},
+    {"properties": {"type": {"const": "embedding.item.completed"}}, "required": ["embedding"]},
+    {"properties": {"type": {"const": "rerank.result.completed"}}, "required": ["rerank"]},
+    {"properties": {"type": {"const": "search.query.started"}}, "required": ["search_query"]},
+    {"properties": {"type": {"const": "search.result.completed"}}, "required": ["search_result"]},
+    {"properties": {"type": {"enum": ["search.answer.delta", "search.answer.completed"]}}, "required": ["search_answer"]},
+    {"properties": {"type": {"const": "citation.completed"}}, "required": ["citation"]},
+    {"properties": {"type": {"const": "usage.updated"}}, "required": ["usage"]}
+  ],
+  "allOf": [
+    {
+      "if": {"properties": {"type": {"const": "execution.failed"}}, "required": ["type"]},
+      "else": {"properties": {"lifecycle": {"not": {"required": ["failure"]}}}}
+    }
+  ],
+  "$defs": {
+    "lifecycle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status"],
+      "properties": {
+        "status": {"enum": ["accepted", "preparing_inputs", "queued", "running", "waiting_retry", "succeeded", "partially_succeeded", "failed", "cancelled", "expired"]},
+        "failure": {"$ref": "./failure.schema.json"}
+      }
+    },
+    "attempt": {"type": "object", "additionalProperties": false, "required": ["sequence"], "properties": {"sequence": {"type": "integer", "minimum": 1}}},
+    "retry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempt"],
+      "properties": {
+        "attempt": {"type": "integer", "minimum": 1},
+        "next_retry_at": {"type": "string", "format": "date-time"},
+        "category": {"type": "string"}
+      }
+    },
+    "progress": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "current": {"type": "integer", "minimum": 0},
+        "total": {"type": "integer", "minimum": 0},
+        "unit": {"type": "string"},
+        "percent": {"type": "number", "minimum": 0, "maximum": 100}
+      },
+      "minProperties": 1
+    },
+    "resourceEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["output_id"],
+      "properties": {
+        "output_id": {"type": "string", "minLength": 1},
+        "resource_id": {"type": "string", "pattern": "^res_[0-9a-f]{32}$"},
+        "kind": {"enum": ["image", "audio", "video", "file"]},
+        "mime_type": {"type": "string"},
+        "partial_bytes": {"type": "integer", "minimum": 0},
+        "resource": {"$ref": "./resource.schema.json"}
+      },
+      "oneOf": [
+        {"required": ["kind", "mime_type", "partial_bytes"], "not": {"anyOf": [{"required": ["resource_id"]}, {"required": ["resource"]}]}},
+        {"required": ["resource_id", "resource"], "not": {"required": ["partial_bytes"]}}
+      ]
+    },
+    "usage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["unit", "value", "accuracy", "source", "aggregation", "phase", "accounting_basis", "final"],
+      "properties": {
+        "unit": {"type": "string", "minLength": 1},
+        "value": {"type": "number", "minimum": 0},
+        "accuracy": {"enum": ["exact", "estimated", "unknown"]},
+        "source": {"type": "string", "minLength": 1},
+        "aggregation": {"enum": ["delta", "cumulative", "snapshot"]},
+        "phase": {"enum": ["preflight", "streaming", "terminal", "billing"]},
+        "accounting_basis": {"type": "string", "minLength": 1},
+        "final": {"type": "boolean"}
+      }
+    }
+  }
+}

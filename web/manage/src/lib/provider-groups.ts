@@ -125,10 +125,7 @@ export interface ProviderAuthMethod {
   // plan_acquisition identifies how this authentication method obtains plan evidence.
   // plan_acquisition 标识该认证方式如何获得套餐证据。
   plan_acquisition:
-    | "provider_detected"
-    | "manual_required"
-    | "manual_optional"
-    | "unavailable";
+    "provider_detected" | "manual_required" | "manual_optional" | "unavailable";
 }
 
 // ProviderPlanOption describes one safe code-owned commercial tier.
@@ -386,8 +383,7 @@ export interface CustomProviderDefinitionInput {
 
 // VertexServiceAccountOnboardingInput contains one transient typed JSON document whose identity is derived server-side.
 // VertexServiceAccountOnboardingInput 包含一个临时类型化 JSON 文档，其身份由服务端派生。
-export interface VertexServiceAccountOnboardingInput
-  extends Partial<CredentialReauthorizationTarget> {
+export interface VertexServiceAccountOnboardingInput extends Partial<CredentialReauthorizationTarget> {
   // provider_definition_id selects the Vertex system definition.
   // provider_definition_id 选择 Vertex 系统 Definition。
   provider_definition_id: string;
@@ -616,6 +612,61 @@ export interface ProviderEndpoint {
   revision: number;
 }
 
+// ProviderBinding describes one management-safe credential-to-endpoint authorization relationship.
+// ProviderBinding 描述一个管理安全的凭据到端点授权关系。
+export interface ProviderBinding {
+  // id is the immutable binding identifier.
+  // id 是不可变绑定标识。
+  id: string;
+  // provider_instance_id identifies the exact binding owner.
+  // provider_instance_id 标识精确绑定所有者。
+  provider_instance_id: string;
+  // endpoint_id identifies the same-instance upstream endpoint.
+  // endpoint_id 标识同实例上游端点。
+  endpoint_id: string;
+  // credential_id identifies the same-instance local credential.
+  // credential_id 标识同实例本地凭据。
+  credential_id: string;
+  // allowed_model_ids contains explicit model restrictions when present.
+  // allowed_model_ids 在存在时包含显式模型限制。
+  allowed_model_ids: string[];
+  // allowed_service_ids contains explicit special-service restrictions when present.
+  // allowed_service_ids 在存在时包含显式特殊服务限制。
+  allowed_service_ids: string[];
+  // priority is the persisted same-pool selection order.
+  // priority 是持久化的同池选择顺序。
+  priority: number;
+  // enabled reports whether the relationship may participate in provider resolution.
+  // enabled 表示该关系是否可以参与供应商解析。
+  enabled: boolean;
+  // revision is the persisted binding revision.
+  // revision 是持久化绑定修订号。
+  revision: number;
+}
+
+// ProviderFileDiagnostic describes one credential-scoped provider file without exposing its content or download address.
+// ProviderFileDiagnostic 描述一个凭据作用域的供应商文件，且不暴露其内容或下载地址。
+export interface ProviderFileDiagnostic {
+  // file_id is the provider-issued file identifier.
+  // file_id 是供应商签发的文件标识。
+  file_id: string;
+  // filename is the provider-recorded file basename.
+  // filename 是供应商记录的文件基本名称。
+  filename: string;
+  // purpose is the provider-recorded resource purpose.
+  // purpose 是供应商记录的资源用途。
+  purpose: string;
+  // size_bytes is the provider-reported object size in bytes.
+  // size_bytes 是供应商报告的对象大小（字节）。
+  size_bytes: number;
+  // created_at is the provider-reported creation timestamp.
+  // created_at 是供应商报告的创建时间戳。
+  created_at: string;
+  // download_available reports availability without exposing a temporary URL.
+  // download_available 仅报告可用性而不暴露临时下载地址。
+  download_available: boolean;
+}
+
 // ProviderCredential describes one management-safe authorization entry.
 // ProviderCredential 描述一个管理安全的授权条目。
 export interface ProviderCredential {
@@ -766,6 +817,9 @@ export interface ProviderAllowanceWindow {
   // time_zone identifies the provider calendar time zone when known.
   // time_zone 标识已知时的供应商日历时区。
   time_zone?: string;
+  // start_at is the provider-reported beginning of the active window when known.
+  // start_at 是已知时供应商报告的当前窗口起始时间。
+  start_at?: string;
   // reset_at is the next provider-reported recovery time when known.
   // reset_at 是已知时供应商报告的下次恢复时间。
   reset_at?: string;
@@ -807,6 +861,9 @@ export interface ProviderAllowance {
   // remaining_ratio is the normalized available fraction when derivable.
   // remaining_ratio 是可推导时规范化的可用比例。
   remaining_ratio?: number;
+  // display_multiplier_permille preserves a provider-authored visual multiplier without changing exact counts.
+  // display_multiplier_permille 在不改变精确计数的情况下保留供应商编写的视觉倍率。
+  display_multiplier_permille?: number;
   // status is the normalized allowance lifecycle state.
   // status 是规范化的额度生命周期状态。
   status: string;
@@ -827,12 +884,12 @@ export interface ProviderAllowance {
 // ProviderCatalogMetadata contains the management-safe portion of one refreshed catalog snapshot.
 // ProviderCatalogMetadata 包含一个已刷新目录快照中管理安全的部分。
 export interface ProviderCatalogMetadata {
-	// provider_instance_id identifies the refreshed provider instance.
-	// provider_instance_id 标识已刷新的供应商实例。
-	provider_instance_id: string;
-	// default_additional_parameters contains provider-wide rules inherited by every model.
-	// default_additional_parameters 包含由每个模型继承的供应商级规则。
-	default_additional_parameters: AdditionalPayloadProjection;
+  // provider_instance_id identifies the refreshed provider instance.
+  // provider_instance_id 标识已刷新的供应商实例。
+  provider_instance_id: string;
+  // default_additional_parameters contains provider-wide rules inherited by every model.
+  // default_additional_parameters 包含由每个模型继承的供应商级规则。
+  default_additional_parameters: AdditionalPayloadProjection;
   // models contains the refreshed provider model inventory and local eligibility.
   // models 包含已刷新的供应商模型清单与本地可用性。
   models: ProviderCatalogModel[];
@@ -842,12 +899,41 @@ export interface ProviderCatalogMetadata {
   // allowances contains normalized quota and credit observations.
   // allowances 包含规范化的额度与积分观测。
   allowances: ProviderAllowance[];
+  // voices contains cached credential-scoped provider voice entries.
+  // voices 包含缓存的凭据作用域供应商声音项。
+  voices: ProviderVoice[];
   // revision is the committed catalog snapshot revision.
   // revision 是已提交目录快照的修订号。
   revision: number;
   // observed_at is the server timestamp for the complete refresh.
   // observed_at 是完整刷新操作的服务端时间戳。
   observed_at: string;
+}
+
+// ProviderVoice contains one provider voice and the exact configured account exposing it.
+// ProviderVoice 包含一个供应商声音及公开它的精确已配置账号。
+export interface ProviderVoice {
+  // voice_id is the exact synthesis request value.
+  // voice_id 是精确的合成请求值。
+  voice_id: string;
+  // display_name is the provider-authored label.
+  // display_name 是供应商编写的标签。
+  display_name: string;
+  // descriptions contains ordered provider-authored traits.
+  // descriptions 包含供应商编写的有序特征。
+  descriptions: string[];
+  // credential_id identifies the exact configured account.
+  // credential_id 标识精确的已配置账号。
+  credential_id: string;
+  // credential_label is the management-safe configured account label.
+  // credential_label 是管理安全的已配置账号标签。
+  credential_label: string;
+  // observed_at records the successful provider read time.
+  // observed_at 记录成功读取供应商的时间。
+  observed_at: string;
+  // expires_at is the cache freshness boundary.
+  // expires_at 是缓存新鲜度边界。
+  expires_at: string;
 }
 
 // endpointParameterDefinitionSchema validates the server's closed endpoint parameter contract.
@@ -1096,6 +1182,41 @@ const providerEndpointListResponseSchema = z.object({
   ),
 });
 
+// providerBindingListResponseSchema validates credential-to-endpoint relationships before resource reads select an endpoint.
+// providerBindingListResponseSchema 在资源读取选择端点前校验凭据到端点关系。
+const providerBindingListResponseSchema = z.object({
+  bindings: z.array(
+    z.object({
+      id: z.string().min(1),
+      provider_instance_id: z.string().min(1),
+      endpoint_id: z.string().min(1),
+      credential_id: z.string().min(1),
+      allowed_model_ids: z.array(z.string().min(1)).optional().default([]),
+      allowed_service_ids: z.array(z.string().min(1)).optional().default([]),
+      priority: z.number().int().nonnegative(),
+      enabled: z.boolean(),
+      revision: z.number().int().positive(),
+    }),
+  ),
+});
+
+// providerFileDiagnosticSchema validates management-safe provider file metadata without accepting download URLs or file content.
+// providerFileDiagnosticSchema 校验管理安全的供应商文件元数据，且不接受下载地址或文件内容。
+const providerFileDiagnosticSchema = z.object({
+  file_id: z.string().min(1),
+  filename: z.string().min(1),
+  purpose: z.string().min(1),
+  size_bytes: z.number().int().nonnegative(),
+  created_at: z.string().datetime({ offset: true }),
+  download_available: z.boolean().optional().default(false),
+});
+
+// providerFileDiagnosticListResponseSchema validates one credential-scoped provider file listing envelope.
+// providerFileDiagnosticListResponseSchema 校验一个凭据作用域的供应商文件列表信封。
+const providerFileDiagnosticListResponseSchema = z.object({
+  files: z.array(providerFileDiagnosticSchema),
+});
+
 // customProviderOnboardingResponseSchema validates every identifier returned after the atomic custom commit.
 // customProviderOnboardingResponseSchema 校验自定义原子提交后返回的每个标识。
 const customProviderOnboardingResponseSchema = z.object({
@@ -1140,7 +1261,10 @@ const exactNonNegativeIntegerPattern = /^(0|[1-9][0-9]*)$/;
 // providerCatalogMetadataSchema 在渲染前校验供应商原生套餐与额度观测。
 const providerCatalogMetadataSchema = z.object({
   provider_instance_id: z.string().min(1),
-  default_additional_parameters: z.lazy(() => additionalPayloadProjectionSchema).optional().default({}),
+  default_additional_parameters: z
+    .lazy(() => additionalPayloadProjectionSchema)
+    .optional()
+    .default({}),
   models: z.array(
     z.object({
       id: z.string().min(1),
@@ -1197,7 +1321,11 @@ const providerCatalogMetadataSchema = z.object({
         ])
         .optional()
         .default("provider_api"),
-      observed_at: z.string().datetime({ offset: true }).optional().default("1970-01-01T00:00:00Z"),
+      observed_at: z
+        .string()
+        .datetime({ offset: true })
+        .optional()
+        .default("1970-01-01T00:00:00Z"),
       expires_at: z.string().datetime({ offset: true }).optional(),
     }),
   ),
@@ -1239,12 +1367,15 @@ const providerCatalogMetadataSchema = z.object({
       used: z.string().regex(exactNonNegativeDecimalPattern).optional(),
       remaining: z.string().regex(exactNonNegativeDecimalPattern).optional(),
       remaining_ratio: z.number().finite().min(0).max(1).optional(),
+      display_multiplier_permille: z.number().int().nonnegative().optional(),
       status: z.enum([
         "available",
+        "unlimited",
         "low",
         "exhausted",
         "unknown_sufficiency",
         "unavailable",
+		"not_included",
       ]),
       mandatory: z.boolean(),
       window: z
@@ -1253,6 +1384,7 @@ const providerCatalogMetadataSchema = z.object({
           duration: z.string().regex(exactNonNegativeIntegerPattern),
           calendar_unit: z.string().min(1).optional(),
           time_zone: z.string().min(1).optional(),
+          start_at: z.string().datetime({ offset: true }).optional(),
           reset_at: z.string().datetime({ offset: true }).optional(),
         })
         .optional(),
@@ -1260,13 +1392,34 @@ const providerCatalogMetadataSchema = z.object({
       expires_at: z.string().datetime({ offset: true }),
     }),
   ),
+  voices: z
+    .array(
+      z.object({
+        voice_id: z.string().min(1),
+        display_name: z.string().min(1),
+        // Legacy running backends encoded an empty Go slice copy as null; normalize only that proven historical shape.
+        // 旧版运行中后端会把空 Go 切片副本编码为 null；这里只规范化这一已证实的历史结构。
+        descriptions: z
+          .array(z.string().min(1))
+          .nullable()
+          .transform((descriptions) => descriptions ?? []),
+        credential_id: z.string().min(1),
+        credential_label: z.string(),
+        observed_at: z.string().datetime({ offset: true }),
+        expires_at: z.string().datetime({ offset: true }),
+      }),
+    )
+    .optional()
+    .default([]),
   revision: z.number().int().positive(),
   observed_at: z.string().datetime({ offset: true }),
 });
 
 // payloadPathSchema accepts unambiguous dot-separated JSON object paths.
 // payloadPathSchema 接受无歧义的点分隔 JSON 对象路径。
-const payloadPathSchema = z.string().regex(/^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*$/);
+const payloadPathSchema = z
+  .string()
+  .regex(/^[A-Za-z_][A-Za-z0-9_-]*(\.[A-Za-z_][A-Za-z0-9_-]*)*$/);
 
 // payloadParameterSchema validates one exact JSON assignment.
 // payloadParameterSchema 校验一个精确 JSON 赋值。
@@ -1277,13 +1430,15 @@ const payloadParameterSchema = z.object({
 
 // reasoningParameterRuleSchema validates one non-empty value-to-mutation mapping.
 // reasoningParameterRuleSchema 校验一个非空的值到变更映射。
-const reasoningParameterRuleSchema = z.object({
-  value: z.string().trim().min(1),
-  set: z.array(payloadParameterSchema).optional(),
-  delete: z.array(payloadPathSchema).optional(),
-}).refine((rule) => (rule.set?.length ?? 0) + (rule.delete?.length ?? 0) > 0, {
-  message: "each reasoning rule requires at least one set or delete mutation",
-});
+const reasoningParameterRuleSchema = z
+  .object({
+    value: z.string().trim().min(1),
+    set: z.array(payloadParameterSchema).optional(),
+    delete: z.array(payloadPathSchema).optional(),
+  })
+  .refine((rule) => (rule.set?.length ?? 0) + (rule.delete?.length ?? 0) > 0, {
+    message: "each reasoning rule requires at least one set or delete mutation",
+  });
 
 // requestProjectionSchema validates editable projection JSON before it reaches the server.
 // requestProjectionSchema 在可编辑投影 JSON 到达服务端之前进行校验。
@@ -1301,22 +1456,30 @@ const requestProjectionSchema: z.ZodType<RequestProjection> = z.object({
 
 // additionalPayloadProjectionSchema validates one provider- or model-level additional rule document.
 // additionalPayloadProjectionSchema 校验一份供应商级或模型级附加规则文档。
-const additionalPayloadProjectionSchema: z.ZodType<AdditionalPayloadProjection> = z.object({
-  default: z.array(payloadParameterSchema).optional(),
-  override: z.array(payloadParameterSchema).optional(),
-  filter: z.array(payloadPathSchema).optional(),
-});
+const additionalPayloadProjectionSchema: z.ZodType<AdditionalPayloadProjection> =
+  z.object({
+    default: z.array(payloadParameterSchema).optional(),
+    override: z.array(payloadParameterSchema).optional(),
+    filter: z.array(payloadPathSchema).optional(),
+  });
 
 // parseAdditionalPayloadProjectionJSON parses and validates non-reasoning payload rules.
 // parseAdditionalPayloadProjectionJSON 解析并校验非推理载荷规则。
-export function parseAdditionalPayloadProjectionJSON(value: string): AdditionalPayloadProjection {
+export function parseAdditionalPayloadProjectionJSON(
+  value: string,
+): AdditionalPayloadProjection {
   const projection = additionalPayloadProjectionSchema.parse(JSON.parse(value));
   validateAdditionalParameters(projection.default ?? [], "default", new Set());
-  validateAdditionalParameters(projection.override ?? [], "override", new Set());
+  validateAdditionalParameters(
+    projection.override ?? [],
+    "override",
+    new Set(),
+  );
   const filterPaths = new Set<string>();
   for (const path of projection.filter ?? []) {
     validateSafeProjectionPath(path);
-    if (pathConflicts(path, filterPaths)) throw new Error(`filter path ${path} is duplicated`);
+    if (pathConflicts(path, filterPaths))
+      throw new Error(`filter path ${path} is duplicated`);
     filterPaths.add(path);
   }
   return projection;
@@ -1324,23 +1487,50 @@ export function parseAdditionalPayloadProjectionJSON(value: string): AdditionalP
 
 // parseRequestProjectionJSON parses and validates one complete editable rule document.
 // parseRequestProjectionJSON 解析并校验一份完整的可编辑规则文档。
-export function parseRequestProjectionJSON(value: string, protocolProfileID = ""): RequestProjection {
+export function parseRequestProjectionJSON(
+  value: string,
+  protocolProfileID = "",
+): RequestProjection {
   const projection = requestProjectionSchema.parse(JSON.parse(value));
   const effortPaths = new Set<string>();
-  validateReasoningRules(projection.reasoning.effort ?? [], "effort", effortPaths, protocolProfileID);
+  validateReasoningRules(
+    projection.reasoning.effort ?? [],
+    "effort",
+    effortPaths,
+    protocolProfileID,
+  );
   const summaryPaths = new Set<string>();
-  validateReasoningRules(projection.reasoning.summary ?? [], "summary", summaryPaths, protocolProfileID);
+  validateReasoningRules(
+    projection.reasoning.summary ?? [],
+    "summary",
+    summaryPaths,
+    protocolProfileID,
+  );
   for (const path of summaryPaths) {
-    if (pathConflicts(path, effortPaths)) throw new Error(`summary path ${path} conflicts with an effort rule`);
+    if (pathConflicts(path, effortPaths))
+      throw new Error(`summary path ${path} conflicts with an effort rule`);
   }
   const reasoningPaths = new Set([...effortPaths, ...summaryPaths]);
-  validateAdditionalParameters(projection.additional.default ?? [], "default", reasoningPaths);
-  validateAdditionalParameters(projection.additional.override ?? [], "override", reasoningPaths);
+  validateAdditionalParameters(
+    projection.additional.default ?? [],
+    "default",
+    reasoningPaths,
+  );
+  validateAdditionalParameters(
+    projection.additional.override ?? [],
+    "override",
+    reasoningPaths,
+  );
   const filterPaths = new Set<string>();
   for (const path of projection.additional.filter ?? []) {
     validateSafeProjectionPath(path);
-    if (pathConflicts(path, reasoningPaths) || pathConflicts(path, filterPaths)) {
-      throw new Error(`filter path ${path} is duplicated or conflicts with a reasoning rule`);
+    if (
+      pathConflicts(path, reasoningPaths) ||
+      pathConflicts(path, filterPaths)
+    ) {
+      throw new Error(
+        `filter path ${path} is duplicated or conflicts with a reasoning rule`,
+      );
     }
     filterPaths.add(path);
   }
@@ -1349,41 +1539,78 @@ export function parseRequestProjectionJSON(value: string, protocolProfileID = ""
 
 // validateReasoningRules verifies unique canonical values, safe paths, and deterministic mutations.
 // validateReasoningRules 校验唯一规范值、安全路径与确定性变更。
-function validateReasoningRules(rules: ReasoningParameterRule[], label: string, ownedPaths: Set<string>, protocolProfileID: string): void {
+function validateReasoningRules(
+  rules: ReasoningParameterRule[],
+  label: string,
+  ownedPaths: Set<string>,
+  protocolProfileID: string,
+): void {
   const values = new Set<string>();
   for (const rule of rules) {
-    if (values.has(rule.value)) throw new Error(`${label} value ${rule.value} is duplicated`);
+    if (values.has(rule.value))
+      throw new Error(`${label} value ${rule.value} is duplicated`);
     values.add(rule.value);
     const rulePaths = new Set<string>();
     for (const parameter of rule.set ?? []) {
       validateSafeProjectionPath(parameter.path);
-      if (pathConflicts(parameter.path, rulePaths)) throw new Error(`${label} value ${rule.value} mutates ${parameter.path} more than once`);
+      if (pathConflicts(parameter.path, rulePaths))
+        throw new Error(
+          `${label} value ${rule.value} mutates ${parameter.path} more than once`,
+        );
       rulePaths.add(parameter.path);
       ownedPaths.add(parameter.path);
     }
     for (const path of rule.delete ?? []) {
       validateSafeProjectionPath(path);
-      if (pathConflicts(path, rulePaths)) throw new Error(`${label} value ${rule.value} mutates ${path} more than once`);
+      if (pathConflicts(path, rulePaths))
+        throw new Error(
+          `${label} value ${rule.value} mutates ${path} more than once`,
+        );
       rulePaths.add(path);
       ownedPaths.add(path);
     }
-    if (protocolProfileID === "openai.chat" && (rule.set ?? []).some((parameter) => parameter.path === "reasoning.effort") && !(rule.delete ?? []).includes("reasoning_effort")) {
-      throw new Error(`${label} value ${rule.value} must delete reasoning_effort when using reasoning.effort with OpenAI Chat`);
+    if (
+      protocolProfileID === "openai.chat" &&
+      (rule.set ?? []).some(
+        (parameter) => parameter.path === "reasoning.effort",
+      ) &&
+      !(rule.delete ?? []).includes("reasoning_effort")
+    ) {
+      throw new Error(
+        `${label} value ${rule.value} must delete reasoning_effort when using reasoning.effort with OpenAI Chat`,
+      );
     }
-    if (protocolProfileID === "openai.responses" && (rule.set ?? []).some((parameter) => parameter.path === "reasoning_effort") && !(rule.delete ?? []).includes("reasoning.effort")) {
-      throw new Error(`${label} value ${rule.value} must delete reasoning.effort when using reasoning_effort with OpenAI Responses`);
+    if (
+      protocolProfileID === "openai.responses" &&
+      (rule.set ?? []).some(
+        (parameter) => parameter.path === "reasoning_effort",
+      ) &&
+      !(rule.delete ?? []).includes("reasoning.effort")
+    ) {
+      throw new Error(
+        `${label} value ${rule.value} must delete reasoning.effort when using reasoning_effort with OpenAI Responses`,
+      );
     }
   }
 }
 
 // validateAdditionalParameters rejects duplicate, protected, and reasoning-owned paths.
 // validateAdditionalParameters 拒绝重复、受保护及由推理规则拥有的路径。
-function validateAdditionalParameters(parameters: PayloadParameter[], label: string, reasoningPaths: Set<string>): void {
+function validateAdditionalParameters(
+  parameters: PayloadParameter[],
+  label: string,
+  reasoningPaths: Set<string>,
+): void {
   const paths = new Set<string>();
   for (const parameter of parameters) {
     validateSafeProjectionPath(parameter.path);
-    if (pathConflicts(parameter.path, paths) || pathConflicts(parameter.path, reasoningPaths)) {
-      throw new Error(`${label} path ${parameter.path} is duplicated or conflicts with a reasoning rule`);
+    if (
+      pathConflicts(parameter.path, paths) ||
+      pathConflicts(parameter.path, reasoningPaths)
+    ) {
+      throw new Error(
+        `${label} path ${parameter.path} is duplicated or conflicts with a reasoning rule`,
+      );
     }
     paths.add(parameter.path);
   }
@@ -1392,10 +1619,36 @@ function validateAdditionalParameters(parameters: PayloadParameter[], label: str
 // validateSafeProjectionPath rejects protocol identity, content, tool, stream, and authentication roots.
 // validateSafeProjectionPath 拒绝协议身份、内容、工具、流式及认证根路径。
 function validateSafeProjectionPath(path: string): void {
-  const protectedRoots = new Set(["model", "messages", "input", "instructions", "system", "tools", "tool_choice", "stream", "previous_response_id", "authorization", "proxy_authorization", "api_key", "apikey", "x_api_key", "access_token", "auth_token", "token", "secret", "client_secret", "password", "credential", "cookie", "set_cookie"]);
+  const protectedRoots = new Set([
+    "model",
+    "messages",
+    "input",
+    "instructions",
+    "system",
+    "tools",
+    "tool_choice",
+    "stream",
+    "previous_response_id",
+    "authorization",
+    "proxy_authorization",
+    "api_key",
+    "apikey",
+    "x_api_key",
+    "access_token",
+    "auth_token",
+    "token",
+    "secret",
+    "client_secret",
+    "password",
+    "credential",
+    "cookie",
+    "set_cookie",
+  ]);
   const root = path.split(".", 1)[0].toLowerCase().replaceAll("-", "_");
   if (protectedRoots.has(root)) {
-    throw new Error(`path ${path} is owned by the protocol or authentication boundary`);
+    throw new Error(
+      `path ${path} is owned by the protocol or authentication boundary`,
+    );
   }
 }
 
@@ -1403,7 +1656,12 @@ function validateSafeProjectionPath(path: string): void {
 // pathConflicts 报告精确或父子路径重叠。
 function pathConflicts(path: string, paths: Set<string>): boolean {
   for (const candidate of paths) {
-    if (path === candidate || path.startsWith(`${candidate}.`) || candidate.startsWith(`${path}.`)) return true;
+    if (
+      path === candidate ||
+      path.startsWith(`${candidate}.`) ||
+      candidate.startsWith(`${path}.`)
+    )
+      return true;
   }
   return false;
 }
@@ -1662,6 +1920,68 @@ export async function fetchProviderEndpoints(
   return endpoints;
 }
 
+// fetchProviderBindings loads the management-safe access graph for one exact provider instance.
+// fetchProviderBindings 加载一个精确供应商实例的管理安全访问图。
+export async function fetchProviderBindings(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  signal?: AbortSignal,
+): Promise<ProviderBinding[]> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/bindings`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `provider bindings request failed with status ${response.status}`,
+    );
+  }
+  const bindings = providerBindingListResponseSchema.parse(
+    await response.json(),
+  ).bindings;
+  if (
+    bindings.some(
+      (binding) => binding.provider_instance_id !== providerInstanceID,
+    )
+  ) {
+    throw new Error("provider binding response contains a mismatched owner");
+  }
+  return bindings;
+}
+
+// fetchProviderFiles loads redacted file metadata for one exact provider instance, endpoint, and credential.
+// fetchProviderFiles 加载一个精确供应商实例、端点和凭据的脱敏文件元数据。
+export async function fetchProviderFiles(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  endpointID: string,
+  credentialID: string,
+  signal?: AbortSignal,
+): Promise<ProviderFileDiagnostic[]> {
+  // query binds the endpoint identity outside the path while retaining browser-safe URL encoding.
+  // query 在路径外绑定端点标识，同时保留浏览器安全的 URL 编码。
+  const query = new URLSearchParams({ endpoint_id: endpointID });
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}/files?${query.toString()}`,
+    {
+      method: "GET",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+      signal,
+    },
+  );
+  if (!response.ok) {
+    throw new Error(
+      `provider file list request failed with status ${response.status}`,
+    );
+  }
+  return providerFileDiagnosticListResponseSchema.parse(await response.json())
+    .files;
+}
+
 // fetchProviderCredentials loads redacted credential metadata for one exact provider instance.
 // fetchProviderCredentials 加载一个精确供应商实例的脱敏凭据元数据。
 export async function fetchProviderCredentials(
@@ -1837,7 +2157,9 @@ export async function updateProviderInstance(
     },
   );
   if (!response.ok) {
-    throw new Error(`provider instance update failed with status ${response.status}`);
+    throw new Error(
+      `provider instance update failed with status ${response.status}`,
+    );
   }
   z.object({ id: z.literal(providerInstanceID) }).parse(await response.json());
 }
@@ -1847,7 +2169,9 @@ export async function updateProviderInstance(
 export async function updateProviderEndpoint(
   managementAuthToken: string,
   providerInstanceID: string,
-  endpoint: Pick<ProviderEndpoint, "id" | "region" | "status"> & { base_url: string },
+  endpoint: Pick<ProviderEndpoint, "id" | "region" | "status"> & {
+    base_url: string;
+  },
 ): Promise<void> {
   const response = await fetch(
     `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/endpoints/${encodeURIComponent(endpoint.id)}`,
@@ -1865,7 +2189,9 @@ export async function updateProviderEndpoint(
     },
   );
   if (!response.ok) {
-    throw new Error(`provider endpoint update failed with status ${response.status}`);
+    throw new Error(
+      `provider endpoint update failed with status ${response.status}`,
+    );
   }
   z.object({ id: z.literal(endpoint.id) }).parse(await response.json());
 }
@@ -2000,7 +2326,9 @@ export async function fetchRoutingSettings(
     signal,
   });
   if (!response.ok) {
-    throw new Error(`routing settings request failed with status ${response.status}`);
+    throw new Error(
+      `routing settings request failed with status ${response.status}`,
+    );
   }
   return routingSettingsSchema.parse(await response.json());
 }
@@ -2020,7 +2348,9 @@ export async function updateRoutingSettings(
     body: JSON.stringify({ strategy }),
   });
   if (!response.ok) {
-    throw new Error(`routing settings update failed with status ${response.status}`);
+    throw new Error(
+      `routing settings update failed with status ${response.status}`,
+    );
   }
   return routingSettingsSchema.parse(await response.json());
 }
@@ -2044,7 +2374,9 @@ export async function updateProviderRoutingStrategy(
     },
   );
   if (!response.ok) {
-    throw new Error(`provider routing update failed with status ${response.status}`);
+    throw new Error(
+      `provider routing update failed with status ${response.status}`,
+    );
   }
 }
 
@@ -2068,7 +2400,9 @@ export async function updateProviderCredentialPriority(
     },
   );
   if (!response.ok) {
-    throw new Error(`credential priority update failed with status ${response.status}`);
+    throw new Error(
+      `credential priority update failed with status ${response.status}`,
+    );
   }
 }
 
@@ -2092,7 +2426,9 @@ export async function updateProviderCredentialPlan(
     },
   );
   if (!response.ok) {
-    throw new Error(`credential plan update failed with status ${response.status}`);
+    throw new Error(
+      `credential plan update failed with status ${response.status}`,
+    );
   }
 }
 
@@ -2249,6 +2585,76 @@ export async function cancelKimiDeviceFlow(
   if (!response.ok) {
     throw new Error(
       `Kimi device flow cancellation failed with status ${response.status}`,
+    );
+  }
+}
+
+// startMiniMaxDeviceFlow starts one token-confidential flow against the explicitly selected regional Origin.
+// startMiniMaxDeviceFlow 针对显式选择的区域 Origin 启动一个 Token 保密授权流程。
+export async function startMiniMaxDeviceFlow(
+  managementAuthToken: string,
+  region: "global" | "cn",
+): Promise<KimiDeviceFlow> {
+  const response = await fetch("/vulcan/manage/minimax/device-flows", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${managementAuthToken}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify({ region }),
+  });
+  if (!response.ok) {
+    throw new Error(
+      `MiniMax device flow failed with status ${response.status}`,
+    );
+  }
+  return kimiDeviceFlowSchema.parse(await response.json());
+}
+
+// onboardMiniMaxDeviceFlow polls once and persists only a definition-matching regional credential.
+// onboardMiniMaxDeviceFlow 轮询一次，并仅持久化与 Definition 匹配的区域凭据。
+export async function onboardMiniMaxDeviceFlow(
+  managementAuthToken: string,
+  flowID: string,
+  input: Pick<SystemOnboardingInput, "provider_definition_id" | "name"> &
+    Partial<CredentialReauthorizationTarget>,
+): Promise<SystemOnboardingResponse | null> {
+  const response = await fetch(
+    `/vulcan/manage/minimax/device-flows/${encodeURIComponent(flowID)}/onboard`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${managementAuthToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(input),
+    },
+  );
+  if (response.status === 202) return null;
+  if (!response.ok) {
+    throw new Error(
+      `MiniMax device onboarding failed with status ${response.status}`,
+    );
+  }
+  return systemOnboardingResponseSchema.parse(await response.json());
+}
+
+// cancelMiniMaxDeviceFlow releases one incomplete regional authorization session.
+// cancelMiniMaxDeviceFlow 释放一个未完成的区域授权会话。
+export async function cancelMiniMaxDeviceFlow(
+  managementAuthToken: string,
+  flowID: string,
+): Promise<void> {
+  const response = await fetch(
+    `/vulcan/manage/minimax/device-flows/${encodeURIComponent(flowID)}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+    },
+  );
+  if (!response.ok && response.status !== 404) {
+    throw new Error(
+      `MiniMax device flow cancellation failed with status ${response.status}`,
     );
   }
 }

@@ -261,6 +261,12 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			AllowedAuthMethods: nil,
 		},
 		{
+			ID: providerminimax.MediaAnalyzeProtocolProfileID, Version: "1", DisplayName: "MiniMax Coding Plan VLM", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+		},
+		{
+			ID: providerminimax.SearchWebProtocolProfileID, Version: "1", DisplayName: "MiniMax Coding Plan Search", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+		},
+		{
 			ID:                 providerminimax.VideoGenerateProtocolProfileID,
 			Version:            "1",
 			DisplayName:        "MiniMax Video Generation",

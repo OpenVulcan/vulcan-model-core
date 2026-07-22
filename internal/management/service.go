@@ -5,6 +5,7 @@ package management
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -24,11 +25,21 @@ import (
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+)
+
+const (
+	// customModelDiscoveryTTL bounds freshness of a provider-owned standard model listing before explicit refresh.
+	// customModelDiscoveryTTL 限制供应商标准模型清单在显式刷新前的有效期。
+	customModelDiscoveryTTL = 15 * time.Minute
+	// maximumCustomModelDiscoveryBytes bounds untrusted standard model-list responses.
+	// maximumCustomModelDiscoveryBytes 限制不受信任的标准模型清单响应大小。
+	maximumCustomModelDiscoveryBytes = 1 << 20
 )
 
 // OnboardSystemProviderInput contains the only operator-authored fields for one atomic system-provider onboarding.
@@ -113,6 +124,24 @@ func (s *Service) OnboardKimiDeviceProvider(ctx context.Context, input OnboardSy
 	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt)
 	applyResolvedProviderName(&input, "")
 	return s.onboardSystemProvider(ctx, input, "kimi")
+}
+
+// OnboardMiniMaxDeviceProvider atomically stores one server-acquired region-bound MiniMax OAuth credential.
+// OnboardMiniMaxDeviceProvider 原子存储一个由服务端获取且绑定区域的 MiniMax OAuth 凭据。
+func (s *Service) OnboardMiniMaxDeviceProvider(ctx context.Context, input OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	token, errToken := providerminimax.UnmarshalToken(input.Secret)
+	if errToken != nil {
+		return providerconfig.SystemOnboarding{}, errToken
+	}
+	regionMatches := (input.DefinitionID == "system_minimax_api" && token.Region == "global") || (input.DefinitionID == "system_minimax_cn" && token.Region == "cn")
+	if input.AuthMethodID != "device_flow" || !regionMatches {
+		return providerconfig.SystemOnboarding{}, errors.New("MiniMax device credential does not match the selected regional provider")
+	}
+	input.PrincipalKey = ""
+	input.ScopeRefs = nil
+	input.credentialExpiresAt = providerTokenExpiry(token.ExpiresAt.Unix())
+	applyResolvedProviderName(&input, "")
+	return s.onboardSystemProvider(ctx, input, "minimax")
 }
 
 // OnboardXAIDeviceProvider atomically stores one server-acquired and validated xAI device credential.
@@ -274,6 +303,13 @@ func (s *Service) onboardSystemProvider(ctx context.Context, input OnboardSystem
 			}
 			if input.PrincipalKey != "" || len(input.ScopeRefs) != 0 {
 				return providerconfig.SystemOnboarding{}, errors.New("Kimi onboarding does not accept caller-authored account identity or scopes")
+			}
+		case "minimax":
+			if _, errToken := providerminimax.UnmarshalToken(input.Secret); errToken != nil {
+				return providerconfig.SystemOnboarding{}, errToken
+			}
+			if input.PrincipalKey != "" || len(input.ScopeRefs) != 0 {
+				return providerconfig.SystemOnboarding{}, errors.New("MiniMax onboarding does not accept caller-authored account identity or scopes")
 			}
 		case "xai":
 			token, errToken := providerxai.UnmarshalToken(input.Secret)
@@ -465,16 +501,16 @@ func (s *Service) buildSystemOnboarding(definition providerconfig.ProviderDefini
 		baseURL = input.endpointBaseURL
 		region = input.endpointRegion
 	}
+	endpointID, errEndpointID := generateID("ep_")
+	if errEndpointID != nil {
+		return providerconfig.SystemOnboarding{}, errEndpointID
+	}
+	onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: baseURL, Region: region, Parameters: append([]providerconfig.EndpointParameterValue(nil), endpointParameters...), Status: providerconfig.EndpointReady, Revision: 1})
 	for _, channelID := range definition.ChannelIDs() {
-		endpointID, errEndpointID := generateID("ep_")
-		if errEndpointID != nil {
-			return providerconfig.SystemOnboarding{}, errEndpointID
-		}
 		bindingID, errBindingID := generateID("bind_")
 		if errBindingID != nil {
 			return providerconfig.SystemOnboarding{}, errBindingID
 		}
-		onboarding.Endpoints = append(onboarding.Endpoints, providerconfig.Endpoint{ID: endpointID, ProviderInstanceID: instanceID, ChannelID: channelID, BaseURL: baseURL, Region: region, Parameters: append([]providerconfig.EndpointParameterValue(nil), endpointParameters...), Status: providerconfig.EndpointReady, Revision: 1})
 		onboarding.Bindings = append(onboarding.Bindings, providerconfig.AccessBinding{ID: bindingID, ProviderInstanceID: instanceID, ChannelID: channelID, EndpointID: endpointID, CredentialID: credentialID, Priority: definition.Priority, Enabled: true, Revision: 1})
 	}
 	return onboarding, nil
@@ -1117,13 +1153,30 @@ func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInst
 	}
 	request.Header.Set("Authorization", "Bearer "+string(protectedSecret))
 	request.Header.Set("Accept", "application/json")
+	current, errCurrent := s.catalogs.Get(ctx, instance.ID)
+	if errCurrent != nil {
+		return catalog.Snapshot{}, errCurrent
+	}
+	if current.Dynamic != nil && strings.TrimSpace(current.Dynamic.ETag) != "" {
+		request.Header.Set("If-None-Match", current.Dynamic.ETag)
+	}
 	response, errDo := s.httpClient.Do(request)
 	if errDo != nil {
-		return catalog.Snapshot{}, fmt.Errorf("discover custom provider models: %w", errDo)
+		discoveryError := fmt.Errorf("discover custom provider models: %w", errDo)
+		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_unavailable", discoveryError)
 	}
 	defer response.Body.Close()
+	observedAt := s.now().UTC()
+	expiresAt := observedAt.Add(customModelDiscoveryTTL)
+	if response.StatusCode == http.StatusNotModified {
+		if current.Dynamic == nil {
+			return catalog.Snapshot{}, errors.New("custom provider returned not-modified without a last-good dynamic catalog")
+		}
+		return catalog.ApplyDynamicRefresh(ctx, s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: instance.ID, Authority: catalog.CatalogAuthorityProvider, ETag: response.Header.Get("ETag"), RefreshedAt: observedAt, ExpiresAt: expiresAt, NotModified: true})
+	}
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return catalog.Snapshot{}, fmt.Errorf("custom provider model discovery returned status %d", response.StatusCode)
+		discoveryError := fmt.Errorf("custom provider model discovery returned status %d", response.StatusCode)
+		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_rejected", discoveryError)
 	}
 	// modelListPayload intentionally decodes only the standard data[].id contract and ignores provider extensions.
 	// modelListPayload 有意仅解码标准 data[].id 合同并忽略供应商扩展。
@@ -1136,22 +1189,18 @@ func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInst
 			ID string `json:"id"`
 		} `json:"data"`
 	}
-	decoder := json.NewDecoder(io.LimitReader(response.Body, 1<<20))
-	if errDecode := decoder.Decode(&modelListPayload); errDecode != nil {
-		return catalog.Snapshot{}, errors.New("custom provider returned an invalid model list")
+	encodedResponse, errRead := io.ReadAll(io.LimitReader(response.Body, maximumCustomModelDiscoveryBytes+1))
+	if errRead != nil || len(encodedResponse) > maximumCustomModelDiscoveryBytes {
+		discoveryError := errors.New("custom provider model list exceeds the allowed boundary")
+		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
+	}
+	if errDecode := json.Unmarshal(encodedResponse, &modelListPayload); errDecode != nil {
+		discoveryError := errors.New("custom provider returned an invalid model list")
+		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
 	}
 	if modelListPayload.Data == nil {
-		return catalog.Snapshot{}, errors.New("custom provider model list omitted the standard data array")
-	}
-	// trailing detects ambiguous concatenated JSON values after the standard response document.
-	// trailing 检测标准响应文档之后含义不明确的拼接 JSON 值。
-	var trailing json.RawMessage
-	if errTrailing := decoder.Decode(&trailing); !errors.Is(errTrailing, io.EOF) {
-		return catalog.Snapshot{}, errors.New("custom provider model list contains trailing JSON values")
-	}
-	current, errCurrent := s.catalogs.Get(ctx, instance.ID)
-	if errCurrent != nil {
-		return catalog.Snapshot{}, errCurrent
+		discoveryError := errors.New("custom provider model list omitted the standard data array")
+		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
 	}
 	modelsByUpstreamID := make(map[string]catalog.ProviderModel, len(current.Models))
 	for _, model := range current.Models {
@@ -1167,20 +1216,24 @@ func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInst
 	}
 	updated := catalog.Snapshot{
 		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
-		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances,
+		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances, Voices: current.Voices,
 		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(current.DefaultAdditionalParameters),
-		Revision:                    current.Revision + 1, ObservedAt: s.now().UTC(),
+		Revision:                    current.Revision + 1, ObservedAt: observedAt,
 	}
 	seen := make(map[string]struct{}, len(modelListPayload.Data))
+	discoveredModelIDs := make([]string, 0, len(modelListPayload.Data))
 	for _, discovered := range modelListPayload.Data {
 		upstreamModelID := strings.TrimSpace(discovered.ID)
 		if upstreamModelID == "" {
-			return catalog.Snapshot{}, errors.New("custom provider model list contains an empty model ID")
+			discoveryError := errors.New("custom provider model list contains an empty model ID")
+			return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
 		}
 		if _, duplicate := seen[upstreamModelID]; duplicate {
-			return catalog.Snapshot{}, errors.New("custom provider model list contains duplicate model IDs")
+			discoveryError := errors.New("custom provider model list contains duplicate model IDs")
+			return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
 		}
 		seen[upstreamModelID] = struct{}{}
+		discoveredModelIDs = append(discoveredModelIDs, upstreamModelID)
 		if existing, exists := modelsByUpstreamID[upstreamModelID]; exists {
 			updated.Models = append(updated.Models, existing)
 			for _, offering := range offeringsByModelID[existing.ID] {
@@ -1206,10 +1259,40 @@ func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInst
 	if errResolver != nil {
 		return catalog.Snapshot{}, errResolver
 	}
-	if errSave := s.catalogs.Save(ctx, updated); errSave != nil {
-		return catalog.Snapshot{}, errSave
+	slices.Sort(discoveredModelIDs)
+	sourceRevision := customModelDiscoveryRevision(discoveredModelIDs)
+	return catalog.ApplyDynamicRefresh(ctx, s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: instance.ID, Authority: catalog.CatalogAuthorityProvider, SourceRevision: sourceRevision, ETag: response.Header.Get("ETag"), RefreshedAt: observedAt, ExpiresAt: expiresAt, Candidate: &updated})
+}
+
+// failCustomModelDiscovery preserves the provider failure and joins any durable failure-recording error.
+// failCustomModelDiscovery 保留供应商失败，并合并任何持久失败记录错误。
+func (s *Service) failCustomModelDiscovery(ctx context.Context, current catalog.Snapshot, failureCode string, discoveryError error) error {
+	errRecord := s.recordCustomModelDiscoveryFailure(ctx, current, failureCode)
+	if errRecord == nil {
+		return discoveryError
 	}
-	return updated, nil
+	return errors.Join(discoveryError, fmt.Errorf("record custom model discovery failure: %w", errRecord))
+}
+
+// recordCustomModelDiscoveryFailure marks a prior dynamic snapshot stale while preserving every last-good catalog entity.
+// recordCustomModelDiscoveryFailure 在保留全部最后有效目录实体的同时将既有动态快照标记为过期。
+func (s *Service) recordCustomModelDiscoveryFailure(ctx context.Context, current catalog.Snapshot, failureCode string) error {
+	if current.Dynamic == nil {
+		return nil
+	}
+	_, errRefresh := catalog.ApplyDynamicRefresh(context.WithoutCancel(ctx), s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: current.ProviderInstanceID, Authority: catalog.CatalogAuthorityProvider, RefreshedAt: s.now().UTC(), FailureCode: failureCode})
+	return errRefresh
+}
+
+// customModelDiscoveryRevision derives a stable order-independent source revision when the provider omits an ETag.
+// customModelDiscoveryRevision 在供应商省略 ETag 时派生稳定且与顺序无关的来源修订。
+func customModelDiscoveryRevision(modelIDs []string) string {
+	digest := sha256.New()
+	for _, modelID := range modelIDs {
+		_, _ = digest.Write([]byte(modelID))
+		_, _ = digest.Write([]byte{0})
+	}
+	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
 // SaveCustomProviderModels replaces a custom provider's simplified model set with explicit user-declared capabilities.
@@ -1251,7 +1334,7 @@ func (s *Service) SaveCustomProviderModels(ctx context.Context, providerInstance
 	}
 	updated := catalog.Snapshot{
 		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
-		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances,
+		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances, Voices: current.Voices,
 		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(current.DefaultAdditionalParameters),
 		Revision:                    current.Revision + 1, ObservedAt: s.now().UTC(),
 	}
@@ -1391,8 +1474,8 @@ func (s *Service) DeleteProviderConfiguration(ctx context.Context, providerInsta
 	return nil
 }
 
-// buildProviderConfiguration materializes one exact endpoint per definition-owned channel.
-// buildProviderConfiguration 为每个定义拥有的通道实例化一个精确入口。
+// buildProviderConfiguration materializes one network Origin that definition-owned channels may share through bindings.
+// buildProviderConfiguration 实例化一个可由定义拥有通道通过绑定共享的网络 Origin。
 func (s *Service) buildProviderConfiguration(definition providerconfig.ProviderDefinition, input ConfigureProviderInput) (providerconfig.ProviderConfiguration, error) {
 	input.Handle = strings.TrimSpace(input.Handle)
 	input.DisplayName = strings.TrimSpace(input.DisplayName)
@@ -1455,16 +1538,14 @@ func (s *Service) buildProviderConfiguration(definition providerconfig.ProviderD
 		ID: instanceID, DefinitionID: definition.ID, Handle: input.Handle, DisplayName: input.DisplayName,
 		Status: providerconfig.LifecycleDraft, Revision: 1, DefinitionRevision: definition.Revision, CreatedAt: now, UpdatedAt: now,
 	}}
-	for _, channelID := range definition.ChannelIDs() {
-		endpointID, errEndpointID := generateID("ep_")
-		if errEndpointID != nil {
-			return providerconfig.ProviderConfiguration{}, errEndpointID
-		}
-		configuration.Endpoints = append(configuration.Endpoints, providerconfig.Endpoint{
-			ID: endpointID, ProviderInstanceID: instanceID, ChannelID: channelID, BaseURL: baseURL,
-			Region: region, Parameters: append([]providerconfig.EndpointParameterValue(nil), parameters...), Status: providerconfig.EndpointReady, Revision: 1,
-		})
+	endpointID, errEndpointID := generateID("ep_")
+	if errEndpointID != nil {
+		return providerconfig.ProviderConfiguration{}, errEndpointID
 	}
+	configuration.Endpoints = append(configuration.Endpoints, providerconfig.Endpoint{
+		ID: endpointID, ProviderInstanceID: instanceID, ChannelID: definition.ProtocolProfileID, BaseURL: baseURL,
+		Region: region, Parameters: append([]providerconfig.EndpointParameterValue(nil), parameters...), Status: providerconfig.EndpointReady, Revision: 1,
+	})
 	if errValidate := providerconfig.ValidateProviderConfiguration(configuration, definition); errValidate != nil {
 		return providerconfig.ProviderConfiguration{}, errValidate
 	}
@@ -1788,17 +1869,22 @@ func (s *Service) attachCredential(ctx context.Context, input AddCredentialInput
 	if errCredential != nil {
 		return CredentialAttachment{}, errCredential
 	}
-	bindings := make([]providerconfig.AccessBinding, 0, len(endpoints))
-	for _, endpoint := range endpoints {
-		if !definition.ChannelAllowsAuth(endpoint.ChannelID, credential.AuthMethodID) {
+	channels := definition.ChannelIDs()
+	bindings := make([]providerconfig.AccessBinding, 0, len(channels))
+	for _, channelID := range channels {
+		if !definition.ChannelAllowsAuth(channelID, credential.AuthMethodID) {
 			continue
+		}
+		endpoint, errEndpoint := endpointForChannel(endpoints, channelID)
+		if errEndpoint != nil {
+			return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errEndpoint)
 		}
 		bindingID, errBindingID := generateID("bind_")
 		if errBindingID != nil {
 			return CredentialAttachment{}, s.compensateCredentialAttachment(ctx, instance, credential, originalSnapshot, errBindingID)
 		}
 		bindings = append(bindings, providerconfig.AccessBinding{
-			ID: bindingID, ProviderInstanceID: instance.ID, ChannelID: endpoint.ChannelID, EndpointID: endpoint.ID,
+			ID: bindingID, ProviderInstanceID: instance.ID, ChannelID: channelID, EndpointID: endpoint.ID,
 			CredentialID: credential.ID, Priority: definition.Priority, Enabled: true, Revision: 1,
 		})
 	}
@@ -1855,6 +1941,20 @@ func (s *Service) attachCredential(ctx context.Context, input AddCredentialInput
 	return CredentialAttachment{Credential: credential, Bindings: bindings}, nil
 }
 
+// endpointForChannel selects an exact legacy channel endpoint or the sole shared Origin endpoint.
+// endpointForChannel 选择精确的旧通道端点或唯一的共享 Origin 端点。
+func endpointForChannel(endpoints []providerconfig.Endpoint, channelID string) (providerconfig.Endpoint, error) {
+	for _, endpoint := range endpoints {
+		if endpoint.ChannelID == channelID {
+			return endpoint, nil
+		}
+	}
+	if len(endpoints) == 1 {
+		return endpoints[0], nil
+	}
+	return providerconfig.Endpoint{}, fmt.Errorf("provider configuration has no unambiguous endpoint for channel %q", channelID)
+}
+
 // AttachAcquiredCredentialInput contains provider-owned credential material and its exact existing instance target.
 // AttachAcquiredCredentialInput 包含供应商拥有的凭据材料及其精确既有实例目标。
 type AttachAcquiredCredentialInput struct {
@@ -1891,6 +1991,19 @@ func (s *Service) AttachAcquiredCredential(ctx context.Context, input AttachAcqu
 			return CredentialAttachment{}, errToken
 		}
 		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "minimax":
+		if input.AuthMethodID != "device_flow" {
+			return CredentialAttachment{}, errors.New("MiniMax provider-owned credential attachment requires device_flow")
+		}
+		token, errToken := providerminimax.UnmarshalToken(input.Secret)
+		if errToken != nil {
+			return CredentialAttachment{}, errToken
+		}
+		regionMatches := (definition.ID == "system_minimax_api" && token.Region == "global") || (definition.ID == "system_minimax_cn" && token.Region == "cn")
+		if !regionMatches {
+			return CredentialAttachment{}, errors.New("MiniMax token region does not match the selected provider definition")
+		}
+		credentialInput.ExpiresAt = providerTokenExpiry(token.ExpiresAt.Unix())
 	case "xai":
 		token, errToken := providerxai.UnmarshalToken(input.Secret)
 		if errToken != nil {
@@ -2163,6 +2276,22 @@ func (s *Service) ReauthorizeCredential(ctx context.Context, input ReauthorizeCr
 			return providerconfig.Credential{}, errors.New("Kimi credential identity is inconsistent")
 		}
 		expiresAt = providerTokenExpiry(token.ExpiresAt)
+	case "system_minimax_api", "system_minimax_cn":
+		if input.AuthMethodID != "device_flow" {
+			return providerconfig.Credential{}, errors.New("MiniMax reauthorization requires device_flow")
+		}
+		token, errToken := providerminimax.UnmarshalToken(input.Secret)
+		if errToken != nil {
+			return providerconfig.Credential{}, errToken
+		}
+		regionMatches := (instance.DefinitionID == "system_minimax_api" && token.Region == "global") || (instance.DefinitionID == "system_minimax_cn" && token.Region == "cn")
+		if !regionMatches {
+			return providerconfig.Credential{}, errors.New("MiniMax replacement token region does not match the existing provider definition")
+		}
+		if credential.PrincipalKey != "" || len(credential.ScopeRefs) != 0 {
+			return providerconfig.Credential{}, errors.New("MiniMax credential identity is inconsistent")
+		}
+		expiresAt = providerTokenExpiry(token.ExpiresAt.Unix())
 	case "system_xai_oauth":
 		token, errToken := providerxai.UnmarshalToken(input.Secret)
 		if errToken != nil {

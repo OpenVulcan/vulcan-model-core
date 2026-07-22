@@ -1,0 +1,16 @@
+{
+  "request_id": "selection_model",
+  "target": {
+    "model": {
+      "target": "exact",
+      "provider_instance_id": "pvi_minimax_global",
+      "provider_model_id": "model_minimax_m3",
+      "execution_profile_id": "profile_minimax_m3",
+      "required_region": "Global"
+    }
+  },
+  "operation": "conversation.respond",
+  "effective_context_tokens": 204800,
+  "capability_revision": 1,
+  "catalog_revision": 1
+}

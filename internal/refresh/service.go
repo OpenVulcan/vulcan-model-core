@@ -26,7 +26,7 @@ var (
 const (
 	// credentialRefreshLeadTime refreshes short-lived provider tokens before the next metadata scan can cross expiry.
 	// credentialRefreshLeadTime 在下一次元数据扫描可能跨过到期时间前刷新短期供应商令牌。
-	credentialRefreshLeadTime = time.Minute
+	credentialRefreshLeadTime = 5 * time.Minute
 )
 
 // DriverRegistry resolves one trusted system-provider driver by definition identifier.
@@ -172,12 +172,25 @@ func (s *Service) refresh(ctx context.Context, instanceID string, discoveryCrede
 		if !supportsDiscovery {
 			return catalog.Snapshot{}, errors.New("provider declares model discovery without a ModelDiscoverer")
 		}
-		freshDiscovery, errDiscovery := discoverer.DiscoverModels(ctx, provider.DiscoveryRequest{ProviderInstance: instance, Credential: discoveryCredential})
+		lastETag := ""
+		if errCurrentSnapshot == nil && currentSnapshot.Dynamic != nil {
+			lastETag = currentSnapshot.Dynamic.ETag
+		}
+		freshDiscovery, errDiscovery := discoverer.DiscoverModels(ctx, provider.DiscoveryRequest{ProviderInstance: instance, Credential: discoveryCredential, ETag: lastETag})
 		if errDiscovery != nil {
-			return catalog.Snapshot{}, fmt.Errorf("discover provider models: %w", errDiscovery)
+			return catalog.Snapshot{}, recordDiscoveryFailure(ctx, s.catalogs, currentSnapshot, errCurrentSnapshot, instance.ID, now, errDiscovery)
 		}
 		if freshDiscovery.ObservedAt.IsZero() {
 			return catalog.Snapshot{}, errors.New("provider model discovery observed time is required")
+		}
+		if freshDiscovery.NotModified {
+			if errCurrentSnapshot != nil || currentSnapshot.Dynamic == nil {
+				return catalog.Snapshot{}, errors.New("provider model discovery returned not-modified without a last-good dynamic catalog")
+			}
+			return catalog.ApplyDynamicRefresh(ctx, s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: instance.ID, Authority: catalog.CatalogAuthorityProvider, ETag: freshDiscovery.ETag, RefreshedAt: freshDiscovery.ObservedAt, ExpiresAt: freshDiscovery.ExpiresAt, NotModified: true})
+		}
+		if strings.TrimSpace(freshDiscovery.SourceRevision) == "" || !freshDiscovery.ExpiresAt.After(freshDiscovery.ObservedAt) {
+			return catalog.Snapshot{}, errors.New("provider model discovery requires source revision and future expiry")
 		}
 		discovery = freshDiscovery
 	}
@@ -189,10 +202,21 @@ func (s *Service) refresh(ctx context.Context, instanceID string, discoveryCrede
 	entitlements := make([]catalog.ModelEntitlement, 0)
 	serviceEntitlements := make([]catalog.ServiceEntitlement, 0)
 	allowances := make([]catalog.AllowanceSnapshot, 0)
+	voices := make([]catalog.VoiceSnapshot, 0)
 	planByID := make(map[string]catalog.PlanSnapshot)
 	entitlementByID := make(map[string]catalog.ModelEntitlement)
 	serviceEntitlementByID := make(map[string]catalog.ServiceEntitlement)
 	allowanceByID := make(map[string]catalog.AllowanceSnapshot)
+	voiceByID := make(map[string]catalog.VoiceSnapshot)
+	if errCurrentSnapshot == nil {
+		for _, voice := range currentSnapshot.Voices {
+			if metadataCurrent(voice.ObservedAt, voice.ExpiresAt, now) {
+				if errAppend := appendUnique(voice.ID, voice, voiceByID, &voices); errAppend != nil {
+					return catalog.Snapshot{}, errAppend
+				}
+			}
+		}
+	}
 	if errCurrentSnapshot == nil && driverDefinition.Features.PlanReader != providerconfig.SupportSupported {
 		for _, plan := range currentSnapshot.Plans {
 			if metadataCurrent(plan.ObservedAt, plan.ExpiresAt, now) {
@@ -244,6 +268,25 @@ func (s *Service) refresh(ctx context.Context, instanceID string, discoveryCrede
 				return catalog.Snapshot{}, errPreserve
 			}
 			continue
+		}
+		if voiceReader, supported := driver.(provider.VoiceCatalogReader); supported {
+			credentialVoices, errVoices := voiceReader.ReadVoices(ctx, instance, credential)
+			if errVoices == nil {
+				for _, voice := range credentialVoices {
+					if voice.ProviderInstanceID != instance.ID || voice.CredentialID != credential.ID {
+						return catalog.Snapshot{}, errors.New("provider voice catalog crosses credential ownership")
+					}
+					if errValidate := voice.Validate(); errValidate != nil {
+						return catalog.Snapshot{}, fmt.Errorf("validate provider voice catalog: %w", errValidate)
+					}
+				}
+				voices = removeCredentialVoices(voices, voiceByID, credential.ID)
+				for _, voice := range credentialVoices {
+					if errAppend := appendUnique(voice.ID, voice, voiceByID, &voices); errAppend != nil {
+						return catalog.Snapshot{}, errAppend
+					}
+				}
+			}
 		}
 		// aggregateReader preserves consistency when one provider response contains multiple metadata classes.
 		// aggregateReader 在一个供应商响应包含多类元数据时保持一致性。
@@ -374,6 +417,7 @@ func (s *Service) refresh(ctx context.Context, instanceID string, discoveryCrede
 		ServiceEntitlements: serviceEntitlements,
 		Plans:               plans,
 		Allowances:          allowances,
+		Voices:              voices,
 		Revision:            revision,
 		ObservedAt:          discovery.ObservedAt,
 	}
@@ -385,10 +429,41 @@ func (s *Service) refresh(ctx context.Context, instanceID string, discoveryCrede
 		return catalog.Snapshot{}, fmt.Errorf("summarize provider account pools: %w", errPools)
 	}
 	snapshot.Pools = pools
+	if driverDefinition.Features.ModelDiscovery == providerconfig.SupportSupported {
+		return catalog.ApplyDynamicRefresh(ctx, s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: instance.ID, Authority: catalog.CatalogAuthorityProvider, SourceRevision: discovery.SourceRevision, ETag: discovery.ETag, RefreshedAt: discovery.ObservedAt, ExpiresAt: discovery.ExpiresAt, Candidate: &snapshot})
+	}
 	if errSave := s.catalogs.Save(ctx, snapshot); errSave != nil {
 		return catalog.Snapshot{}, errSave
 	}
 	return snapshot, nil
+}
+
+// recordDiscoveryFailure preserves the discovery cause and any durable failure-observation error.
+// recordDiscoveryFailure 保留发现失败原因以及任何持久化失败观测错误。
+func recordDiscoveryFailure(ctx context.Context, catalogs catalog.Store, current catalog.Snapshot, currentErr error, instanceID string, now time.Time, discoveryErr error) error {
+	discoveryFailure := fmt.Errorf("discover provider models: %w", discoveryErr)
+	if currentErr != nil || current.Dynamic == nil {
+		return discoveryFailure
+	}
+	_, errRecord := catalog.ApplyDynamicRefresh(context.WithoutCancel(ctx), catalogs, catalog.DynamicRefresh{ProviderInstanceID: instanceID, Authority: catalog.CatalogAuthorityProvider, RefreshedAt: now, FailureCode: "provider_discovery_failed"})
+	if errRecord == nil {
+		return discoveryFailure
+	}
+	return errors.Join(discoveryFailure, fmt.Errorf("record provider discovery failure: %w", errRecord))
+}
+
+// removeCredentialVoices replaces one credential's complete voice catalog after a successful read.
+// removeCredentialVoices 在成功读取后替换一个凭据的完整声音目录。
+func removeCredentialVoices(voices []catalog.VoiceSnapshot, byID map[string]catalog.VoiceSnapshot, credentialID string) []catalog.VoiceSnapshot {
+	retained := voices[:0]
+	for _, voice := range voices {
+		if voice.CredentialID == credentialID {
+			delete(byID, voice.ID)
+			continue
+		}
+		retained = append(retained, voice)
+	}
+	return retained
 }
 
 // prepareCredential refreshes only active, refreshable credentials whose known expiry is inside the safety lead time.

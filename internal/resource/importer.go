@@ -98,6 +98,9 @@ type URLImportInput struct {
 	// GeneratedBy records safe execution provenance for provider-generated URL acquisition.
 	// GeneratedBy 为供应商生成 URL 获取记录安全执行来源。
 	GeneratedBy *GenerationProvenance
+	// MaxBytes optionally applies a stricter call-scoped download ceiling.
+	// MaxBytes 可选地应用更严格的调用作用域下载上限。
+	MaxBytes *int64
 }
 
 // PublicDocumentFetcher securely downloads a bounded public sidecar document without persisting it as media.
@@ -250,7 +253,16 @@ func (i *Importer) importURL(ctx context.Context, input URLImportInput, source S
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
 		return Resource{}, fmt.Errorf("%w: upstream status %d", ErrImportResponse, response.StatusCode)
 	}
-	if response.ContentLength > i.resources.options.MaxObjectBytes {
+	maximumBytes := i.resources.options.MaxObjectBytes
+	if input.MaxBytes != nil {
+		if *input.MaxBytes <= 0 {
+			return Resource{}, fmt.Errorf("%w: call-scoped byte ceiling must be positive", ErrInvalidResource)
+		}
+		if *input.MaxBytes < maximumBytes {
+			maximumBytes = *input.MaxBytes
+		}
+	}
+	if response.ContentLength > maximumBytes {
 		return Resource{}, ErrResourceQuotaExceeded
 	}
 	finalURL := ""
@@ -259,7 +271,7 @@ func (i *Importer) importURL(ctx context.Context, input URLImportInput, source S
 	}
 	return i.resources.Create(ctx, CreateInput{
 		OwnerAPIKeyID: input.OwnerAPIKeyID, Kind: input.Kind, DeclaredMIME: input.DeclaredMIME, Source: source, SourceURL: finalURL,
-		Retention: input.Retention, ExpiresAt: input.ExpiresAt, GeneratedBy: input.GeneratedBy, Reader: response.Body,
+		Retention: input.Retention, ExpiresAt: input.ExpiresAt, GeneratedBy: input.GeneratedBy, Reader: response.Body, MaxBytes: input.MaxBytes,
 	})
 }
 

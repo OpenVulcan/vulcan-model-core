@@ -3,7 +3,10 @@ package vcp
 import (
 	"errors"
 	"fmt"
+	"math"
+	"net/url"
 	"sort"
+	"strings"
 	"time"
 )
 
@@ -188,6 +191,182 @@ type Event struct {
 	Citation *Citation `json:"citation,omitempty"`
 }
 
+// Validate verifies one closed semantic-event variant before reduction, persistence, or publication.
+// Validate 在归并、持久化或发布前校验一个封闭语义事件变体。
+func (e Event) Validate() error {
+	if strings.TrimSpace(e.ResponseID) == "" || e.ResponseID != strings.TrimSpace(e.ResponseID) || strings.TrimSpace(e.EventID) == "" || e.EventID != strings.TrimSpace(e.EventID) || e.Sequence == 0 || e.Time.IsZero() || e.ContentIndex < 0 {
+		return errors.New("invalid semantic event identity")
+	}
+	// forbiddenCommon reports fields that are never legal for the selected event branch.
+	// forbiddenCommon 报告所选事件分支绝不允许的字段。
+	forbiddenCommon := func(item bool, delta bool, tool bool, usage bool, finish bool, failure bool, warning bool, search bool, citation bool) bool {
+		return !item && (e.ItemID != "" || e.Item != nil) || !delta && e.Delta != "" || !tool && (e.ToolCallID != "" || e.ToolName != "" || e.UpstreamToolCallID != "" || e.FinalArguments != nil) || !usage && e.Usage != nil || !finish && e.FinishReason != "" || !failure && e.ErrorCode != "" || !warning && e.WarningCode != "" || !search && e.SearchCall != nil || !citation && e.Citation != nil
+	}
+	switch e.Type {
+	case EventResponseStarted, EventRouteResolved:
+		if forbiddenCommon(false, false, false, false, false, false, false, false, false) {
+			return errors.New("semantic event contains fields outside its branch")
+		}
+	case EventResponseCancelled:
+		if forbiddenCommon(false, false, false, false, true, false, false, false, false) {
+			return errors.New("response cancellation contains fields outside its branch")
+		}
+	case EventItemStarted:
+		if e.ItemID == "" || e.Item == nil || e.Item.ItemID != e.ItemID || forbiddenCommon(true, false, false, false, false, false, false, false, false) {
+			return errors.New("item.started requires one matching item")
+		}
+		if errItem := e.Item.validateStarted(); errItem != nil {
+			return errItem
+		}
+	case EventContentStarted, EventContentCompleted:
+		if e.ItemID == "" || e.Item != nil || forbiddenCommon(true, false, false, false, false, false, false, false, false) {
+			return errors.New("content boundary requires one item identifier")
+		}
+	case EventContentDelta:
+		if e.ItemID == "" || e.Item != nil || e.Delta == "" || forbiddenCommon(true, true, false, false, false, false, false, false, false) {
+			return errors.New("content.delta requires non-empty item content")
+		}
+	case EventToolArgumentsDelta:
+		if e.ItemID == "" || e.Item != nil || e.Delta == "" || forbiddenCommon(true, true, true, false, false, false, false, false, false) {
+			return errors.New("tool.arguments.delta requires non-empty item arguments")
+		}
+	case EventToolArgumentsCompleted:
+		if e.ItemID == "" || e.Item != nil || forbiddenCommon(true, false, true, false, false, false, false, false, false) {
+			return errors.New("tool.arguments.completed requires one item identifier")
+		}
+	case EventItemCompleted:
+		if e.ItemID == "" || e.Item != nil || forbiddenCommon(true, false, false, false, false, false, false, true, false) {
+			return errors.New("item.completed requires one item identifier")
+		}
+		if e.SearchCall != nil && e.SearchCall.validate() != nil {
+			return errors.New("item.completed contains an invalid search call")
+		}
+	case EventCitationCompleted:
+		if e.Item != nil || e.Citation == nil || forbiddenCommon(true, false, false, false, false, false, false, false, true) || e.Citation.validate() != nil {
+			return errors.New("citation.completed requires one valid citation")
+		}
+	case EventUsageUpdated:
+		if e.Usage == nil || forbiddenCommon(false, false, false, true, false, false, false, false, false) || e.Usage.validate() != nil {
+			return errors.New("usage.updated requires one valid usage observation")
+		}
+	case EventWarningRaised:
+		if strings.TrimSpace(e.WarningCode) == "" || e.WarningCode != strings.TrimSpace(e.WarningCode) || e.Item != nil || forbiddenCommon(true, false, false, false, false, false, true, false, false) {
+			return errors.New("warning.raised requires one safe warning code")
+		}
+	case EventResponseCompleted, EventResponseIncomplete:
+		if forbiddenCommon(false, false, false, false, true, false, false, false, false) {
+			return errors.New("response terminal contains fields outside its branch")
+		}
+	case EventResponseFailed:
+		if strings.TrimSpace(e.ErrorCode) == "" || e.ErrorCode != strings.TrimSpace(e.ErrorCode) || forbiddenCommon(false, false, false, false, false, true, false, false, false) {
+			return errors.New("response.failed requires one safe error code")
+		}
+	default:
+		return fmt.Errorf("unknown semantic event type %q", e.Type)
+	}
+	return nil
+}
+
+// validateStarted verifies the closed output-item shape accepted at item.started.
+// validateStarted 校验 item.started 接受的封闭输出项目形态。
+func (i OutputItem) validateStarted() error {
+	if strings.TrimSpace(i.ItemID) == "" || i.ItemID != strings.TrimSpace(i.ItemID) || i.Status != OutputItemInProgress {
+		return errors.New("started output item identity or status is invalid")
+	}
+	if i.Kind != ContextMessage && i.Kind != ContextToolCall && i.Kind != ContextReasoning && i.Kind != ContextRefusal && i.Kind != ContextSearchCall {
+		return errors.New("started output item kind is invalid")
+	}
+	if (i.Kind == ContextToolCall) != (i.ToolCall != nil) || (i.Kind == ContextSearchCall) != (i.SearchCall != nil) {
+		return errors.New("started output item payload does not match its kind")
+	}
+	if i.ToolCall != nil && (strings.TrimSpace(i.ToolCall.ToolCallID) == "" || !validToolCallStatus(i.ToolCall.Status)) {
+		return errors.New("started tool call is invalid")
+	}
+	if i.ToolCall != nil && len(i.ToolCall.ComputerActions) > 0 {
+		if i.ToolCall.Name != "computer_use" || i.ToolCall.Status != ToolCallCompleted || i.ToolCall.Arguments != "" {
+			return errors.New("started computer tool call is invalid")
+		}
+		for _, action := range i.ToolCall.ComputerActions {
+			if errAction := validateComputerAction(action); errAction != nil {
+				return fmt.Errorf("started computer action is invalid: %w", errAction)
+			}
+		}
+	}
+	if i.SearchCall != nil && i.SearchCall.validate() != nil {
+		return errors.New("started search call is invalid")
+	}
+	for _, content := range i.Content {
+		switch content.Type {
+		case ContentText, ContentRefusal, ContentCitation:
+			if content.ResourceRef != "" || content.ExtensionID != "" || len(content.Extension) != 0 {
+				return errors.New("started textual content contains unrelated fields")
+			}
+		case ContentImage, ContentAudio, ContentVideo, ContentFile:
+			if strings.TrimSpace(content.ResourceRef) == "" {
+				return errors.New("started media content requires a resource reference")
+			}
+		case ContentRegisteredExtension:
+			if strings.TrimSpace(content.ExtensionID) == "" || !validJSONObject(content.Extension) {
+				return errors.New("started extension content is invalid")
+			}
+		default:
+			return errors.New("started output content type is invalid")
+		}
+	}
+	return nil
+}
+
+// validate verifies one provider-observed native search call without inventing missing action details.
+// validate 校验一个供应商观测到的原生搜索调用，且不虚构缺失动作细节。
+func (s SearchCall) validate() error {
+	if strings.TrimSpace(s.ID) == "" || s.ID != strings.TrimSpace(s.ID) || strings.TrimSpace(s.Status) == "" || s.Status != strings.TrimSpace(s.Status) {
+		return errors.New("search call identity and status are required")
+	}
+	for _, source := range s.Sources {
+		parsed, errURL := url.Parse(source.URL)
+		if strings.TrimSpace(source.Type) == "" || errURL != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+			return errors.New("search call source is invalid")
+		}
+	}
+	return nil
+}
+
+// validate verifies one citation identity, HTTPS source, and optional ordered offsets.
+// validate 校验一个引用身份、HTTPS 来源与可选有序偏移。
+func (c Citation) validate() error {
+	parsed, errURL := url.Parse(c.URL)
+	if strings.TrimSpace(c.ID) == "" || c.ID != strings.TrimSpace(c.ID) || errURL != nil || parsed.Scheme != "https" || parsed.Hostname() == "" {
+		return errors.New("citation identity or URL is invalid")
+	}
+	if c.Location.Start != nil && *c.Location.Start < 0 || c.Location.End != nil && *c.Location.End < 0 || c.Location.Start != nil && c.Location.End != nil && *c.Location.End < *c.Location.Start {
+		return errors.New("citation offsets are invalid")
+	}
+	return nil
+}
+
+// validate verifies closed usage enums, non-negative finite metrics, and paired provider units.
+// validate 校验封闭用量枚举、非负有限指标与成对供应商单位。
+func (u UsageObservation) validate() error {
+	if u.Source != "provider_reported" && u.Source != "exact" && u.Source != "estimated" && u.Source != "derived" && u.Source != "unknown" {
+		return errors.New("usage source is invalid")
+	}
+	if u.Aggregation != "delta" && u.Aggregation != "cumulative" && u.Aggregation != "snapshot" || u.Phase != "preflight" && u.Phase != "streaming" && u.Phase != "terminal" && u.Phase != "billing" || strings.TrimSpace(u.AccountingBasis) == "" || u.AccountingBasis != strings.TrimSpace(u.AccountingBasis) {
+		return errors.New("usage semantics are invalid")
+	}
+	if (u.ServiceUnits == nil) != (u.ServiceUnit == "") {
+		return errors.New("usage service value and unit must be supplied together")
+	}
+	if u.ServiceUnits != nil && (*u.ServiceUnits < 0 || math.IsNaN(*u.ServiceUnits) || math.IsInf(*u.ServiceUnits, 0)) {
+		return errors.New("usage service units are invalid")
+	}
+	for _, value := range []*int64{u.InputTokens, u.OutputTokens, u.ReasoningTokens, u.CacheReadTokens, u.CacheCreationTokens, u.TotalTokens} {
+		if value != nil && *value < 0 {
+			return errors.New("usage token value is invalid")
+		}
+	}
+	return nil
+}
+
 // Response is the deterministic reduction of one legal event sequence.
 // Response 是一个合法事件序列的确定性归并结果。
 type Response struct {
@@ -243,7 +422,10 @@ func NewReducer(responseID string) *Reducer {
 // Apply validates and applies one semantic event.
 // Apply 校验并应用一个语义事件。
 func (r *Reducer) Apply(event Event) error {
-	if event.ResponseID != r.response.ResponseID || event.EventID == "" || event.Sequence == 0 {
+	if errEvent := event.Validate(); errEvent != nil {
+		return errEvent
+	}
+	if event.ResponseID != r.response.ResponseID {
 		return errors.New("invalid semantic event identity")
 	}
 	if _, duplicate := r.seenEvents[event.EventID]; duplicate {
@@ -354,17 +536,23 @@ func (r *Reducer) Apply(event Event) error {
 // Snapshot returns an isolated deterministic response value.
 // Snapshot 返回隔离的确定性响应值。
 func (r *Reducer) Snapshot() Response {
-	response := r.response
-	response.Items = make([]OutputItem, len(r.response.Items))
-	for index := range r.response.Items {
-		response.Items[index] = cloneOutputItem(r.response.Items[index])
+	return CloneResponse(r.response)
+}
+
+// CloneResponse returns a mutation-safe copy of one canonical response.
+// CloneResponse 返回一个防外部修改的规范响应副本。
+func CloneResponse(source Response) Response {
+	response := source
+	response.Items = make([]OutputItem, len(source.Items))
+	for index := range source.Items {
+		response.Items[index] = cloneOutputItem(source.Items[index])
 	}
-	response.Warnings = append([]string(nil), r.response.Warnings...)
-	response.Citations = make([]Citation, len(r.response.Citations))
-	for index := range r.response.Citations {
-		response.Citations[index] = cloneCitation(r.response.Citations[index])
+	response.Warnings = append([]string(nil), source.Warnings...)
+	response.Citations = make([]Citation, len(source.Citations))
+	for index := range source.Citations {
+		response.Citations[index] = cloneCitation(source.Citations[index])
 	}
-	response.Usage = cloneUsageObservation(r.response.Usage)
+	response.Usage = cloneUsageObservation(source.Usage)
 	return response
 }
 
@@ -378,12 +566,29 @@ func cloneOutputItem(source OutputItem) OutputItem {
 	}
 	if source.ToolCall != nil {
 		toolCall := *source.ToolCall
+		toolCall.ComputerActions = cloneComputerActions(source.ToolCall.ComputerActions)
 		cloned.ToolCall = &toolCall
 	}
 	if source.SearchCall != nil {
 		searchCall := *source.SearchCall
 		searchCall.Sources = append([]SearchSource(nil), source.SearchCall.Sources...)
 		cloned.SearchCall = &searchCall
+	}
+	return cloned
+}
+
+// cloneComputerActions returns a mutation-safe copy of provider computer actions.
+// cloneComputerActions 返回供应商计算机动作的防修改副本。
+func cloneComputerActions(source []ComputerAction) []ComputerAction {
+	cloned := make([]ComputerAction, len(source))
+	for index := range source {
+		cloned[index] = source[index]
+		cloned[index].X = cloneIntPointer(source[index].X)
+		cloned[index].Y = cloneIntPointer(source[index].Y)
+		cloned[index].ScrollX = cloneIntPointer(source[index].ScrollX)
+		cloned[index].ScrollY = cloneIntPointer(source[index].ScrollY)
+		cloned[index].Keys = append([]string(nil), source[index].Keys...)
+		cloned[index].Path = append([]ComputerPoint(nil), source[index].Path...)
 	}
 	return cloned
 }

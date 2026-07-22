@@ -1,0 +1,11 @@
+{
+  "actions": [
+    {"type": "click", "x": 405, "y": 157, "button": "left", "keys": ["SHIFT"]},
+    {"type": "type", "text": "penguin"},
+    {"type": "screenshot"}
+  ],
+  "result": {
+    "resource_ref": "res_0123456789abcdef0123456789abcdef",
+    "detail": "original"
+  }
+}

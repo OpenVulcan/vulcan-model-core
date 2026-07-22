@@ -46,6 +46,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "@/components/ui/table";
 import { type TranslationKey, useI18n } from "@/i18n";
 import { ProviderIcon } from "@/lib/provider-icons";
 import {
@@ -53,19 +61,24 @@ import {
   cancelClaudeOAuthFlow,
   cancelCodexOAuthFlow,
   cancelKimiDeviceFlow,
+  cancelMiniMaxDeviceFlow,
   cancelCodexDeviceFlow,
   cancelXAIDeviceFlow,
   attachProviderCredential,
   deleteProviderCredential,
   fetchAuthorizedProviders,
+  fetchProviderBindings,
   fetchCustomProtocolProfiles,
   fetchProviderCatalog,
   fetchProviderDefinitions,
+  fetchProviderEndpoints,
+  fetchProviderFiles,
   fetchProviderGroups,
   onboardAntigravityOAuthFlow,
   onboardClaudeOAuthFlow,
   onboardCodexOAuthFlow,
   onboardKimiDeviceFlow,
+  onboardMiniMaxDeviceFlow,
   onboardCodexDeviceFlow,
   onboardXAIDeviceFlow,
   onboardCustomProvider,
@@ -78,6 +91,7 @@ import {
   startClaudeOAuthFlow,
   startCodexOAuthFlow,
   startKimiDeviceFlow,
+  startMiniMaxDeviceFlow,
   startCodexDeviceFlow,
   startXAIDeviceFlow,
   updateProviderCredentialPlan,
@@ -93,6 +107,8 @@ import {
   type ProviderDefinitionSummary,
   type ProviderDefinition,
   type ProviderCredential,
+  type ProviderEndpoint,
+  type ProviderFileDiagnostic,
   type ProviderAllowance,
   type ProviderAllowanceWindow,
   type ProviderCatalogMetadata,
@@ -377,7 +393,10 @@ export function ProviderManagementPage({
         for (const entry of entries) {
           if (!entry) continue;
           const [providerInstanceID, metadata] = entry;
-          if (!next[providerInstanceID] || metadata.revision >= next[providerInstanceID].revision) {
+          if (
+            !next[providerInstanceID] ||
+            metadata.revision >= next[providerInstanceID].revision
+          ) {
             next[providerInstanceID] = metadata;
           }
         }
@@ -423,9 +442,10 @@ export function ProviderManagementPage({
 
   // selectedDefinition is the exact immutable variant passed to the onboarding command.
   // selectedDefinition 是传递给录入命令的精确不可变变体。
-  const selectedDefinition = groups
-    .flatMap((group) => group.provider_definitions)
-    .find((definition) => definition.id === selectedDefinitionID) ??
+  const selectedDefinition =
+    groups
+      .flatMap((group) => group.provider_definitions)
+      .find((definition) => definition.id === selectedDefinitionID) ??
     definitions.find((definition) => definition.id === selectedDefinitionID);
   // selectedCredentialCategory is the top-level native family or custom provider selected in the directory.
   // selectedCredentialCategory 是目录中选中的顶层原生系列或自定义供应商。
@@ -434,8 +454,8 @@ export function ProviderManagementPage({
   );
   // selectedCredentialProviders contains every configured subtype instance owned by the selected category.
   // selectedCredentialProviders 包含所选大类拥有的每个已配置子类实例。
-  const selectedCredentialProviders = authorizedProviders.filter(
-    (provider) => selectedCredentialCategory?.definitions.some(
+  const selectedCredentialProviders = authorizedProviders.filter((provider) =>
+    selectedCredentialCategory?.definitions.some(
       (definition) => definition.id === provider.instance.definition_id,
     ),
   );
@@ -838,15 +858,20 @@ export function ProviderManagementPage({
           credentialCategories.length > 0 ? (
             <div className="grid min-h-[32rem] overflow-hidden rounded-xl border lg:grid-cols-[16rem_minmax(0,1fr)]">
               <aside className="border-b bg-muted/20 p-2 lg:border-b-0 lg:border-r">
-                <div className="space-y-1" role="tree" aria-label={t("credentials.title")}>
+                <div
+                  className="space-y-1"
+                  role="tree"
+                  aria-label={t("credentials.title")}
+                >
                   {credentialCategories.map((category) => {
                     // configuredProviders contains every configured subtype owned by this top-level category.
                     // configuredProviders 包含此顶层大类拥有的每个已配置子类。
                     const configuredProviders = authorizedProviders.filter(
-                      (provider) => category.definitions.some(
-                        (definition) =>
-                          definition.id === provider.instance.definition_id,
-                      ),
+                      (provider) =>
+                        category.definitions.some(
+                          (definition) =>
+                            definition.id === provider.instance.definition_id,
+                        ),
                     );
                     // credentialCount summarizes every account attached across all category subtypes.
                     // credentialCount 汇总此大类所有子类附加的账号。
@@ -854,8 +879,7 @@ export function ProviderManagementPage({
                       (count, provider) => count + provider.credentials.length,
                       0,
                     );
-                    const selected =
-                      category.id === activeCredentialCategoryID;
+                    const selected = category.id === activeCredentialCategoryID;
                     return (
                       <button
                         key={category.id}
@@ -885,11 +909,25 @@ export function ProviderManagementPage({
               </aside>
               <main className="min-w-0 p-3 lg:p-4">
                 {selectedCredentialProviders.length > 0 ? (
-                  <div className="grid gap-4">
-                    {selectedCredentialProviders.map(
-                      renderAuthorizedProviderCard,
-                    )}
-                  </div>
+                  <CredentialManagementTable
+                    providers={selectedCredentialProviders}
+                    definitions={definitions}
+                    groups={groups}
+                    metadataByProviderID={providerMetadata}
+                    managementAuthToken={managementAuthToken}
+                    refreshingMetadataIDs={refreshingMetadataIDs}
+                    metadataErrors={metadataErrors}
+                    refreshingCredentialIDs={refreshingCredentialIDs}
+                    credentialRefreshErrors={credentialRefreshErrors}
+                    deletingCredentialIDs={deletingCredentialIDs}
+                    onRefreshMetadata={refreshAccountMetadata}
+                    onRefreshCredential={refreshAccountCredential}
+                    onChangeCredentialPriority={changeCredentialPriority}
+                    onChangeCredentialPlan={changeCredentialPlan}
+                    onReauthorizeCredential={beginCredentialReauthorization}
+                    onDeleteCredential={deleteCredential}
+                    onAddCredential={beginCredentialAttachment}
+                  />
                 ) : selectedCredentialCategory ? (
                   <Card>
                     <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
@@ -955,11 +993,11 @@ export function ProviderManagementPage({
             }
           >
             <DialogHeader>
-              {((credentialCreationCategory && selectedDefinition) ||
-                ((selectedDefinition || configuringCustom) &&
-                  !attachmentTarget &&
-                  !reauthorizationTarget &&
-                  !credentialIntent)) ? (
+              {(credentialCreationCategory && selectedDefinition) ||
+              ((selectedDefinition || configuringCustom) &&
+                !attachmentTarget &&
+                !reauthorizationTarget &&
+                !credentialIntent) ? (
                 <Button
                   type="button"
                   variant="ghost"
@@ -978,20 +1016,22 @@ export function ProviderManagementPage({
                 <DialogTitle>
                   {reauthorizationTarget
                     ? t("providers.reauthorizeCredential")
-                    : attachmentTarget || credentialIntent || credentialCreationCategory
+                    : attachmentTarget ||
+                        credentialIntent ||
+                        credentialCreationCategory
                       ? t("providers.addCredential")
-                    : selectedDefinition || configuringCustom
-                    ? t("providers.configureProvider")
-                    : t("providers.add")}
+                      : selectedDefinition || configuringCustom
+                        ? t("providers.configureProvider")
+                        : t("providers.add")}
                 </DialogTitle>
                 <DialogDescription>
                   {selectedDefinition
                     ? selectedDefinition.display_name
                     : credentialCreationCategory
                       ? credentialCreationCategory.display_name
-                    : configuringCustom
-                      ? t("providers.customDescription")
-                      : t("providers.description")}
+                      : configuringCustom
+                        ? t("providers.customDescription")
+                        : t("providers.description")}
                 </DialogDescription>
               </div>
               <DialogClose
@@ -1133,10 +1173,12 @@ function findProviderDefinition(
   groups: ProviderGroup[],
   definitionID: string,
 ): ProviderDefinitionIdentity | undefined {
-  return definitions.find((definition) => definition.id === definitionID) ??
+  return (
+    definitions.find((definition) => definition.id === definitionID) ??
     groups
       .flatMap((group) => group.provider_definitions)
-      .find((definition) => definition.id === definitionID);
+      .find((definition) => definition.id === definitionID)
+  );
 }
 
 // buildCredentialProviderCategories returns custom providers and native families as top-level credential navigation entries.
@@ -1181,10 +1223,7 @@ function buildCredentialProviderCategories(
     }
   }
   for (const definition of definitions) {
-    if (
-      definition.kind !== "system" ||
-      seenDefinitionIDs.has(definition.id)
-    ) {
+    if (definition.kind !== "system" || seenDefinitionIDs.has(definition.id)) {
       continue;
     }
     seenDefinitionIDs.add(definition.id);
@@ -1321,11 +1360,7 @@ function ProviderGroupSelectionCard({
             <span className="block font-semibold">{group.display_name}</span>
             <span className="mt-1 flex flex-wrap gap-1.5">
               {badges.map((badge) => (
-                <Badge
-                  key={badge}
-                  variant="default"
-                  className="rounded-sm"
-                >
+                <Badge key={badge} variant="default" className="rounded-sm">
                   {badge}
                 </Badge>
               ))}
@@ -1363,7 +1398,1442 @@ function ProviderGroupSelectionCard({
 // providerGroupBadges 为 Alibaba 返回简洁系列标签，并为其他供应商保留通用变体标签。
 function providerGroupBadges(group: ProviderGroup): string[] {
   if (group.id === "alibaba") return ["Coding Plan", "Token Plan"];
-  return group.provider_definitions.map((definition) => definition.variant_name);
+  return group.provider_definitions.map(
+    (definition) => definition.variant_name,
+  );
+}
+
+// CredentialManagementTableProps defines the compact credential-only workspace contract.
+// CredentialManagementTableProps 定义紧凑凭据专用工作区的契约。
+interface CredentialManagementTableProps {
+  // providers contains configured instances belonging to the selected credential category.
+  // providers 包含属于当前所选凭据分类的已配置实例。
+  providers: AuthorizedProvider[];
+  // definitions resolves each configured instance to server-owned authentication and plan metadata.
+  // definitions 将每个已配置实例解析为服务端拥有的认证与套餐元数据。
+  definitions: ProviderDefinitionSummary[];
+  // groups supplies native definition metadata that is not repeated in the ungrouped inventory.
+  // groups 提供未在未分组清单中重复的原生定义元数据。
+  groups: ProviderGroup[];
+  // metadataByProviderID stores the latest management-safe provider catalog snapshot by immutable instance identifier.
+  // metadataByProviderID 按不可变实例标识保存最新的管理安全供应商目录快照。
+  metadataByProviderID: Readonly<Record<string, ProviderCatalogMetadata>>;
+  // managementAuthToken authorizes protected resource metadata reads without retaining it in dialog state.
+  // managementAuthToken 授权受保护资源元数据读取，且不会将其保留在对话框状态中。
+  managementAuthToken: string;
+  // refreshingMetadataIDs identifies instances with an active provider-native metadata refresh.
+  // refreshingMetadataIDs 标识正在执行供应商原生元数据刷新的实例。
+  refreshingMetadataIDs: ReadonlySet<string>;
+  // metadataErrors contains safe per-instance metadata refresh failures.
+  // metadataErrors 包含安全的按实例划分的元数据刷新失败。
+  metadataErrors: Readonly<Record<string, string>>;
+  // refreshingCredentialIDs identifies credentials with an active refresh request.
+  // refreshingCredentialIDs 标识正在执行刷新请求的凭据。
+  refreshingCredentialIDs: ReadonlySet<string>;
+  // credentialRefreshErrors contains safe per-credential refresh failures.
+  // credentialRefreshErrors 包含安全的按凭据划分的刷新失败。
+  credentialRefreshErrors: Readonly<Record<string, string>>;
+  // deletingCredentialIDs identifies credentials pending confirmed deletion.
+  // deletingCredentialIDs 标识正在等待确认删除完成的凭据。
+  deletingCredentialIDs: ReadonlySet<string>;
+  // onRefreshMetadata refreshes one exact provider-native catalog snapshot.
+  // onRefreshMetadata 刷新一个精确供应商原生目录快照。
+  onRefreshMetadata: (providerInstanceID: string) => Promise<void>;
+  // onRefreshCredential refreshes one exact local provider credential.
+  // onRefreshCredential 刷新一个精确的本地供应商凭据。
+  onRefreshCredential: (
+    providerInstanceID: string,
+    credentialID: string,
+  ) => void;
+  // onChangeCredentialPriority persists one confirmed nonnegative credential ordering value.
+  // onChangeCredentialPriority 持久化一个已确认的非负凭据排序值。
+  onChangeCredentialPriority: (
+    providerInstanceID: string,
+    credentialID: string,
+    priority: number,
+  ) => Promise<void>;
+  // onChangeCredentialPlan persists one definition-owned manual plan selection.
+  // onChangeCredentialPlan 持久化一个由定义拥有的人工套餐选择。
+  onChangeCredentialPlan: (
+    providerInstanceID: string,
+    credentialID: string,
+    planOptionID: string,
+  ) => Promise<void>;
+  // onReauthorizeCredential opens the exact existing credential acquisition workflow.
+  // onReauthorizeCredential 打开精确既有凭据的获取工作流。
+  onReauthorizeCredential: (
+    providerInstanceID: string,
+    definitionID: string,
+    credential: ProviderCredential,
+  ) => void;
+  // onDeleteCredential deletes one confirmed credential.
+  // onDeleteCredential 删除一个已确认的凭据。
+  onDeleteCredential: (
+    providerInstanceID: string,
+    credentialID: string,
+  ) => Promise<void>;
+  // onAddCredential opens attachment for an existing provider instance.
+  // onAddCredential 为既有供应商实例打开凭据附加流程。
+  onAddCredential: (provider: AuthorizedProvider) => void;
+}
+
+// CredentialPriorityEditTarget identifies the only credential permitted to receive the currently open priority update.
+// CredentialPriorityEditTarget 标识当前打开的优先级更新唯一允许作用的凭据。
+interface CredentialPriorityEditTarget {
+  // providerInstanceID owns the exact local credential.
+  // providerInstanceID 拥有精确的本地凭据。
+  providerInstanceID: string;
+  // credential is the management-safe credential shown by the table row.
+  // credential 是由表格行展示的管理安全凭据。
+  credential: ProviderCredential;
+}
+
+// CredentialResourceDialogTarget scopes a resource dialog to one provider credential and its exact definition.
+// CredentialResourceDialogTarget 将资源对话框限定到一个供应商凭据及其精确定义。
+interface CredentialResourceDialogTarget {
+  // provider owns the selected credential.
+  // provider 拥有已选凭据。
+  provider: AuthorizedProvider;
+  // definition authoritatively describes provider-specific resource support when available.
+  // definition 在可用时权威描述供应商专用资源支持。
+  definition?: ProviderDefinitionIdentity;
+  // credential is the selected account whose resources may be listed.
+  // credential 是可以列出资源的已选账号。
+  credential: ProviderCredential;
+}
+
+// ProviderResourceFileGroup keeps provider files separate by their exact configured endpoint.
+// ProviderResourceFileGroup 按其精确配置端点分离供应商文件。
+interface ProviderResourceFileGroup {
+  // endpoint is the management-safe configured upstream target that produced the listing.
+  // endpoint 是产生该列表的管理安全已配置上游目标。
+  endpoint: ProviderEndpoint;
+  // files contains only redacted file metadata and never file content.
+  // files 仅包含脱敏文件元数据，绝不包含文件内容。
+  files: ProviderFileDiagnostic[];
+}
+
+// CredentialManagementTable renders credential rows with only account-facing controls and on-demand detail dialogs.
+// CredentialManagementTable 渲染仅包含账号侧控件的凭据行，并按需打开详情对话框。
+function CredentialManagementTable({
+  providers,
+  definitions,
+  groups,
+  metadataByProviderID,
+  managementAuthToken,
+  refreshingMetadataIDs,
+  metadataErrors,
+  refreshingCredentialIDs,
+  credentialRefreshErrors,
+  deletingCredentialIDs,
+  onRefreshMetadata,
+  onRefreshCredential,
+  onChangeCredentialPriority,
+  onChangeCredentialPlan,
+  onReauthorizeCredential,
+  onDeleteCredential,
+  onAddCredential,
+}: CredentialManagementTableProps) {
+  const { t } = useI18n();
+  // modelProviderInstanceID opens one provider-scoped supported-model dialog without duplicating model details in the table.
+  // modelProviderInstanceID 打开一个供应商作用域的支持模型对话框，而不在表格中重复模型详情。
+  const [modelProviderInstanceID, setModelProviderInstanceID] = useState("");
+  // resourceTarget constrains the resource dialog to one exact local credential.
+  // resourceTarget 将资源对话框限定到一个精确的本地凭据。
+  const [resourceTarget, setResourceTarget] =
+    useState<CredentialResourceDialogTarget | null>(null);
+  // resourceFileGroups preserves the endpoint boundary when MiniMax returns file metadata.
+  // resourceFileGroups 在 MiniMax 返回文件元数据时保留端点边界。
+  const [resourceFileGroups, setResourceFileGroups] = useState<
+    ProviderResourceFileGroup[]
+  >([]);
+  // resourceFilesLoading reports the explicit on-demand provider file read.
+  // resourceFilesLoading 表示显式按需的供应商文件读取。
+  const [resourceFilesLoading, setResourceFilesLoading] = useState(false);
+  // resourceFilesFailed records a safe generic failure without retaining provider response content.
+  // resourceFilesFailed 记录安全的通用失败，而不保留供应商响应内容。
+  const [resourceFilesFailed, setResourceFilesFailed] = useState(false);
+  // priorityEditTarget identifies the only credential receiving a confirmed priority change.
+  // priorityEditTarget 标识唯一接收已确认优先级变更的凭据。
+  const [priorityEditTarget, setPriorityEditTarget] =
+    useState<CredentialPriorityEditTarget | null>(null);
+  // priorityDraft is deliberately dialog-local so a table row never edits priority on blur.
+  // priorityDraft 被刻意限定在对话框内，因此表格行绝不会在失焦时编辑优先级。
+  const [priorityDraft, setPriorityDraft] = useState("");
+  // priorityUpdatePending prevents duplicate confirmed updates for one credential.
+  // priorityUpdatePending 防止同一凭据重复提交已确认的更新。
+  const [priorityUpdatePending, setPriorityUpdatePending] = useState(false);
+  // priorityUpdateError distinguishes invalid local input from a failed persisted update.
+  // priorityUpdateError 区分无效的本地输入与失败的持久化更新。
+  const [priorityUpdateError, setPriorityUpdateError] = useState<
+    "invalid" | "failed" | null
+  >(null);
+  // modelProvider resolves the live row target after inventory reloads while its dialog remains open.
+  // modelProvider 在目录重载后解析仍处于打开状态的实时行目标。
+  const modelProvider = providers.find(
+    (provider) => provider.instance.id === modelProviderInstanceID,
+  );
+  // modelDefinition supplies the exact provider capability contract for the selected model dialog.
+  // modelDefinition 为已选模型对话框提供精确的供应商能力契约。
+  const modelDefinition = modelProvider
+    ? findProviderDefinition(
+        definitions,
+        groups,
+        modelProvider.instance.definition_id,
+      )
+    : undefined;
+  // modelMetadata always follows the latest parent-owned snapshot instead of keeping a stale dialog copy.
+  // modelMetadata 始终跟随最新的父级快照，而不保留过期的对话框副本。
+  const modelMetadata = modelProvider
+    ? metadataByProviderID[modelProvider.instance.id]
+    : undefined;
+  // resourceMetadata always follows the latest parent-owned snapshot for the selected credential.
+  // resourceMetadata 始终跟随已选凭据的最新父级快照。
+  const resourceMetadata = resourceTarget
+    ? metadataByProviderID[resourceTarget.provider.instance.id]
+    : undefined;
+  // resourceVoices retains only entries owned by the selected credential and never mixes accounts.
+  // resourceVoices 仅保留由已选凭据拥有的条目，绝不混合账号。
+  const resourceVoices = resourceTarget
+    ? (resourceMetadata?.voices ?? []).filter(
+        (voice) => voice.credential_id === resourceTarget.credential.id,
+      )
+    : [];
+  // resourceUsesProviderFiles is true only for the exact MiniMax definitions implemented by the protected file endpoint.
+  // resourceUsesProviderFiles 仅在受保护文件端点已实现的精确 MiniMax 定义下为真。
+  const resourceUsesProviderFiles = supportsMiniMaxProviderFileList(
+    resourceTarget?.definition?.id,
+  );
+  // resourceHasFiles avoids presenting an empty detail section as a loaded resource list.
+  // resourceHasFiles 避免将空详情区展示为已加载的资源列表。
+  const resourceHasFiles = resourceFileGroups.some(
+    (group) => group.files.length > 0,
+  );
+
+  useEffect(() => {
+    if (!resourceTarget || !resourceUsesProviderFiles) {
+      setResourceFileGroups([]);
+      setResourceFilesLoading(false);
+      setResourceFilesFailed(false);
+      return;
+    }
+    // controller cancels the dialog-owned diagnostic reads when the user closes or switches the resource target.
+    // controller 在用户关闭或切换资源目标时取消由对话框拥有的诊断读取。
+    const controller = new AbortController();
+    setResourceFileGroups([]);
+    setResourceFilesLoading(true);
+    setResourceFilesFailed(false);
+    void (async () => {
+      try {
+        const [endpoints, bindings] = await Promise.all([
+          fetchProviderEndpoints(
+            managementAuthToken,
+            resourceTarget.provider.instance.id,
+            controller.signal,
+          ),
+          fetchProviderBindings(
+            managementAuthToken,
+            resourceTarget.provider.instance.id,
+            controller.signal,
+          ),
+        ]);
+        // boundEndpointIDs selects only endpoints that the exact credential is enabled to use.
+        // boundEndpointIDs 仅选择精确凭据已启用使用权的端点。
+        const boundEndpointIDs = new Set(
+          bindings
+            .filter(
+              (binding) =>
+                binding.credential_id === resourceTarget.credential.id &&
+                binding.enabled,
+            )
+            .map((binding) => binding.endpoint_id),
+        );
+        // boundEndpoints prevents a diagnostic request from probing unrelated or disabled credential paths.
+        // boundEndpoints 防止诊断请求探测无关或已禁用的凭据路径。
+        const boundEndpoints = endpoints.filter((endpoint) =>
+          boundEndpointIDs.has(endpoint.id),
+        );
+        const fileGroups = await Promise.all(
+          boundEndpoints.map(async (endpoint) => ({
+            endpoint,
+            files: await fetchProviderFiles(
+              managementAuthToken,
+              resourceTarget.provider.instance.id,
+              endpoint.id,
+              resourceTarget.credential.id,
+              controller.signal,
+            ),
+          })),
+        );
+        if (controller.signal.aborted) return;
+        setResourceFileGroups(fileGroups);
+      } catch {
+        if (controller.signal.aborted) return;
+        setResourceFilesFailed(true);
+      } finally {
+        if (!controller.signal.aborted) setResourceFilesLoading(false);
+      }
+    })();
+    return () => controller.abort();
+  }, [managementAuthToken, resourceTarget, resourceUsesProviderFiles]);
+
+  // openModelCatalog starts one explicit account refresh and opens the compact model-only detail dialog.
+  // openModelCatalog 启动一次显式账号刷新，并打开紧凑的仅模型详情对话框。
+  function openModelCatalog(
+    provider: AuthorizedProvider,
+    definition: ProviderDefinitionIdentity | undefined,
+  ): void {
+    setModelProviderInstanceID(provider.instance.id);
+    if (providerSupportsAccountMetadata(definition)) {
+      void onRefreshMetadata(provider.instance.id);
+    }
+  }
+
+  // openResourceCatalog starts any supported metadata refresh before showing credential-scoped resources.
+  // openResourceCatalog 在展示凭据作用域资源前启动任何受支持的元数据刷新。
+  function openResourceCatalog(
+    provider: AuthorizedProvider,
+    definition: ProviderDefinitionIdentity | undefined,
+    credential: ProviderCredential,
+  ): void {
+    setResourceTarget({ provider, definition, credential });
+    if (providerSupportsAccountMetadata(definition)) {
+      void onRefreshMetadata(provider.instance.id);
+    }
+  }
+
+  // openPriorityEditor copies the current persisted priority into an explicit confirmation dialog.
+  // openPriorityEditor 将当前持久化优先级复制到显式确认对话框中。
+  function openPriorityEditor(
+    providerInstanceID: string,
+    credential: ProviderCredential,
+  ): void {
+    setPriorityEditTarget({ providerInstanceID, credential });
+    setPriorityDraft(String(credential.priority));
+    setPriorityUpdateError(null);
+  }
+
+  // closePriorityEditor discards an unconfirmed priority draft.
+  // closePriorityEditor 丢弃未确认的优先级草稿。
+  function closePriorityEditor(): void {
+    if (priorityUpdatePending) return;
+    setPriorityEditTarget(null);
+    setPriorityDraft("");
+    setPriorityUpdateError(null);
+  }
+
+  // savePriority commits only one syntactically valid nonnegative safe integer after explicit confirmation.
+  // savePriority 仅在显式确认后提交一个语法有效的非负安全整数。
+  async function savePriority(): Promise<void> {
+    if (!priorityEditTarget) return;
+    const normalizedPriority = priorityDraft.trim();
+    if (!/^(0|[1-9][0-9]*)$/.test(normalizedPriority)) {
+      setPriorityUpdateError("invalid");
+      return;
+    }
+    const priority = Number(normalizedPriority);
+    if (!Number.isSafeInteger(priority)) {
+      setPriorityUpdateError("invalid");
+      return;
+    }
+    setPriorityUpdatePending(true);
+    setPriorityUpdateError(null);
+    try {
+      await onChangeCredentialPriority(
+        priorityEditTarget.providerInstanceID,
+        priorityEditTarget.credential.id,
+        priority,
+      );
+      setPriorityEditTarget(null);
+      setPriorityDraft("");
+    } catch {
+      setPriorityUpdateError("failed");
+    } finally {
+      setPriorityUpdatePending(false);
+    }
+  }
+
+  return (
+    <>
+      <div className="overflow-hidden rounded-xl border">
+        <Table>
+          <TableHeader className="bg-muted/40">
+            <TableRow>
+              <TableHead className="min-w-52">
+                {t("providerConfig.provider")}
+              </TableHead>
+              <TableHead className="min-w-48">
+                {t("providers.authorizations")}
+              </TableHead>
+              <TableHead className="min-w-40">
+                {t("providers.membershipPlan")}
+              </TableHead>
+              <TableHead className="min-w-48">{t("providers.usage")}</TableHead>
+              <TableHead className="w-24 text-center">
+                {t("providers.priority")}
+              </TableHead>
+              <TableHead className="w-24 text-center">
+                {t("providerConfig.status")}
+              </TableHead>
+              <TableHead className="min-w-80 text-right">
+                {t("providerConfig.actions")}
+              </TableHead>
+            </TableRow>
+          </TableHeader>
+          <TableBody>
+            {providers.flatMap((provider) => {
+              // definition is resolved once per provider so every credential row obeys the same server-authored contract.
+              // definition 每个供应商仅解析一次，因此每个凭据行都遵循相同的服务端编写契约。
+              const definition = findProviderDefinition(
+                definitions,
+                groups,
+                provider.instance.definition_id,
+              );
+              // metadata is the latest local catalog snapshot shared by the provider's credential rows.
+              // metadata 是由该供应商凭据行共享的最新本地目录快照。
+              const metadata = metadataByProviderID[provider.instance.id];
+              const supportsMetadata = providerSupportsAccountMetadata(definition);
+              if (provider.credentials.length === 0) {
+                return [
+                  <TableRow key={provider.instance.id}>
+                    <TableCell className="whitespace-normal py-3 align-top">
+                      <div className="flex items-center gap-3">
+                        <ProviderIcon
+                          definitionID={provider.instance.definition_id}
+                          groupID={definition?.group_id}
+                          className="size-[26px]"
+                        />
+                        <div className="min-w-0">
+                          <p className="font-medium">
+                            {provider.instance.display_name}
+                          </p>
+                          <p className="text-muted-foreground mt-1 text-xs">
+                            {definition?.display_name ??
+                              provider.instance.definition_id}
+                          </p>
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell
+                      colSpan={6}
+                      className="whitespace-normal py-3 align-middle"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-3">
+                        <span className="text-muted-foreground text-sm">
+                          {t("providers.noCredentialsForProvider")}
+                        </span>
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          aria-label={`${t("providers.addCredential")} ${provider.instance.display_name}`}
+                          onClick={() => onAddCredential(provider)}
+                        >
+                          <PlusIcon className="size-3.5" />
+                          {t("providers.addCredential")}
+                        </Button>
+                      </div>
+                    </TableCell>
+                  </TableRow>,
+                ];
+              }
+              return provider.credentials.map((credential, credentialIndex) => {
+                // authMethod is resolved only from the owning definition and never inferred from a credential value.
+                // authMethod 仅从所属定义解析，绝不从凭据值推断。
+                const authMethod = definition?.auth_methods.find(
+                  (method) => method.id === credential.auth_method_id,
+                );
+                const canListResources = supportsCredentialResourceList(
+                  definition?.id,
+                  metadata,
+                );
+                return (
+                  <TableRow key={credential.id}>
+                    <TableCell className="whitespace-normal py-3 align-top">
+                      <div className="flex items-center gap-3">
+                        <ProviderIcon
+                          definitionID={provider.instance.definition_id}
+                          groupID={definition?.group_id}
+                          className="size-[26px]"
+                        />
+                        <div className="min-w-0">
+                          <p className="font-medium">
+                            {provider.instance.display_name}
+                          </p>
+                          <p className="text-muted-foreground mt-1 text-xs">
+                            {definition?.display_name ??
+                              provider.instance.definition_id}
+                          </p>
+                        </div>
+                      </div>
+                    </TableCell>
+                    <TableCell className="whitespace-normal py-3 align-top">
+                      <p className="font-medium">{credential.label}</p>
+                      <p className="text-muted-foreground mt-1 text-xs">
+                        {authorizationTypeLabel(
+                          t,
+                          authMethod?.type,
+                          credential.auth_method_id,
+                        )}
+                      </p>
+                    </TableCell>
+                    <TableCell className="whitespace-normal py-3 align-top">
+                      {authMethod?.plan_acquisition === "manual_required" ? (
+                        <ReadonlyCombobox
+                          value={
+                            credential.declared_plan?.plan_option_id ?? ""
+                          }
+                          onValueChange={(value) => {
+                            if (
+                              value !==
+                              credential.declared_plan?.plan_option_id
+                            ) {
+                              void onChangeCredentialPlan(
+                                provider.instance.id,
+                                credential.id,
+                                value,
+                              );
+                            }
+                          }}
+                          options={(definition?.plan_options ?? [])
+                            .filter(
+                              (option) =>
+                                option.manually_selectable &&
+                                option.auth_method_ids.includes(
+                                  credential.auth_method_id,
+                                ),
+                            )
+                            .map((option) => ({
+                              value: option.id,
+                              label: option.display_name,
+                            }))}
+                          placeholder={t("providers.selectMembershipPlan")}
+                          className="w-full min-w-36"
+                        />
+                      ) : (
+                        <span className="text-muted-foreground text-sm">
+                          {credentialPlanLabel(definition, credential) ?? "—"}
+                        </span>
+                      )}
+                    </TableCell>
+                    <TableCell className="whitespace-normal py-3 align-top">
+                      <CompactAllowanceSummary
+                        allowances={metadata?.allowances ?? []}
+                        credentialID={credential.id}
+                        includeSharedAllowances={credentialIndex === 0}
+                        t={t}
+                      />
+                    </TableCell>
+                    <TableCell className="py-3 text-center align-middle">
+                      <Button
+                        type="button"
+                        variant="outline"
+                        size="sm"
+                        aria-label={`${t("providers.editPriority")} ${credential.label}`}
+                        onClick={() =>
+                          openPriorityEditor(provider.instance.id, credential)
+                        }
+                      >
+                        {credential.priority}
+                      </Button>
+                    </TableCell>
+                    <TableCell className="py-3 text-center align-middle">
+                      <Badge variant="outline">
+                        {providerStatusLabel(t, credential.status)}
+                      </Badge>
+                    </TableCell>
+                    <TableCell className="whitespace-normal py-3 text-right align-middle">
+                      <div className="flex flex-wrap justify-end gap-2">
+                        {supportsMetadata ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="icon-sm"
+                            aria-label={t("providers.refreshMetadata")}
+                            disabled={refreshingMetadataIDs.has(
+                              provider.instance.id,
+                            )}
+                            onClick={() =>
+                              void onRefreshMetadata(provider.instance.id)
+                            }
+                          >
+                            <RefreshCwIcon
+                              className={`size-3.5 ${refreshingMetadataIDs.has(provider.instance.id) ? "animate-spin" : ""}`}
+                            />
+                          </Button>
+                        ) : null}
+                        <Button
+                          type="button"
+                          variant="outline"
+                          size="sm"
+                          onClick={() => openModelCatalog(provider, definition)}
+                        >
+                          {t("providers.getSupportedModels")}
+                        </Button>
+                        {canListResources ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              openResourceCatalog(
+                                provider,
+                                definition,
+                                credential,
+                              )
+                            }
+                          >
+                            {t("providers.resources")}
+                          </Button>
+                        ) : null}
+                        {definition &&
+                        (authMethod?.type === "api_key" ||
+                          authMethod?.type === "bearer" ||
+                          authMethod?.type === "header_api_key" ||
+                          authMethod?.type === "device_flow" ||
+                          authMethod?.type === "oauth" ||
+                          authMethod?.type === "service_account") ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              onReauthorizeCredential(
+                                provider.instance.id,
+                                provider.instance.definition_id,
+                                credential,
+                              )
+                            }
+                          >
+                            <KeyRoundIcon className="size-3.5" />
+                            {authMethod.type === "api_key" ||
+                            authMethod.type === "bearer" ||
+                            authMethod.type === "header_api_key" ||
+                            authMethod.type === "service_account"
+                              ? t("providers.replaceCredential")
+                              : t("providers.reauthorizeCredential")}
+                          </Button>
+                        ) : null}
+                        {authMethod?.refreshable ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={refreshingCredentialIDs.has(
+                              credential.id,
+                            )}
+                            onClick={() =>
+                              onRefreshCredential(
+                                provider.instance.id,
+                                credential.id,
+                              )
+                            }
+                          >
+                            <RefreshCwIcon
+                              className={`size-3.5 ${refreshingCredentialIDs.has(credential.id) ? "animate-spin" : ""}`}
+                            />
+                            {refreshingCredentialIDs.has(credential.id)
+                              ? t("providers.refreshingCredential")
+                              : t("providers.refreshCredential")}
+                          </Button>
+                        ) : null}
+                        <AlertDialog>
+                          <AlertDialogTrigger
+                            render={
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={t("providers.deleteCredential")}
+                                disabled={deletingCredentialIDs.has(
+                                  credential.id,
+                                )}
+                              />
+                            }
+                          >
+                            <Trash2Icon className="text-destructive size-3.5" />
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>
+                                {t("providers.deleteCredentialTitle")}
+                              </AlertDialogTitle>
+                              <AlertDialogDescription>
+                                {t("providers.deleteCredentialDescription")}
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>
+                                {t("providers.cancel")}
+                              </AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() =>
+                                  void onDeleteCredential(
+                                    provider.instance.id,
+                                    credential.id,
+                                  )
+                                }
+                              >
+                                {t("providers.deleteCredential")}
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
+                      {metadataErrors[provider.instance.id] ? (
+                        <p
+                          className="text-destructive mt-2 text-left text-xs"
+                          role="status"
+                        >
+                          {metadataRefreshErrorLabel(
+                            t,
+                            metadataErrors[provider.instance.id],
+                          )}
+                        </p>
+                      ) : null}
+                      {credentialRefreshErrors[credential.id] ? (
+                        <p
+                          className="text-destructive mt-2 text-left text-xs"
+                          role="status"
+                        >
+                          {credentialRefreshErrorLabel(
+                            t,
+                            credentialRefreshErrors[credential.id],
+                          )}
+                        </p>
+                      ) : null}
+                    </TableCell>
+                  </TableRow>
+                );
+              });
+            })}
+          </TableBody>
+        </Table>
+      </div>
+
+      <Dialog
+        open={modelProviderInstanceID !== ""}
+        onOpenChange={(open) => {
+          if (!open) setModelProviderInstanceID("");
+        }}
+      >
+        <DialogContent className="grid max-h-[min(80vh,680px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
+          <DialogHeader>
+            <div className="min-w-0 flex-1">
+              <DialogTitle>{t("providers.modelCatalogTitle")}</DialogTitle>
+              <DialogDescription>
+                {modelProvider?.instance.display_name ??
+                  t("providers.modelCatalogDescription")}
+              </DialogDescription>
+            </div>
+            <DialogClose
+              aria-label={t("providers.cancel")}
+              render={<Button type="button" variant="ghost" size="icon" />}
+            >
+              <XIcon className="size-4" />
+            </DialogClose>
+          </DialogHeader>
+          <div className="min-h-0 overflow-y-auto pr-1">
+            {modelProvider && modelDefinition ? (
+              <div className="mb-3 flex justify-end">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  disabled={refreshingMetadataIDs.has(
+                    modelProvider.instance.id,
+                  )}
+                  onClick={() =>
+                    void onRefreshMetadata(modelProvider.instance.id)
+                  }
+                >
+                  <RefreshCwIcon
+                    className={`size-3.5 ${refreshingMetadataIDs.has(modelProvider.instance.id) ? "animate-spin" : ""}`}
+                  />
+                  {refreshingMetadataIDs.has(modelProvider.instance.id)
+                    ? t("providers.refreshingMetadata")
+                    : t("providers.refreshMetadata")}
+                </Button>
+              </div>
+            ) : null}
+            {modelMetadata?.models.length ? (
+              <div className="overflow-hidden rounded-lg border">
+                <Table>
+                  <TableHeader className="bg-muted/40">
+                    <TableRow>
+                      <TableHead>{t("providers.models")}</TableHead>
+                      <TableHead>{t("providers.upstreamModelID")}</TableHead>
+                      <TableHead className="w-36 text-center">
+                        {t("providers.authorizations")}
+                      </TableHead>
+                      <TableHead className="w-24 text-center">
+                        {t("providerConfig.status")}
+                      </TableHead>
+                    </TableRow>
+                  </TableHeader>
+                  <TableBody>
+                    {modelMetadata.models.map((model) => (
+                      <TableRow key={model.id}>
+                        <TableCell className="whitespace-normal py-3">
+                          {model.display_name}
+                        </TableCell>
+                        <TableCell className="py-3 font-mono text-xs">
+                          {model.upstream_model_id}
+                        </TableCell>
+                        <TableCell className="py-3 text-center">
+                          {model.entitlement_mode === "explicit" ? (
+                            <Badge variant="outline">
+                              {model.authorization_status === "authorized"
+                                ? t("providers.modelAuthorized")
+                                : model.authorization_status === "denied"
+                                  ? t("providers.modelUnauthorized")
+                                  : t(
+                                      "providers.modelAuthorizationUnknown",
+                                    )}
+                            </Badge>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="py-3 text-center">
+                          <Badge variant="outline">
+                            {model.enabled
+                              ? t("providers.modelEnabled")
+                              : t("providers.modelDisabled")}
+                          </Badge>
+                        </TableCell>
+                      </TableRow>
+                    ))}
+                  </TableBody>
+                </Table>
+              </div>
+            ) : (
+              <p className="text-muted-foreground text-sm">
+                {refreshingMetadataIDs.has(modelProviderInstanceID)
+                  ? t("providers.refreshingMetadata")
+                  : t("providers.noSupportedModels")}
+              </p>
+            )}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={resourceTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) setResourceTarget(null);
+        }}
+      >
+        <DialogContent className="grid max-h-[min(80vh,720px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
+          <DialogHeader>
+            <div className="min-w-0 flex-1">
+              <DialogTitle>{t("providers.resourceList")}</DialogTitle>
+              <DialogDescription>
+                {resourceTarget
+                  ? `${resourceTarget.provider.instance.display_name} · ${resourceTarget.credential.label}`
+                  : t("providers.resourceListDescription")}
+              </DialogDescription>
+            </div>
+            <DialogClose
+              aria-label={t("providers.cancel")}
+              render={<Button type="button" variant="ghost" size="icon" />}
+            >
+              <XIcon className="size-4" />
+            </DialogClose>
+          </DialogHeader>
+          <div className="min-h-0 space-y-5 overflow-y-auto pr-1">
+            {resourceVoices.length ? (
+              <section className="space-y-2">
+                <h4 className="text-sm font-medium">
+                  {t("providers.voiceResources")}
+                </h4>
+                <div className="overflow-hidden rounded-lg border">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow>
+                        <TableHead>{t("providers.voices")}</TableHead>
+                        <TableHead>{t("providers.voiceIdentifier")}</TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {resourceVoices.map((voice) => (
+                        <TableRow key={voice.voice_id}>
+                          <TableCell className="whitespace-normal py-3">
+                            <p className="font-medium">{voice.display_name}</p>
+                            {voice.descriptions.length ? (
+                              <p className="text-muted-foreground mt-1 text-xs">
+                                {voice.descriptions.join(" · ")}
+                              </p>
+                            ) : null}
+                          </TableCell>
+                          <TableCell className="py-3 font-mono text-xs">
+                            {voice.voice_id}
+                          </TableCell>
+                        </TableRow>
+                      ))}
+                    </TableBody>
+                  </Table>
+                </div>
+              </section>
+            ) : null}
+
+            {resourceUsesProviderFiles ? (
+              <section className="space-y-2">
+                <h4 className="text-sm font-medium">
+                  {t("providers.fileResources")}
+                </h4>
+                {resourceFilesLoading ? (
+                  <p className="text-muted-foreground text-sm">
+                    {t("providers.loadingResourceFiles")}
+                  </p>
+                ) : resourceFilesFailed ? (
+                  <p className="text-destructive text-sm" role="status">
+                    {t("providers.resourceLoadFailed")}
+                  </p>
+                ) : resourceFileGroups.length ? (
+                  <div className="space-y-3">
+                    {resourceFileGroups.map((group) => (
+                      <div key={group.endpoint.id} className="space-y-2">
+                        {resourceFileGroups.length > 1 ? (
+                          <p className="text-muted-foreground text-xs">
+                            {group.endpoint.region || group.endpoint.id}
+                          </p>
+                        ) : null}
+                        {group.files.length ? (
+                          <div className="overflow-hidden rounded-lg border">
+                            <Table>
+                              <TableHeader className="bg-muted/40">
+                                <TableRow>
+                                  <TableHead>{t("providers.fileName")}</TableHead>
+                                  <TableHead>
+                                    {t("providers.resourcePurpose")}
+                                  </TableHead>
+                                  <TableHead className="w-24 text-right">
+                                    {t("providers.resourceSize")}
+                                  </TableHead>
+                                  <TableHead className="w-44">
+                                    {t("providers.resourceCreatedAt")}
+                                  </TableHead>
+                                </TableRow>
+                              </TableHeader>
+                              <TableBody>
+                                {group.files.map((file) => (
+                                  <TableRow key={file.file_id}>
+                                    <TableCell className="whitespace-normal py-3">
+                                      <p className="font-medium">
+                                        {file.filename}
+                                      </p>
+                                      <p className="text-muted-foreground mt-1 font-mono text-xs">
+                                        {file.file_id}
+                                      </p>
+                                    </TableCell>
+                                    <TableCell className="py-3">
+                                      {file.purpose}
+                                    </TableCell>
+                                    <TableCell className="py-3 text-right tabular-nums">
+                                      {formatResourceBytes(file.size_bytes)}
+                                    </TableCell>
+                                    <TableCell className="py-3 text-xs">
+                                      {formatAllowanceTime(file.created_at)}
+                                    </TableCell>
+                                  </TableRow>
+                                ))}
+                              </TableBody>
+                            </Table>
+                          </div>
+                        ) : (
+                          <p className="text-muted-foreground text-sm">
+                            {t("providers.noFileResources")}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <p className="text-muted-foreground text-sm">
+                    {t("providers.noFileResources")}
+                  </p>
+                )}
+              </section>
+            ) : null}
+
+            {!resourceFilesLoading &&
+            !resourceFilesFailed &&
+            resourceVoices.length === 0 &&
+            (!resourceUsesProviderFiles || !resourceHasFiles) ? (
+              <p className="text-muted-foreground text-sm">
+                {t("providers.noResources")}
+              </p>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={priorityEditTarget !== null}
+        onOpenChange={(open) => {
+          if (!open) closePriorityEditor();
+        }}
+      >
+        <DialogContent className="max-w-md">
+          <DialogHeader>
+            <div className="min-w-0 flex-1">
+              <DialogTitle>{t("providers.editPriority")}</DialogTitle>
+              <DialogDescription>
+                {priorityEditTarget?.credential.label ??
+                  t("providers.priorityEditDescription")}
+              </DialogDescription>
+            </div>
+            <DialogClose
+              aria-label={t("providers.cancel")}
+              render={<Button type="button" variant="ghost" size="icon" />}
+            >
+              <XIcon className="size-4" />
+            </DialogClose>
+          </DialogHeader>
+          <div className="space-y-2">
+            <Label htmlFor="credential-priority-dialog">
+              {t("providers.priority")}
+            </Label>
+            <Input
+              id="credential-priority-dialog"
+              type="number"
+              min={0}
+              inputMode="numeric"
+              value={priorityDraft}
+              disabled={priorityUpdatePending}
+              onChange={(event) => {
+                setPriorityDraft(event.target.value);
+                setPriorityUpdateError(null);
+              }}
+            />
+            {priorityUpdateError ? (
+              <p className="text-destructive text-xs" role="alert">
+                {t(
+                  priorityUpdateError === "invalid"
+                    ? "providers.priorityInvalid"
+                    : "providers.priorityUpdateFailed",
+                )}
+              </p>
+            ) : null}
+          </div>
+          <div className="flex justify-end gap-2">
+            <Button
+              type="button"
+              variant="outline"
+              disabled={priorityUpdatePending}
+              onClick={closePriorityEditor}
+            >
+              {t("providers.cancel")}
+            </Button>
+            <Button
+              type="button"
+              disabled={priorityUpdatePending}
+              onClick={() => void savePriority()}
+            >
+              {priorityUpdatePending
+                ? t("providers.updatingPriority")
+                : t("providers.updatePriority")}
+            </Button>
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
+// providerSupportsAccountMetadata follows only the server-authored native reader capability contract.
+// providerSupportsAccountMetadata 仅遵循服务端编写的原生读取器能力契约。
+function providerSupportsAccountMetadata(
+  definition: ProviderDefinitionIdentity | undefined,
+): boolean {
+  // statuses contains every account metadata capability represented by the provider definition.
+  // statuses 包含供应商定义表示的每个账号元数据能力。
+  const statuses = [
+    definition?.features.model_discovery,
+    definition?.features.plan_reader,
+    definition?.features.entitlement_reader,
+    definition?.features.allowance_reader,
+  ];
+  return statuses.includes("supported");
+}
+
+// supportsMiniMaxProviderFileList follows the exact two MiniMax definitions implemented by the protected file listing endpoint.
+// supportsMiniMaxProviderFileList 遵循受保护文件列表端点实现的两个精确 MiniMax 定义。
+function supportsMiniMaxProviderFileList(
+  definitionID: string | undefined,
+): boolean {
+  return (
+    definitionID === "system_minimax_api" || definitionID === "system_minimax_cn"
+  );
+}
+
+// supportsCredentialResourceList exposes a resource action only for proven MiniMax file support or cached credential-scoped voices.
+// supportsCredentialResourceList 仅为已证实的 MiniMax 文件支持或缓存的凭据作用域声音暴露资源操作。
+function supportsCredentialResourceList(
+  definitionID: string | undefined,
+  metadata: ProviderCatalogMetadata | undefined,
+): boolean {
+  return (
+    supportsMiniMaxProviderFileList(definitionID) ||
+    (metadata?.voices.length ?? 0) > 0
+  );
+}
+
+// credentialPlanLabel returns the exact manually declared plan display label without inferring provider-detected ownership.
+// credentialPlanLabel 返回精确人工声明的套餐展示标签，而不推断供应商检测到的归属关系。
+function credentialPlanLabel(
+  definition: ProviderDefinitionIdentity | undefined,
+  credential: ProviderCredential,
+): string | undefined {
+  const planOptionID = credential.declared_plan?.plan_option_id;
+  if (!planOptionID) return undefined;
+  return (
+    definition?.plan_options.find((option) => option.id === planOptionID)
+      ?.display_name ?? planOptionID
+  );
+}
+
+// CompactAllowanceSummaryProps defines the limited quota visualization placed inside one credential table field.
+// CompactAllowanceSummaryProps 定义放置在一个凭据表格字段内的有限额度可视化。
+interface CompactAllowanceSummaryProps {
+  // allowances contains one provider's latest normalized quota observations.
+  // allowances 包含一个供应商最新的规范化额度观测。
+  allowances: ProviderAllowance[];
+  // credentialID selects exact credential-scoped observations.
+  // credentialID 选择精确的凭据作用域观测。
+  credentialID: string;
+  // includeSharedAllowances renders unscoped provider usage once without assigning it to every credential.
+  // includeSharedAllowances 仅渲染一次无作用域供应商用量，而不将其分配给每个凭据。
+  includeSharedAllowances: boolean;
+  // t resolves current localized field labels.
+  // t 解析当前本地化字段标签。
+  t: (key: TranslationKey) => string;
+}
+
+// MiniMaxAllowanceRow joins the provider's current and weekly windows for one Token Plan resource bucket.
+// MiniMaxAllowanceRow 将供应商针对一个 Token Plan 资源桶的当前周期与周窗口连接起来。
+interface MiniMaxAllowanceRow {
+  // name is the exact provider-owned resource bucket name.
+  // name 是供应商拥有的精确资源桶名称。
+  name: string;
+  // current is the short provider-defined interval when reported.
+  // current 是报告时的短供应商定义周期。
+  current?: ProviderAllowance;
+  // weekly is the calendar-week interval when reported.
+  // weekly 是报告时的日历周周期。
+  weekly?: ProviderAllowance;
+}
+
+// miniMaxAllowanceRows recognizes only the exact metric namespace emitted by the MiniMax allowance driver.
+// miniMaxAllowanceRows 仅识别 MiniMax 额度 Driver 发出的精确指标命名空间。
+function miniMaxAllowanceRows(
+  allowances: ProviderAllowance[],
+): MiniMaxAllowanceRow[] {
+  const rows = new Map<string, MiniMaxAllowanceRow>();
+  for (const allowance of allowances) {
+    const match = /^minimax\.(.+)\.(current_interval|weekly)$/.exec(
+      allowance.metric,
+    );
+    if (!match) continue;
+    const name = match[1];
+    const row = rows.get(name) ?? { name };
+    if (match[2] === "current_interval") row.current = allowance;
+    else row.weekly = allowance;
+    rows.set(name, row);
+  }
+  return [...rows.values()].sort((left, right) => {
+    const order = (name: string) => (name === "general" ? 0 : name === "video" ? 1 : 2);
+    return order(left.name) - order(right.name) || left.name.localeCompare(right.name);
+  });
+}
+
+// MiniMaxAllowanceSummary renders the Token Plan's paired resource windows inside one credential field.
+// MiniMaxAllowanceSummary 在一个凭据字段内渲染 Token Plan 成对的资源窗口。
+function MiniMaxAllowanceSummary({
+  rows,
+  t,
+}: {
+  rows: MiniMaxAllowanceRow[];
+  t: (key: TranslationKey) => string;
+}) {
+  const weeklyWindow = rows.find(
+    (row) => row.weekly?.window?.start_at && row.weekly.window.reset_at,
+  )?.weekly?.window;
+  return (
+    <div className="w-[22rem] max-w-full space-y-1.5">
+      {weeklyWindow?.start_at && weeklyWindow.reset_at ? (
+        <div className="text-muted-foreground text-right text-[10px] leading-none">
+          {t("providers.period")}: {miniMaxPeriodDate(weeklyWindow.start_at)} –{" "}
+          {miniMaxPeriodDate(weeklyWindow.reset_at)}
+        </div>
+      ) : null}
+      {rows.map((row) => {
+        const label =
+          row.name === "general"
+            ? t("providers.allowanceMetrics.minimaxGeneral")
+            : row.name === "video"
+              ? t("providers.allowanceMetrics.minimaxVideo")
+              : row.name;
+        const resetAt = row.current?.window?.reset_at;
+        return (
+          <div
+            key={row.name}
+            className="grid grid-cols-[2.75rem_minmax(0,1fr)_minmax(0,1fr)_auto] items-center gap-2 text-[11px]"
+          >
+            <span className="font-medium">{label}</span>
+            <MiniMaxAllowanceMetric
+              label={t("providers.allowanceMetrics.minimaxCurrent")}
+              allowance={row.current}
+              t={t}
+            />
+            <MiniMaxAllowanceMetric
+              label={t("providers.allowanceMetrics.minimaxWeekly")}
+              allowance={row.weekly}
+              t={t}
+            />
+            <span className="text-muted-foreground whitespace-nowrap tabular-nums">
+              {t("providers.resetsIn")} {miniMaxResetDuration(resetAt)}
+            </span>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+// MiniMaxAllowanceMetric renders one exact remaining amount and its compact progress indicator.
+// MiniMaxAllowanceMetric 渲染一个精确剩余量及其紧凑进度指示器。
+function MiniMaxAllowanceMetric({
+  label,
+  allowance,
+  t,
+}: {
+  label: string;
+  allowance?: ProviderAllowance;
+  t: (key: TranslationKey) => string;
+}) {
+  const ratio = allowanceDisplayRatio(allowance);
+  const visualRatio = ratio === undefined ? 0 : Math.min(1, ratio);
+  // displayValue keeps the visible amount and accessible progress name on the same normalized contract.
+  // displayValue 使可见额度与无障碍进度名称保持同一规范合同。
+  const displayValue = miniMaxAllowanceValue(allowance, ratio, t);
+  return (
+    <div className="min-w-0 space-y-0.5">
+      <div className="flex items-center justify-between gap-1">
+        <span className="text-muted-foreground truncate">{label}</span>
+        <span className="shrink-0 tabular-nums">{displayValue}</span>
+      </div>
+      <div
+        aria-label={`${label}: ${displayValue}`}
+        aria-valuemax={100}
+        aria-valuemin={0}
+        aria-valuenow={Math.round(visualRatio * 100)}
+        className="bg-muted h-1.5 overflow-hidden rounded-full"
+        role="progressbar"
+      >
+        <div
+          className={`h-full rounded-full ${visualRatio <= 0.1 ? "bg-destructive" : visualRatio <= 0.3 ? "bg-amber-500" : "bg-emerald-500"}`}
+          style={{ width: `${visualRatio * 100}%` }}
+        />
+      </div>
+    </div>
+  );
+}
+
+// isMiniMaxAllowanceUnlimited recognizes the canonical state and the exact legacy MiniMax management representation.
+// isMiniMaxAllowanceUnlimited 识别规范状态及精确的旧版 MiniMax 管理表示。
+function isMiniMaxAllowanceUnlimited(
+  allowance: ProviderAllowance | undefined,
+): boolean {
+  if (!allowance) return false;
+  if (allowance.status === "unlimited") return true;
+  return (
+    /^minimax\.(.+)\.(current_interval|weekly)$/.test(allowance.metric) &&
+    allowance.status === "available" &&
+    allowance.limit === undefined &&
+    allowance.remaining === undefined &&
+    allowance.remaining_ratio === undefined
+  );
+}
+
+// allowanceDisplayRatio applies explicit unlimited availability or the provider-authored visual multiplier without changing exact accounting counts.
+// allowanceDisplayRatio 应用明确的无限可用性或供应商编写的视觉倍率，且不改变精确计量数。
+function allowanceDisplayRatio(
+  allowance: ProviderAllowance | undefined,
+): number | undefined {
+  if (!allowance) return undefined;
+  if (isMiniMaxAllowanceUnlimited(allowance)) return 1;
+  let ratio = allowance.remaining_ratio;
+  if (ratio === undefined && allowance.limit && allowance.remaining) {
+    const limit = Number(allowance.limit);
+    const remaining = Number(allowance.remaining);
+    if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining)) {
+      ratio = remaining / limit;
+    }
+  }
+  if (ratio === undefined) return undefined;
+  return ratio * ((allowance.display_multiplier_permille ?? 1000) / 1000);
+}
+
+// miniMaxAllowanceValue follows minimax-cli's count, percentage, unlimited, and unavailable display contract.
+// miniMaxAllowanceValue 遵循 minimax-cli 的次数、百分比、无限与不可用展示合同。
+function miniMaxAllowanceValue(
+  allowance: ProviderAllowance | undefined,
+  ratio: number | undefined,
+  t: (key: TranslationKey) => string,
+): string {
+  if (!allowance) return t("providers.unknownAmount");
+  if (allowance.status === "not_included") return t("providers.notInPlan");
+  // The legacy management response encoded MiniMax unlimited windows as available with every finite amount omitted.
+  // 旧版管理响应将 MiniMax 无限窗口编码为可用且省略全部有限数值。
+  if (isMiniMaxAllowanceUnlimited(allowance)) return t("providers.unlimited");
+  if (allowance.limit !== undefined && Number(allowance.limit) > 0) {
+    return `${allowance.remaining ?? "0"} / ${allowance.limit}`;
+  }
+  return ratio === undefined
+    ? t("providers.unknownAmount")
+    : `${Math.round(ratio * 100)}%`;
+}
+
+// miniMaxResetDuration renders the current interval reset countdown used by minimax-cli.
+// miniMaxResetDuration 渲染 minimax-cli 使用的当前周期重置倒计时。
+function miniMaxResetDuration(resetAt: string | undefined): string {
+  if (!resetAt) return "—";
+  const remainingMilliseconds = Math.max(0, new Date(resetAt).getTime() - Date.now());
+  const hours = Math.floor(remainingMilliseconds / 3_600_000);
+  const minutes = Math.floor((remainingMilliseconds % 3_600_000) / 60_000);
+  return hours > 0 ? `${hours}h ${minutes}m` : `${minutes}m`;
+}
+
+// miniMaxPeriodDate renders the calendar date portion used by the Token Plan period header.
+// miniMaxPeriodDate 渲染 Token Plan 周期标题使用的日历日期部分。
+function miniMaxPeriodDate(value: string): string {
+  return new Date(value).toISOString().slice(0, 10);
+}
+
+// CompactAllowanceSummary renders up to three miniature usage indicators in one table field.
+// CompactAllowanceSummary 在一个表格字段内渲染最多三个微型用量指示器。
+function CompactAllowanceSummary({
+  allowances,
+  credentialID,
+  includeSharedAllowances,
+  t,
+}: CompactAllowanceSummaryProps) {
+  // credentialAllowances keeps ownership exact and never treats shared usage as credential-specific.
+  // credentialAllowances 保持归属精确，绝不将共享用量视为凭据专属。
+  const credentialAllowances = allowances.filter(
+    (allowance) => allowance.credential_id === credentialID,
+  );
+  // sharedAllowances is rendered only once to avoid duplicating provider-level usage across account rows.
+  // sharedAllowances 仅渲染一次，以避免跨账号行重复供应商级用量。
+  const sharedAllowances = includeSharedAllowances
+    ? allowances.filter((allowance) => allowance.credential_id === undefined)
+    : [];
+  const scopedAllowances = [...credentialAllowances, ...sharedAllowances];
+  const miniMaxRows = miniMaxAllowanceRows(scopedAllowances);
+  if (miniMaxRows.length > 0) {
+    return <MiniMaxAllowanceSummary rows={miniMaxRows} t={t} />;
+  }
+  // visibleAllowances caps table density while retaining the full detailed contract in the model and resource dialogs.
+  // visibleAllowances 限制表格密度，同时在模型与资源对话框中保留完整详情契约。
+  const visibleAllowances = scopedAllowances.slice(0, 3);
+  const hiddenAllowanceCount =
+    credentialAllowances.length + sharedAllowances.length -
+    visibleAllowances.length;
+  if (visibleAllowances.length === 0) {
+    return (
+      <span className="text-muted-foreground text-xs">
+        {t("providers.noUsage")}
+      </span>
+    );
+  }
+  return (
+    <div className="w-48 space-y-1.5">
+      {visibleAllowances.map((allowance, index) => {
+        // progress is used only when the canonical catalog supplied a normalized remaining ratio.
+        // progress 仅在规范目录提供了规范化剩余比例时使用。
+        const progress =
+          allowance.remaining_ratio === undefined
+            ? undefined
+            : Math.round(allowance.remaining_ratio * 100);
+        const shared = allowance.credential_id === undefined;
+        return (
+          <div
+            key={`${allowance.kind}\u0000${allowance.metric}\u0000${allowance.scope}\u0000${index}`}
+            className="space-y-0.5"
+          >
+            <div className="flex items-center justify-between gap-2 text-[11px] leading-none">
+              <span className="min-w-0 truncate" title={allowanceMetricLabel(t, allowance.metric, allowance.window)}>
+                {allowanceMetricLabel(t, allowance.metric, allowance.window)}
+                {shared ? ` · ${t("providers.sharedUsage")}` : ""}
+              </span>
+              <span className="text-muted-foreground shrink-0 tabular-nums">
+                {progress === undefined
+                  ? compactAllowanceValue(allowance, t)
+                  : `${progress}%`}
+              </span>
+            </div>
+            {progress !== undefined ? (
+              <div
+                className="bg-muted h-1.5 overflow-hidden rounded-full"
+                role="progressbar"
+                aria-label={allowanceMetricLabel(
+                  t,
+                  allowance.metric,
+                  allowance.window,
+                )}
+                aria-valuemin={0}
+                aria-valuemax={100}
+                aria-valuenow={progress}
+              >
+                <div
+                  className={`h-full rounded-full ${progress <= 10 ? "bg-destructive" : progress <= 30 ? "bg-amber-500" : "bg-emerald-500"}`}
+                  style={{ width: `${progress}%` }}
+                />
+              </div>
+            ) : null}
+          </div>
+        );
+      })}
+      {hiddenAllowanceCount > 0 ? (
+        <p className="text-muted-foreground text-[11px] leading-none">
+          +{hiddenAllowanceCount}
+        </p>
+      ) : null}
+    </div>
+  );
+}
+
+// compactAllowanceValue renders the exact available amount for observations that do not provide a progress ratio.
+// compactAllowanceValue 为未提供进度比例的观测渲染精确可用数量。
+function compactAllowanceValue(
+  allowance: ProviderAllowance,
+  t: (key: TranslationKey) => string,
+): string {
+  if (allowance.status === "unlimited") return t("providers.unlimited");
+  const value = allowance.remaining ?? allowance.limit;
+  if (value === undefined) return t("providers.unknownAmount");
+  if (allowance.unit === "minor_currency_units") {
+    return formatMinorCurrency(value, allowance.currency) ?? value;
+  }
+  return `${value} ${allowanceDisplayUnit(allowance)}`;
+}
+
+// formatResourceBytes renders provider-reported byte counts without exposing file content.
+// formatResourceBytes 渲染供应商报告的字节数，而不暴露文件内容。
+function formatResourceBytes(sizeBytes: number): string {
+  if (sizeBytes < 1024) return `${sizeBytes} B`;
+  const units = ["KB", "MB", "GB", "TB"];
+  let value = sizeBytes / 1024;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+  return `${value.toLocaleString(undefined, {
+    maximumFractionDigits: 1,
+  })} ${units[unitIndex]}`;
 }
 
 // AuthorizedProviderCardProps defines the data required by one configured-provider card.
@@ -1618,6 +3088,38 @@ function AuthorizedProviderCard({
             </ul>
           </div>
         ) : null}
+        {metadata?.voices.length ? (
+          <div>
+            <h4 className="mb-2 text-sm font-medium">
+              {t("providers.voices")}
+            </h4>
+            <ul className="divide-y rounded-md border">
+              {metadata.voices.map((voice) => (
+                <li
+                  key={`${voice.voice_id}\u0000${voice.credential_id}`}
+                  className="flex items-center justify-between gap-3 px-3 py-2 text-sm"
+                >
+                  <div className="min-w-0">
+                    <p className="truncate font-medium">
+                      {voice.display_name}
+                    </p>
+                    <p className="text-muted-foreground truncate font-mono text-xs">
+                      {t("providers.voiceIdentifier")}: {voice.voice_id}
+                    </p>
+                    {voice.descriptions.length ? (
+                      <p className="text-muted-foreground line-clamp-2 text-xs">
+                        {voice.descriptions.join(" · ")}
+                      </p>
+                    ) : null}
+                  </div>
+                  <Badge variant="outline" className="shrink-0">
+                    {t("providers.voiceAccount")}: {voice.credential_label}
+                  </Badge>
+                </li>
+              ))}
+            </ul>
+          </div>
+        ) : null}
       </CardHeader>
       <CardContent className="space-y-4">
         <div className="text-muted-foreground text-xs">
@@ -1628,7 +3130,9 @@ function AuthorizedProviderCard({
         </div>
         <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(12rem,16rem)] sm:items-center">
           <div>
-            <p className="text-sm font-medium">{t("providers.routingStrategy")}</p>
+            <p className="text-sm font-medium">
+              {t("providers.routingStrategy")}
+            </p>
             <p className="text-muted-foreground text-xs">
               {t("providers.routingStrategyHelp")}
             </p>
@@ -1674,203 +3178,217 @@ function AuthorizedProviderCard({
               {t("providers.noCredentialsForProvider")}
             </div>
           ) : (
-          <ul className="divide-y rounded-md border">
-            {provider.credentials.map((credential) => {
-              const authMethod = definition?.auth_methods.find(
-                (method) => method.id === credential.auth_method_id,
-              );
-              return (
-                <li key={credential.id} className="space-y-2 px-3 py-3">
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="flex min-w-0 items-center gap-3">
-                      {authMethod?.type === "device_flow" ? (
-                        <ShieldCheckIcon className="text-muted-foreground size-4 shrink-0" />
-                      ) : authMethod?.type === "api_key" ||
-                        authMethod?.type === "bearer" ||
-                        authMethod?.type === "header_api_key" ? (
-                        <KeyRoundIcon className="text-muted-foreground size-4 shrink-0" />
-                      ) : (
-                        <ServerIcon className="text-muted-foreground size-4 shrink-0" />
-                      )}
-                      <div className="min-w-0">
-                        <p className="truncate text-sm font-medium">
-                          {credential.label}
-                        </p>
-                        <p className="text-muted-foreground text-xs">
-                          {authorizationTypeLabel(
-                            t,
-                            authMethod?.type,
-                            credential.auth_method_id,
-                          )}
-                        </p>
-                        <p className="text-muted-foreground text-xs">
-                          {t("providers.priority")}: {credential.priority}
-                        </p>
+            <ul className="divide-y rounded-md border">
+              {provider.credentials.map((credential) => {
+                const authMethod = definition?.auth_methods.find(
+                  (method) => method.id === credential.auth_method_id,
+                );
+                return (
+                  <li key={credential.id} className="space-y-2 px-3 py-3">
+                    <div className="flex items-center justify-between gap-3">
+                      <div className="flex min-w-0 items-center gap-3">
+                        {authMethod?.type === "device_flow" ? (
+                          <ShieldCheckIcon className="text-muted-foreground size-4 shrink-0" />
+                        ) : authMethod?.type === "api_key" ||
+                          authMethod?.type === "bearer" ||
+                          authMethod?.type === "header_api_key" ? (
+                          <KeyRoundIcon className="text-muted-foreground size-4 shrink-0" />
+                        ) : (
+                          <ServerIcon className="text-muted-foreground size-4 shrink-0" />
+                        )}
+                        <div className="min-w-0">
+                          <p className="truncate text-sm font-medium">
+                            {credential.label}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {authorizationTypeLabel(
+                              t,
+                              authMethod?.type,
+                              credential.auth_method_id,
+                            )}
+                          </p>
+                          <p className="text-muted-foreground text-xs">
+                            {t("providers.priority")}: {credential.priority}
+                          </p>
+                        </div>
                       </div>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      {definition &&
-                      (authMethod?.type === "api_key" ||
-                        authMethod?.type === "bearer" ||
-                        authMethod?.type === "header_api_key" ||
-                        authMethod?.type === "device_flow" ||
-                        authMethod?.type === "oauth" ||
-                        authMethod?.type === "service_account") ? (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          onClick={() =>
-                            onReauthorizeCredential(
-                              provider.instance.id,
-                              provider.instance.definition_id,
-                              credential,
-                            )
-                          }
-                        >
-                          <KeyRoundIcon className="size-3.5" />
-                          {authMethod.type === "api_key" ||
-                          authMethod.type === "bearer" ||
-                          authMethod.type === "header_api_key" ||
-                          authMethod.type === "service_account"
-                            ? t("providers.replaceCredential")
-                            : t("providers.reauthorizeCredential")}
-                        </Button>
-                      ) : null}
-                      {authMethod?.refreshable ? (
-                        <Button
-                          type="button"
-                          variant="outline"
-                          size="sm"
-                          disabled={refreshingCredentialIDs.has(credential.id)}
-                          onClick={() =>
-                            onRefreshCredential(
-                              provider.instance.id,
+                      <div className="flex items-center gap-2">
+                        {definition &&
+                        (authMethod?.type === "api_key" ||
+                          authMethod?.type === "bearer" ||
+                          authMethod?.type === "header_api_key" ||
+                          authMethod?.type === "device_flow" ||
+                          authMethod?.type === "oauth" ||
+                          authMethod?.type === "service_account") ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            onClick={() =>
+                              onReauthorizeCredential(
+                                provider.instance.id,
+                                provider.instance.definition_id,
+                                credential,
+                              )
+                            }
+                          >
+                            <KeyRoundIcon className="size-3.5" />
+                            {authMethod.type === "api_key" ||
+                            authMethod.type === "bearer" ||
+                            authMethod.type === "header_api_key" ||
+                            authMethod.type === "service_account"
+                              ? t("providers.replaceCredential")
+                              : t("providers.reauthorizeCredential")}
+                          </Button>
+                        ) : null}
+                        {authMethod?.refreshable ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={refreshingCredentialIDs.has(
                               credential.id,
-                            )
-                          }
-                        >
-                          <RefreshCwIcon
-                            className={`size-3.5 ${refreshingCredentialIDs.has(credential.id) ? "animate-spin" : ""}`}
-                          />
-                          {refreshingCredentialIDs.has(credential.id)
-                            ? t("providers.refreshingCredential")
-                            : t("providers.refreshCredential")}
-                        </Button>
-                      ) : null}
-                      <Badge variant="outline">
-                        {providerStatusLabel(t, credential.status)}
-                      </Badge>
-                      <AlertDialog>
-                        <AlertDialogTrigger
-                          render={
-                            <Button
-                              type="button"
-                              variant="ghost"
-                              size="icon-sm"
-                              aria-label={t("providers.deleteCredential")}
-                              disabled={deletingCredentialIDs.has(credential.id)}
-                            />
-                          }
-                        >
-                          <Trash2Icon className="text-destructive size-3.5" />
-                        </AlertDialogTrigger>
-                        <AlertDialogContent>
-                          <AlertDialogHeader>
-                            <AlertDialogTitle>
-                              {t("providers.deleteCredentialTitle")}
-                            </AlertDialogTitle>
-                            <AlertDialogDescription>
-                              {t("providers.deleteCredentialDescription")}
-                            </AlertDialogDescription>
-                          </AlertDialogHeader>
-                          <AlertDialogFooter>
-                            <AlertDialogCancel>
-                              {t("providers.cancel")}
-                            </AlertDialogCancel>
-                            <AlertDialogAction
-                              onClick={() =>
-                                void onDeleteCredential(
-                                  provider.instance.id,
-                                  credential.id,
-                                )
-                              }
-                            >
-                              {t("providers.deleteCredential")}
-                            </AlertDialogAction>
-                          </AlertDialogFooter>
-                        </AlertDialogContent>
-                      </AlertDialog>
-                    </div>
-                  </div>
-                  <div className="grid gap-2 sm:grid-cols-2">
-                    <div className="space-y-1">
-                      <Label htmlFor={`credential-priority-${credential.id}`}>
-                        {t("providers.priority")}
-                      </Label>
-                      <Input
-                        id={`credential-priority-${credential.id}`}
-                        type="number"
-                        min={0}
-                        defaultValue={credential.priority}
-                        onBlur={(event) => {
-                          const priority = Number.parseInt(event.currentTarget.value, 10);
-                          if (
-                            Number.isInteger(priority) &&
-                            priority >= 0 &&
-                            priority !== credential.priority
-                          ) {
-                            void onChangeCredentialPriority(
-                              provider.instance.id,
-                              credential.id,
-                              priority,
-                            );
-                          }
-                        }}
-                      />
-                    </div>
-                    {authMethod?.plan_acquisition === "manual_required" ? (
-                      <div className="space-y-1">
-                        <Label>{t("providers.membershipPlan")}</Label>
-                        <ReadonlyCombobox
-                          value={credential.declared_plan?.plan_option_id ?? ""}
-                          onValueChange={(value) => {
-                            if (value !== credential.declared_plan?.plan_option_id) {
-                              void onChangeCredentialPlan(
+                            )}
+                            onClick={() =>
+                              onRefreshCredential(
                                 provider.instance.id,
                                 credential.id,
-                                value,
+                              )
+                            }
+                          >
+                            <RefreshCwIcon
+                              className={`size-3.5 ${refreshingCredentialIDs.has(credential.id) ? "animate-spin" : ""}`}
+                            />
+                            {refreshingCredentialIDs.has(credential.id)
+                              ? t("providers.refreshingCredential")
+                              : t("providers.refreshCredential")}
+                          </Button>
+                        ) : null}
+                        <Badge variant="outline">
+                          {providerStatusLabel(t, credential.status)}
+                        </Badge>
+                        <AlertDialog>
+                          <AlertDialogTrigger
+                            render={
+                              <Button
+                                type="button"
+                                variant="ghost"
+                                size="icon-sm"
+                                aria-label={t("providers.deleteCredential")}
+                                disabled={deletingCredentialIDs.has(
+                                  credential.id,
+                                )}
+                              />
+                            }
+                          >
+                            <Trash2Icon className="text-destructive size-3.5" />
+                          </AlertDialogTrigger>
+                          <AlertDialogContent>
+                            <AlertDialogHeader>
+                              <AlertDialogTitle>
+                                {t("providers.deleteCredentialTitle")}
+                              </AlertDialogTitle>
+                              <AlertDialogDescription>
+                                {t("providers.deleteCredentialDescription")}
+                              </AlertDialogDescription>
+                            </AlertDialogHeader>
+                            <AlertDialogFooter>
+                              <AlertDialogCancel>
+                                {t("providers.cancel")}
+                              </AlertDialogCancel>
+                              <AlertDialogAction
+                                onClick={() =>
+                                  void onDeleteCredential(
+                                    provider.instance.id,
+                                    credential.id,
+                                  )
+                                }
+                              >
+                                {t("providers.deleteCredential")}
+                              </AlertDialogAction>
+                            </AlertDialogFooter>
+                          </AlertDialogContent>
+                        </AlertDialog>
+                      </div>
+                    </div>
+                    <div className="grid gap-2 sm:grid-cols-2">
+                      <div className="space-y-1">
+                        <Label htmlFor={`credential-priority-${credential.id}`}>
+                          {t("providers.priority")}
+                        </Label>
+                        <Input
+                          id={`credential-priority-${credential.id}`}
+                          type="number"
+                          min={0}
+                          defaultValue={credential.priority}
+                          onBlur={(event) => {
+                            const priority = Number.parseInt(
+                              event.currentTarget.value,
+                              10,
+                            );
+                            if (
+                              Number.isInteger(priority) &&
+                              priority >= 0 &&
+                              priority !== credential.priority
+                            ) {
+                              void onChangeCredentialPriority(
+                                provider.instance.id,
+                                credential.id,
+                                priority,
                               );
                             }
                           }}
-                          options={(definition?.plan_options ?? [])
-                            .filter(
-                              (option) =>
-                                option.manually_selectable &&
-                                option.auth_method_ids.includes(credential.auth_method_id),
-                            )
-                            .map((option) => ({
-                              value: option.id,
-                              label: option.display_name,
-                            }))}
-                          placeholder={t("providers.selectMembershipPlan")}
-                          className="w-full"
                         />
                       </div>
+                      {authMethod?.plan_acquisition === "manual_required" ? (
+                        <div className="space-y-1">
+                          <Label>{t("providers.membershipPlan")}</Label>
+                          <ReadonlyCombobox
+                            value={
+                              credential.declared_plan?.plan_option_id ?? ""
+                            }
+                            onValueChange={(value) => {
+                              if (
+                                value !==
+                                credential.declared_plan?.plan_option_id
+                              ) {
+                                void onChangeCredentialPlan(
+                                  provider.instance.id,
+                                  credential.id,
+                                  value,
+                                );
+                              }
+                            }}
+                            options={(definition?.plan_options ?? [])
+                              .filter(
+                                (option) =>
+                                  option.manually_selectable &&
+                                  option.auth_method_ids.includes(
+                                    credential.auth_method_id,
+                                  ),
+                              )
+                              .map((option) => ({
+                                value: option.id,
+                                label: option.display_name,
+                              }))}
+                            placeholder={t("providers.selectMembershipPlan")}
+                            className="w-full"
+                          />
+                        </div>
+                      ) : null}
+                    </div>
+                    {credentialRefreshErrors[credential.id] ? (
+                      <p className="text-destructive text-xs" role="status">
+                        {credentialRefreshErrorLabel(
+                          t,
+                          credentialRefreshErrors[credential.id],
+                        )}
+                      </p>
                     ) : null}
-                  </div>
-                  {credentialRefreshErrors[credential.id] ? (
-                    <p className="text-destructive text-xs" role="status">
-                      {credentialRefreshErrorLabel(
-                        t,
-                        credentialRefreshErrors[credential.id],
-                      )}
-                    </p>
-                  ) : null}
-                </li>
-              );
-            })}
-          </ul>
+                  </li>
+                );
+              })}
+            </ul>
           )}
         </div>
       </CardContent>
@@ -1891,7 +3409,10 @@ function AllowanceDisplay({
   // t 解析当前简体中文或英文标签。
   t: (key: TranslationKey) => string;
 }) {
-  const ratio = allowance.remaining_ratio;
+  // ratio treats explicit unlimited resources as fully available without fabricating a finite remaining amount.
+  // ratio 将明确无限的资源视为完全可用，但不虚构有限剩余量。
+  const ratio =
+    allowance.status === "unlimited" ? 1 : allowance.remaining_ratio;
   const progress =
     ratio === undefined ? undefined : Math.max(0, Math.min(100, ratio * 100));
   const isMoney = allowance.unit === "minor_currency_units";
@@ -2149,6 +3670,8 @@ function allowanceStatusLabel(
   switch (status) {
     case "available":
       return t("providers.allowanceStatus.available");
+    case "unlimited":
+      return t("providers.unlimited");
     case "low":
       return t("providers.allowanceStatus.low");
     case "exhausted":
@@ -2157,6 +3680,8 @@ function allowanceStatusLabel(
       return t("providers.allowanceStatus.unknown");
     case "unavailable":
       return t("providers.allowanceStatus.unavailable");
+    case "not_included":
+      return t("providers.notInPlan");
     default:
       return status;
   }
@@ -2167,8 +3692,9 @@ function allowanceStatusLabel(
 function allowanceWindowLabel(window: ProviderAllowanceWindow): string {
   // parts retains only window nodes that are present in the validated management response.
   // parts 仅保留已校验管理响应中实际存在的窗口节点。
-  const parts = [window.kind];
-  if (window.duration !== "0") parts.push(formatAllowanceDuration(window.duration));
+  const parts: string[] = [window.kind];
+  if (window.duration !== "0")
+    parts.push(formatAllowanceDuration(window.duration));
   if (window.calendar_unit) parts.push(window.calendar_unit);
   if (window.time_zone) parts.push(window.time_zone);
   return parts.join(" · ");
@@ -2665,9 +4191,7 @@ export type ProviderWorkflowDefinition = ProviderDefinitionIdentity &
   Partial<
     Pick<
       ProviderDefinition,
-      | "variant_description"
-      | "variant_description_key"
-      | "endpoint_presets"
+      "variant_description" | "variant_description_key" | "endpoint_presets"
     >
   >;
 
@@ -2755,13 +4279,21 @@ export function ProviderOnboardingPanel({
   const isXAIDeviceFlow = definition.id === "system_xai_oauth";
   const isCodexDeviceFlow =
     isDeviceFlow && definition.id === "system_openai_codex";
+  // isMiniMaxDeviceFlow identifies the two explicit regional MiniMax definitions.
+  // isMiniMaxDeviceFlow 标识两个显式区域 MiniMax Definition。
+  const isMiniMaxDeviceFlow =
+    isDeviceFlow &&
+    (definition.id === "system_minimax_api" ||
+      definition.id === "system_minimax_cn");
   // requiresOperatorName is true only when the selected credential carries no provider-issued display identity.
   // requiresOperatorName 仅在所选凭据不携带供应商签发的显示身份时为 true。
   const requiresOperatorName =
     !reauthorizationTarget &&
     (authMethod?.type === "api_key" ||
       (isDeviceFlow &&
-        (definition.id === "system_kimi_coding_plan" || isXAIDeviceFlow)));
+        (definition.id === "system_kimi_coding_plan" ||
+          isXAIDeviceFlow ||
+          isMiniMaxDeviceFlow)));
   // name is the sole operator-authored label and is reused by the server for the instance and credential.
   // name 是唯一由操作员填写的标签，并由服务端同时用于实例与凭据。
   const [name, setName] = useState(
@@ -2833,11 +4365,13 @@ export function ProviderOnboardingPanel({
       const unfinishedDeviceFlow = deviceFlowRef.current;
       deviceFlowRef.current = null;
       if (unfinishedDeviceFlow) {
-        const cancelFlow = isXAIDeviceFlow
-          ? cancelXAIDeviceFlow
-          : isCodexDeviceFlow
-            ? cancelCodexDeviceFlow
-            : cancelKimiDeviceFlow;
+        const cancelFlow = isMiniMaxDeviceFlow
+          ? cancelMiniMaxDeviceFlow
+          : isXAIDeviceFlow
+            ? cancelXAIDeviceFlow
+            : isCodexDeviceFlow
+              ? cancelCodexDeviceFlow
+              : cancelKimiDeviceFlow;
         void cancelFlow(managementAuthToken, unfinishedDeviceFlow.id).catch(
           () => undefined,
         );
@@ -2862,6 +4396,7 @@ export function ProviderOnboardingPanel({
     isClaudeOAuth,
     isCodexDeviceFlow,
     isCodexOAuth,
+    isMiniMaxDeviceFlow,
     isXAIDeviceFlow,
     managementAuthToken,
   ]);
@@ -3081,17 +4616,23 @@ export function ProviderOnboardingPanel({
     // requestRevision 将延迟到达的设备响应绑定到请求发起时选择的供应商路由。
     const requestRevision = flowRequestRevision.current;
     try {
-      const startFlow = isXAIDeviceFlow
-        ? startXAIDeviceFlow
-        : isCodexDeviceFlow
-          ? startCodexDeviceFlow
-          : startKimiDeviceFlow;
-      const cancelFlow = isXAIDeviceFlow
-        ? cancelXAIDeviceFlow
-        : isCodexDeviceFlow
-          ? cancelCodexDeviceFlow
-          : cancelKimiDeviceFlow;
-      const flow = await startFlow(managementAuthToken);
+      const cancelFlow = isMiniMaxDeviceFlow
+        ? cancelMiniMaxDeviceFlow
+        : isXAIDeviceFlow
+          ? cancelXAIDeviceFlow
+          : isCodexDeviceFlow
+            ? cancelCodexDeviceFlow
+            : cancelKimiDeviceFlow;
+      const flow = isMiniMaxDeviceFlow
+        ? await startMiniMaxDeviceFlow(
+            managementAuthToken,
+            definition.id === "system_minimax_cn" ? "cn" : "global",
+          )
+        : isXAIDeviceFlow
+          ? await startXAIDeviceFlow(managementAuthToken)
+          : isCodexDeviceFlow
+            ? await startCodexDeviceFlow(managementAuthToken)
+            : await startKimiDeviceFlow(managementAuthToken);
       if (flowRequestRevision.current !== requestRevision) {
         await cancelFlow(managementAuthToken, flow.id).catch(() => undefined);
         return;
@@ -3112,11 +4653,13 @@ export function ProviderOnboardingPanel({
     setPending(true);
     setMessageKey(null);
     try {
-      const onboardFlow = isXAIDeviceFlow
-        ? onboardXAIDeviceFlow
-        : isCodexDeviceFlow
-          ? onboardCodexDeviceFlow
-          : onboardKimiDeviceFlow;
+      const onboardFlow = isMiniMaxDeviceFlow
+        ? onboardMiniMaxDeviceFlow
+        : isXAIDeviceFlow
+          ? onboardXAIDeviceFlow
+          : isCodexDeviceFlow
+            ? onboardCodexDeviceFlow
+            : onboardKimiDeviceFlow;
       const result = await onboardFlow(managementAuthToken, deviceFlow.id, {
         provider_definition_id: definition.id,
         name: requiresOperatorName ? name.trim() : "",
@@ -3143,11 +4686,13 @@ export function ProviderOnboardingPanel({
     setPending(true);
     setMessageKey(null);
     try {
-      const cancelFlow = isXAIDeviceFlow
-        ? cancelXAIDeviceFlow
-        : isCodexDeviceFlow
-          ? cancelCodexDeviceFlow
-          : cancelKimiDeviceFlow;
+      const cancelFlow = isMiniMaxDeviceFlow
+        ? cancelMiniMaxDeviceFlow
+        : isXAIDeviceFlow
+          ? cancelXAIDeviceFlow
+          : isCodexDeviceFlow
+            ? cancelCodexDeviceFlow
+            : cancelKimiDeviceFlow;
       await cancelFlow(managementAuthToken, deviceFlow.id);
       deviceFlowRef.current = null;
       setDeviceFlow(null);
@@ -3174,11 +4719,13 @@ export function ProviderOnboardingPanel({
     flowRequestRevision.current += 1;
     setPending(false);
     if (deviceFlowRef.current) {
-      const cancelFlow = isXAIDeviceFlow
-        ? cancelXAIDeviceFlow
-        : isCodexDeviceFlow
-          ? cancelCodexDeviceFlow
-          : cancelKimiDeviceFlow;
+      const cancelFlow = isMiniMaxDeviceFlow
+        ? cancelMiniMaxDeviceFlow
+        : isXAIDeviceFlow
+          ? cancelXAIDeviceFlow
+          : isCodexDeviceFlow
+            ? cancelCodexDeviceFlow
+            : cancelKimiDeviceFlow;
       void cancelFlow(managementAuthToken, deviceFlowRef.current.id).catch(
         () => undefined,
       );
@@ -3217,7 +4764,9 @@ export function ProviderOnboardingPanel({
         ]),
       ),
     );
-    setVertexLocation(definition.endpoint_presets?.[0]?.region ?? "us-central1");
+    setVertexLocation(
+      definition.endpoint_presets?.[0]?.region ?? "us-central1",
+    );
     setMessageKey(null);
   }
 
@@ -3291,7 +4840,11 @@ export function ProviderOnboardingPanel({
           {requiresOperatorName ? (
             <div className="space-y-2">
               <Label htmlFor="provider-name">
-                {t(attachmentTarget || credentialIntent ? "providers.credentialName" : "providers.name")}
+                {t(
+                  attachmentTarget || credentialIntent
+                    ? "providers.credentialName"
+                    : "providers.name",
+                )}
               </Label>
               <Input
                 id="provider-name"

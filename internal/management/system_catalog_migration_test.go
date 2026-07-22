@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -28,6 +29,51 @@ type legacyKimiAccessStore struct {
 	// replacements counts committed atomic graph replacements.
 	// replacements 统计已提交原子图替换次数。
 	replacements int
+}
+
+// TestReconcileMiniMaxSharedOriginsCollapsesEquivalentActionEndpoints verifies persisted multimodal channels retain bindings while sharing one regional Origin.
+// TestReconcileMiniMaxSharedOriginsCollapsesEquivalentActionEndpoints 验证持久化多模态通道在保留绑定的同时共享一个区域 Origin。
+func TestReconcileMiniMaxSharedOriginsCollapsesEquivalentActionEndpoints(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := newKimiOnboardingService(t)
+	onboarding, errOnboard := service.OnboardSystemProvider(ctx, OnboardSystemProviderInput{DefinitionID: bootstrap.MiniMaxCNDefinitionID, Handle: "minimax-origin", DisplayName: "MiniMax CN", AuthMethodID: "api_key", CredentialLabel: "MiniMax", Secret: []byte("test-key")})
+	if errOnboard != nil {
+		t.Fatalf("OnboardSystemProvider() error = %v", errOnboard)
+	}
+	if len(onboarding.Endpoints) != 1 || len(onboarding.Bindings) != 10 {
+		t.Fatalf("new MiniMax endpoint/binding counts = %d/%d, want 1/10", len(onboarding.Endpoints), len(onboarding.Bindings))
+	}
+	legacyEndpoints := make([]providerconfig.Endpoint, 0, len(onboarding.Bindings))
+	legacyBindings := append([]providerconfig.AccessBinding(nil), onboarding.Bindings...)
+	for index := range legacyBindings {
+		endpoint := onboarding.Endpoints[0]
+		endpoint.ID = fmt.Sprintf("ep_minimax_legacy_%d", index)
+		endpoint.ChannelID = legacyBindings[index].ChannelID
+		legacyEndpoints = append(legacyEndpoints, endpoint)
+		legacyBindings[index].EndpointID = endpoint.ID
+	}
+	legacy := providerconfig.AccessGraphReplacement{ProviderInstanceID: onboarding.Instance.ID, ExpectedEndpoints: onboarding.Endpoints, ExpectedBindings: onboarding.Bindings, Endpoints: legacyEndpoints, Bindings: legacyBindings}
+	if errReplace := configurations.ReplaceAccessGraph(ctx, legacy); errReplace != nil {
+		t.Fatalf("ReplaceAccessGraph() legacy error = %v", errReplace)
+	}
+	changed, errReconcile := ReconcileMiniMaxSharedOrigins(ctx, configurations)
+	if errReconcile != nil || changed != 1 {
+		t.Fatalf("ReconcileMiniMaxSharedOrigins() changed=%d error=%v", changed, errReconcile)
+	}
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, onboarding.Instance.ID)
+	bindings, errBindings := configurations.ListBindings(ctx, onboarding.Instance.ID)
+	if errEndpoints != nil || errBindings != nil || len(endpoints) != 1 || len(bindings) != len(onboarding.Bindings) {
+		t.Fatalf("reconciled MiniMax graph endpoints=%#v bindings=%#v errors=%v/%v", endpoints, bindings, errEndpoints, errBindings)
+	}
+	for _, binding := range bindings {
+		if binding.EndpointID != endpoints[0].ID {
+			t.Fatalf("MiniMax binding %q endpoint = %q, want %q", binding.ID, binding.EndpointID, endpoints[0].ID)
+		}
+	}
+	changedAgain, errAgain := ReconcileMiniMaxSharedOrigins(ctx, configurations)
+	if errAgain != nil || changedAgain != 0 {
+		t.Fatalf("second reconciliation changed=%d error=%v", changedAgain, errAgain)
+	}
 }
 
 // ListEndpoints returns the overlaid historical endpoint graph.

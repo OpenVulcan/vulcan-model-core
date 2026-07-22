@@ -1,0 +1,15 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "preflight_fixture",
+  "target": {"model": {"target": "exact", "provider_instance_id": "pvi_fixture", "provider_model_id": "model_fixture", "execution_profile_id": "profile_fixture"}},
+  "usage": {
+    "input_tokens": 37,
+    "total_tokens": 37,
+    "source": "provider_reported",
+    "aggregation": "snapshot",
+    "phase": "preflight",
+    "accounting_basis": "provider_count_tokens",
+    "final": true
+  },
+  "metrics": [{"unit": "tokens", "value": 37, "accuracy": "exact", "accounting_basis": "provider_count_tokens"}]
+}

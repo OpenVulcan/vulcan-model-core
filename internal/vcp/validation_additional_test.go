@@ -57,6 +57,71 @@ func TestVulcanRequestValidateAllowsCustomTools(t *testing.T) {
 	}
 }
 
+// TestVulcanRequestValidateComputerUseGenerations verifies GA and preview remain closed non-interchangeable configurations.
+// TestVulcanRequestValidateComputerUseGenerations 验证 GA 与预览版保持封闭且不可互换的配置。
+func TestVulcanRequestValidateComputerUseGenerations(t *testing.T) {
+	testCases := []struct {
+		// name identifies one exact generation/configuration combination.
+		// name 标识一个精确的代际与配置组合。
+		name string
+		// configuration is the computer-use declaration under validation.
+		// configuration 是待校验的计算机使用声明。
+		configuration ProviderComputerUseTool
+		// valid reports whether the combination belongs to the VCP contract.
+		// valid 表示该组合是否属于 VCP 契约。
+		valid bool
+	}{
+		{name: "ga", configuration: ProviderComputerUseTool{Mode: ProviderComputerUseGA}, valid: true},
+		{name: "preview", configuration: ProviderComputerUseTool{Mode: ProviderComputerUsePreview, Environment: "browser", DisplayWidth: 1024, DisplayHeight: 768}, valid: true},
+		{name: "ga-with-preview-fields", configuration: ProviderComputerUseTool{Mode: ProviderComputerUseGA, Environment: "browser", DisplayWidth: 1024, DisplayHeight: 768}},
+		{name: "preview-without-display", configuration: ProviderComputerUseTool{Mode: ProviderComputerUsePreview}},
+		{name: "unknown", configuration: ProviderComputerUseTool{Mode: ProviderComputerUseMode("future")}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := testTextRequest()
+			request.Tools = []ToolDefinition{{Kind: ToolProviderComputerUse, Name: "computer_use", ComputerUse: &testCase.configuration}}
+			errValidate := request.Validate()
+			if testCase.valid && errValidate != nil {
+				t.Fatalf("Validate() error = %v", errValidate)
+			}
+			if !testCase.valid && !errors.Is(errValidate, ErrInvalidRequest) {
+				t.Fatalf("Validate() error = %v, want ErrInvalidRequest", errValidate)
+			}
+		})
+	}
+}
+
+// TestVulcanRequestValidateComputerContinuationDelta verifies only paired strong computer actions and screenshots may accompany continuation.
+// TestVulcanRequestValidateComputerContinuationDelta 验证只有配对的强类型计算机动作与截图可以伴随 Continuation。
+func TestVulcanRequestValidateComputerContinuationDelta(t *testing.T) {
+	request := testTextRequest()
+	request.Tools = []ToolDefinition{{Kind: ToolProviderComputerUse, Name: "computer", ComputerUse: &ProviderComputerUseTool{Mode: ProviderComputerUseGA}}}
+	request.ReasoningPolicy.ContinuationID = "continuation-router"
+	request.Context = []ContextItem{
+		{ItemID: "computer-call", Sequence: 1, Kind: ContextToolCall, Authority: AuthorityAssistant, Actor: ActorProvider, Placement: PlacementTranscript, Activation: Activation{Mode: ActivationRequestStart}, Visibility: VisibilityModel, ToolCall: &ToolCallItem{ToolCallID: "call-router", UpstreamID: "call-upstream", Name: "computer_use", Status: ToolCallCompleted, ComputerActions: []ComputerAction{{Type: ComputerActionScreenshot}}}},
+		{ItemID: "computer-result", Sequence: 2, Kind: ContextToolResult, Authority: AuthorityTool, Actor: ActorTool, Placement: PlacementTranscript, Activation: Activation{Mode: ActivationRequestStart}, Visibility: VisibilityModel, ToolResult: &ToolResultItem{ToolCallID: "call-router", ComputerScreenshot: &ComputerScreenshotResult{ResourceRef: "resource-screenshot", Detail: "original"}}},
+	}
+	if errValidate := request.Validate(); errValidate != nil {
+		t.Fatalf("Validate() error = %v", errValidate)
+	}
+	request.Context[0].ToolCall.ComputerActions[0].X = intPointer(1)
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("Validate() action-field error = %v, want ErrInvalidRequest", errValidate)
+	}
+	request.Context[0].ToolCall.ComputerActions[0].X = nil
+	request.Context[1].ToolResult.ToolCallID = "other-call"
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("Validate() unpaired error = %v, want ErrInvalidRequest", errValidate)
+	}
+}
+
+// intPointer returns a pointer for zero-sensitive computer action fixtures.
+// intPointer 为对零敏感的计算机动作夹具返回一个指针。
+func intPointer(value int) *int {
+	return &value
+}
+
 // TestVulcanRequestValidateReasoningSummaryModes verifies exact modes are accepted and cannot conflict with the legacy boolean.
 // TestVulcanRequestValidateReasoningSummaryModes 验证精确摘要模式可用且不能与旧布尔值冲突。
 func TestVulcanRequestValidateReasoningSummaryModes(t *testing.T) {

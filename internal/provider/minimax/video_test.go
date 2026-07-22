@@ -6,13 +6,31 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestMiniMaxVideoMapsPinnedFailedStatus verifies the pinned CLI Failed terminal value is not treated as unknown.
+// TestMiniMaxVideoMapsPinnedFailedStatus 验证固定 CLI 的 Failed 终态不会被视为未知状态。
+func TestMiniMaxVideoMapsPinnedFailedStatus(t *testing.T) {
+	result, fileID, errDecode := decodeVideoPoll(strings.NewReader(`{"status":"Failed","base_resp":{"status_code":0}}`), "task-failed", time.Unix(1, 0))
+	if errDecode != nil {
+		t.Fatalf("decodeVideoPoll() error = %v", errDecode)
+	}
+	if result.State != provider.TaskFailed || result.ErrorCode != "minimax_video_generation_failed" || fileID != "" {
+		t.Fatalf("decodeVideoPoll() result = %#v, fileID = %q", result, fileID)
+	}
+	if _, _, errDecode := decodeVideoPoll(strings.NewReader(`{"status":"Fail","base_resp":{"status_code":0}}`), "task-legacy", time.Unix(1, 0)); errDecode == nil {
+		t.Fatal("expected undocumented Fail status to be rejected")
+	}
+}
 
 // TestMiniMaxVideoTaskResolvesPrivateFileID verifies creation, polling, and file retrieval remain one private lifecycle.
 // TestMiniMaxVideoTaskResolvesPrivateFileID 验证创建、轮询与文件取回保持在同一私有生命周期内。
@@ -67,5 +85,45 @@ func TestMiniMaxVideoTaskResolvesPrivateFileID(t *testing.T) {
 	}
 	if len(requests) != 3 || requests[1] != "/v1/query/video_generation?task_id=task-video" || requests[2] != "/v1/files/retrieve?file_id=file-video" {
 		t.Fatalf("requests = %#v", requests)
+	}
+}
+
+// TestMiniMaxVideoProjectsSubjectReferenceOnlyForS2V verifies the pinned CLI subject-reference carrier and model boundary.
+// TestMiniMaxVideoProjectsSubjectReferenceOnlyForS2V 验证固定 CLI 的主体参考载体与模型边界。
+func TestMiniMaxVideoProjectsSubjectReferenceOnlyForS2V(t *testing.T) {
+	_, execution := newMiniMaxImageExecution(t, "https://api.minimax.io")
+	execution.Binding.Target.UpstreamModelID = "S2V-01"
+	execution.Execution.Operation = vcp.OperationVideoGenerate
+	execution.Execution.Payload.ImageGenerate = nil
+	execution.Execution.Payload.VideoGenerate = &vcp.VideoGenerateOperation{Prompt: "Move naturally", Inputs: []vcp.MediaInput{{ID: "subject", Kind: vcp.MediaImage, Role: vcp.MediaRoleSubjectReference, Resource: vcp.ResourceReference{ResourceID: "resource-subject"}}}}
+	execution.MaterializedInputs = []resource.MaterializedInput{{InputID: "subject", ResourceID: "resource-subject", Kind: vcp.MediaImage, Role: vcp.MediaRoleSubjectReference, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "c3ViamVjdA=="}}
+	projected, errProject := projectVideoStart(execution)
+	if errProject != nil {
+		t.Fatalf("projectVideoStart() error = %v", errProject)
+	}
+	var body videoRequest
+	if errDecode := json.Unmarshal(projected.Body, &body); errDecode != nil {
+		t.Fatalf("json.Unmarshal() error = %v", errDecode)
+	}
+	if len(body.SubjectReference) != 1 || body.SubjectReference[0].Type != "character" || len(body.SubjectReference[0].Image) != 1 || body.SubjectReference[0].Image[0] != "data:image/png;base64,c3ViamVjdA==" || body.FirstFrameImage != "" || body.LastFrameImage != "" {
+		t.Fatalf("subject request = %#v", body)
+	}
+	execution.Binding.Target.UpstreamModelID = "MiniMax-Hailuo-02"
+	if _, errProject := projectVideoStart(execution); errProject == nil {
+		t.Fatal("expected subject reference rejection for a non-S2V model")
+	}
+}
+
+// TestMiniMaxVideoRequiresPromptForImageModes verifies the pinned CLI prompt requirement also applies to I2V.
+// TestMiniMaxVideoRequiresPromptForImageModes 验证固定 CLI 的提示词要求同样适用于 I2V。
+func TestMiniMaxVideoRequiresPromptForImageModes(t *testing.T) {
+	_, execution := newMiniMaxImageExecution(t, "https://api.minimax.io")
+	execution.Binding.Target.UpstreamModelID = "MiniMax-Hailuo-2.3"
+	execution.Execution.Operation = vcp.OperationVideoGenerate
+	execution.Execution.Payload.ImageGenerate = nil
+	execution.Execution.Payload.VideoGenerate = &vcp.VideoGenerateOperation{Inputs: []vcp.MediaInput{{ID: "first", Kind: vcp.MediaImage, Role: vcp.MediaRoleFirstFrame, Resource: vcp.ResourceReference{ResourceID: "resource-first"}}}}
+	execution.MaterializedInputs = []resource.MaterializedInput{{InputID: "first", ResourceID: "resource-first", Kind: vcp.MediaImage, Role: vcp.MediaRoleFirstFrame, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "Zmlyc3Q="}}
+	if _, errProject := projectVideoStart(execution); errProject == nil {
+		t.Fatal("expected prompt requirement for image-to-video")
 	}
 }

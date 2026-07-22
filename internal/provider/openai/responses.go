@@ -144,7 +144,7 @@ func (d *ResponsesDriver) Execute(ctx context.Context, execution provider.Execut
 		Stream:         projected.Upstream.Stream, IdempotencyKey: execution.Request.IdempotencyKey,
 	}
 	if projected.Upstream.Stream {
-		return d.executeStream(ctx, outbound, projected, execution.Now)
+		return d.executeStream(ctx, execution, outbound, projected, execution.Now)
 	}
 	return d.executeResponse(ctx, outbound, projected, execution.Now)
 }
@@ -179,12 +179,12 @@ func (d *ResponsesDriver) executeResponse(ctx context.Context, outbound transpor
 	if errDecode != nil {
 		return provider.ExecutionResult{}, errDecode
 	}
-	return provider.ExecutionResult{Response: response, Events: events, Report: mergeReports(projected.Report, decodedReport), UpstreamResponseID: upstream.ID}, nil
+	return provider.ExecutionResult{Response: response, Events: events, Report: mergeReports(projected.Report, decodedReport), UpstreamResponseID: upstream.ID, ContinuationUpstreamResponseID: upstream.ID}, nil
 }
 
 // executeStream executes one SSE response request and converts every parsed upstream frame into the same VCP replay log.
 // executeStream 执行一条 SSE 响应请求并将每个已解析上游帧转换为同一 VCP 回放日志。
-func (d *ResponsesDriver) executeStream(ctx context.Context, outbound transport.Request, projected responsesprofile.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
+func (d *ResponsesDriver) executeStream(ctx context.Context, execution provider.ExecutionRequest, outbound transport.Request, projected responsesprofile.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
 	upstreamResponse, errRequest := d.client.DoStream(ctx, outbound)
 	if errRequest != nil {
 		return provider.ExecutionResult{}, errRequest
@@ -197,17 +197,25 @@ func (d *ResponsesDriver) executeStream(ctx context.Context, outbound transport.
 		return provider.ExecutionResult{}, errNew
 	}
 	errRead := responsesprofile.ReadSSE(upstreamResponse.Body, func(envelope responsesprofile.SSEEnvelope) error {
-		_, errPush := decoder.PushSSE(envelope)
-		return errPush
+		events, errPush := decoder.PushSSE(envelope)
+		if errPush != nil {
+			return errPush
+		}
+		return provider.EmitExecutionEvents(ctx, execution.EventSink, events)
 	})
 	if errRead != nil {
-		_, _ = decoder.Close(errRead)
+		closingEvents, _ := decoder.Close(errRead)
+		_ = provider.EmitExecutionEvents(context.WithoutCancel(ctx), execution.EventSink, closingEvents)
 		return provider.ExecutionResult{}, errRead
 	}
-	if _, errClose := decoder.Close(nil); errClose != nil {
+	closingEvents, errClose := decoder.Close(nil)
+	if errClose != nil {
 		return provider.ExecutionResult{}, errClose
 	}
-	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID()}, nil
+	if errEmit := provider.EmitExecutionEvents(ctx, execution.EventSink, closingEvents); errEmit != nil {
+		return provider.ExecutionResult{}, errEmit
+	}
+	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID(), ContinuationUpstreamResponseID: decoder.UpstreamResponseID()}, nil
 }
 
 // mergeReports combines projection-owned routing facts with decoder-owned provider observations without replacing unknown values.

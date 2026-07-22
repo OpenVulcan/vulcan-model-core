@@ -39,6 +39,11 @@ func (s Snapshot) Validate() error {
 	if s.Revision == 0 || s.ObservedAt.IsZero() {
 		return invalid("catalog revision and observed time are required")
 	}
+	if s.Dynamic != nil {
+		if errDynamic := s.Dynamic.Validate(); errDynamic != nil {
+			return errDynamic
+		}
+	}
 	if errAdditional := s.DefaultAdditionalParameters.Validate(); errAdditional != nil {
 		return fmt.Errorf("provider default additional parameters: %w", errAdditional)
 	}
@@ -267,6 +272,25 @@ func (s Snapshot) Validate() error {
 			}
 		}
 	}
+	voiceIDs := make(map[string]struct{}, len(s.Voices))
+	voiceSubjects := make(map[string]string, len(s.Voices))
+	for _, voice := range s.Voices {
+		if errVoice := voice.Validate(); errVoice != nil {
+			return errVoice
+		}
+		if voice.ProviderInstanceID != s.ProviderInstanceID {
+			return invalid("voice %q crosses provider instances", voice.ID)
+		}
+		if _, exists := voiceIDs[voice.ID]; exists {
+			return invalid("duplicate voice id %q", voice.ID)
+		}
+		voiceIDs[voice.ID] = struct{}{}
+		subject := voice.CredentialID + "\x00" + voice.VoiceID
+		if existingID, exists := voiceSubjects[subject]; exists {
+			return invalid("credential %q and provider voice %q have multiple records %q and %q", voice.CredentialID, voice.VoiceID, existingID, voice.ID)
+		}
+		voiceSubjects[subject] = voice.ID
+	}
 	poolProfiles := make(map[string]struct{}, len(s.Pools))
 	for _, pool := range s.Pools {
 		if err := pool.Validate(); err != nil {
@@ -282,6 +306,63 @@ func (s Snapshot) Validate() error {
 			return invalid("duplicate pool summary for profile %q", pool.ExecutionProfileID)
 		}
 		poolProfiles[pool.ExecutionProfileID] = struct{}{}
+	}
+	return nil
+}
+
+// Validate verifies one credential-scoped voice observation and its cache boundary.
+// Validate 校验一个凭据作用域声音观测及其缓存边界。
+func (v VoiceSnapshot) Validate() error {
+	if errID := validatePrefixedID("voice id", v.ID, "voice_"); errID != nil {
+		return errID
+	}
+	if errInstance := validatePrefixedID("voice provider instance id", v.ProviderInstanceID, "pvi_"); errInstance != nil {
+		return errInstance
+	}
+	if errCredential := validatePrefixedID("voice credential id", v.CredentialID, "cred_"); errCredential != nil {
+		return errCredential
+	}
+	if strings.TrimSpace(v.VoiceID) == "" || v.VoiceID != strings.TrimSpace(v.VoiceID) || strings.TrimSpace(v.DisplayName) == "" || v.DisplayName != strings.TrimSpace(v.DisplayName) || !validModelSource(v.Source) || v.ObservedAt.IsZero() || !v.ExpiresAt.After(v.ObservedAt) || v.Revision == 0 {
+		return invalid("voice identity, source, freshness, and revision are required")
+	}
+	descriptions := make(map[string]struct{}, len(v.Descriptions))
+	for _, description := range v.Descriptions {
+		if strings.TrimSpace(description) == "" || description != strings.TrimSpace(description) {
+			return invalid("voice %q contains an empty or unnormalized description", v.ID)
+		}
+		if _, exists := descriptions[description]; exists {
+			return invalid("voice %q contains duplicate description %q", v.ID, description)
+		}
+		descriptions[description] = struct{}{}
+	}
+	return nil
+}
+
+// Validate verifies dynamic source, freshness, failure, and tombstone facts.
+// Validate 校验动态来源、新鲜度、失败与墓碑事实。
+func (m DynamicCatalogMetadata) Validate() error {
+	if m.Authority != CatalogAuthorityProvider && m.Authority != CatalogAuthoritySignedRemote && m.Authority != CatalogAuthorityUser {
+		return invalid("dynamic catalog authority is invalid")
+	}
+	if strings.TrimSpace(m.SourceRevision) == "" || m.SourceRevision != strings.TrimSpace(m.SourceRevision) || m.RefreshedAt.IsZero() || m.ExpiresAt.IsZero() || m.Status == CatalogRefreshFresh && !m.ExpiresAt.After(m.RefreshedAt) {
+		return invalid("dynamic catalog revision and refresh interval are required")
+	}
+	if m.ETag != strings.TrimSpace(m.ETag) || m.FailureCode != strings.TrimSpace(m.FailureCode) {
+		return invalid("dynamic catalog etag and failure code must be normalized")
+	}
+	if m.Status == CatalogRefreshFresh && m.FailureCode != "" || m.Status == CatalogRefreshStale && m.FailureCode == "" || m.Status != CatalogRefreshFresh && m.Status != CatalogRefreshStale {
+		return invalid("dynamic catalog refresh status and failure code do not match")
+	}
+	seen := make(map[string]struct{}, len(m.Tombstones))
+	for _, tombstone := range m.Tombstones {
+		if tombstone.Kind != "model" && tombstone.Kind != "service" || strings.TrimSpace(tombstone.ID) == "" || tombstone.ID != strings.TrimSpace(tombstone.ID) || tombstone.RemovedAt.IsZero() {
+			return invalid("dynamic catalog tombstone is invalid")
+		}
+		key := tombstone.Kind + "\x00" + tombstone.ID
+		if _, exists := seen[key]; exists {
+			return invalid("duplicate dynamic catalog tombstone %q", tombstone.ID)
+		}
+		seen[key] = struct{}{}
 	}
 	return nil
 }
@@ -473,6 +554,9 @@ func (a AllowanceSnapshot) Validate() error {
 	if a.RemainingRatio != nil && (math.IsNaN(*a.RemainingRatio) || *a.RemainingRatio < 0 || *a.RemainingRatio > 1) {
 		return invalid("allowance remaining ratio must be between zero and one")
 	}
+	if a.DisplayMultiplierPermille != nil && *a.DisplayMultiplierPermille < 0 {
+		return invalid("allowance display multiplier must be non-negative")
+	}
 	if a.Kind == AllowanceWindowQuota {
 		if a.Window == nil {
 			return invalid("window quota requires window metadata")
@@ -492,6 +576,9 @@ func (a AllowanceSnapshot) Validate() error {
 // Validate verifies one quota window definition.
 // Validate 校验一个额度窗口定义。
 func (w AllowanceWindow) Validate() error {
+	if w.StartAt != nil && w.ResetAt != nil && !w.StartAt.Before(*w.ResetAt) {
+		return invalid("allowance window start must precede reset")
+	}
 	switch w.Kind {
 	case WindowRolling:
 		if w.Duration <= 0 || w.CalendarUnit != "" {
@@ -542,6 +629,16 @@ func (c ModelCapabilities) Validate() error {
 	}
 	if len(c.ReasoningSummaryModes) > 0 && c.Reasoning != CapabilityNative && c.Reasoning != CapabilityEmulated && c.Reasoning != CapabilityConditional {
 		return invalid("reasoning summary modes require callable reasoning capability")
+	}
+	seenHostedTools := make(map[vcp.ToolKind]struct{}, len(c.HostedTools))
+	for _, toolKind := range c.HostedTools {
+		if toolKind != vcp.ToolNativeWebSearch && toolKind != vcp.ToolProviderFileSearch && toolKind != vcp.ToolProviderCodeInterpreter && toolKind != vcp.ToolProviderComputerUse {
+			return invalid("hosted tool kind %q is invalid", toolKind)
+		}
+		if _, exists := seenHostedTools[toolKind]; exists {
+			return invalid("hosted tool kind %q is duplicated", toolKind)
+		}
+		seenHostedTools[toolKind] = struct{}{}
 	}
 	return c.validateExtended()
 }
@@ -949,7 +1046,7 @@ func validAllowanceScope(scope AllowanceScope) bool {
 // validAllowanceStatus 返回资源状态是否已显式定义。
 func validAllowanceStatus(status AllowanceStatus) bool {
 	switch status {
-	case AllowanceAvailable, AllowanceLow, AllowanceExhausted, AllowanceUnknownSufficiency, AllowanceUnavailable:
+	case AllowanceAvailable, AllowanceUnlimited, AllowanceLow, AllowanceExhausted, AllowanceUnknownSufficiency, AllowanceUnavailable, AllowanceNotIncluded:
 		return true
 	default:
 		return false

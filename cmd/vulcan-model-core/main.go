@@ -16,6 +16,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/access"
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	executioncore "github.com/OpenVulcan/vulcan-model-core/internal/execution"
 	"github.com/OpenVulcan/vulcan-model-core/internal/httpapi"
@@ -25,6 +26,7 @@ import (
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
@@ -77,6 +79,12 @@ type runOptions struct {
 	// resourceDirectory is the user-level Router resource root.
 	// resourceDirectory 是用户级 Router 资源根目录。
 	resourceDirectory string
+	// tlsCertificatePath optionally enables HTTPS with this PEM certificate chain.
+	// tlsCertificatePath 可选地使用此 PEM 证书链启用 HTTPS。
+	tlsCertificatePath string
+	// tlsPrivateKeyPath is the matching PEM private key and must be configured together with the certificate.
+	// tlsPrivateKeyPath 是匹配的 PEM 私钥且必须与证书同时配置。
+	tlsPrivateKeyPath string
 }
 
 // main starts the process and reports terminal startup or shutdown failures.
@@ -106,8 +114,13 @@ func parseRunOptions(args []string) (runOptions, error) {
 	flags.StringVar(&options.configurationPath, "config", runtimeconfig.DefaultPath, "Local control-plane YAML configuration path")
 	flags.StringVar(&options.secretDirectory, "secret-directory", defaultSecretDirectory, "Local protected secret directory")
 	flags.StringVar(&options.resourceDirectory, "resource-directory", defaultResourceDirectory, "Local Router resource directory")
+	flags.StringVar(&options.tlsCertificatePath, "tls-cert", "", "Optional TLS certificate chain path")
+	flags.StringVar(&options.tlsPrivateKeyPath, "tls-key", "", "Optional TLS private key path")
 	if errParse := flags.Parse(args); errParse != nil {
 		return runOptions{}, fmt.Errorf("parse command flags: %w", errParse)
+	}
+	if (options.tlsCertificatePath == "") != (options.tlsPrivateKeyPath == "") {
+		return runOptions{}, errors.New("tls-cert and tls-key must be configured together")
 	}
 	return options, nil
 }
@@ -181,6 +194,15 @@ func run(ctx context.Context, args []string) error {
 	if errRoutingStates != nil {
 		return fmt.Errorf("create routing state store: %w", errRoutingStates)
 	}
+	// reconciledMiniMaxOrigins collapses historical per-action endpoint copies before any resolver or management query reads them.
+	// reconciledMiniMaxOrigins 在任何 Resolver 或管理查询读取前收敛历史 MiniMax 按动作复制的端点。
+	reconciledMiniMaxOrigins, errReconcileMiniMaxOrigins := management.ReconcileMiniMaxSharedOrigins(ctx, configurations)
+	if errReconcileMiniMaxOrigins != nil {
+		return fmt.Errorf("reconcile persisted MiniMax shared Origins: %w", errReconcileMiniMaxOrigins)
+	}
+	if reconciledMiniMaxOrigins > 0 {
+		log.Printf("reconciled %d persisted MiniMax provider Origin(s)", reconciledMiniMaxOrigins)
+	}
 	// reconciledKimiCatalogs upgrades historical multi-protocol Kimi snapshots to the current single Chat contract before any resolver reads them.
 	// reconciledKimiCatalogs 在任何 Resolver 读取历史多协议 Kimi 快照前，将其升级到当前唯一 Chat 合同。
 	reconciledKimiCatalogs, errReconcileKimiCatalogs := management.ReconcileKimiSystemCatalogs(ctx, configurations, catalogs)
@@ -211,9 +233,27 @@ func run(ctx context.Context, args []string) error {
 	if errAssetBindings != nil {
 		return fmt.Errorf("create provider asset binding store: %w", errAssetBindings)
 	}
+	// miniMaxAccessTokens projects either a raw API key or a protected OAuth document for every MiniMax data-plane action.
+	// miniMaxAccessTokens 为每个 MiniMax 数据面动作投影原始 API Key 或受保护 OAuth 文档。
+	miniMaxAccessTokens, errMiniMaxAccessTokens := providerminimax.NewAccessTokenStore(secrets)
+	if errMiniMaxAccessTokens != nil {
+		return fmt.Errorf("create MiniMax access-token store: %w", errMiniMaxAccessTokens)
+	}
+	// miniMaxFileUploader owns the standalone FileSDK lifecycle and is not a VLM input carrier.
+	// miniMaxFileUploader 管理独立 FileSDK 生命周期，且不作为 VLM 输入载体。
+	miniMaxFileUploader, errMiniMaxFileUploader := providerminimax.NewFileUploader(configurations, miniMaxAccessTokens, &http.Client{Timeout: 5 * time.Minute})
+	if errMiniMaxFileUploader != nil {
+		return fmt.Errorf("create MiniMax file uploader: %w", errMiniMaxFileUploader)
+	}
+	// assetBindingCleaner deletes exact MiniMax provider files before local resource removal.
+	// assetBindingCleaner 在删除本地资源前删除精确 MiniMax 供应商文件。
+	assetBindingCleaner, errAssetBindingCleaner := resource.NewAssetBindingCleaner(assetBindings, secrets, miniMaxFileUploader)
+	if errAssetBindingCleaner != nil {
+		return fmt.Errorf("create provider asset binding cleaner: %w", errAssetBindingCleaner)
+	}
 	// resourceService owns verified filesystem objects under the explicit user-level root.
 	// resourceService 在明确用户级根目录下管理已验证文件系统对象。
-	resourceService, errResourceService := resource.NewService(resourceMetadata, resource.ServiceOptions{Root: filepath.Clean(options.resourceDirectory), MaxObjectBytes: defaultMaximumResourceBytes, MaxReadyBytes: defaultMaximumReadyResourceBytes, DefaultTTL: 24 * time.Hour, MaxTTL: 30 * 24 * time.Hour, BindingCleaner: assetBindings})
+	resourceService, errResourceService := resource.NewService(resourceMetadata, resource.ServiceOptions{Root: filepath.Clean(options.resourceDirectory), MaxObjectBytes: defaultMaximumResourceBytes, MaxReadyBytes: defaultMaximumReadyResourceBytes, DefaultTTL: 24 * time.Hour, MaxTTL: 30 * 24 * time.Hour, BindingCleaner: assetBindingCleaner})
 	if errResourceService != nil {
 		return fmt.Errorf("create Router resource service: %w", errResourceService)
 	}
@@ -253,9 +293,9 @@ func run(ctx context.Context, args []string) error {
 	if errExecutionStore != nil {
 		return fmt.Errorf("create execution store: %w", errExecutionStore)
 	}
-	// inputMaterializer realizes inline and direct URL plans immediately and rejects unregistered provider asset uploads.
-	// inputMaterializer 立即实现内联与直接 URL 方案，并拒绝未注册的供应商资产上传。
-	inputMaterializer, errInputMaterializer := resource.NewMaterializer(resourceService, assetBindings, secrets, nil, resource.MaterializerOptions{})
+	// inputMaterializer realizes code-declared inline, direct URL, and registered provider-asset plans.
+	// inputMaterializer 实现代码声明的内联、直连 URL 与已注册供应商资产方案。
+	inputMaterializer, errInputMaterializer := resource.NewMaterializer(resourceService, assetBindings, secrets, miniMaxFileUploader, resource.MaterializerOptions{})
 	if errInputMaterializer != nil {
 		return fmt.Errorf("create input materializer: %w", errInputMaterializer)
 	}
@@ -302,6 +342,21 @@ func run(ctx context.Context, args []string) error {
 	}
 	if errRegisterKimiAllowance := metadataDrivers.Register(kimiAllowanceDriver); errRegisterKimiAllowance != nil {
 		return fmt.Errorf("register Kimi allowance driver: %w", errRegisterKimiAllowance)
+	}
+	// miniMaxAllowanceDrivers read Token Plan windows only from each explicitly selected regional Definition.
+	// miniMaxAllowanceDrivers 仅从每个显式选择的区域 Definition 读取 Token Plan 窗口。
+	for _, miniMaxDefinitionID := range []string{bootstrap.MiniMaxGlobalDefinitionID, bootstrap.MiniMaxCNDefinitionID} {
+		miniMaxDefinition, existsMiniMaxDefinition := systemDefinitions.Lookup(miniMaxDefinitionID)
+		if !existsMiniMaxDefinition {
+			return fmt.Errorf("MiniMax system definition %q is missing", miniMaxDefinitionID)
+		}
+		miniMaxAllowanceDriver, errMiniMaxAllowanceDriver := providerminimax.NewAllowanceDriver(miniMaxDefinition, miniMaxAccessTokens, &http.Client{Timeout: 30 * time.Second})
+		if errMiniMaxAllowanceDriver != nil {
+			return fmt.Errorf("create MiniMax allowance driver %q: %w", miniMaxDefinitionID, errMiniMaxAllowanceDriver)
+		}
+		if errRegisterMiniMaxAllowance := metadataDrivers.Register(miniMaxAllowanceDriver); errRegisterMiniMaxAllowance != nil {
+			return fmt.Errorf("register MiniMax allowance driver %q: %w", miniMaxDefinitionID, errRegisterMiniMaxAllowance)
+		}
 	}
 	claudeCodeDefinition, existsClaudeCodeDefinition := systemDefinitions.Lookup(bootstrap.AnthropicClaudeCodeDefinitionID)
 	if !existsClaudeCodeDefinition {
@@ -364,6 +419,48 @@ func run(ctx context.Context, args []string) error {
 	kimiTokens, errKimiTokens := management.NewKimiTokenService(configurations, secrets, kimiDeviceClient)
 	if errKimiTokens != nil {
 		return fmt.Errorf("create Kimi token service: %w", errKimiTokens)
+	}
+	// miniMaxGlobalDeviceClient performs OAuth exchanges only against the Global account Origin.
+	// miniMaxGlobalDeviceClient 仅针对 Global 账号 Origin 执行 OAuth 交换。
+	miniMaxGlobalDeviceClient, errMiniMaxGlobalDeviceClient := providerminimax.NewDeviceFlowClient(&http.Client{Timeout: 30 * time.Second}, providerminimax.GlobalOAuthRegion())
+	if errMiniMaxGlobalDeviceClient != nil {
+		return fmt.Errorf("create MiniMax Global device-flow client: %w", errMiniMaxGlobalDeviceClient)
+	}
+	// miniMaxCNDeviceClient performs OAuth exchanges only against the CN account Origin.
+	// miniMaxCNDeviceClient 仅针对 CN 账号 Origin 执行 OAuth 交换。
+	miniMaxCNDeviceClient, errMiniMaxCNDeviceClient := providerminimax.NewDeviceFlowClient(&http.Client{Timeout: 30 * time.Second}, providerminimax.CNOAuthRegion())
+	if errMiniMaxCNDeviceClient != nil {
+		return fmt.Errorf("create MiniMax CN device-flow client: %w", errMiniMaxCNDeviceClient)
+	}
+	// miniMaxGlobalFlows owns only Global-site transient authorization state.
+	// miniMaxGlobalFlows 仅管理 Global 站点的临时授权状态。
+	miniMaxGlobalFlows, errMiniMaxGlobalFlows := providerminimax.NewFlowManager(miniMaxGlobalDeviceClient)
+	if errMiniMaxGlobalFlows != nil {
+		return fmt.Errorf("create MiniMax Global flow manager: %w", errMiniMaxGlobalFlows)
+	}
+	// miniMaxCNFlows owns only CN-site transient authorization state.
+	// miniMaxCNFlows 仅管理 CN 站点的临时授权状态。
+	miniMaxCNFlows, errMiniMaxCNFlows := providerminimax.NewFlowManager(miniMaxCNDeviceClient)
+	if errMiniMaxCNFlows != nil {
+		return fmt.Errorf("create MiniMax CN flow manager: %w", errMiniMaxCNFlows)
+	}
+	// miniMaxDeviceFlows dispatches only from the explicit region selected before authorization.
+	// miniMaxDeviceFlows 仅根据授权前显式选择的区域进行分派。
+	miniMaxDeviceFlows, errMiniMaxDeviceFlows := providerminimax.NewRegionalFlowManager(miniMaxGlobalFlows, miniMaxCNFlows)
+	if errMiniMaxDeviceFlows != nil {
+		return fmt.Errorf("create MiniMax regional flow manager: %w", errMiniMaxDeviceFlows)
+	}
+	// miniMaxTokenClient refreshes through the immutable region stored in the protected document.
+	// miniMaxTokenClient 通过受保护文档中不可变的区域刷新 Token。
+	miniMaxTokenClient, errMiniMaxTokenClient := providerminimax.NewRegionalTokenClient(miniMaxGlobalDeviceClient, miniMaxCNDeviceClient)
+	if errMiniMaxTokenClient != nil {
+		return fmt.Errorf("create MiniMax regional token client: %w", errMiniMaxTokenClient)
+	}
+	// miniMaxTokens persists exact-region OAuth refresh results without exposing token material.
+	// miniMaxTokens 在不暴露 Token 材料的情况下持久化精确区域 OAuth 刷新结果。
+	miniMaxTokens, errMiniMaxTokens := management.NewMiniMaxTokenService(configurations, secrets, miniMaxTokenClient)
+	if errMiniMaxTokens != nil {
+		return fmt.Errorf("create MiniMax token service: %w", errMiniMaxTokens)
 	}
 	// xaiDeviceClient performs OIDC discovery and bounded Grok CLI device authorization exchanges.
 	// xaiDeviceClient 执行 OIDC 发现与有界 Grok CLI 设备授权交换。
@@ -459,6 +556,8 @@ func run(ctx context.Context, args []string) error {
 	// credentialRefreshers 将每个可刷新系统定义绑定到现有的受保护令牌生命周期服务。
 	credentialRefreshers := map[string]refresh.CredentialRefresher{
 		bootstrap.KimiCodingDefinitionID:          kimiTokens,
+		bootstrap.MiniMaxGlobalDefinitionID:       miniMaxTokens,
+		bootstrap.MiniMaxCNDefinitionID:           miniMaxTokens,
 		bootstrap.XAIOAuthDefinitionID:            xaiTokens,
 		bootstrap.OpenAICodexDefinitionID:         codexTokens,
 		bootstrap.AnthropicClaudeCodeDefinitionID: claudeTokens,
@@ -493,6 +592,12 @@ func run(ctx context.Context, args []string) error {
 	openPlatformTransport, errOpenPlatformTransport := transport.NewClient(&http.Client{Timeout: 5 * time.Minute}, secrets, transport.RetryPolicy{})
 	if errOpenPlatformTransport != nil {
 		return fmt.Errorf("create Kimi Open Platform transport: %w", errOpenPlatformTransport)
+	}
+	// miniMaxTransport applies projected API-key or OAuth access-token values without changing the selected regional endpoint.
+	// miniMaxTransport 应用投影后的 API Key 或 OAuth Access Token，且不更改选定区域入口。
+	miniMaxTransport, errMiniMaxTransport := transport.NewClient(&http.Client{Timeout: 5 * time.Minute}, miniMaxAccessTokens, transport.RetryPolicy{})
+	if errMiniMaxTransport != nil {
+		return fmt.Errorf("create MiniMax transport: %w", errMiniMaxTransport)
 	}
 	// codexAccessTokens projects protected OAuth documents to access tokens only during Codex execution.
 	// codexAccessTokens 仅在 Codex 执行期间将受保护 OAuth 文档投影为 Access Token。
@@ -587,7 +692,7 @@ func run(ctx context.Context, args []string) error {
 	if errDrivers := bootstrap.RegisterOpenRouterExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
 		return fmt.Errorf("register OpenRouter execution drivers: %w", errDrivers)
 	}
-	if errDrivers := bootstrap.RegisterMiniMaxExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+	if errDrivers := bootstrap.RegisterMiniMaxExecutionDrivers(executionDrivers, miniMaxTransport); errDrivers != nil {
 		return fmt.Errorf("register MiniMax execution drivers: %w", errDrivers)
 	}
 	if errDrivers := bootstrap.RegisterTavilyExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
@@ -604,39 +709,63 @@ func run(ctx context.Context, args []string) error {
 	}
 	// executions owns the durable public execution lifecycle and exact provider dispatch.
 	// executions 拥有持久化公共执行生命周期与精确供应商分派。
-	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway, RuntimeFeedback: runtimeFeedback})
+	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway, RuntimeFeedback: runtimeFeedback, Leases: executionStore, LeaseTTL: 30 * time.Second})
 	if errExecutions != nil {
 		return fmt.Errorf("create execution service: %w", errExecutions)
+	}
+	// accessController enforces local tenant/project isolation and exposes interfaces replaceable by shared services.
+	// accessController 强制执行本地租户/项目隔离，并暴露可由共享服务替换的接口。
+	accessController, errAccessController := access.NewLocalController(access.Limits{RequestsPerMinute: 600, ConcurrentRequests: 64, AuditEntries: 10000})
+	if errAccessController != nil {
+		return fmt.Errorf("create access controller: %w", errAccessController)
+	}
+	// callIdentityVerifier is absent by default and accepts only one explicitly configured OIDC trust boundary.
+	// callIdentityVerifier 默认不存在，并且仅接受一个显式配置的 OIDC 信任边界。
+	var callIdentityVerifier access.IdentityVerifier
+	if oidcConfiguration := controlConfiguration.OIDCConfiguration(); oidcConfiguration != nil && oidcConfiguration.Enabled {
+		oidcVerifier, errOIDCVerifier := access.NewOIDCVerifier(access.OIDCVerifierConfig{Issuer: oidcConfiguration.Issuer, Audience: oidcConfiguration.Audience, JWKSURL: oidcConfiguration.JWKSURL})
+		if errOIDCVerifier != nil {
+			return fmt.Errorf("create call-plane OIDC verifier: %w", errOIDCVerifier)
+		}
+		callIdentityVerifier = oidcVerifier
 	}
 	// api exposes separated authenticated Vulcan management and call-plane routes.
 	// api 暴露相互隔离且经认证的 Vulcan 管理面和调用面路由。
 	api, errAPI := httpapi.NewWithControlPlane(executionDrivers, httpapi.ControlPlane{
-		Query:                 managementQueries,
-		Commands:              managementCommands,
-		ModelAccess:           modelAccessCommands,
-		CustomCatalogs:        customCatalogCommands,
-		MetadataRefresh:       metadataRefreshCoordinator,
-		Routing:               routingManagement,
-		Protocols:             protocols,
-		APIKeys:               controlConfiguration,
-		Auth:                  controlConfiguration,
-		Resources:             resourceGateway,
-		InputPlans:            inputPlans,
-		Executions:            executions,
-		ResourceDiagnostics:   resourceService,
-		ExecutionDiagnostics:  executions,
-		Targets:               targetResolver,
-		KimiDeviceFlows:       kimiDeviceFlows,
-		KimiTokens:            kimiTokens,
-		XAIDeviceFlows:        xaiDeviceFlows,
-		XAITokens:             xaiTokens,
-		CodexDeviceFlows:      codexDeviceFlows,
-		CodexOAuthFlows:       codexOAuthFlows,
-		CodexTokens:           codexTokens,
-		ClaudeOAuthFlows:      claudeOAuthFlows,
-		ClaudeTokens:          claudeTokens,
-		AntigravityOAuthFlows: antigravityOAuthFlows,
-		AntigravityTokens:     antigravityTokens,
+		Query:                   managementQueries,
+		Commands:                managementCommands,
+		ModelAccess:             modelAccessCommands,
+		CustomCatalogs:          customCatalogCommands,
+		MetadataRefresh:         metadataRefreshCoordinator,
+		Routing:                 routingManagement,
+		Protocols:               protocols,
+		APIKeys:                 controlConfiguration,
+		Auth:                    controlConfiguration,
+		Access:                  accessController,
+		CallIdentityVerifier:    callIdentityVerifier,
+		AccessDiagnostics:       accessController,
+		Resources:               resourceGateway,
+		InputPlans:              inputPlans,
+		Executions:              executions,
+		Preflight:               executions,
+		ResourceDiagnostics:     resourceService,
+		ExecutionDiagnostics:    executions,
+		CatalogChanges:          catalogs,
+		ProviderFileDiagnostics: miniMaxFileUploader,
+		Targets:                 targetResolver,
+		KimiDeviceFlows:         kimiDeviceFlows,
+		KimiTokens:              kimiTokens,
+		MiniMaxDeviceFlows:      miniMaxDeviceFlows,
+		MiniMaxTokens:           miniMaxTokens,
+		XAIDeviceFlows:          xaiDeviceFlows,
+		XAITokens:               xaiTokens,
+		CodexDeviceFlows:        codexDeviceFlows,
+		CodexOAuthFlows:         codexOAuthFlows,
+		CodexTokens:             codexTokens,
+		ClaudeOAuthFlows:        claudeOAuthFlows,
+		ClaudeTokens:            claudeTokens,
+		AntigravityOAuthFlows:   antigravityOAuthFlows,
+		AntigravityTokens:       antigravityTokens,
 	})
 	if errAPI != nil {
 		return fmt.Errorf("create HTTP API: %w", errAPI)
@@ -655,7 +784,7 @@ func run(ctx context.Context, args []string) error {
 
 	// server owns the standard library HTTP lifecycle.
 	// server 管理标准库 HTTP 生命周期。
-	server := &http.Server{Handler: api.Handler()}
+	server := &http.Server{Handler: api.Handler(), ReadHeaderTimeout: 10 * time.Second, IdleTimeout: 2 * time.Minute}
 	// serveErrors receives the terminal serve result exactly once.
 	// serveErrors 只接收一次最终服务结果。
 	serveErrors := make(chan error, 1)
@@ -666,6 +795,10 @@ func run(ctx context.Context, args []string) error {
 	// metadataRefreshErrors 接收后台元数据协调器的终止结果。
 	metadataRefreshErrors := make(chan error, 1)
 	go func() {
+		if options.tlsCertificatePath != "" {
+			serveErrors <- server.ServeTLS(listener, options.tlsCertificatePath, options.tlsPrivateKeyPath)
+			return
+		}
 		serveErrors <- server.Serve(listener)
 	}()
 	go func() {

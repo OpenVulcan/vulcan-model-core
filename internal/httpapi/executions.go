@@ -33,6 +33,22 @@ type ExecutionService interface {
 	Cancel(context.Context, string, string) (execution.Record, error)
 }
 
+// executionEventWaiter is the optional shared-store event distribution extension implemented by the production service.
+// executionEventWaiter 是生产服务实现的可选共享存储事件分发扩展。
+type executionEventWaiter interface {
+	// WaitEvents waits for one durable event batch without making notification delivery authoritative.
+	// WaitEvents 等待一批持久事件，且不将通知传递作为权威事实。
+	WaitEvents(context.Context, string, string, uint64, time.Duration) ([]execution.Event, error)
+}
+
+// UsagePreflightService owns side-effect-free accounting for one exact call-plane target.
+// UsagePreflightService 拥有一个精确调用面 Target 的无副作用计量。
+type UsagePreflightService interface {
+	// Preflight returns provider-exact, Router-estimated, or explicitly unknown usage facts.
+	// Preflight 返回供应商精确、Router 估算或明确未知的用量事实。
+	Preflight(context.Context, string, vcp.UsagePreflightRequest) (vcp.UsagePreflightResponse, error)
+}
+
 // executionCreateResponse reports whether this response is an exact idempotent replay.
 // executionCreateResponse 报告此响应是否为精确幂等重放。
 type executionCreateResponse struct {
@@ -69,6 +85,27 @@ func (s *Server) handleCreateExecution(writer http.ResponseWriter, request *http
 		statusCode = http.StatusAccepted
 	}
 	writeJSON(writer, statusCode, executionCreateResponse{Execution: record, IdempotentReplay: replayed})
+}
+
+// handleUsagePreflight returns side-effect-free usage facts without creating an execution record.
+// handleUsagePreflight 返回无副作用用量事实且不创建执行记录。
+func (s *Server) handleUsagePreflight(writer http.ResponseWriter, request *http.Request) {
+	ownerAPIKeyID, ok := authenticatedAPIKeyID(request.Context())
+	if !ok {
+		writeUnauthorized(writer)
+		return
+	}
+	payload, errDecode := decodeControlJSON[vcp.UsagePreflightRequest](writer, request)
+	if errDecode != nil {
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: "invalid usage preflight request"})
+		return
+	}
+	response, errPreflight := s.control.Preflight.Preflight(request.Context(), ownerAPIKeyID, payload)
+	if errPreflight != nil {
+		writeExecutionError(writer, errPreflight)
+		return
+	}
+	writeJSON(writer, http.StatusOK, response)
 }
 
 // handleGetExecution returns one owner-scoped safe execution view.
@@ -156,6 +193,27 @@ func (s *Server) handleExecutionEvents(writer http.ResponseWriter, request *http
 		record, errGet = s.control.Executions.Get(request.Context(), ownerAPIKeyID, executionID)
 		if errGet != nil || record.Status.IsTerminal() {
 			return
+		}
+		if waiter, distributed := s.control.Executions.(executionEventWaiter); distributed {
+			waitedEvents, errWait := waiter.WaitEvents(request.Context(), ownerAPIKeyID, executionID, afterSequence, 15*time.Second)
+			if errWait != nil {
+				return
+			}
+			for _, event := range waitedEvents {
+				if errWrite := writeSSEExecutionEvent(writer, event); errWrite != nil {
+					return
+				}
+				afterSequence = event.Sequence
+			}
+			if len(waitedEvents) > 0 {
+				flusher.Flush()
+			} else {
+				if _, errWrite := writer.Write([]byte(": keep-alive\n\n")); errWrite != nil {
+					return
+				}
+				flusher.Flush()
+			}
+			continue
 		}
 		select {
 		case <-request.Context().Done():

@@ -33,3 +33,15 @@ func TestParseRunOptionsAcceptsExplicitLocalOverrides(t *testing.T) {
 		t.Fatalf("explicit options = %+v", options)
 	}
 }
+
+// TestParseRunOptionsRequiresCompleteTLSPair verifies public HTTPS cannot start with half-configured key material.
+// TestParseRunOptionsRequiresCompleteTLSPair 验证公共 HTTPS 无法使用不完整密钥材料启动。
+func TestParseRunOptionsRequiresCompleteTLSPair(t *testing.T) {
+	if _, errOptions := parseRunOptions([]string{"--tls-cert", "server.crt"}); errOptions == nil {
+		t.Fatal("parseRunOptions() accepted a TLS certificate without its private key")
+	}
+	options, errOptions := parseRunOptions([]string{"--tls-cert", "server.crt", "--tls-key", "server.key"})
+	if errOptions != nil || options.tlsCertificatePath != "server.crt" || options.tlsPrivateKeyPath != "server.key" {
+		t.Fatalf("complete TLS options=%+v error=%v", options, errOptions)
+	}
+}

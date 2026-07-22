@@ -1,0 +1,224 @@
+openapi: 3.1.0
+info:
+  title: Vulcan Control Protocol
+  version: "1.0"
+  description: Authoritative call-plane contract for VulcanModelRouter. Provider compatibility protocols are upstream-only.
+servers:
+  - url: http://127.0.0.1:13514
+security:
+  - bearerAuth: []
+paths:
+  /vulcan/v1/info:
+    post:
+      operationId: getRouterInformation
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InformationRequest"
+      responses:
+        "200":
+          description: Requested typed information.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/information-response.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/selections:
+    post:
+      operationId: selectExecutionTarget
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/selection-request.schema.json"}
+      responses:
+        "200":
+          description: One exact provider-scoped target without candidates or credentials.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/selection-response.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/preflight:
+    post:
+      operationId: preflightUsage
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/usage-preflight-request.schema.json"}
+      responses:
+        "200":
+          description: Provider-exact, Router-estimated, or explicitly unknown side-effect-free usage facts.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/usage-preflight-response.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/executions:
+    post:
+      operationId: createExecution
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/execution-request.schema.json"}
+      responses:
+        "200": {$ref: "#/components/responses/Execution"}
+        "201": {$ref: "#/components/responses/Execution"}
+        "202": {$ref: "#/components/responses/Execution"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/executions/{execution_id}:
+    get:
+      operationId: getExecution
+      parameters:
+        - $ref: "#/components/parameters/ExecutionID"
+      responses:
+        "200":
+          description: Owner-scoped durable execution.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/execution-record.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/executions/{execution_id}/events:
+    get:
+      operationId: streamExecutionEvents
+      parameters:
+        - $ref: "#/components/parameters/ExecutionID"
+        - name: Last-Event-ID
+          in: header
+          schema: {type: string}
+      responses:
+        "200":
+          description: Durable replay followed by live typed SSE events.
+          content:
+            text/event-stream:
+              schema: {$ref: "./schemas/execution-event.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/executions/{execution_id}/cancel:
+    post:
+      operationId: cancelExecution
+      parameters:
+        - $ref: "#/components/parameters/ExecutionID"
+      responses:
+        "200": {$ref: "#/components/responses/Execution"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/input-plans:
+    post:
+      operationId: createInputPlan
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/input-plan-request.schema.json"}
+      responses:
+        "201":
+          description: Immutable input materialization plan.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/input-plan.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/resources:
+    post:
+      operationId: uploadResource
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              additionalProperties: false
+              required: [file, kind, retention]
+              properties:
+                file: {type: string, contentMediaType: application/octet-stream, contentEncoding: binary}
+                kind: {type: string, enum: [image, audio, video, file]}
+                declared_mime: {type: string}
+                retention: {type: string, enum: [ephemeral, explicit_expiry, persistent]}
+                expires_at: {type: string, format: date-time}
+      responses:
+        "201":
+          description: Router-owned resource metadata.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/resource.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/resources/import:
+    post:
+      operationId: importResource
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: "./schemas/resource-import-request.schema.json"}
+      responses:
+        "201":
+          description: Router-owned imported resource metadata.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/resource.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/resources/{resource_id}:
+    parameters:
+      - $ref: "#/components/parameters/ResourceID"
+    get:
+      operationId: getResource
+      responses:
+        "200":
+          description: Owner-scoped Router resource metadata.
+          content:
+            application/json:
+              schema: {$ref: "./schemas/resource.schema.json"}
+        default: {$ref: "#/components/responses/Error"}
+    delete:
+      operationId: deleteResource
+      responses:
+        "204": {description: Resource deleted.}
+        default: {$ref: "#/components/responses/Error"}
+  /vulcan/v1/resources/{resource_id}/content:
+    get:
+      operationId: downloadResourceContent
+      parameters:
+        - $ref: "#/components/parameters/ResourceID"
+      responses:
+        "200":
+          description: Owner-scoped verified resource bytes.
+          content:
+            application/octet-stream: {schema: {type: string, contentEncoding: binary}}
+        default: {$ref: "#/components/responses/Error"}
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+  parameters:
+    ExecutionID:
+      name: execution_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^exe_[0-9a-f]{32}$'}
+    ResourceID:
+      name: resource_id
+      in: path
+      required: true
+      schema: {type: string, pattern: '^res_[0-9a-f]{32}$'}
+  schemas:
+    InformationRequest:
+      $ref: "./schemas/information-request.schema.json"
+    Error:
+      $ref: "./schemas/error.schema.json"
+  responses:
+    Execution:
+      description: Durable execution admission or result.
+      content:
+        application/json:
+          schema:
+            type: object
+            additionalProperties: false
+            required: [execution, idempotent_replay]
+            properties:
+              execution: {$ref: "./schemas/execution-record.schema.json"}
+              idempotent_replay: {type: boolean}
+    Error:
+      description: Safe VCP error with supported version range.
+      content:
+        application/json:
+          schema: {$ref: "./schemas/error.schema.json"}

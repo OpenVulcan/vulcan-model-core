@@ -190,7 +190,7 @@ func (b Binding) Validate() error {
 	if serviceTarget && (b.Target.ProviderModelID != "" || b.Target.OfferingID != "" || b.Target.UpstreamModelID != "") {
 		return fmt.Errorf("%w: service target cannot contain model facts", ErrInvalidBinding)
 	}
-	if b.Endpoint.ID != b.Target.EndpointID || b.Endpoint.ProviderInstanceID != b.Target.ProviderInstanceID || b.Endpoint.ChannelID != b.Target.ChannelID {
+	if b.Endpoint.ID != b.Target.EndpointID || b.Endpoint.ProviderInstanceID != b.Target.ProviderInstanceID {
 		return fmt.Errorf("%w: endpoint does not match target", ErrInvalidBinding)
 	}
 	if b.Credential.ID != b.Target.CredentialID || b.Credential.ProviderInstanceID != b.Target.ProviderInstanceID {

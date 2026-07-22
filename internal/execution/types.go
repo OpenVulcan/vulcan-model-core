@@ -31,6 +31,9 @@ var (
 	// ErrInvalidProviderResult reports a provider result that violates the selected immutable capability contract.
 	// ErrInvalidProviderResult 表示供应商结果违反选定的不可变能力合同。
 	ErrInvalidProviderResult = errors.New("invalid provider execution result")
+	// ErrExecutionBudgetExceeded reports a caller-owned hard execution ceiling.
+	// ErrExecutionBudgetExceeded 表示调用方拥有的执行硬上限。
+	ErrExecutionBudgetExceeded = errors.New("execution budget exceeded")
 )
 
 // Status identifies one closed durable execution lifecycle state.
@@ -50,6 +53,9 @@ const (
 	// StatusRunning records active provider execution or polling.
 	// StatusRunning 表示供应商正在执行或轮询。
 	StatusRunning Status = "running"
+	// StatusWaitingRetry records a durable retry that has not reached its scheduled time.
+	// StatusWaitingRetry 表示尚未到达计划时间的持久重试。
+	StatusWaitingRetry Status = "waiting_retry"
 	// StatusSucceeded records complete success.
 	// StatusSucceeded 表示完整成功。
 	StatusSucceeded Status = "succeeded"
@@ -95,7 +101,9 @@ func ValidateTransition(current Status, next Status) error {
 	case StatusQueued:
 		allowed = next == StatusRunning || next == StatusFailed || next == StatusCancelled || next == StatusExpired
 	case StatusRunning:
-		allowed = next == StatusSucceeded || next == StatusPartiallySucceeded || next == StatusFailed || next == StatusCancelled || next == StatusExpired
+		allowed = next == StatusSucceeded || next == StatusPartiallySucceeded || next == StatusWaitingRetry || next == StatusFailed || next == StatusCancelled || next == StatusExpired
+	case StatusWaitingRetry:
+		allowed = next == StatusPreparingInputs || next == StatusQueued || next == StatusRunning || next == StatusFailed || next == StatusCancelled || next == StatusExpired
 	}
 	if !allowed {
 		return fmt.Errorf("%w: transition %q to %q is forbidden", ErrInvalidExecution, current, next)
@@ -112,6 +120,112 @@ type Failure struct {
 	// Retryable reports only a known safe retry classification.
 	// Retryable 仅表示已知且安全的重试分类。
 	Retryable bool `json:"retryable"`
+	// Category is the trusted provider category when the failure reached an upstream boundary.
+	// Category 是失败到达上游边界时的可信供应商类别。
+	Category string `json:"category,omitempty"`
+	// Scope identifies the affected provider-owned resource without exposing its identifier.
+	// Scope 标识受影响的供应商拥有资源且不暴露其标识。
+	Scope provider.ErrorScope `json:"scope,omitempty"`
+	// RetryAction is the final same-provider recovery recommendation.
+	// RetryAction 是最终同供应商恢复建议。
+	RetryAction provider.RetryAction `json:"retry_action,omitempty"`
+	// RetryAfterMilliseconds is the non-negative delay known when the failure became terminal.
+	// RetryAfterMilliseconds 是失败进入终态时已知的非负延迟。
+	RetryAfterMilliseconds *int64 `json:"retry_after_milliseconds,omitempty"`
+	// NextRetryAt is the provider-evidenced recovery time when known.
+	// NextRetryAt 是已知时由供应商证据支持的恢复时间。
+	NextRetryAt *time.Time `json:"next_retry_at,omitempty"`
+	// Attempt is the number of completed provider dispatches.
+	// Attempt 是已完成的供应商分派次数。
+	Attempt uint32 `json:"attempt"`
+	// MaxAttempts is present only for a finite caller policy.
+	// MaxAttempts 仅在调用方策略有限时存在。
+	MaxAttempts *uint32 `json:"max_attempts,omitempty"`
+	// RouterRequestID correlates the failure with the caller request without exposing payloads.
+	// RouterRequestID 将失败与调用方请求关联且不暴露载荷。
+	RouterRequestID string `json:"router_request_id"`
+	// TargetSummary contains only provider instance, model or service, profile, and region.
+	// TargetSummary 仅包含供应商实例、模型或服务、规格与区域。
+	TargetSummary string `json:"target_summary"`
+	// ProviderRequestID contains only a provider-approved request identifier.
+	// ProviderRequestID 仅包含供应商批准公开的请求标识。
+	ProviderRequestID string `json:"provider_request_id,omitempty"`
+}
+
+// Validate verifies the closed client-safe failure shape and provider classification tuple.
+// Validate 校验封闭的客户端安全失败结构及供应商分类元组。
+func (f Failure) Validate() error {
+	if strings.TrimSpace(f.Code) == "" || strings.TrimSpace(f.RouterRequestID) == "" || strings.TrimSpace(f.TargetSummary) == "" {
+		return fmt.Errorf("%w: failure code, router request id, and target summary are required", ErrInvalidExecution)
+	}
+	if f.RetryAfterMilliseconds != nil && *f.RetryAfterMilliseconds < 0 {
+		return fmt.Errorf("%w: failure retry delay cannot be negative", ErrInvalidExecution)
+	}
+	if f.NextRetryAt != nil && f.NextRetryAt.IsZero() {
+		return fmt.Errorf("%w: failure next retry time cannot be zero", ErrInvalidExecution)
+	}
+	if f.MaxAttempts != nil && (*f.MaxAttempts == 0 || f.Attempt > *f.MaxAttempts) {
+		return fmt.Errorf("%w: failure attempt exceeds the finite retry policy", ErrInvalidExecution)
+	}
+	// classifiedFields enforces the exact tuple created only after a trusted provider classifier succeeds.
+	// classifiedFields 仅在可信供应商分类器成功后强制其创建的精确元组。
+	classifiedFields := []bool{strings.TrimSpace(f.Category) != "", f.Scope != "", f.RetryAction != ""}
+	if classifiedFields[0] != classifiedFields[1] || classifiedFields[1] != classifiedFields[2] {
+		return fmt.Errorf("%w: failure category, scope, and retry action must appear together", ErrInvalidExecution)
+	}
+	if classifiedFields[0] {
+		if !validFailureScope(f.Scope) || !validFailureRetryAction(f.RetryAction) {
+			return fmt.Errorf("%w: failure provider classification is invalid", ErrInvalidExecution)
+		}
+	} else if f.RetryAfterMilliseconds != nil || f.NextRetryAt != nil || strings.TrimSpace(f.ProviderRequestID) != "" {
+		return fmt.Errorf("%w: unclassified failure cannot carry provider retry or request metadata", ErrInvalidExecution)
+	}
+	return nil
+}
+
+// validFailureScope reports whether a scope belongs to the provider error contract.
+// validFailureScope 报告作用域是否属于供应商错误契约。
+func validFailureScope(scope provider.ErrorScope) bool {
+	switch scope {
+	case provider.ErrorScopeRequest, provider.ErrorScopeCredential, provider.ErrorScopeSubscription, provider.ErrorScopeBillingAccount, provider.ErrorScopeEndpoint, provider.ErrorScopeModel, provider.ErrorScopeProvider:
+		return true
+	default:
+		return false
+	}
+}
+
+// validFailureRetryAction reports whether an action belongs to the same-provider recovery contract.
+// validFailureRetryAction 报告动作是否属于同供应商恢复契约。
+func validFailureRetryAction(action provider.RetryAction) bool {
+	switch action {
+	case provider.RetryStop, provider.RetrySameTarget, provider.RetryOtherCredential, provider.RetryOtherEndpoint, provider.RetryAfterReset:
+		return true
+	default:
+		return false
+	}
+}
+
+// RetryState contains client-safe durable scheduling facts for a deferred execution.
+// RetryState 包含延迟执行的客户端安全持久调度事实。
+type RetryState struct {
+	// ConsecutiveFailures counts completed retryable failure cycles.
+	// ConsecutiveFailures 统计已经完成的连续可重试失败周期。
+	ConsecutiveFailures uint32 `json:"consecutive_failures"`
+	// NextRetryAt is the earliest scheduler dispatch time.
+	// NextRetryAt 是调度器最早分派时间。
+	NextRetryAt time.Time `json:"next_retry_at"`
+	// Category is the stable provider-classified failure category.
+	// Category 是稳定的供应商分类失败类别。
+	Category string `json:"category"`
+	// Scope is the provider-owned resource affected by the failure.
+	// Scope 是失败影响的供应商拥有资源。
+	Scope provider.ErrorScope `json:"scope"`
+	// Action is the same-provider recovery action used by the next dispatch.
+	// Action 是下一次分派使用的同供应商恢复动作。
+	Action provider.RetryAction `json:"action"`
+	// MaxAttempts is present only when the caller configured a finite limit.
+	// MaxAttempts 仅在调用方配置有限次数时存在。
+	MaxAttempts *uint32 `json:"max_attempts,omitempty"`
 }
 
 // Attempt records one private exact-target provider dispatch within a logical execution.
@@ -141,6 +255,9 @@ type Attempt struct {
 	// SemanticOutput reports whether any provider semantic output was observed before failure.
 	// SemanticOutput 表示失败前是否已观测到任何供应商语义输出。
 	SemanticOutput bool `json:"semantic_output"`
+	// Usage contains the terminal provider observation attributable to this exact attempt when one was returned.
+	// Usage 包含供应商返回时可归属于该精确尝试的终态用量观测。
+	Usage *vcp.UsageObservation `json:"usage,omitempty"`
 }
 
 // ProviderTaskSnapshot freezes the private upstream task affinity needed for restart recovery.
@@ -170,6 +287,15 @@ type ProviderTaskSnapshot struct {
 	// PollAttempts records completed bounded polls.
 	// PollAttempts 记录已完成的有界轮询次数。
 	PollAttempts uint32 `json:"poll_attempts"`
+	// CancellationRequestedAt records a durable operator cancellation intent before any upstream cancellation call.
+	// CancellationRequestedAt 在任何上游取消调用前记录持久化的操作员取消意图。
+	CancellationRequestedAt *time.Time `json:"-"`
+	// CancellationAfter records the earliest safe retry time for an unconfirmed upstream cancellation.
+	// CancellationAfter 记录尚未确认的上游取消可安全重试的最早时间。
+	CancellationAfter time.Time `json:"-"`
+	// CancellationAttempts counts completed upstream cancellation requests.
+	// CancellationAttempts 统计已完成的上游取消请求次数。
+	CancellationAttempts uint32 `json:"-"`
 }
 
 // ProviderPreparationSnapshot freezes one private multi-step provider handle and its exact affinity.
@@ -187,6 +313,63 @@ type ProviderPreparationSnapshot struct {
 	// ExpiresAt is the provider-confirmed handle expiry.
 	// ExpiresAt 是供应商确认的句柄过期时间。
 	ExpiresAt time.Time `json:"-"`
+}
+
+// ProviderContinuationSnapshot freezes one protected upstream continuation and its exact provider affinity.
+// ProviderContinuationSnapshot 冻结一个受保护的上游续接标识及其精确供应商亲和性。
+type ProviderContinuationSnapshot struct {
+	// ContinuationID is the Router-owned identifier exposed to the original call-plane owner.
+	// ContinuationID 是向原调用面所有者公开的 Router 所有标识。
+	ContinuationID string `json:"-"`
+	// UpstreamResponseID is the protected provider response identifier and is never serialized publicly.
+	// UpstreamResponseID 是受保护的供应商响应标识，绝不公开序列化。
+	UpstreamResponseID string `json:"-"`
+	// ProtectedResponseIDRef is the durable secret-store reference used only by repositories.
+	// ProtectedResponseIDRef 是仅由 Repository 使用的持久 SecretStore 引用。
+	ProtectedResponseIDRef string `json:"-"`
+	// Target contains the exact provider state ownership boundary.
+	// Target 包含精确的供应商状态所有权边界。
+	Target resolve.Target `json:"-"`
+	// LogicalResponseID identifies the public response that created this continuation.
+	// LogicalResponseID 标识创建此续接的公开响应。
+	LogicalResponseID string `json:"-"`
+	// CreatedAt records when the provider continuation became durable.
+	// CreatedAt 记录供应商续接进入持久状态的时间。
+	CreatedAt time.Time `json:"-"`
+	// LastUsedAt records the latest successful affinity validation before replay.
+	// LastUsedAt 记录重放前最近一次成功亲和性校验时间。
+	LastUsedAt time.Time `json:"-"`
+	// ExpiresAt bounds continuation replay.
+	// ExpiresAt 限制续接重放期限。
+	ExpiresAt time.Time `json:"-"`
+	// InvalidatedAt records an explicit durable revocation time.
+	// InvalidatedAt 记录明确的持久失效时间。
+	InvalidatedAt time.Time `json:"-"`
+	// InvalidationReason is one safe closed reason for rejecting later replay.
+	// InvalidationReason 是拒绝后续重放的安全封闭原因。
+	InvalidationReason ContinuationInvalidationReason `json:"-"`
+}
+
+// ContinuationInvalidationReason identifies one durable safe replay revocation cause.
+// ContinuationInvalidationReason 标识一个持久且安全的重放撤销原因。
+type ContinuationInvalidationReason string
+
+const (
+	// ContinuationInvalidatedExpired marks a continuation whose absolute lifetime ended.
+	// ContinuationInvalidatedExpired 标记绝对有效期已经结束的续接。
+	ContinuationInvalidatedExpired ContinuationInvalidationReason = "expired"
+	// ContinuationInvalidatedTargetUnavailable marks deleted, disabled, or no-longer-eligible exact affinity.
+	// ContinuationInvalidatedTargetUnavailable 标记已删除、已禁用或不再可用的精确亲和目标。
+	ContinuationInvalidatedTargetUnavailable ContinuationInvalidationReason = "target_unavailable"
+	// ContinuationInvalidatedProviderRejected marks an upstream response that explicitly rejected its own continuation state.
+	// ContinuationInvalidatedProviderRejected 标记上游明确拒绝其自身续接状态。
+	ContinuationInvalidatedProviderRejected ContinuationInvalidationReason = "provider_rejected"
+)
+
+// validContinuationInvalidationReason reports membership in the closed durable revocation set.
+// validContinuationInvalidationReason 报告是否属于封闭的持久撤销集合。
+func validContinuationInvalidationReason(reason ContinuationInvalidationReason) bool {
+	return reason == ContinuationInvalidatedExpired || reason == ContinuationInvalidatedTargetUnavailable || reason == ContinuationInvalidatedProviderRejected
 }
 
 // Result contains the operation-specific canonical result currently produced by registered drivers.
@@ -216,6 +399,12 @@ type Result struct {
 	// Resources contains only completed Router-owned generated resources.
 	// Resources 仅包含已完成且由 Router 拥有的生成资源。
 	Resources []resource.Resource `json:"resources,omitempty"`
+	// Continuation is a client-safe reference to protected provider state.
+	// Continuation 是指向受保护供应商状态的客户端安全引用。
+	Continuation *vcp.Continuation `json:"continuation,omitempty"`
+	// Usage contains the logical execution aggregate of all observed attempt usage without filling unknown dimensions.
+	// Usage 包含全部已观测尝试用量的逻辑执行聚合，且不会填充未知维度。
+	Usage *vcp.UsageObservation `json:"usage,omitempty"`
 }
 
 // Record is one owner-scoped durable execution and its private recovery snapshot.
@@ -251,12 +440,21 @@ type Record struct {
 	// Failure contains a safe terminal failure classification.
 	// Failure 包含安全终态错误分类。
 	Failure *Failure `json:"failure,omitempty"`
+	// Retry contains a safe pending retry state only while status is waiting_retry.
+	// Retry 仅在状态为 waiting_retry 时包含安全的待重试状态。
+	Retry *RetryState `json:"retry,omitempty"`
+	// RetryCycles counts durable retry schedules created for this logical execution.
+	// RetryCycles 统计为此逻辑执行创建的持久重试计划次数。
+	RetryCycles uint32 `json:"retry_cycles,omitempty"`
 	// ProviderTask contains private task recovery affinity when asynchronous.
 	// ProviderTask 在异步场景包含私有任务恢复亲和性。
 	ProviderTask *ProviderTaskSnapshot `json:"-"`
 	// ProviderPreparation contains private prepared-workflow affinity after successful preprocessing.
 	// ProviderPreparation 在成功预处理后包含私有准备工作流亲和性。
 	ProviderPreparation *ProviderPreparationSnapshot `json:"-"`
+	// ProviderContinuation contains private target-bound state produced by a successful conversational execution.
+	// ProviderContinuation 包含成功会话执行产生的私有 Target 绑定状态。
+	ProviderContinuation *ProviderContinuationSnapshot `json:"-"`
 	// Attempts contains private exact-target dispatch audit records.
 	// Attempts 包含私有精确 Target 分派审计记录。
 	Attempts []Attempt `json:"-"`
@@ -294,9 +492,24 @@ const (
 	// EventExecutionRunning records provider execution start.
 	// EventExecutionRunning 记录供应商执行开始。
 	EventExecutionRunning EventType = "execution.running"
+	// EventExecutionCancellationRequested records durable intent before an upstream task cancellation request.
+	// EventExecutionCancellationRequested 在上游任务取消请求前记录持久化意图。
+	EventExecutionCancellationRequested EventType = "execution.cancellation.requested"
 	// EventExecutionAttemptCompleted records one private provider attempt without exposing its target.
 	// EventExecutionAttemptCompleted 记录一次私有供应商尝试且不暴露其 Target。
 	EventExecutionAttemptCompleted EventType = "execution.attempt.completed"
+	// EventRetryScheduled records one durable provider-safe retry schedule.
+	// EventRetryScheduled 记录一次持久且供应商安全的重试计划。
+	EventRetryScheduled EventType = "retry.scheduled"
+	// EventRetryStarted records dispatch of one previously scheduled retry.
+	// EventRetryStarted 记录一次先前已计划重试的分派。
+	EventRetryStarted EventType = "retry.started"
+	// EventRetrySucceeded records success after at least one scheduled retry.
+	// EventRetrySucceeded 记录至少一次计划重试后的成功。
+	EventRetrySucceeded EventType = "retry.succeeded"
+	// EventRetryAborted records a scheduled retry becoming terminal or cancelled.
+	// EventRetryAborted 记录计划重试进入终态或被取消。
+	EventRetryAborted EventType = "retry.aborted"
 	// EventProgressUpdated records only provider-reported bounded progress facts.
 	// EventProgressUpdated 仅记录供应商报告的有界进度事实。
 	EventProgressUpdated EventType = "progress.updated"
@@ -372,6 +585,20 @@ type AttemptEvent struct {
 	Sequence uint32 `json:"sequence"`
 }
 
+// RetryEvent contains only safe durable scheduler facts.
+// RetryEvent 仅包含安全的持久调度事实。
+type RetryEvent struct {
+	// Attempt is the next one-based provider dispatch ordinal.
+	// Attempt 是下一次从一开始的供应商分派序号。
+	Attempt uint32 `json:"attempt"`
+	// NextRetryAt is present only for retry.scheduled.
+	// NextRetryAt 仅用于 retry.scheduled。
+	NextRetryAt *time.Time `json:"next_retry_at,omitempty"`
+	// Category is the stable provider-classified category when known.
+	// Category 是已知时稳定的供应商分类类别。
+	Category string `json:"category,omitempty"`
+}
+
 // ProgressEvent contains provider-reported progress without fabricating a percentage.
 // ProgressEvent 包含供应商报告进度且不虚构百分比。
 type ProgressEvent struct {
@@ -392,9 +619,18 @@ type ProgressEvent struct {
 // ResourceEvent contains one partial byte observation or completed Router resource.
 // ResourceEvent 包含一个部分字节观测或已完成 Router 资源。
 type ResourceEvent struct {
-	// ResourceID is stable across partial and completed observations.
-	// ResourceID 在部分与完成观测间保持稳定。
-	ResourceID string `json:"resource_id"`
+	// OutputID is the provider-result-local stable identity shared by partial and completed observations.
+	// OutputID 是在部分与完成观测间共享的供应商结果局部稳定身份。
+	OutputID string `json:"output_id"`
+	// ResourceID is the Router-owned identifier present only after completed ingestion.
+	// ResourceID 是仅在完成接收后出现的 Router 所有标识。
+	ResourceID string `json:"resource_id,omitempty"`
+	// Kind identifies the partial generated media family before Router metadata exists.
+	// Kind 在 Router 元数据存在前标识部分生成媒体类别。
+	Kind vcp.MediaKind `json:"kind,omitempty"`
+	// MIMEType identifies the selected partial output encoding before Router probing completes.
+	// MIMEType 在 Router 探测完成前标识选定的部分输出编码。
+	MIMEType string `json:"mime_type,omitempty"`
 	// PartialBytes is the actual byte count received so far for native partial output.
 	// PartialBytes 是原生部分输出目前实际收到的字节数。
 	PartialBytes *int64 `json:"partial_bytes,omitempty"`
@@ -435,10 +671,25 @@ type UsageEvent struct {
 	Unit string `json:"unit"`
 	// Value is the non-negative observed quantity.
 	// Value 是非负观测数量。
-	Value int64 `json:"value"`
+	Value float64 `json:"value"`
 	// Accuracy is exact, estimated, or unknown.
 	// Accuracy 是精确、估算或未知。
 	Accuracy string `json:"accuracy"`
+	// Source identifies the authoritative origin of this observation.
+	// Source 标识该观测的权威来源。
+	Source string `json:"source"`
+	// Aggregation identifies delta, cumulative, or snapshot semantics.
+	// Aggregation 标识增量、累计或快照语义。
+	Aggregation string `json:"aggregation"`
+	// Phase identifies the execution phase that produced the observation.
+	// Phase 标识产生该观测的执行阶段。
+	Phase string `json:"phase"`
+	// AccountingBasis records the provider or Router counting rule.
+	// AccountingBasis 记录供应商或 Router 计量规则。
+	AccountingBasis string `json:"accounting_basis"`
+	// Final reports whether this metric is terminal.
+	// Final 表示该指标是否为终态。
+	Final bool `json:"final"`
 }
 
 // Event contains one durable strictly typed replay event.
@@ -465,6 +716,9 @@ type Event struct {
 	// Attempt contains a safe completed-attempt ordinal without private target details.
 	// Attempt 包含不带私有 Target 详情的安全已完成尝试序号。
 	Attempt *AttemptEvent `json:"attempt,omitempty"`
+	// Retry contains durable retry scheduling payload.
+	// Retry 包含持久重试调度载荷。
+	Retry *RetryEvent `json:"retry,omitempty"`
 	// ProviderEvent contains one typed provider conversation event.
 	// ProviderEvent 包含一个类型化供应商会话事件。
 	ProviderEvent *vcp.Event `json:"provider_event,omitempty"`
@@ -509,7 +763,7 @@ func (e Event) Validate() error {
 	// payloadCount enforces a closed exact-one union across every semantic payload family.
 	// payloadCount 在每个语义载荷类别之间强制封闭唯一联合体。
 	payloadCount := 0
-	for _, present := range []bool{e.Lifecycle != nil, e.Attempt != nil, e.ProviderEvent != nil, e.Progress != nil, e.Resource != nil, e.Transcript != nil, e.Embedding != nil, e.Rerank != nil, e.SearchQuery != nil, e.SearchResult != nil, e.SearchAnswer != nil, e.Citation != nil, e.Usage != nil} {
+	for _, present := range []bool{e.Lifecycle != nil, e.Attempt != nil, e.Retry != nil, e.ProviderEvent != nil, e.Progress != nil, e.Resource != nil, e.Transcript != nil, e.Embedding != nil, e.Rerank != nil, e.SearchQuery != nil, e.SearchResult != nil, e.SearchAnswer != nil, e.Citation != nil, e.Usage != nil} {
 		if present {
 			payloadCount++
 		}
@@ -521,6 +775,9 @@ func (e Event) Validate() error {
 		if e.ProviderEvent == nil {
 			return fmt.Errorf("%w: provider event requires exactly one provider payload", ErrInvalidExecution)
 		}
+		if errProviderEvent := e.ProviderEvent.Validate(); errProviderEvent != nil {
+			return fmt.Errorf("%w: provider event is invalid: %v", ErrInvalidExecution, errProviderEvent)
+		}
 		return nil
 	}
 	if e.Type == EventExecutionAttemptCompleted {
@@ -528,6 +785,23 @@ func (e Event) Validate() error {
 			return fmt.Errorf("%w: execution attempt payload is invalid", ErrInvalidExecution)
 		}
 		return nil
+	}
+	if e.Type == EventExecutionCancellationRequested {
+		if e.Lifecycle == nil || e.Lifecycle.Failure != nil || e.Lifecycle.Status != StatusQueued && e.Lifecycle.Status != StatusRunning {
+			return fmt.Errorf("%w: cancellation request requires one active task lifecycle", ErrInvalidExecution)
+		}
+		return nil
+	}
+	if e.Type == EventRetryScheduled || e.Type == EventRetryStarted || e.Type == EventRetrySucceeded || e.Type == EventRetryAborted {
+		if e.Retry == nil || e.Retry.Attempt == 0 {
+			return fmt.Errorf("%w: retry event requires a positive attempt", ErrInvalidExecution)
+		}
+		if (e.Type == EventRetryScheduled) != (e.Retry.NextRetryAt != nil) {
+			return fmt.Errorf("%w: only retry.scheduled requires next_retry_at", ErrInvalidExecution)
+		}
+		return nil
+	} else if e.Retry != nil {
+		return fmt.Errorf("%w: retry payload requires a retry event type", ErrInvalidExecution)
 	}
 	if e.Type == EventProgressUpdated {
 		if e.Progress == nil || !validProgress(*e.Progress) {
@@ -556,7 +830,7 @@ func (e Event) Validate() error {
 	if (e.Type == EventSearchAnswerDelta || e.Type == EventSearchAnswerCompleted) && e.SearchAnswer != nil && e.SearchAnswer.Text != "" {
 		return nil
 	}
-	if e.Type == EventUsageUpdated && e.Usage != nil && strings.TrimSpace(e.Usage.Unit) != "" && strings.TrimSpace(e.Usage.Accuracy) != "" && e.Usage.Value >= 0 {
+	if e.Type == EventUsageUpdated && e.Usage != nil && strings.TrimSpace(e.Usage.Unit) != "" && strings.TrimSpace(e.Usage.Accuracy) != "" && strings.TrimSpace(e.Usage.Source) != "" && strings.TrimSpace(e.Usage.Aggregation) != "" && strings.TrimSpace(e.Usage.Phase) != "" && strings.TrimSpace(e.Usage.AccountingBasis) != "" && e.Usage.Value >= 0 {
 		return nil
 	}
 	if e.Lifecycle == nil || e.Lifecycle.Status == "" {
@@ -591,6 +865,11 @@ func (e Event) Validate() error {
 	if (e.Type == EventExecutionFailed) != (e.Lifecycle.Failure != nil) {
 		return fmt.Errorf("%w: failure payload must exist only on execution.failed", ErrInvalidExecution)
 	}
+	if e.Lifecycle.Failure != nil {
+		if errFailure := e.Lifecycle.Failure.Validate(); errFailure != nil {
+			return fmt.Errorf("%w: lifecycle failure is invalid: %v", ErrInvalidExecution, errFailure)
+		}
+	}
 	return nil
 }
 
@@ -609,13 +888,24 @@ func validProgress(progress ProgressEvent) bool {
 // validResourceEvent verifies the exact partial or completed resource union.
 // validResourceEvent 校验精确部分或完成资源联合体。
 func validResourceEvent(eventType EventType, payload ResourceEvent) bool {
-	if strings.TrimSpace(payload.ResourceID) == "" {
+	if strings.TrimSpace(payload.OutputID) == "" {
 		return false
 	}
 	if eventType == EventResourcePartial {
-		return payload.PartialBytes != nil && *payload.PartialBytes >= 0 && payload.Resource == nil
+		return payload.ResourceID == "" && payload.PartialBytes != nil && *payload.PartialBytes > 0 && payload.Resource == nil && validGeneratedMediaKind(payload.Kind) && strings.TrimSpace(payload.MIMEType) != ""
 	}
-	return payload.PartialBytes == nil && payload.Resource != nil && payload.Resource.ID == payload.ResourceID && payload.Resource.State == resource.StateReady
+	return payload.Kind == "" && payload.MIMEType == "" && payload.PartialBytes == nil && payload.Resource != nil && payload.Resource.ID == payload.ResourceID && payload.Resource.State == resource.StateReady
+}
+
+// validGeneratedMediaKind reports whether a progress event belongs to a generated binary family.
+// validGeneratedMediaKind 报告进度事件是否属于生成二进制类别。
+func validGeneratedMediaKind(kind vcp.MediaKind) bool {
+	switch kind {
+	case vcp.MediaImage, vcp.MediaAudio, vcp.MediaVideo, vcp.MediaFile:
+		return true
+	default:
+		return false
+	}
 }
 
 // Validate verifies the durable record's private and public invariants.
@@ -630,16 +920,43 @@ func (r Record) Validate() error {
 	if r.Operation != r.Request.Operation || r.Target.Operation != r.Operation || r.Target.ProviderInstanceID == "" || r.Target.ExecutionProfileID == "" {
 		return fmt.Errorf("%w: request, operation, and target do not match", ErrInvalidExecution)
 	}
-	if r.Status == StatusFailed && r.Failure == nil {
-		return fmt.Errorf("%w: failed execution requires a safe failure", ErrInvalidExecution)
+	if (r.Status == StatusFailed) != (r.Failure != nil) {
+		return fmt.Errorf("%w: safe failure must exist only for failed execution", ErrInvalidExecution)
 	}
-	if r.Status == StatusSucceeded && r.Result == nil {
-		return fmt.Errorf("%w: successful execution requires a result", ErrInvalidExecution)
+	if r.Failure != nil {
+		if errFailure := r.Failure.Validate(); errFailure != nil {
+			return fmt.Errorf("%w: safe failure is invalid: %v", ErrInvalidExecution, errFailure)
+		}
+	}
+	resultRequired := r.Status == StatusSucceeded || r.Status == StatusPartiallySucceeded
+	if resultRequired != (r.Result != nil) {
+		return fmt.Errorf("%w: result must exist only for successful or partially successful execution", ErrInvalidExecution)
+	}
+	if (r.Status == StatusWaitingRetry) != (r.Retry != nil) {
+		return fmt.Errorf("%w: retry state must exist only while waiting_retry", ErrInvalidExecution)
+	}
+	if r.Retry != nil {
+		if r.Request.DispatchMode != vcp.DispatchDeferred || r.Retry.ConsecutiveFailures == 0 || r.Retry.NextRetryAt.IsZero() || r.Retry.NextRetryAt.Before(r.CreatedAt) || strings.TrimSpace(r.Retry.Category) == "" || r.Retry.Scope == "" || r.Retry.Action == "" {
+			return fmt.Errorf("%w: durable retry state is incomplete", ErrInvalidExecution)
+		}
+		if r.Retry.MaxAttempts != nil && *r.Retry.MaxAttempts <= uint32(len(r.Attempts)) {
+			return fmt.Errorf("%w: durable retry exceeds configured attempts", ErrInvalidExecution)
+		}
+	}
+	if r.RetryCycles > uint32(len(r.Attempts)) {
+		return fmt.Errorf("%w: retry cycle count exceeds completed attempts", ErrInvalidExecution)
 	}
 	if r.ProviderTask != nil {
 		task := r.ProviderTask
 		if strings.TrimSpace(task.ProviderTaskID) == "" || task.Target.ProviderDefinitionID != r.Target.ProviderDefinitionID || task.Target.ProviderInstanceID != r.Target.ProviderInstanceID || task.Target.EndpointID != r.Target.EndpointID || task.Target.EndpointRegion != r.Target.EndpointRegion || task.Target.CredentialID != r.Target.CredentialID || task.Target.ActionBindingID != r.Target.ActionBindingID || task.Target.ProviderModelID != r.Target.ProviderModelID || task.Target.UpstreamModelID != r.Target.UpstreamModelID || task.Definition.ID != r.Target.ProviderDefinitionID || task.Endpoint.ID != r.Target.EndpointID || task.Endpoint.ProviderInstanceID != r.Target.ProviderInstanceID || task.Credential.ID != r.Target.CredentialID || task.Credential.ProviderInstanceID != r.Target.ProviderInstanceID {
 			return fmt.Errorf("%w: provider task affinity does not match the immutable target", ErrInvalidExecution)
+		}
+		if task.CancellationRequestedAt != nil {
+			if task.CancellationRequestedAt.IsZero() || task.CancellationRequestedAt.Before(r.CreatedAt) || task.CancellationAfter.IsZero() || task.CancellationAfter.Before(*task.CancellationRequestedAt) {
+				return fmt.Errorf("%w: provider task cancellation intent is invalid", ErrInvalidExecution)
+			}
+		} else if !task.CancellationAfter.IsZero() || task.CancellationAttempts != 0 {
+			return fmt.Errorf("%w: provider task cancellation state has no durable intent", ErrInvalidExecution)
 		}
 	}
 	if r.ProviderPreparation != nil {
@@ -648,12 +965,45 @@ func (r Record) Validate() error {
 			return fmt.Errorf("%w: provider preparation affinity does not match the successful cover preparation", ErrInvalidExecution)
 		}
 	}
+	if r.ProviderContinuation != nil {
+		continuation := r.ProviderContinuation
+		if r.Operation != vcp.OperationConversationRespond || r.Status != StatusSucceeded || r.Result == nil || r.Result.Continuation == nil || r.Result.Continuation.ContinuationID != continuation.ContinuationID || strings.TrimSpace(continuation.ContinuationID) == "" || strings.TrimSpace(continuation.UpstreamResponseID) == "" || strings.TrimSpace(continuation.LogicalResponseID) == "" || continuation.CreatedAt.IsZero() || continuation.CreatedAt.Before(r.CreatedAt) || continuation.CreatedAt.After(r.UpdatedAt) || continuation.ExpiresAt.IsZero() || !continuation.ExpiresAt.After(continuation.CreatedAt) {
+			return fmt.Errorf("%w: provider continuation requires one successful timestamped conversational result", ErrInvalidExecution)
+		}
+		if !continuation.LastUsedAt.IsZero() && (continuation.LastUsedAt.Before(continuation.CreatedAt) || continuation.LastUsedAt.After(r.UpdatedAt)) {
+			return fmt.Errorf("%w: provider continuation last-used time is invalid", ErrInvalidExecution)
+		}
+		if continuation.InvalidatedAt.IsZero() != (continuation.InvalidationReason == "") {
+			return fmt.Errorf("%w: provider continuation invalidation requires both time and reason", ErrInvalidExecution)
+		}
+		if !continuation.InvalidatedAt.IsZero() {
+			if continuation.InvalidatedAt.Before(continuation.CreatedAt) || continuation.InvalidatedAt.After(r.UpdatedAt) || !validContinuationInvalidationReason(continuation.InvalidationReason) {
+				return fmt.Errorf("%w: provider continuation invalidation is invalid", ErrInvalidExecution)
+			}
+		} else if !continuation.ExpiresAt.After(r.UpdatedAt) {
+			return fmt.Errorf("%w: active provider continuation is expired", ErrInvalidExecution)
+		}
+		binding := provider.ContinuationBinding{ContinuationID: continuation.ContinuationID, ProviderDefinitionID: continuation.Target.ProviderDefinitionID, ProviderInstanceID: continuation.Target.ProviderInstanceID, ChannelID: continuation.Target.ChannelID, EndpointID: continuation.Target.EndpointID, CredentialID: continuation.Target.CredentialID, ProviderModelID: continuation.Target.ProviderModelID, UpstreamModelID: continuation.Target.UpstreamModelID, ExecutionProfileID: continuation.Target.ExecutionProfileID, UpstreamResponseID: continuation.UpstreamResponseID}
+		if errBinding := binding.Validate(r.Target); errBinding != nil {
+			return fmt.Errorf("%w: provider continuation affinity does not match the successful target", ErrInvalidExecution)
+		}
+	}
 	for index, attempt := range r.Attempts {
 		if attempt.Sequence != uint32(index+1) || attempt.StartedAt.IsZero() || attempt.EndedAt.Before(attempt.StartedAt) || attempt.Target.ProviderDefinitionID != r.Target.ProviderDefinitionID || attempt.Target.ProviderInstanceID != r.Target.ProviderInstanceID || attempt.Target.ProviderModelID != r.Target.ProviderModelID || attempt.Target.ProviderServiceID != r.Target.ProviderServiceID || attempt.Target.ExecutionProfileID != r.Target.ExecutionProfileID || attempt.Target.Operation != r.Operation {
 			return fmt.Errorf("%w: provider execution attempt is invalid", ErrInvalidExecution)
 		}
 		if attempt.Succeeded && (attempt.FailureCategory != "" || attempt.RetryAction != "") {
 			return fmt.Errorf("%w: successful provider attempt cannot carry failure classification", ErrInvalidExecution)
+		}
+		if attempt.Usage != nil {
+			if errUsage := validateUsageObservation(*attempt.Usage); errUsage != nil {
+				return fmt.Errorf("%w: provider execution attempt contains invalid usage: %v", ErrInvalidExecution, errUsage)
+			}
+		}
+	}
+	if r.Result != nil && r.Result.Usage != nil {
+		if errUsage := validateUsageObservation(*r.Result.Usage); errUsage != nil {
+			return fmt.Errorf("%w: execution result contains invalid usage: %v", ErrInvalidExecution, errUsage)
 		}
 	}
 	return nil

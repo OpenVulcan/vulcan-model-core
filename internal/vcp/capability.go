@@ -171,9 +171,15 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 		demands = append(demands, preferredDemand(FeatureRemoteCompaction, false))
 	}
 	for _, tool := range request.Tools {
-		if tool.Kind == ToolNativeWebSearch {
+		switch tool.Kind {
+		case ToolNativeWebSearch:
 			demands = append(demands, requiredDemand(FeatureNativeWebSearch, false))
-			break
+		case ToolProviderFileSearch:
+			demands = append(demands, requiredDemand(FeatureProviderFileSearch, false))
+		case ToolProviderCodeInterpreter:
+			demands = append(demands, requiredDemand(FeatureProviderCodeInterpreter, false))
+		case ToolProviderComputerUse:
+			demands = append(demands, requiredDemand(FeatureProviderComputerUse, false))
 		}
 	}
 	if needsReasoning {

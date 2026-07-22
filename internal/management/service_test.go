@@ -94,6 +94,69 @@ func TestDiscoverCustomProviderModelsUsesExplicitCredential(t *testing.T) {
 	}
 }
 
+// TestDiscoverCustomProviderModelsMaintainsDynamicLastGood verifies ETag reuse, deletion tombstones, and stale failure preservation.
+// TestDiscoverCustomProviderModelsMaintainsDynamicLastGood 验证 ETag 复用、删除墓碑与失败后的过期快照保留。
+func TestDiscoverCustomProviderModelsMaintainsDynamicLastGood(t *testing.T) {
+	ctx := context.Background()
+	requestCount := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		requestCount++
+		switch requestCount {
+		case 1:
+			writer.Header().Set("ETag", `"models-v1"`)
+			_, _ = writer.Write([]byte(`{"data":[{"id":"retained-model"},{"id":"removed-model"}]}`))
+		case 2:
+			if request.Header.Get("If-None-Match") != `"models-v1"` {
+				t.Fatalf("If-None-Match = %q", request.Header.Get("If-None-Match"))
+			}
+			writer.WriteHeader(http.StatusNotModified)
+		case 3:
+			writer.Header().Set("ETag", `"models-v2"`)
+			_, _ = writer.Write([]byte(`{"data":[{"id":"retained-model"}]}`))
+		default:
+			writer.WriteHeader(http.StatusServiceUnavailable)
+		}
+	}))
+	defer server.Close()
+	service, _, _ := managementTestService(t)
+	now := time.Date(2026, time.July, 21, 22, 0, 0, 0, time.UTC)
+	service.now = func() time.Time { return now }
+	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{ID: "custom_dynamic_discovery", DisplayName: "Dynamic Discovery", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer})
+	if errDefinition != nil {
+		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
+	}
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{DefinitionID: definition.ID, Handle: "dynamic-discovery", DisplayName: "Dynamic Discovery", BaseURL: server.URL + "/v1", InitialModel: &InitialProviderModelInput{UpstreamModelID: "retained-model", DisplayName: "Retained Model"}})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
+	}
+	attachment, errAttach := service.AttachCredential(ctx, AddCredentialInput{ProviderInstanceID: configured.Configuration.Instance.ID, AuthMethodID: "default", Label: "Discovery Key", Secret: []byte("discovery-secret")})
+	if errAttach != nil {
+		t.Fatalf("AttachCredential() error = %v", errAttach)
+	}
+	first, errFirst := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
+	if errFirst != nil || first.Dynamic == nil || first.Dynamic.ETag != `"models-v1"` || first.Dynamic.Status != catalog.CatalogRefreshFresh || len(first.Models) != 2 {
+		t.Fatalf("first discovery = %+v, error = %v", first, errFirst)
+	}
+	now = now.Add(time.Minute)
+	notModified, errNotModified := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
+	if errNotModified != nil || notModified.Dynamic == nil || notModified.Dynamic.RefreshedAt != now || notModified.Revision != first.Revision+1 {
+		t.Fatalf("not-modified discovery = %+v, error = %v", notModified, errNotModified)
+	}
+	now = now.Add(time.Minute)
+	replaced, errReplaced := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
+	if errReplaced != nil || replaced.Dynamic == nil || replaced.Dynamic.ETag != `"models-v2"` || len(replaced.Models) != 1 || len(replaced.Dynamic.Tombstones) != 1 || replaced.Dynamic.Tombstones[0].Kind != "model" {
+		t.Fatalf("replacement discovery = %+v, error = %v", replaced, errReplaced)
+	}
+	now = now.Add(time.Minute)
+	if _, errFailure := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID); errFailure == nil {
+		t.Fatal("failed discovery unexpectedly succeeded")
+	}
+	stale, errStale := service.catalogs.Get(ctx, configured.Configuration.Instance.ID)
+	if errStale != nil || stale.Dynamic == nil || stale.Dynamic.Status != catalog.CatalogRefreshStale || stale.Dynamic.FailureCode != "provider_discovery_rejected" || len(stale.Models) != 1 || len(stale.Dynamic.Tombstones) != 1 {
+		t.Fatalf("stale last-good = %+v, error = %v", stale, errStale)
+	}
+}
+
 // Delete returns the configured compensation failure without removing the secret.
 // Delete 返回配置的补偿失败且不删除秘密。
 func (s *onboardingDeleteFailureStore) Delete(context.Context, string) error {

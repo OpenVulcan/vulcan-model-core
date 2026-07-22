@@ -55,6 +55,9 @@ type ServiceOptions struct {
 	// BindingCleaner removes upstream handles during deletion.
 	// BindingCleaner 在删除期间移除上游句柄。
 	BindingCleaner BindingCleaner
+	// Objects optionally replaces local object bytes with a shared object-store implementation.
+	// Objects 可选地使用共享对象存储实现替换本地对象字节。
+	Objects ObjectStore
 }
 
 // Service owns resource ingestion, authorization, content access, and cleanup.
@@ -66,9 +69,9 @@ type Service struct {
 	// options contains validated immutable service dependencies.
 	// options 包含已校验不可变服务依赖。
 	options ServiceOptions
-	// objectsRoot is the resolved object directory.
-	// objectsRoot 是已解析对象目录。
-	objectsRoot string
+	// objects owns immutable bytes independently from the metadata store.
+	// objects 独立于元数据存储管理不可变字节。
+	objects ObjectStore
 	// temporaryRoot is the resolved temporary directory.
 	// temporaryRoot 是已解析临时目录。
 	temporaryRoot string
@@ -114,6 +117,9 @@ type CreateInput struct {
 	// Reader streams decoded bytes and remains caller-owned.
 	// Reader 流式提供解码字节且仍由调用方拥有。
 	Reader io.Reader
+	// MaxBytes optionally applies a stricter call-scoped ceiling than the service quota.
+	// MaxBytes 可选地应用比服务配额更严格的调用作用域上限。
+	MaxBytes *int64
 }
 
 // NewService validates directories and creates a bounded resource service.
@@ -135,16 +141,20 @@ func NewService(store Store, options ServiceOptions) (*Service, error) {
 	if dependency.IsNil(options.Probe) {
 		options.Probe = StandardProbe{}
 	}
-	objectsRoot := filepath.Join(root, "objects")
 	temporaryRoot := filepath.Join(root, "tmp")
-	if errCreate := os.MkdirAll(objectsRoot, 0o700); errCreate != nil {
-		return nil, fmt.Errorf("create resource object directory: %w", errCreate)
-	}
 	if errCreate := os.MkdirAll(temporaryRoot, 0o700); errCreate != nil {
 		return nil, fmt.Errorf("create resource temporary directory: %w", errCreate)
 	}
+	objects := options.Objects
+	if dependency.IsNil(objects) {
+		localObjects, errObjects := NewLocalObjectStore(root)
+		if errObjects != nil {
+			return nil, errObjects
+		}
+		objects = localObjects
+	}
 	options.Root = root
-	return &Service{store: store, options: options, objectsRoot: objectsRoot, temporaryRoot: temporaryRoot}, nil
+	return &Service{store: store, options: options, objects: objects, temporaryRoot: temporaryRoot}, nil
 }
 
 // Create streams, hashes, probes, atomically moves, and quota-commits one resource.
@@ -183,7 +193,17 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Resource, erro
 		_ = os.Remove(temporaryPath)
 	}()
 	hash := sha256.New()
-	written, errCopy := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(input.Reader, s.options.MaxObjectBytes+1))
+	maximumBytes := s.options.MaxObjectBytes
+	if input.MaxBytes != nil {
+		if *input.MaxBytes <= 0 {
+			s.fail(ctx, resourceID, "invalid_byte_ceiling")
+			return Resource{}, fmt.Errorf("%w: call-scoped byte ceiling must be positive", ErrInvalidResource)
+		}
+		if *input.MaxBytes < maximumBytes {
+			maximumBytes = *input.MaxBytes
+		}
+	}
+	written, errCopy := io.Copy(io.MultiWriter(temporary, hash), io.LimitReader(input.Reader, maximumBytes+1))
 	if errCopy != nil {
 		s.fail(ctx, resourceID, "read_failed")
 		return Resource{}, fmt.Errorf("stream resource bytes: %w", errCopy)
@@ -192,7 +212,7 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Resource, erro
 		s.fail(ctx, resourceID, "empty_resource")
 		return Resource{}, fmt.Errorf("%w: resource is empty", ErrInvalidResource)
 	}
-	if written > s.options.MaxObjectBytes {
+	if written > maximumBytes {
 		s.fail(ctx, resourceID, "object_too_large")
 		return Resource{}, ErrResourceQuotaExceeded
 	}
@@ -215,19 +235,10 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Resource, erro
 		s.fail(ctx, resourceID, errorCode)
 		return Resource{}, errProbe
 	}
-	objectDirectory := filepath.Join(s.objectsRoot, resourceID[4:6])
-	if errCreate := os.MkdirAll(objectDirectory, 0o700); errCreate != nil {
-		s.fail(ctx, resourceID, "object_directory_failed")
-		return Resource{}, fmt.Errorf("create resource object shard: %w", errCreate)
-	}
-	objectPath := filepath.Join(objectDirectory, resourceID+".bin")
-	if _, errStat := os.Stat(objectPath); errStat == nil || !errors.Is(errStat, os.ErrNotExist) {
-		s.fail(ctx, resourceID, "object_conflict")
-		return Resource{}, ErrResourceConflict
-	}
-	if errRename := os.Rename(temporaryPath, objectPath); errRename != nil {
+	objectKey := filepath.ToSlash(filepath.Join("objects", resourceID[4:6], resourceID+".bin"))
+	if errPublish := s.objects.Publish(ctx, objectKey, temporaryPath); errPublish != nil {
 		s.fail(ctx, resourceID, "object_move_failed")
-		return Resource{}, fmt.Errorf("publish resource object: %w", errRename)
+		return Resource{}, fmt.Errorf("publish resource object: %w", errPublish)
 	}
 	ready := receiving
 	ready.MIMEType = mimeType
@@ -235,11 +246,11 @@ func (s *Service) Create(ctx context.Context, input CreateInput) (Resource, erro
 	ready.SHA256 = hex.EncodeToString(hash.Sum(nil))
 	ready.Metadata = metadata
 	ready.State = StateReady
-	ready.ObjectKey = filepath.ToSlash(filepath.Join("objects", resourceID[4:6], resourceID+".bin"))
+	ready.ObjectKey = objectKey
 	ready.UpdatedAt = s.options.Now().UTC()
 	ready.Revision++
 	if errCommit := s.store.CommitReady(ctx, ready, s.options.MaxReadyBytes); errCommit != nil {
-		_ = os.Remove(objectPath)
+		_ = s.objects.Delete(context.WithoutCancel(ctx), objectKey)
 		s.fail(ctx, resourceID, failureCode(errCommit))
 		return Resource{}, errCommit
 	}
@@ -269,11 +280,7 @@ func (s *Service) OpenContent(ctx context.Context, ownerAPIKeyID string, resourc
 	if resource.State != StateReady || (resource.ExpiresAt != nil && !resource.ExpiresAt.After(s.options.Now().UTC())) {
 		return Resource{}, nil, ErrResourceNotFound
 	}
-	path, errPath := s.objectPath(resource.ObjectKey)
-	if errPath != nil {
-		return Resource{}, nil, errPath
-	}
-	content, errOpen := os.Open(path)
+	content, errOpen := s.objects.Open(ctx, resource.ObjectKey)
 	if errOpen != nil {
 		return Resource{}, nil, fmt.Errorf("open resource content: %w", errOpen)
 	}
@@ -300,12 +307,8 @@ func (s *Service) Delete(ctx context.Context, ownerAPIKeyID string, resourceID s
 			return fmt.Errorf("cleanup provider resource bindings: %w", errCleanup)
 		}
 	}
-	path, errPath := s.objectPath(deleting.ObjectKey)
-	if errPath != nil {
-		return errPath
-	}
-	if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
-		return fmt.Errorf("remove resource object: %w", errRemove)
+	if errRemove := s.objects.Delete(ctx, deleting.ObjectKey); errRemove != nil {
+		return errRemove
 	}
 	return s.store.FinishDelete(ctx, deleting.ID, deleting.Revision, s.options.Now().UTC())
 }
@@ -341,11 +344,7 @@ func (s *Service) CleanupExpired(ctx context.Context, limit int) (int, error) {
 				return cleaned, errBindings
 			}
 		}
-		path, errPath := s.objectPath(deleting.ObjectKey)
-		if errPath != nil {
-			return cleaned, errPath
-		}
-		if errRemove := os.Remove(path); errRemove != nil && !errors.Is(errRemove, os.ErrNotExist) {
+		if errRemove := s.objects.Delete(ctx, deleting.ObjectKey); errRemove != nil {
 			return cleaned, errRemove
 		}
 		if errFinish := s.store.FinishDelete(ctx, deleting.ID, deleting.Revision, now); errFinish != nil {
@@ -377,18 +376,6 @@ func (s *Service) resolveExpiry(now time.Time, retention RetentionPolicy, reques
 	}
 	expiresAt := requested.UTC()
 	return &expiresAt, nil
-}
-
-// objectPath resolves one internal object key and rejects path escape.
-// objectPath 解析一个内部对象键并拒绝路径逸出。
-func (s *Service) objectPath(objectKey string) (string, error) {
-	cleanKey := filepath.Clean(filepath.FromSlash(objectKey))
-	path := filepath.Join(s.options.Root, cleanKey)
-	relative, errRelative := filepath.Rel(s.options.Root, path)
-	if errRelative != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
-		return "", fmt.Errorf("%w: object key escapes resource root", ErrInvalidResource)
-	}
-	return path, nil
 }
 
 // fail records a safe terminal code while preserving the original operation error.

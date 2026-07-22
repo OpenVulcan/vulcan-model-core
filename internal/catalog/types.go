@@ -257,6 +257,9 @@ type ModelCapabilities struct {
 	// UsageMetrics lists independently observable usage dimensions.
 	// UsageMetrics 列出可独立观察的用量维度。
 	UsageMetrics []UsageMetricCapability
+	// HostedTools lists exact provider-hosted tool kinds supported by this profile.
+	// HostedTools 列出此规格支持的精确供应商托管工具类型。
+	HostedTools []vcp.ToolKind
 }
 
 // PayloadParameter assigns one validated JSON value to an exact upstream JSON path.
@@ -565,6 +568,9 @@ const (
 	// AllowanceAvailable means the resource does not currently block execution.
 	// AllowanceAvailable 表示资源当前不阻塞执行。
 	AllowanceAvailable AllowanceStatus = "available"
+	// AllowanceUnlimited means the provider explicitly reports no finite consumption ceiling.
+	// AllowanceUnlimited 表示供应商明确报告不存在有限消费上限。
+	AllowanceUnlimited AllowanceStatus = "unlimited"
 	// AllowanceLow means the resource remains usable but is close to exhaustion.
 	// AllowanceLow 表示资源仍可使用但接近耗尽。
 	AllowanceLow AllowanceStatus = "low"
@@ -577,6 +583,9 @@ const (
 	// AllowanceUnavailable means the provider could not return current resource state.
 	// AllowanceUnavailable 表示供应商无法返回当前资源状态。
 	AllowanceUnavailable AllowanceStatus = "unavailable"
+	// AllowanceNotIncluded means the provider explicitly reports that the resource is absent from the current plan.
+	// AllowanceNotIncluded 表示供应商明确报告当前套餐不包含该资源。
+	AllowanceNotIncluded AllowanceStatus = "not_included"
 )
 
 // AllowanceUnit identifies the accounting unit of one consumable resource.
@@ -638,6 +647,9 @@ type AllowanceWindow struct {
 	// TimeZone identifies the provider calendar time zone when known.
 	// TimeZone 标识已知时的供应商日历时区。
 	TimeZone string
+	// StartAt is the provider-reported beginning of the active window when known.
+	// StartAt 是已知时供应商报告的当前窗口起始时间。
+	StartAt *time.Time
 	// ResetAt is the next provider-reported recovery time when known.
 	// ResetAt 是已知时供应商报告的下次恢复时间。
 	ResetAt *time.Time
@@ -682,6 +694,9 @@ type AllowanceSnapshot struct {
 	// RemainingRatio is a value between zero and one when only a ratio is available.
 	// RemainingRatio 是只获得比例时位于零到一之间的值。
 	RemainingRatio *float64
+	// DisplayMultiplierPermille is a provider-reported presentation multiplier without changing the base quota amounts.
+	// DisplayMultiplierPermille 是供应商报告的展示倍率，不改变基础额度数值。
+	DisplayMultiplierPermille *int64
 	// Status is the current normalized resource state.
 	// Status 是当前规范化资源状态。
 	Status AllowanceStatus
@@ -785,6 +800,9 @@ type Snapshot struct {
 	// Allowances contains arbitrary quotas, balances, and credits.
 	// Allowances 包含任意额度、余额和 Credit。
 	Allowances []AllowanceSnapshot
+	// Voices contains credential-scoped provider voice catalog observations.
+	// Voices 包含凭据作用域的供应商声音目录观测。
+	Voices []VoiceSnapshot
 	// Pools contains derived client-safe pool summaries.
 	// Pools 包含派生的客户端安全账号池摘要。
 	Pools []PoolSummary
@@ -794,4 +812,117 @@ type Snapshot struct {
 	// ObservedAt records when the atomic catalog was produced.
 	// ObservedAt 记录生成原子目录的时间。
 	ObservedAt time.Time
+	// Dynamic records trusted refresh provenance only for discoverable catalogs.
+	// Dynamic 仅为可发现目录记录可信刷新来源。
+	Dynamic *DynamicCatalogMetadata
+}
+
+// VoiceSnapshot contains one provider-reported voice available to one exact credential.
+// VoiceSnapshot 包含供应商报告的、对一个精确凭据可用的声音。
+type VoiceSnapshot struct {
+	// ID is the stable Router-owned voice observation identifier.
+	// ID 是 Router 所有的稳定声音观测标识。
+	ID string
+	// ProviderInstanceID owns the voice observation.
+	// ProviderInstanceID 拥有该声音观测。
+	ProviderInstanceID string
+	// CredentialID identifies the exact account that exposed the voice.
+	// CredentialID 标识公开该声音的精确账号。
+	CredentialID string
+	// VoiceID is the exact provider request value.
+	// VoiceID 是精确的供应商请求值。
+	VoiceID string
+	// DisplayName is the provider-authored safe voice name.
+	// DisplayName 是供应商编写的安全声音名称。
+	DisplayName string
+	// Descriptions contains ordered provider-authored voice traits.
+	// Descriptions 包含供应商编写的有序声音特征。
+	Descriptions []string
+	// Source identifies the authoritative observation source.
+	// Source 标识权威观测来源。
+	Source ModelSource
+	// ObservedAt records when the provider returned the voice.
+	// ObservedAt 记录供应商返回该声音的时间。
+	ObservedAt time.Time
+	// ExpiresAt bounds cached use of the voice observation.
+	// ExpiresAt 限制声音观测的缓存使用时间。
+	ExpiresAt time.Time
+	// Revision identifies the normalized voice record revision.
+	// Revision 标识规范化声音记录修订号。
+	Revision uint64
+}
+
+// CatalogAuthority identifies who owns one complete snapshot revision.
+// CatalogAuthority 标识一个完整快照修订的所有者。
+type CatalogAuthority string
+
+const (
+	// CatalogAuthorityCode identifies immutable code-owned metadata.
+	// CatalogAuthorityCode 标识不可变代码拥有元数据。
+	CatalogAuthorityCode CatalogAuthority = "code"
+	// CatalogAuthorityProvider identifies a provider discovery API.
+	// CatalogAuthorityProvider 标识供应商发现 API。
+	CatalogAuthorityProvider CatalogAuthority = "provider"
+	// CatalogAuthoritySignedRemote identifies a signature-verified remote catalog.
+	// CatalogAuthoritySignedRemote 标识经过签名验证的远程目录。
+	CatalogAuthoritySignedRemote CatalogAuthority = "signed_remote"
+	// CatalogAuthorityUser identifies explicit local operator metadata.
+	// CatalogAuthorityUser 标识明确的本地操作员元数据。
+	CatalogAuthorityUser CatalogAuthority = "user"
+)
+
+// CatalogRefreshStatus identifies the last attempted dynamic refresh outcome.
+// CatalogRefreshStatus 标识最近一次动态刷新结果。
+type CatalogRefreshStatus string
+
+const (
+	// CatalogRefreshFresh means the current validated payload came from the latest refresh.
+	// CatalogRefreshFresh 表示当前已校验载荷来自最近刷新。
+	CatalogRefreshFresh CatalogRefreshStatus = "fresh"
+	// CatalogRefreshStale means the last-good payload is retained after expiry or refresh failure.
+	// CatalogRefreshStale 表示过期或刷新失败后保留最后一次有效载荷。
+	CatalogRefreshStale CatalogRefreshStatus = "stale"
+)
+
+// CatalogTombstone records a provider identifier removed by a successful authoritative refresh.
+// CatalogTombstone 记录被一次成功权威刷新移除的供应商标识。
+type CatalogTombstone struct {
+	// Kind is model or service.
+	// Kind 是模型或服务。
+	Kind string
+	// ID is the removed provider-scoped identifier.
+	// ID 是被移除的供应商作用域标识。
+	ID string
+	// RemovedAt records the successful refresh time.
+	// RemovedAt 记录成功刷新时间。
+	RemovedAt time.Time
+}
+
+// DynamicCatalogMetadata contains last-good, incremental synchronization, and failure facts.
+// DynamicCatalogMetadata 包含最后有效、增量同步与失败事实。
+type DynamicCatalogMetadata struct {
+	// Authority identifies the trusted source class.
+	// Authority 标识可信来源类别。
+	Authority CatalogAuthority
+	// SourceRevision is the provider, signature manifest, or user revision.
+	// SourceRevision 是供应商、签名清单或用户修订。
+	SourceRevision string
+	// ETag is the opaque conditional-refresh validator when supplied.
+	// ETag 是供应商提供时的不透明条件刷新校验值。
+	ETag string
+	// RefreshedAt records the most recent refresh attempt.
+	// RefreshedAt 记录最近一次刷新尝试时间。
+	RefreshedAt time.Time
+	// ExpiresAt marks when fresh data becomes stale.
+	// ExpiresAt 标记新鲜数据何时变为陈旧。
+	ExpiresAt time.Time
+	// Status reports fresh or retained stale data.
+	// Status 报告新鲜数据或保留的陈旧数据。
+	Status CatalogRefreshStatus
+	// FailureCode is a safe local classification for the latest failed refresh.
+	// FailureCode 是最近失败刷新的安全本地分类。
+	FailureCode string
+	// Tombstones preserve authoritative removals for incremental clients.
+	// Tombstones 为增量客户端保留权威删除记录。
+	Tombstones []CatalogTombstone
 }

@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/failure.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["code", "retryable", "attempt", "router_request_id", "target_summary"],
+  "properties": {
+    "code": {"type": "string"}, "retryable": {"type": "boolean"}, "category": {"type": "string"},
+    "scope": {"enum": ["request", "credential", "subscription", "billing_account", "endpoint", "model", "provider"]},
+    "retry_action": {"enum": ["stop", "retry_same_target", "retry_other_credential", "retry_other_endpoint", "retry_after_reset"]},
+    "retry_after_milliseconds": {"type": "integer", "minimum": 0}, "next_retry_at": {"type": "string", "format": "date-time"},
+    "attempt": {"type": "integer", "minimum": 0}, "max_attempts": {"type": "integer", "minimum": 1},
+    "router_request_id": {"type": "string", "minLength": 1}, "target_summary": {"type": "string", "minLength": 1}, "provider_request_id": {"type": "string", "minLength": 1}
+  },
+  "allOf": [
+    {
+      "if": {"required": ["category"]},
+      "then": {"required": ["scope", "retry_action"]},
+      "else": {
+        "not": {
+          "anyOf": [
+            {"required": ["scope"]},
+            {"required": ["retry_action"]},
+            {"required": ["retry_after_milliseconds"]},
+            {"required": ["next_retry_at"]},
+            {"required": ["provider_request_id"]}
+          ]
+        }
+      }
+    },
+    {"if": {"required": ["scope"]}, "then": {"required": ["category", "retry_action"]}},
+    {"if": {"required": ["retry_action"]}, "then": {"required": ["category", "scope"]}},
+    {
+      "if": {"required": ["max_attempts"]},
+      "then": {"properties": {"attempt": {"type": "integer", "minimum": 0}}}
+    }
+  ]
+}

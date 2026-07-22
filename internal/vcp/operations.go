@@ -167,6 +167,39 @@ type OperationBudget struct {
 	MaxProviderTasks *int `json:"max_provider_tasks,omitempty"`
 }
 
+// RetryBackoff identifies one closed durable retry delay algorithm.
+// RetryBackoff 标识一种封闭的持久重试延迟算法。
+type RetryBackoff string
+
+const (
+	// RetryBackoffFixed keeps the configured initial delay for every retry.
+	// RetryBackoffFixed 对每次重试保持配置的初始延迟。
+	RetryBackoffFixed RetryBackoff = "fixed"
+	// RetryBackoffExponential multiplies the delay after each consecutive failure.
+	// RetryBackoffExponential 在每次连续失败后倍增延迟。
+	RetryBackoffExponential RetryBackoff = "exponential"
+)
+
+// RetryPolicy configures restart-safe retries for deferred executions before semantic output.
+// RetryPolicy 配置延迟执行在产生语义输出前的可重启安全重试。
+type RetryPolicy struct {
+	// Backoff selects fixed or exponential delay and defaults to exponential.
+	// Backoff 选择固定或指数延迟，默认使用指数延迟。
+	Backoff RetryBackoff `json:"backoff,omitempty"`
+	// InitialDelayMilliseconds defaults to five seconds when omitted.
+	// InitialDelayMilliseconds 省略时默认五秒。
+	InitialDelayMilliseconds *int64 `json:"initial_delay_milliseconds,omitempty"`
+	// MaximumDelayMilliseconds defaults to thirty minutes and may not exceed it.
+	// MaximumDelayMilliseconds 省略时默认三十分钟且不得超过该值。
+	MaximumDelayMilliseconds *int64 `json:"maximum_delay_milliseconds,omitempty"`
+	// Multiplier defaults to two and applies only to exponential backoff.
+	// Multiplier 省略时默认为二且仅用于指数退避。
+	Multiplier *float64 `json:"multiplier,omitempty"`
+	// MaxAttempts optionally limits total provider dispatch attempts; omission retries until retention expiry or cancellation.
+	// MaxAttempts 可选地限制供应商分派总次数；省略时持续重试直至保留期届满或取消。
+	MaxAttempts *uint32 `json:"max_attempts,omitempty"`
+}
+
 // InputPlanResourceAssignment binds one pending planned input to a completed Router resource.
 // InputPlanResourceAssignment 将一个待完成规划输入绑定到已完成 Router 资源。
 type InputPlanResourceAssignment struct {
@@ -255,6 +288,9 @@ type ExecutionRequest struct {
 	// Stream requests real semantic events when the selected profile supports them.
 	// Stream 在所选规格支持时请求真实语义事件。
 	Stream bool `json:"stream"`
+	// DispatchMode selects inline compatibility or durable deferred execution.
+	// DispatchMode 选择内联兼容或持久化延迟执行。
+	DispatchMode DispatchMode `json:"dispatch_mode,omitempty"`
 	// Payload contains exactly one matching operation payload.
 	// Payload 只包含一个匹配的操作载荷。
 	Payload OperationPayload `json:"payload"`
@@ -264,6 +300,9 @@ type ExecutionRequest struct {
 	// Budget contains caller-enforced operation ceilings.
 	// Budget 包含调用方强制操作上限。
 	Budget OperationBudget `json:"budget"`
+	// RetryPolicy optionally overrides the durable deferred-execution retry defaults.
+	// RetryPolicy 可选地覆盖持久延迟执行的默认重试策略。
+	RetryPolicy *RetryPolicy `json:"retry_policy,omitempty"`
 }
 
 // Validate verifies the execution envelope, target, and exact-one payload union.
@@ -274,6 +313,9 @@ func (r ExecutionRequest) Validate() error {
 	}
 	if strings.TrimSpace(r.RequestID) == "" {
 		return fmt.Errorf("%w: request_id is required", ErrInvalidRequest)
+	}
+	if r.DispatchMode != "" && r.DispatchMode != DispatchInline && r.DispatchMode != DispatchDeferred {
+		return fmt.Errorf("%w: invalid dispatch_mode %q", ErrInvalidRequest, r.DispatchMode)
 	}
 	if errTarget := r.Target.validate(r.Operation); errTarget != nil {
 		return errTarget
@@ -287,8 +329,29 @@ func (r ExecutionRequest) Validate() error {
 	if errBudget := r.Budget.validate(); errBudget != nil {
 		return errBudget
 	}
+	if r.RetryPolicy != nil {
+		if r.DispatchMode != DispatchDeferred {
+			return fmt.Errorf("%w: retry_policy requires deferred dispatch", ErrInvalidRequest)
+		}
+		if errRetry := r.RetryPolicy.validate(); errRetry != nil {
+			return errRetry
+		}
+	}
 	return nil
 }
+
+// DispatchMode identifies whether Create waits for completion or returns after durable admission.
+// DispatchMode 标识 Create 等待完成还是在持久接收后返回。
+type DispatchMode string
+
+const (
+	// DispatchInline preserves synchronous compatibility and returns after the initial execution attempt.
+	// DispatchInline 保持同步兼容并在首次执行尝试后返回。
+	DispatchInline DispatchMode = "inline"
+	// DispatchDeferred returns the accepted record so SSE and cancellation can attach before provider dispatch.
+	// DispatchDeferred 返回已接收记录，使 SSE 与取消可在供应商分派前接入。
+	DispatchDeferred DispatchMode = "deferred"
+)
 
 // validateInputPlanAssignments verifies that assignments exist only with a plan and have unique complete identities.
 // validateInputPlanAssignments 校验资源指派仅与方案共存且具有唯一完整身份。
@@ -318,6 +381,30 @@ func (b OperationBudget) validate() error {
 	return nil
 }
 
+// validate verifies bounded retry timing and attempt semantics.
+// validate 校验有界重试时间与尝试次数语义。
+func (p RetryPolicy) validate() error {
+	if p.Backoff != "" && p.Backoff != RetryBackoffFixed && p.Backoff != RetryBackoffExponential {
+		return fmt.Errorf("%w: invalid retry backoff %q", ErrInvalidRequest, p.Backoff)
+	}
+	if p.InitialDelayMilliseconds != nil && (*p.InitialDelayMilliseconds <= 0 || *p.InitialDelayMilliseconds > 1_800_000) {
+		return fmt.Errorf("%w: initial retry delay must be within 1..1800000 milliseconds", ErrInvalidRequest)
+	}
+	if p.MaximumDelayMilliseconds != nil && (*p.MaximumDelayMilliseconds <= 0 || *p.MaximumDelayMilliseconds > 1_800_000) {
+		return fmt.Errorf("%w: maximum retry delay must be within 1..1800000 milliseconds", ErrInvalidRequest)
+	}
+	if p.InitialDelayMilliseconds != nil && p.MaximumDelayMilliseconds != nil && *p.InitialDelayMilliseconds > *p.MaximumDelayMilliseconds {
+		return fmt.Errorf("%w: initial retry delay exceeds maximum retry delay", ErrInvalidRequest)
+	}
+	if p.Multiplier != nil && (*p.Multiplier < 1 || *p.Multiplier > 100) {
+		return fmt.Errorf("%w: retry multiplier must be within 1..100", ErrInvalidRequest)
+	}
+	if p.MaxAttempts != nil && *p.MaxAttempts == 0 {
+		return fmt.Errorf("%w: max retry attempts must be positive", ErrInvalidRequest)
+	}
+	return nil
+}
+
 // validate verifies exact-one target selection and operation ownership.
 // validate 校验唯一目标选择和操作归属。
 func (t TargetSelection) validate(operation OperationKind) error {
@@ -335,6 +422,9 @@ func (t TargetSelection) validate(operation OperationKind) error {
 	}
 	if !validModelTarget(t.Model.Target) {
 		return fmt.Errorf("%w: invalid model target %q", ErrInvalidRequest, t.Model.Target)
+	}
+	if t.Model.RequiredRegion != "" && strings.TrimSpace(t.Model.RequiredRegion) != t.Model.RequiredRegion {
+		return fmt.Errorf("%w: required_region must not contain surrounding whitespace", ErrInvalidRequest)
 	}
 	if t.Model.Target == ModelTargetExact && (strings.TrimSpace(t.Model.ProviderInstanceID) == "" || strings.TrimSpace(t.Model.ProviderModelID) == "") {
 		return fmt.Errorf("%w: exact model selection requires provider_instance_id and provider_model_id", ErrInvalidRequest)

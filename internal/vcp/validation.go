@@ -31,8 +31,8 @@ func (r VulcanRequest) Validate() error {
 	if r.ModelSelection.Target == ModelTargetExact && (strings.TrimSpace(r.ModelSelection.ProviderInstanceID) == "" || strings.TrimSpace(r.ModelSelection.ProviderModelID) == "") {
 		return fmt.Errorf("%w: exact model selection requires provider_instance_id and provider_model_id", ErrInvalidRequest)
 	}
-	if r.ReasoningPolicy.ContinuationID != "" && len(r.Context) != 0 {
-		return fmt.Errorf("%w: continuation and full canonical context are mutually exclusive", ErrInvalidRequest)
+	if r.ReasoningPolicy.ContinuationID != "" && len(r.Context) != 0 && !isComputerContinuationDelta(r.Context) {
+		return fmt.Errorf("%w: continuation accepts only an exact computer call and screenshot result delta", ErrInvalidRequest)
 	}
 	if r.ReasoningPolicy.Summary && strings.TrimSpace(r.ReasoningPolicy.SummaryMode) != "" {
 		return fmt.Errorf("%w: reasoning summary and summary_mode are mutually exclusive", ErrInvalidRequest)
@@ -115,6 +115,47 @@ func (r VulcanRequest) Validate() error {
 		}
 	}
 	return nil
+}
+
+// isComputerContinuationDelta reports whether context is an exact set of paired computer calls and screenshot results.
+// isComputerContinuationDelta 报告上下文是否为一组精确配对的计算机调用与截图结果。
+func isComputerContinuationDelta(context []ContextItem) bool {
+	if len(context) == 0 || len(context)%2 != 0 {
+		return false
+	}
+	calls := make(map[string]struct{}, len(context)/2)
+	results := make(map[string]struct{}, len(context)/2)
+	for _, item := range context {
+		switch item.Kind {
+		case ContextToolCall:
+			if item.ToolCall == nil || len(item.ToolCall.ComputerActions) == 0 || item.ToolCall.UpstreamID == "" || len(item.Content) != 0 {
+				return false
+			}
+			if _, exists := calls[item.ToolCall.ToolCallID]; exists {
+				return false
+			}
+			calls[item.ToolCall.ToolCallID] = struct{}{}
+		case ContextToolResult:
+			if item.ToolResult == nil || item.ToolResult.ComputerScreenshot == nil || len(item.Content) != 0 {
+				return false
+			}
+			if _, exists := results[item.ToolResult.ToolCallID]; exists {
+				return false
+			}
+			results[item.ToolResult.ToolCallID] = struct{}{}
+		default:
+			return false
+		}
+	}
+	if len(calls) != len(results) {
+		return false
+	}
+	for callID := range calls {
+		if _, exists := results[callID]; !exists {
+			return false
+		}
+	}
+	return true
 }
 
 // validToolChoice reports whether a tool choice is empty-defaulted or registered.
@@ -216,7 +257,7 @@ func validToolCallStatus(status ToolCallStatus) bool {
 // validCapabilityFeature 报告能力是否已在 VCP 1.0 中注册。
 func validCapabilityFeature(feature CapabilityFeature) bool {
 	switch feature {
-	case FeatureOrderedContextProjection, FeatureStructuredToolCalling, FeatureParallelToolCalling, FeatureStreamingToolArguments, FeatureStrictSchema, FeatureImageInput, FeatureAudioInput, FeatureVideoInput, FeatureFileInput, FeatureExplicitPromptCache, FeatureRemoteCompaction, FeatureNativeWebSearch, FeatureReasoning, FeatureReasoningContinuation:
+	case FeatureOrderedContextProjection, FeatureStructuredToolCalling, FeatureParallelToolCalling, FeatureStreamingToolArguments, FeatureStrictSchema, FeatureImageInput, FeatureAudioInput, FeatureVideoInput, FeatureFileInput, FeatureExplicitPromptCache, FeatureRemoteCompaction, FeatureNativeWebSearch, FeatureProviderFileSearch, FeatureProviderCodeInterpreter, FeatureProviderComputerUse, FeatureReasoning, FeatureReasoningContinuation:
 		return true
 	default:
 		return false
@@ -306,9 +347,27 @@ func validateContextItem(item ContextItem) error {
 		if !validToolCallStatus(item.ToolCall.Status) {
 			return fmt.Errorf("invalid tool call status %q", item.ToolCall.Status)
 		}
+		if len(item.ToolCall.ComputerActions) > 0 {
+			if item.ToolCall.Name != "computer_use" || item.ToolCall.Arguments != "" || item.ToolCall.Status != ToolCallCompleted {
+				return errors.New("computer tool call requires computer_use name, no arguments, and completed status")
+			}
+			for index := range item.ToolCall.ComputerActions {
+				if errAction := validateComputerAction(item.ToolCall.ComputerActions[index]); errAction != nil {
+					return fmt.Errorf("computer action %d: %v", index, errAction)
+				}
+			}
+		}
 	case ContextToolResult:
 		if item.ToolResult == nil || item.ToolResult.ToolCallID == "" {
 			return errors.New("tool_result requires a parent tool_call_id")
+		}
+		if item.ToolResult.ComputerScreenshot != nil {
+			if len(item.Content) != 0 {
+				return errors.New("computer screenshot tool result cannot contain ordinary content")
+			}
+			if errScreenshot := validateComputerScreenshot(*item.ToolResult.ComputerScreenshot); errScreenshot != nil {
+				return errScreenshot
+			}
 		}
 	case ContextReasoning:
 		if item.Reasoning == nil {
@@ -320,6 +379,73 @@ func validateContextItem(item ContextItem) error {
 		}
 	default:
 		return fmt.Errorf("unknown context kind %q", item.Kind)
+	}
+	return nil
+}
+
+// validateComputerAction verifies exact field ownership for one closed computer action.
+// validateComputerAction 校验一个封闭计算机动作的精确字段归属。
+func validateComputerAction(action ComputerAction) error {
+	coordinates := action.X != nil || action.Y != nil
+	scroll := action.ScrollX != nil || action.ScrollY != nil
+	path := len(action.Path) > 0
+	text := action.Text != ""
+	keys := len(action.Keys) > 0
+	button := action.Button != ""
+	for _, key := range action.Keys {
+		if strings.TrimSpace(key) == "" || key != strings.TrimSpace(key) {
+			return errors.New("computer action keys must be non-empty and trimmed")
+		}
+	}
+	switch action.Type {
+	case ComputerActionClick:
+		if action.X == nil || action.Y == nil || !validComputerButton(action.Button) || scroll || path || text {
+			return errors.New("click requires x, y, and a registered button only")
+		}
+	case ComputerActionDoubleClick, ComputerActionMove:
+		if action.X == nil || action.Y == nil || button || scroll || path || text {
+			return fmt.Errorf("%s requires x and y only", action.Type)
+		}
+	case ComputerActionDrag:
+		if len(action.Path) < 2 || coordinates || button || scroll || text {
+			return errors.New("drag requires at least two path coordinates only")
+		}
+	case ComputerActionScroll:
+		if action.X == nil || action.Y == nil || action.ScrollX == nil || action.ScrollY == nil || button || path || text {
+			return errors.New("scroll requires x, y, scroll_x, and scroll_y only")
+		}
+	case ComputerActionKeypress:
+		if !keys || coordinates || button || scroll || path || text {
+			return errors.New("keypress requires one or more keys only")
+		}
+	case ComputerActionTypeText:
+		if !text || coordinates || button || scroll || path || keys {
+			return errors.New("type requires non-empty text only")
+		}
+	case ComputerActionWait, ComputerActionScreenshot:
+		if coordinates || button || scroll || path || text || keys {
+			return fmt.Errorf("%s does not accept additional fields", action.Type)
+		}
+	default:
+		return fmt.Errorf("unsupported computer action type %q", action.Type)
+	}
+	return nil
+}
+
+// validComputerButton reports whether a click button belongs to the documented closed set.
+// validComputerButton 报告点击按钮是否属于文档化封闭集合。
+func validComputerButton(button string) bool {
+	return button == "left" || button == "right" || button == "wheel" || button == "back" || button == "forward"
+}
+
+// validateComputerScreenshot verifies the screenshot resource and coordinate-preserving detail mode.
+// validateComputerScreenshot 校验截图资源与保持坐标的清晰度模式。
+func validateComputerScreenshot(screenshot ComputerScreenshotResult) error {
+	if strings.TrimSpace(screenshot.ResourceRef) == "" || screenshot.ResourceRef != strings.TrimSpace(screenshot.ResourceRef) {
+		return errors.New("computer screenshot requires one trimmed resource_ref")
+	}
+	if screenshot.Detail != "original" {
+		return errors.New("computer screenshot detail must be original")
 	}
 	return nil
 }
@@ -349,7 +475,7 @@ func validateContent(block ContentBlock) error {
 // validateTool verifies one tool declaration without accepting arbitrary execution fields.
 // validateTool 校验工具声明且不接受任意执行字段。
 func validateTool(tool ToolDefinition) error {
-	if tool.Kind != ToolFunction && tool.Kind != ToolCustom && tool.Kind != ToolNativeWebSearch {
+	if tool.Kind != ToolFunction && tool.Kind != ToolCustom && tool.Kind != ToolNativeWebSearch && tool.Kind != ToolProviderFileSearch && tool.Kind != ToolProviderCodeInterpreter && tool.Kind != ToolProviderComputerUse {
 		return fmt.Errorf("unknown tool kind %q", tool.Kind)
 	}
 	if strings.TrimSpace(tool.Name) == "" {
@@ -361,7 +487,75 @@ func validateTool(tool ToolDefinition) error {
 	if tool.Kind == ToolFunction && !validJSONObject(tool.Parameters) {
 		return errors.New("function parameters must be a JSON object")
 	}
+	hostedPayloads := 0
+	if tool.FileSearch != nil {
+		hostedPayloads++
+	}
+	if tool.CodeInterpreter != nil {
+		hostedPayloads++
+	}
+	if tool.ComputerUse != nil {
+		hostedPayloads++
+	}
+	if tool.Kind == ToolProviderFileSearch {
+		if hostedPayloads != 1 || tool.FileSearch == nil || len(tool.FileSearch.StoreIDs) == 0 {
+			return errors.New("provider file search requires one file_search configuration and at least one store")
+		}
+		seenStores := make(map[string]struct{}, len(tool.FileSearch.StoreIDs))
+		for _, storeID := range tool.FileSearch.StoreIDs {
+			if strings.TrimSpace(storeID) == "" || storeID != strings.TrimSpace(storeID) {
+				return errors.New("provider file search store ids must be normalized")
+			}
+			if _, exists := seenStores[storeID]; exists {
+				return errors.New("provider file search store ids must be unique")
+			}
+			seenStores[storeID] = struct{}{}
+		}
+		if tool.FileSearch.MaxResults != nil && *tool.FileSearch.MaxResults <= 0 {
+			return errors.New("provider file search max_results must be positive")
+		}
+	} else if tool.Kind == ToolProviderCodeInterpreter {
+		if hostedPayloads != 1 || tool.CodeInterpreter == nil || tool.CodeInterpreter.ContainerID != strings.TrimSpace(tool.CodeInterpreter.ContainerID) {
+			return errors.New("provider code interpreter requires normalized code_interpreter configuration")
+		}
+		if tool.CodeInterpreter.ContainerID != "" && tool.CodeInterpreter.MemoryLimit != "" {
+			return errors.New("provider code interpreter memory_limit applies only to auto containers")
+		}
+		if !validCodeInterpreterMemoryLimit(tool.CodeInterpreter.MemoryLimit) {
+			return errors.New("provider code interpreter memory_limit is unsupported")
+		}
+	} else if tool.Kind == ToolProviderComputerUse {
+		if hostedPayloads != 1 || tool.ComputerUse == nil {
+			return errors.New("provider computer use requires one computer_use configuration")
+		}
+		switch tool.ComputerUse.Mode {
+		case ProviderComputerUseGA:
+			if tool.ComputerUse.Environment != "" || tool.ComputerUse.DisplayWidth != 0 || tool.ComputerUse.DisplayHeight != 0 {
+				return errors.New("provider computer use GA does not accept preview display configuration")
+			}
+		case ProviderComputerUsePreview:
+			if !validComputerEnvironment(tool.ComputerUse.Environment) || tool.ComputerUse.DisplayWidth <= 0 || tool.ComputerUse.DisplayHeight <= 0 {
+				return errors.New("provider computer use preview requires a supported environment and positive display dimensions")
+			}
+		default:
+			return errors.New("provider computer use mode is unsupported")
+		}
+	} else if hostedPayloads != 0 {
+		return errors.New("provider-hosted tool configuration does not match tool kind")
+	}
 	return nil
+}
+
+// validCodeInterpreterMemoryLimit reports membership in the provider-documented Responses memory tiers.
+// validCodeInterpreterMemoryLimit 报告是否属于供应商文档声明的 Responses 内存档位。
+func validCodeInterpreterMemoryLimit(value string) bool {
+	return value == "" || value == "1g" || value == "4g" || value == "16g" || value == "64g"
+}
+
+// validComputerEnvironment reports membership in the closed provider-hosted environment set.
+// validComputerEnvironment 报告是否属于封闭的供应商托管环境集合。
+func validComputerEnvironment(value string) bool {
+	return value == "browser" || value == "linux" || value == "windows" || value == "macos"
 }
 
 // validJSONObject reports whether raw JSON contains exactly one object.

@@ -24,6 +24,7 @@ import {
   KeyRoundIcon,
   SearchIcon,
   ServerCogIcon,
+  ShieldCheckIcon,
   SparklesIcon,
   Settings2Icon,
 } from "lucide-react"
@@ -173,6 +174,14 @@ const data: SidebarData = {
       url: "/diagnostics/executions",
       icon: (
         <FileClockIcon
+        />
+      ),
+    },
+    {
+      nameKey: "sidebar.accessDiagnostics",
+      url: "/diagnostics/access",
+      icon: (
+        <ShieldCheckIcon
         />
       ),
     },

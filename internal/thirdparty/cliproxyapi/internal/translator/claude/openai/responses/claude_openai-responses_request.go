@@ -8,12 +8,12 @@ import (
 	"math/big"
 	"strings"
 
-	"github.com/google/uuid"
 	"github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/internal/registry"
 	sigcompat "github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/internal/signature"
 	"github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/internal/thinking"
 	"github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/internal/translator/common"
 	"github.com/OpenVulcan/vulcan-model-core/internal/thirdparty/cliproxyapi/internal/util"
+	"github.com/google/uuid"
 	"github.com/tidwall/gjson"
 	"github.com/tidwall/sjson"
 )

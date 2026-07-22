@@ -1,0 +1,191 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/result-components.schema.json",
+  "title": "VCP Typed Result Components 1.0",
+  "$defs": {
+    "contentBlock": {
+      "type": "object", "additionalProperties": false, "required": ["type"],
+      "properties": {
+        "type": {"enum": ["text", "image", "audio", "video", "file", "citation", "refusal", "registered_extension"]},
+        "text": {"type": "string"}, "resource_ref": {"type": "string"}, "media_type": {"type": "string"},
+        "media_role": {"type": "string"}, "extension_id": {"type": "string"}, "extension": {}
+      }
+    },
+    "searchSource": {
+      "type": "object", "additionalProperties": false, "required": ["type", "url"],
+      "properties": {"type": {"type": "string"}, "url": {"type": "string", "format": "uri"}}
+    },
+    "searchCall": {
+      "type": "object", "additionalProperties": false, "required": ["id", "status"],
+      "properties": {
+        "id": {"type": "string"}, "status": {"type": "string"}, "action_type": {"type": "string"},
+        "query": {"type": "string"}, "url": {"type": "string"}, "pattern": {"type": "string"},
+        "sources": {"type": "array", "items": {"$ref": "#/$defs/searchSource"}}
+      }
+    },
+    "toolCall": {
+      "type": "object", "additionalProperties": false, "required": ["tool_call_id", "status"],
+      "properties": {
+        "tool_call_id": {"type": "string"}, "upstream_id": {"type": "string"}, "synthesized_id": {"type": "boolean"},
+        "namespace": {"type": "string"}, "name": {"type": "string"}, "arguments": {"type": "string"},
+        "status": {"enum": ["pending", "completed", "incomplete"]},
+        "computer_actions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/computerAction"}}
+      }
+    },
+    "computerPoint": {
+      "type": "object", "additionalProperties": false, "required": ["x", "y"],
+      "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}
+    },
+    "computerAction": {
+      "type": "object", "additionalProperties": false, "required": ["type"],
+      "properties": {
+        "type": {"enum": ["click", "double_click", "drag", "move", "scroll", "keypress", "type", "wait", "screenshot"]},
+        "x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"enum": ["left", "right", "wheel", "back", "forward"]},
+        "scroll_x": {"type": "integer"}, "scroll_y": {"type": "integer"}, "text": {"type": "string", "minLength": 1},
+        "keys": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}}, "path": {"type": "array", "minItems": 2, "items": {"$ref": "#/$defs/computerPoint"}}
+      },
+      "oneOf": [
+        {"properties": {"type": {"const": "click"}}, "required": ["x", "y", "button"], "not": {"anyOf": [{"required": ["scroll_x"]}, {"required": ["scroll_y"]}, {"required": ["text"]}, {"required": ["path"]}]}},
+        {"properties": {"type": {"enum": ["double_click", "move"]}}, "required": ["x", "y"], "not": {"anyOf": [{"required": ["button"]}, {"required": ["scroll_x"]}, {"required": ["scroll_y"]}, {"required": ["text"]}, {"required": ["path"]}]}},
+        {"properties": {"type": {"const": "drag"}}, "required": ["path"], "not": {"anyOf": [{"required": ["x"]}, {"required": ["y"]}, {"required": ["button"]}, {"required": ["scroll_x"]}, {"required": ["scroll_y"]}, {"required": ["text"]}]}},
+        {"properties": {"type": {"const": "scroll"}}, "required": ["x", "y", "scroll_x", "scroll_y"], "not": {"anyOf": [{"required": ["button"]}, {"required": ["text"]}, {"required": ["path"]}]}},
+        {"properties": {"type": {"const": "keypress"}}, "required": ["keys"], "not": {"anyOf": [{"required": ["x"]}, {"required": ["y"]}, {"required": ["button"]}, {"required": ["scroll_x"]}, {"required": ["scroll_y"]}, {"required": ["text"]}, {"required": ["path"]}]}},
+        {"properties": {"type": {"const": "type"}}, "required": ["text"], "not": {"anyOf": [{"required": ["x"]}, {"required": ["y"]}, {"required": ["button"]}, {"required": ["scroll_x"]}, {"required": ["scroll_y"]}, {"required": ["keys"]}, {"required": ["path"]}]}},
+        {"properties": {"type": {"enum": ["wait", "screenshot"]}}, "not": {"anyOf": [{"required": ["x"]}, {"required": ["y"]}, {"required": ["button"]}, {"required": ["scroll_x"]}, {"required": ["scroll_y"]}, {"required": ["text"]}, {"required": ["keys"]}, {"required": ["path"]}]}}
+      ]
+    },
+    "outputItem": {
+      "type": "object", "additionalProperties": false, "required": ["item_id", "kind", "status"],
+      "properties": {
+        "item_id": {"type": "string"},
+        "kind": {"enum": ["instruction", "message", "delegated_result", "tool_call", "tool_result", "reasoning", "refusal", "search_call"]},
+        "content": {"type": "array", "items": {"$ref": "#/$defs/contentBlock"}},
+        "tool_call": {"$ref": "#/$defs/toolCall"}, "search_call": {"$ref": "#/$defs/searchCall"},
+        "status": {"enum": ["in_progress", "completed", "incomplete"]}
+      }
+    },
+    "citationLocation": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"output_item_id": {"type": "string"}, "start": {"type": "integer", "minimum": 0}, "end": {"type": "integer", "minimum": 0}}
+    },
+    "citation": {
+      "type": "object", "additionalProperties": false, "required": ["id", "url", "location"],
+      "properties": {"id": {"type": "string"}, "result_id": {"type": "string"}, "url": {"type": "string", "format": "uri"}, "title": {"type": "string"}, "location": {"$ref": "#/$defs/citationLocation"}}
+    },
+    "response": {
+      "type": "object", "additionalProperties": false, "required": ["response_id", "status"],
+      "properties": {
+        "response_id": {"type": "string"}, "status": {"enum": ["in_progress", "completed", "incomplete", "failed", "cancelled"]},
+        "items": {"type": "array", "items": {"$ref": "#/$defs/outputItem"}},
+        "citations": {"type": "array", "items": {"$ref": "#/$defs/citation"}},
+        "usage": {"$ref": "./usage-observation.schema.json"}, "finish_reason": {"type": "string"},
+        "error_code": {"type": "string"}, "warnings": {"type": "array", "items": {"type": "string"}}
+      }
+    },
+    "denseEmbedding": {
+      "type": "object", "additionalProperties": false, "required": ["values", "dimensions"],
+      "properties": {"values": {"oneOf": [{"type": "array", "minItems": 1, "items": {"type": "number"}}, {"type": "null"}]}, "base64": {"type": "string", "minLength": 1}, "dimensions": {"type": "integer", "minimum": 1}, "normalized": {"type": "boolean"}, "distance_metric": {"type": "string"}},
+      "oneOf": [
+        {"properties": {"values": {"type": "array", "minItems": 1}}, "not": {"required": ["base64"]}},
+        {"properties": {"values": {"type": "null"}}, "required": ["base64"]}
+      ]
+    },
+    "sparseEntry": {
+      "type": "object", "additionalProperties": false, "required": ["index", "value"],
+      "properties": {"index": {"type": "integer", "minimum": 0}, "value": {"type": "number"}}
+    },
+    "multiVector": {
+      "type": "object", "additionalProperties": false, "required": ["index", "values"],
+      "properties": {"index": {"type": "integer", "minimum": 0}, "values": {"type": "array", "minItems": 1, "items": {"type": "number"}}}
+    },
+    "embeddingItem": {
+      "type": "object", "additionalProperties": false, "required": ["input_id", "kind", "encoding"],
+      "properties": {
+        "input_id": {"type": "string"}, "kind": {"enum": ["dense", "sparse", "multi_vector"]},
+        "dense": {"$ref": "#/$defs/denseEmbedding"}, "sparse": {"type": "array", "items": {"$ref": "#/$defs/sparseEntry"}},
+        "multi_vector": {"type": "array", "items": {"$ref": "#/$defs/multiVector"}}, "encoding": {"enum": ["float", "base64"]}
+      },
+      "oneOf": [
+        {"properties": {"kind": {"const": "dense"}}, "required": ["dense"], "not": {"anyOf": [{"required": ["sparse"]}, {"required": ["multi_vector"]}]}},
+        {"properties": {"kind": {"const": "sparse"}}, "required": ["sparse"], "not": {"anyOf": [{"required": ["dense"]}, {"required": ["multi_vector"]}]}},
+        {"properties": {"kind": {"const": "multi_vector"}}, "required": ["multi_vector"], "not": {"anyOf": [{"required": ["dense"]}, {"required": ["sparse"]}]}}
+      ]
+    },
+    "rerankContent": {
+      "type": "object", "additionalProperties": false,
+      "properties": {"text": {"type": "string"}, "resource": {"type": "object", "additionalProperties": false, "required": ["resource_id"], "properties": {"resource_id": {"type": "string"}, "revision": {"type": "string"}}}},
+      "oneOf": [{"required": ["text"]}, {"required": ["resource"]}]
+    },
+    "rerankResult": {
+      "type": "object", "additionalProperties": false, "required": ["candidate_id", "original_index", "rank", "provider_score", "score_semantics"],
+      "properties": {"candidate_id": {"type": "string"}, "original_index": {"type": "integer", "minimum": 0}, "rank": {"type": "integer", "minimum": 1}, "provider_score": {"type": "number"}, "score_semantics": {"type": "string"}, "content": {"$ref": "#/$defs/rerankContent"}}
+    },
+    "searchResult": {
+      "type": "object", "additionalProperties": false, "required": ["id", "rank", "url"],
+      "properties": {
+        "id": {"type": "string"}, "rank": {"type": "integer", "minimum": 1}, "title": {"type": "string"}, "url": {"type": "string", "format": "uri"},
+        "source_domain": {"type": "string"}, "snippet": {"type": "string"}, "published_at": {"type": "string", "format": "date-time"},
+        "updated_at": {"type": "string", "format": "date-time"}, "author": {"type": "string"}, "provider_score": {"type": "number"}
+      }
+    },
+    "searchResponse": {
+      "type": "object", "additionalProperties": false, "required": ["query", "evidence"],
+      "properties": {
+        "query": {"type": "string"}, "queries": {"type": "array", "items": {"type": "string"}},
+        "evidence": {"type": "object", "additionalProperties": false, "required": ["status"], "properties": {"status": {"enum": ["confirmed", "requested_unverified", "not_performed"]}, "kinds": {"type": "array", "items": {"enum": ["provider_event", "structured_result", "citation", "provider_contract_only"]}}}},
+        "results": {"type": "array", "items": {"$ref": "#/$defs/searchResult"}}, "answer": {"type": "string"},
+        "citations": {"type": "array", "items": {"$ref": "#/$defs/citation"}}, "sources": {"type": "array", "items": {"$ref": "#/$defs/searchSource"}},
+        "usage": {"$ref": "./usage-observation.schema.json"}
+      }
+    },
+    "transcriptWord": {
+      "type": "object", "additionalProperties": false, "required": ["text"],
+      "properties": {"text": {"type": "string"}, "start_milliseconds": {"type": "integer", "minimum": 0}, "end_milliseconds": {"type": "integer", "minimum": 0}, "speaker": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}
+    },
+    "transcriptSegment": {
+      "type": "object", "additionalProperties": false, "required": ["candidate_id", "segment_id", "text"],
+      "properties": {"candidate_id": {"type": "string"}, "segment_id": {"type": "string"}, "text": {"type": "string"}, "start_milliseconds": {"type": "integer", "minimum": 0}, "end_milliseconds": {"type": "integer", "minimum": 0}, "speaker": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "words": {"type": "array", "items": {"$ref": "#/$defs/transcriptWord"}}}
+    },
+    "transcriptCandidate": {
+      "type": "object", "additionalProperties": false, "required": ["candidate_id", "text"],
+      "properties": {"candidate_id": {"type": "string"}, "text": {"type": "string"}, "language": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "segments": {"type": "array", "items": {"$ref": "#/$defs/transcriptSegment"}}}
+    },
+    "transcript": {
+      "type": "object", "additionalProperties": false, "required": ["candidates"],
+      "properties": {"duration_milliseconds": {"type": "integer", "minimum": 0}, "candidates": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/transcriptCandidate"}}}
+    },
+    "musicCoverPreparation": {
+      "type": "object", "additionalProperties": false, "required": ["preparation_id", "formatted_lyrics", "structure", "audio_duration_seconds", "expires_at"],
+      "properties": {
+        "preparation_id": {"type": "string"}, "formatted_lyrics": {"type": "string"},
+        "structure": {"type": "array", "minItems": 1, "items": {"type": "object", "additionalProperties": false, "required": ["label", "start_seconds", "end_seconds"], "properties": {"label": {"enum": ["intro", "verse", "chorus", "bridge", "outro", "inst", "silence"]}, "start_seconds": {"type": "number", "minimum": 0}, "end_seconds": {"type": "number", "exclusiveMinimum": 0}}}},
+        "audio_duration_seconds": {"type": "number", "exclusiveMinimum": 0}, "expires_at": {"type": "string", "format": "date-time"}
+      }
+    },
+    "providerEvent": {
+      "type": "object", "additionalProperties": false, "required": ["response_id", "event_id", "sequence", "time", "replayable", "type"],
+      "properties": {
+        "response_id": {"type": "string"}, "event_id": {"type": "string"}, "sequence": {"type": "integer", "minimum": 1}, "time": {"type": "string", "format": "date-time"}, "replayable": {"type": "boolean"},
+        "type": {"enum": ["response.started", "route.resolved", "item.started", "content.started", "content.delta", "content.completed", "tool.arguments.delta", "tool.arguments.completed", "item.completed", "citation.completed", "usage.updated", "warning.raised", "response.completed", "response.incomplete", "response.failed", "response.cancelled"]},
+        "item_id": {"type": "string"}, "content_index": {"type": "integer", "minimum": 0}, "tool_call_id": {"type": "string"},
+        "item": {"$ref": "#/$defs/outputItem"}, "delta": {"type": "string"}, "tool_name": {"type": "string"}, "upstream_tool_call_id": {"type": "string"},
+        "final_arguments": {"type": "string"}, "usage": {"$ref": "./usage-observation.schema.json"}, "finish_reason": {"type": "string"},
+        "error_code": {"type": "string"}, "warning_code": {"type": "string"}, "search_call": {"$ref": "#/$defs/searchCall"}, "citation": {"$ref": "#/$defs/citation"}
+      },
+      "allOf": [{"oneOf": [
+        {"properties": {"type": {"enum": ["response.started", "route.resolved"]}}, "not": {"anyOf": [{"required": ["item_id"]}, {"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "item.started"}}, "required": ["item_id", "item"], "not": {"anyOf": [{"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"enum": ["content.started", "content.completed"]}}, "required": ["item_id"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "content.delta"}}, "required": ["item_id", "delta"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "tool.arguments.delta"}}, "required": ["item_id", "delta"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "tool.arguments.completed"}}, "required": ["item_id"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["delta"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "item.completed"}}, "required": ["item_id"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "citation.completed"}}, "required": ["citation"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}]}},
+        {"properties": {"type": {"const": "usage.updated"}}, "required": ["usage"], "not": {"anyOf": [{"required": ["item_id"]}, {"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "warning.raised"}}, "required": ["warning_code"], "not": {"anyOf": [{"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["error_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"enum": ["response.completed", "response.incomplete", "response.cancelled"]}}, "not": {"anyOf": [{"required": ["item_id"]}, {"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["error_code"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}},
+        {"properties": {"type": {"const": "response.failed"}}, "required": ["error_code"], "not": {"anyOf": [{"required": ["item_id"]}, {"required": ["item"]}, {"required": ["delta"]}, {"required": ["tool_call_id"]}, {"required": ["tool_name"]}, {"required": ["upstream_tool_call_id"]}, {"required": ["final_arguments"]}, {"required": ["usage"]}, {"required": ["finish_reason"]}, {"required": ["warning_code"]}, {"required": ["search_call"]}, {"required": ["citation"]}]}}
+      ]}]
+    }
+  }
+}

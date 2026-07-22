@@ -111,7 +111,7 @@ func (d *AIStudioDriver) Execute(ctx context.Context, execution provider.Executi
 		Stream:         execution.Request.Stream, IdempotencyKey: execution.Request.IdempotencyKey,
 	}
 	if execution.Request.Stream {
-		return d.executeStream(ctx, outbound, projected, execution.Now)
+		return d.executeStream(ctx, execution, outbound, projected, execution.Now)
 	}
 	return d.executeResponse(ctx, outbound, projected, execution.Now)
 }
@@ -176,6 +176,16 @@ func (d *AIStudioDriver) CountTokens(ctx context.Context, execution provider.Exe
 	return aistudio.CountTokensResult{TotalTokens: upstream.TotalTokens, Usage: usage, Report: report, Projected: projected}, nil
 }
 
+// PreflightUsage exposes AI Studio countTokens through the provider-neutral preflight contract.
+// PreflightUsage 通过供应商无关预检合同公开 AI Studio countTokens。
+func (d *AIStudioDriver) PreflightUsage(ctx context.Context, execution provider.ExecutionRequest) (provider.UsagePreflightResult, error) {
+	result, errCount := d.CountTokens(ctx, execution)
+	if errCount != nil {
+		return provider.UsagePreflightResult{}, errCount
+	}
+	return provider.UsagePreflightResult{Usage: result.Usage, Accuracy: vcp.PreflightExact}, nil
+}
+
 // executeResponse executes one non-streaming AI Studio request and rejects trailing untyped payload data.
 // executeResponse 执行一条非流式 AI Studio 请求并拒绝尾随的未类型化载荷数据。
 func (d *AIStudioDriver) executeResponse(ctx context.Context, outbound transport.Request, projected aistudio.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
@@ -213,7 +223,7 @@ func executeAIStudioResponse(ctx context.Context, client *transport.Client, outb
 
 // executeStream executes one AI Studio SSE request and converts every parsed upstream frame into one VCP replay log.
 // executeStream 执行一条 AI Studio SSE 请求并将每个已解析上游帧转换为一个 VCP 回放日志。
-func (d *AIStudioDriver) executeStream(ctx context.Context, outbound transport.Request, projected aistudio.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
+func (d *AIStudioDriver) executeStream(ctx context.Context, execution provider.ExecutionRequest, outbound transport.Request, projected aistudio.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
 	upstreamResponse, errRequest := d.client.DoStream(ctx, outbound)
 	if errRequest != nil {
 		return provider.ExecutionResult{}, errRequest
@@ -226,15 +236,23 @@ func (d *AIStudioDriver) executeStream(ctx context.Context, outbound transport.R
 		return provider.ExecutionResult{}, errNew
 	}
 	errRead := aistudio.ReadSSE(upstreamResponse.Body, func(envelope aistudio.SSEEnvelope) error {
-		_, errPush := decoder.PushSSE(envelope)
-		return errPush
+		events, errPush := decoder.PushSSE(envelope)
+		if errPush != nil {
+			return errPush
+		}
+		return provider.EmitExecutionEvents(ctx, execution.EventSink, events)
 	})
 	if errRead != nil {
-		_, _ = decoder.Close(errRead)
+		closingEvents, _ := decoder.Close(errRead)
+		_ = provider.EmitExecutionEvents(context.WithoutCancel(ctx), execution.EventSink, closingEvents)
 		return provider.ExecutionResult{}, errRead
 	}
-	if _, errClose := decoder.Close(nil); errClose != nil {
+	closingEvents, errClose := decoder.Close(nil)
+	if errClose != nil {
 		return provider.ExecutionResult{}, errClose
+	}
+	if errEmit := provider.EmitExecutionEvents(ctx, execution.EventSink, closingEvents); errEmit != nil {
+		return provider.ExecutionResult{}, errEmit
 	}
 	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeAIStudioReports(projected.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID()}, nil
 }

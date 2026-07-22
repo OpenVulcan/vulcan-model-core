@@ -737,7 +737,7 @@ func (s *MemoryStore) SaveBinding(ctx context.Context, binding AccessBinding) er
 	if endpoint.ProviderInstanceID != binding.ProviderInstanceID || credential.ProviderInstanceID != binding.ProviderInstanceID {
 		return invalid("access binding cannot cross provider instances")
 	}
-	if endpoint.ChannelID != binding.ChannelID || !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
+	if !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
 		return invalid("access binding channel is incompatible with endpoint or credential auth method")
 	}
 	s.mu.Lock()

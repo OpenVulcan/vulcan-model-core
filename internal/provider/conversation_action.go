@@ -52,3 +52,22 @@ func (d *ConversationActionDriver) Execute(ctx context.Context, request Executio
 	request.Execution = nil
 	return d.profileDriver.Execute(ctx, request)
 }
+
+// PreflightUsage converts the action envelope and delegates only when the proven profile owns a native counter.
+// PreflightUsage 转换动作信封，并且仅在已验证 Profile 拥有原生计量器时委派。
+func (d *ConversationActionDriver) PreflightUsage(ctx context.Context, request ExecutionRequest) (UsagePreflightResult, error) {
+	if request.Execution == nil {
+		return UsagePreflightResult{}, fmt.Errorf("%w: conversation action preflight request is required", ErrExecutionBinding)
+	}
+	counter, supported := d.profileDriver.(UsagePreflightDriver)
+	if !supported {
+		return UsagePreflightResult{}, fmt.Errorf("%w: conversation profile has no native usage preflight", ErrExecutionDriverNotFound)
+	}
+	conversation, errConversation := request.Execution.ConversationRequest()
+	if errConversation != nil {
+		return UsagePreflightResult{}, errConversation
+	}
+	request.Request = conversation
+	request.Execution = nil
+	return counter.PreflightUsage(ctx, request)
+}

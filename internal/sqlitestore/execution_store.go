@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/execution"
@@ -245,7 +246,7 @@ func (s *ExecutionStore) Create(ctx context.Context, record execution.Record, ac
 	if errRecord := record.Validate(); errRecord != nil {
 		return execution.Record{}, false, errRecord
 	}
-	if errEvent := accepted.Validate(); errEvent != nil || accepted.ExecutionID != record.ID || accepted.Sequence != 1 {
+	if errEvent := accepted.Validate(); errEvent != nil || accepted.ExecutionID != record.ID || accepted.Sequence != 1 || accepted.Type != execution.EventExecutionAccepted || accepted.Lifecycle == nil || accepted.Lifecycle.Status != execution.StatusAccepted {
 		return execution.Record{}, false, fmt.Errorf("%w: invalid accepted event", execution.ErrInvalidExecution)
 	}
 	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
@@ -277,7 +278,7 @@ func (s *ExecutionStore) Create(ctx context.Context, record execution.Record, ac
 			cleanupCreatedExecutionSecrets(ctx, s.secrets, encoded.createdSecretRefs)
 		}
 	}()
-	if _, errInsert := transaction.ExecContext(ctx, `INSERT INTO executions(id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_task_secret_ref, provider_preparation_secret_ref, attempts_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, record.OwnerAPIKeyID, record.RequestHash, record.IdempotencyKey, record.Status, record.Operation, record.Revision, formatExecutionTime(record.CreatedAt), formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.request, encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), encoded.attempts); errInsert != nil {
+	if _, errInsert := transaction.ExecContext(ctx, `INSERT INTO executions(id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_continuation_payload, provider_task_secret_ref, provider_preparation_secret_ref, provider_continuation_secret_ref, attempts_payload, retry_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, record.ID, record.OwnerAPIKeyID, record.RequestHash, record.IdempotencyKey, record.Status, record.Operation, record.Revision, formatExecutionTime(record.CreatedAt), formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.request, encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, encoded.providerContinuation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), nullString(encoded.providerContinuationSecretRef), encoded.attempts, encoded.retry); errInsert != nil {
 		if record.IdempotencyKey != "" {
 			existing, found, errExisting := getExecutionByIdempotency(ctx, s.secrets, transaction, record.OwnerAPIKeyID, record.IdempotencyKey)
 			if errExisting == nil && found {
@@ -329,7 +330,8 @@ func (s *ExecutionStore) Save(ctx context.Context, record execution.Record, expe
 	// previousTaskSecretRef 与 previousPreparationSecretRef 标识被本次提交替换的受保护值。
 	var previousTaskSecretRef sql.NullString
 	var previousPreparationSecretRef sql.NullString
-	errCurrent := transaction.QueryRowContext(ctx, `SELECT status, revision, COALESCE((SELECT MAX(sequence) FROM execution_events WHERE execution_id = executions.id), 0), provider_task_secret_ref, provider_preparation_secret_ref FROM executions WHERE owner_api_key_id = ? AND id = ?`, record.OwnerAPIKeyID, record.ID).Scan(&currentStatus, &currentRevision, &maximumSequence, &previousTaskSecretRef, &previousPreparationSecretRef)
+	var previousContinuationSecretRef sql.NullString
+	errCurrent := transaction.QueryRowContext(ctx, `SELECT status, revision, COALESCE((SELECT MAX(sequence) FROM execution_events WHERE execution_id = executions.id), 0), provider_task_secret_ref, provider_preparation_secret_ref, provider_continuation_secret_ref FROM executions WHERE owner_api_key_id = ? AND id = ?`, record.OwnerAPIKeyID, record.ID).Scan(&currentStatus, &currentRevision, &maximumSequence, &previousTaskSecretRef, &previousPreparationSecretRef, &previousContinuationSecretRef)
 	if errors.Is(errCurrent, sql.ErrNoRows) {
 		return execution.ErrExecutionNotFound
 	}
@@ -361,7 +363,7 @@ func (s *ExecutionStore) Save(ctx context.Context, record execution.Record, expe
 			cleanupCreatedExecutionSecrets(ctx, s.secrets, encoded.createdSecretRefs)
 		}
 	}()
-	result, errUpdate := transaction.ExecContext(ctx, `UPDATE executions SET status = ?, revision = ?, updated_at = ?, expires_at = ?, target_payload = ?, result_payload = ?, failure_payload = ?, provider_task_payload = ?, provider_preparation_payload = ?, provider_task_secret_ref = ?, provider_preparation_secret_ref = ?, attempts_payload = ? WHERE id = ? AND owner_api_key_id = ? AND revision = ?`, record.Status, record.Revision, formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), encoded.attempts, record.ID, record.OwnerAPIKeyID, expectedRevision)
+	result, errUpdate := transaction.ExecContext(ctx, `UPDATE executions SET status = ?, revision = ?, updated_at = ?, expires_at = ?, target_payload = ?, result_payload = ?, failure_payload = ?, provider_task_payload = ?, provider_preparation_payload = ?, provider_continuation_payload = ?, provider_task_secret_ref = ?, provider_preparation_secret_ref = ?, provider_continuation_secret_ref = ?, attempts_payload = ?, retry_payload = ? WHERE id = ? AND owner_api_key_id = ? AND revision = ?`, record.Status, record.Revision, formatExecutionTime(record.UpdatedAt), formatExecutionTime(record.ExpiresAt), encoded.target, encoded.result, encoded.failure, encoded.providerTask, encoded.providerPreparation, encoded.providerContinuation, nullString(encoded.providerTaskSecretRef), nullString(encoded.providerPreparationSecretRef), nullString(encoded.providerContinuationSecretRef), encoded.attempts, encoded.retry, record.ID, record.OwnerAPIKeyID, expectedRevision)
 	if errUpdate != nil {
 		return fmt.Errorf("update execution: %w", errUpdate)
 	}
@@ -382,6 +384,7 @@ func (s *ExecutionStore) Save(ctx context.Context, record execution.Record, expe
 	assignExecutionSecretRefs(&record, encoded)
 	deleteReplacedExecutionSecret(ctx, s.secrets, previousTaskSecretRef.String, encoded.providerTaskSecretRef)
 	deleteReplacedExecutionSecret(ctx, s.secrets, previousPreparationSecretRef.String, encoded.providerPreparationSecretRef)
+	deleteReplacedExecutionSecret(ctx, s.secrets, previousContinuationSecretRef.String, encoded.providerContinuationSecretRef)
 	return nil
 }
 
@@ -464,6 +467,55 @@ func (s *ExecutionStore) ListDiagnostics(ctx context.Context, limit int) ([]exec
 	return records, nil
 }
 
+// AcquireLease creates, renews, or takes an expired execution lease in one atomic statement.
+// AcquireLease 在一个原子语句中创建、续约或接管已过期执行租约。
+func (s *ExecutionStore) AcquireLease(ctx context.Context, executionID string, ownerID string, now time.Time, expiresAt time.Time) (bool, error) {
+	if strings.TrimSpace(executionID) == "" || strings.TrimSpace(ownerID) == "" || now.IsZero() || !expiresAt.After(now) {
+		return false, fmt.Errorf("%w: execution lease identity and interval are invalid", execution.ErrInvalidExecution)
+	}
+	result, errExec := s.database.sql.ExecContext(ctx, `
+		INSERT INTO execution_leases(execution_id, owner_id, expires_at, revision) VALUES (?, ?, ?, 1)
+		ON CONFLICT(execution_id) DO UPDATE SET owner_id = excluded.owner_id, expires_at = excluded.expires_at, revision = execution_leases.revision + 1
+		WHERE execution_leases.owner_id = excluded.owner_id OR execution_leases.expires_at <= ?`, executionID, ownerID, formatExecutionTime(expiresAt), formatExecutionTime(now))
+	if errExec != nil {
+		return false, fmt.Errorf("acquire execution lease: %w", errExec)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return false, fmt.Errorf("read execution lease acquisition: %w", errRows)
+	}
+	return rowsAffected == 1, nil
+}
+
+// RenewLease extends only an unexpired lease currently owned by the exact worker.
+// RenewLease 仅延长由精确 Worker 当前拥有且未过期的租约。
+func (s *ExecutionStore) RenewLease(ctx context.Context, executionID string, ownerID string, now time.Time, expiresAt time.Time) (bool, error) {
+	if strings.TrimSpace(executionID) == "" || strings.TrimSpace(ownerID) == "" || now.IsZero() || !expiresAt.After(now) {
+		return false, fmt.Errorf("%w: execution lease identity and interval are invalid", execution.ErrInvalidExecution)
+	}
+	result, errExec := s.database.sql.ExecContext(ctx, `UPDATE execution_leases SET expires_at = ?, revision = revision + 1 WHERE execution_id = ? AND owner_id = ? AND expires_at > ?`, formatExecutionTime(expiresAt), executionID, ownerID, formatExecutionTime(now))
+	if errExec != nil {
+		return false, fmt.Errorf("renew execution lease: %w", errExec)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return false, fmt.Errorf("read execution lease renewal: %w", errRows)
+	}
+	return rowsAffected == 1, nil
+}
+
+// ReleaseLease removes only the exact worker's execution lease and is idempotent.
+// ReleaseLease 仅移除精确 Worker 的执行租约且具幂等性。
+func (s *ExecutionStore) ReleaseLease(ctx context.Context, executionID string, ownerID string) error {
+	if strings.TrimSpace(executionID) == "" || strings.TrimSpace(ownerID) == "" {
+		return fmt.Errorf("%w: execution lease identity is invalid", execution.ErrInvalidExecution)
+	}
+	if _, errExec := s.database.sql.ExecContext(ctx, `DELETE FROM execution_leases WHERE execution_id = ? AND owner_id = ?`, executionID, ownerID); errExec != nil {
+		return fmt.Errorf("release execution lease: %w", errExec)
+	}
+	return nil
+}
+
 // executionEncodedRecord contains exact JSON columns for one durable record.
 // executionEncodedRecord 包含一个持久化记录的精确 JSON 列。
 type executionEncodedRecord struct {
@@ -482,18 +534,27 @@ type executionEncodedRecord struct {
 	// attempts stores private exact-target dispatch audit records.
 	// attempts 保存私有精确 Target 分派审计记录。
 	attempts []byte
+	// retry stores optional client-safe durable scheduler facts.
+	// retry 保存可选的客户端安全持久调度事实。
+	retry []byte
 	// providerTask stores optional private asynchronous recovery facts.
 	// providerTask 保存可选私有异步恢复事实。
 	providerTask []byte
 	// providerPreparation stores optional private multi-step workflow affinity.
 	// providerPreparation 保存可选私有多步骤工作流亲和性。
 	providerPreparation []byte
+	// providerContinuation stores optional private target-bound continuation affinity.
+	// providerContinuation 保存可选的私有 Target 绑定续接亲和性。
+	providerContinuation []byte
 	// providerTaskSecretRef points to the protected upstream task identifier.
 	// providerTaskSecretRef 指向受保护的上游任务标识。
 	providerTaskSecretRef string
 	// providerPreparationSecretRef points to the protected prepared-workflow handle.
 	// providerPreparationSecretRef 指向受保护的准备工作流句柄。
 	providerPreparationSecretRef string
+	// providerContinuationSecretRef points to the protected upstream response identifier.
+	// providerContinuationSecretRef 指向受保护的上游响应标识。
+	providerContinuationSecretRef string
 	// createdSecretRefs contains values that must be removed if the SQL transaction fails.
 	// createdSecretRefs 包含 SQL 事务失败时必须删除的值。
 	createdSecretRefs []string
@@ -501,7 +562,7 @@ type executionEncodedRecord struct {
 
 // executionSelect is the sole column order accepted by scanExecution.
 // executionSelect 是 scanExecution 接受的唯一列顺序。
-const executionSelect = `SELECT id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_task_secret_ref, provider_preparation_secret_ref, attempts_payload FROM executions`
+const executionSelect = `SELECT id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_continuation_payload, provider_task_secret_ref, provider_preparation_secret_ref, provider_continuation_secret_ref, attempts_payload, retry_payload FROM executions`
 
 // rowScanner abstracts QueryRow and Rows without weakening typed record decoding.
 // rowScanner 在不削弱类型化记录解码的情况下抽象 QueryRow 与 Rows。
@@ -524,10 +585,13 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 	var failurePayload []byte
 	var providerTaskPayload []byte
 	var providerPreparationPayload []byte
+	var providerContinuationPayload []byte
 	var providerTaskSecretRef sql.NullString
 	var providerPreparationSecretRef sql.NullString
+	var providerContinuationSecretRef sql.NullString
 	var attemptsPayload []byte
-	errScan := scanner.Scan(&record.ID, &record.OwnerAPIKeyID, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.Operation, &record.Revision, &createdAt, &updatedAt, &expiresAt, &requestPayload, &targetPayload, &resultPayload, &failurePayload, &providerTaskPayload, &providerPreparationPayload, &providerTaskSecretRef, &providerPreparationSecretRef, &attemptsPayload)
+	var retryPayload []byte
+	errScan := scanner.Scan(&record.ID, &record.OwnerAPIKeyID, &record.RequestHash, &record.IdempotencyKey, &record.Status, &record.Operation, &record.Revision, &createdAt, &updatedAt, &expiresAt, &requestPayload, &targetPayload, &resultPayload, &failurePayload, &providerTaskPayload, &providerPreparationPayload, &providerContinuationPayload, &providerTaskSecretRef, &providerPreparationSecretRef, &providerContinuationSecretRef, &attemptsPayload, &retryPayload)
 	if errScan != nil {
 		return execution.Record{}, errScan
 	}
@@ -564,6 +628,14 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 			return execution.Record{}, fmt.Errorf("decode execution attempts: %w", errDecode)
 		}
 	}
+	if len(retryPayload) > 0 && !bytes.Equal(bytes.TrimSpace(retryPayload), []byte("null")) {
+		var persistedRetry executionRetryPayload
+		if errDecode = json.Unmarshal(retryPayload, &persistedRetry); errDecode != nil {
+			return execution.Record{}, fmt.Errorf("decode execution retry: %w", errDecode)
+		}
+		record.Retry = persistedRetry.State
+		record.RetryCycles = persistedRetry.Cycles
+	}
 	if len(providerTaskPayload) > 0 {
 		var persistedTask executionProviderTaskPayload
 		if errDecode = json.Unmarshal(providerTaskPayload, &persistedTask); errDecode != nil {
@@ -573,7 +645,7 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 		if errSecret != nil {
 			return execution.Record{}, errSecret
 		}
-		record.ProviderTask = &execution.ProviderTaskSnapshot{ProviderTaskID: providerTaskID, ProtectedTaskIDRef: providerTaskSecretRef.String, Target: persistedTask.Target, Definition: persistedTask.Definition, Endpoint: persistedTask.Endpoint, Credential: persistedTask.Credential, PollAfter: persistedTask.PollAfter, PollAttempts: persistedTask.PollAttempts}
+		record.ProviderTask = &execution.ProviderTaskSnapshot{ProviderTaskID: providerTaskID, ProtectedTaskIDRef: providerTaskSecretRef.String, Target: persistedTask.Target, Definition: persistedTask.Definition, Endpoint: persistedTask.Endpoint, Credential: persistedTask.Credential, PollAfter: persistedTask.PollAfter, PollAttempts: persistedTask.PollAttempts, CancellationRequestedAt: persistedTask.CancellationRequestedAt, CancellationAfter: persistedTask.CancellationAfter, CancellationAttempts: persistedTask.CancellationAttempts}
 	}
 	if len(providerPreparationPayload) > 0 {
 		var persistedPreparation executionProviderPreparationPayload
@@ -585,6 +657,22 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 			return execution.Record{}, errSecret
 		}
 		record.ProviderPreparation = &execution.ProviderPreparationSnapshot{ProviderHandle: providerHandle, ProtectedHandleRef: providerPreparationSecretRef.String, Target: persistedPreparation.Target, ExpiresAt: persistedPreparation.ExpiresAt}
+	}
+	if len(providerContinuationPayload) > 0 {
+		var persistedContinuation executionProviderContinuationPayload
+		if errDecode = json.Unmarshal(providerContinuationPayload, &persistedContinuation); errDecode != nil {
+			return execution.Record{}, fmt.Errorf("decode execution provider continuation: %w", errDecode)
+		}
+		// Legacy continuation payloads predate created_at; their terminal execution updated_at is the authoritative creation commit time.
+		// 旧版续接载荷早于 created_at；其终态执行 updated_at 是权威创建提交时间。
+		if persistedContinuation.CreatedAt.IsZero() {
+			persistedContinuation.CreatedAt = record.UpdatedAt
+		}
+		upstreamResponseID, errSecret := readExecutionSecret(ctx, secrets, providerContinuationSecretRef.String, "provider continuation")
+		if errSecret != nil {
+			return execution.Record{}, errSecret
+		}
+		record.ProviderContinuation = &execution.ProviderContinuationSnapshot{ContinuationID: record.ID, UpstreamResponseID: upstreamResponseID, ProtectedResponseIDRef: providerContinuationSecretRef.String, Target: persistedContinuation.Target, LogicalResponseID: persistedContinuation.LogicalResponseID, CreatedAt: persistedContinuation.CreatedAt, LastUsedAt: persistedContinuation.LastUsedAt, ExpiresAt: persistedContinuation.ExpiresAt, InvalidatedAt: persistedContinuation.InvalidatedAt, InvalidationReason: persistedContinuation.InvalidationReason}
 	}
 	return record, nil
 }
@@ -612,6 +700,14 @@ func encodeExecutionRecord(ctx context.Context, secrets secret.Store, record exe
 	if errAttempts != nil {
 		return executionEncodedRecord{}, fmt.Errorf("encode execution attempts: %w", errAttempts)
 	}
+	var retryPayload []byte
+	if record.Retry != nil || record.RetryCycles > 0 {
+		var errRetry error
+		retryPayload, errRetry = json.Marshal(executionRetryPayload{State: record.Retry, Cycles: record.RetryCycles})
+		if errRetry != nil {
+			return executionEncodedRecord{}, fmt.Errorf("encode execution retry: %w", errRetry)
+		}
+	}
 	providerTaskPayload, providerTaskSecretRef, taskSecretCreated, errTask := marshalProviderTask(ctx, secrets, record.ProviderTask)
 	if errTask != nil {
 		return executionEncodedRecord{}, fmt.Errorf("encode execution provider task: %w", errTask)
@@ -623,14 +719,40 @@ func encodeExecutionRecord(ctx context.Context, secrets secret.Store, record exe
 		}
 		return executionEncodedRecord{}, fmt.Errorf("encode execution provider preparation: %w", errPreparation)
 	}
-	createdSecretRefs := make([]string, 0, 2)
+	providerContinuationPayload, providerContinuationSecretRef, continuationSecretCreated, errContinuation := marshalProviderContinuation(ctx, secrets, record.ProviderContinuation)
+	if errContinuation != nil {
+		created := make([]string, 0, 2)
+		if taskSecretCreated {
+			created = append(created, providerTaskSecretRef)
+		}
+		if preparationSecretCreated {
+			created = append(created, providerPreparationSecretRef)
+		}
+		cleanupCreatedExecutionSecrets(ctx, secrets, created)
+		return executionEncodedRecord{}, fmt.Errorf("encode execution provider continuation: %w", errContinuation)
+	}
+	createdSecretRefs := make([]string, 0, 3)
 	if taskSecretCreated {
 		createdSecretRefs = append(createdSecretRefs, providerTaskSecretRef)
 	}
 	if preparationSecretCreated {
 		createdSecretRefs = append(createdSecretRefs, providerPreparationSecretRef)
 	}
-	return executionEncodedRecord{request: requestPayload, target: targetPayload, result: resultPayload, failure: failurePayload, attempts: attemptsPayload, providerTask: providerTaskPayload, providerPreparation: providerPreparationPayload, providerTaskSecretRef: providerTaskSecretRef, providerPreparationSecretRef: providerPreparationSecretRef, createdSecretRefs: createdSecretRefs}, nil
+	if continuationSecretCreated {
+		createdSecretRefs = append(createdSecretRefs, providerContinuationSecretRef)
+	}
+	return executionEncodedRecord{request: requestPayload, target: targetPayload, result: resultPayload, failure: failurePayload, attempts: attemptsPayload, retry: retryPayload, providerTask: providerTaskPayload, providerPreparation: providerPreparationPayload, providerContinuation: providerContinuationPayload, providerTaskSecretRef: providerTaskSecretRef, providerPreparationSecretRef: providerPreparationSecretRef, providerContinuationSecretRef: providerContinuationSecretRef, createdSecretRefs: createdSecretRefs}, nil
+}
+
+// executionRetryPayload persists pending and historical durable retry facts together.
+// executionRetryPayload 将待执行与历史持久重试事实一并保存。
+type executionRetryPayload struct {
+	// State contains the current pending schedule when waiting.
+	// State 在等待时包含当前待执行计划。
+	State *execution.RetryState `json:"state,omitempty"`
+	// Cycles counts schedules created for the logical execution.
+	// Cycles 统计为逻辑执行创建的计划次数。
+	Cycles uint32 `json:"cycles"`
 }
 
 // executionProviderTaskPayload is the private persisted asynchronous affinity shape.
@@ -654,6 +776,15 @@ type executionProviderTaskPayload struct {
 	// PollAttempts counts completed bounded polls.
 	// PollAttempts 统计已完成有界轮询次数。
 	PollAttempts uint32 `json:"poll_attempts"`
+	// CancellationRequestedAt records durable intent before an upstream cancellation call.
+	// CancellationRequestedAt 在上游取消调用前记录持久化意图。
+	CancellationRequestedAt *time.Time `json:"cancellation_requested_at,omitempty"`
+	// CancellationAfter is the earliest safe cancellation retry time.
+	// CancellationAfter 是可安全重试取消的最早时间。
+	CancellationAfter time.Time `json:"cancellation_after,omitempty"`
+	// CancellationAttempts counts completed upstream cancellation requests.
+	// CancellationAttempts 统计已完成的上游取消请求次数。
+	CancellationAttempts uint32 `json:"cancellation_attempts,omitempty"`
 }
 
 // executionProviderPreparationPayload is the private persisted prepared-workflow affinity shape.
@@ -667,6 +798,32 @@ type executionProviderPreparationPayload struct {
 	ExpiresAt time.Time `json:"expires_at"`
 }
 
+// executionProviderContinuationPayload is the private persisted continuation affinity without its upstream identifier.
+// executionProviderContinuationPayload 是不含上游标识的私有持久化续接亲和性结构。
+type executionProviderContinuationPayload struct {
+	// Target is the immutable provider state ownership boundary.
+	// Target 是不可变供应商状态所有权边界。
+	Target resolve.Target `json:"target"`
+	// LogicalResponseID identifies the public response that created the state.
+	// LogicalResponseID 标识创建该状态的公开响应。
+	LogicalResponseID string `json:"logical_response_id"`
+	// CreatedAt records when the continuation became durable.
+	// CreatedAt 记录续接进入持久状态的时间。
+	CreatedAt time.Time `json:"created_at"`
+	// LastUsedAt records the latest successful replay affinity validation.
+	// LastUsedAt 记录最近一次成功重放亲和性校验时间。
+	LastUsedAt time.Time `json:"last_used_at,omitempty"`
+	// ExpiresAt bounds continuation replay.
+	// ExpiresAt 限制续接重放期限。
+	ExpiresAt time.Time `json:"expires_at"`
+	// InvalidatedAt records durable explicit revocation.
+	// InvalidatedAt 记录持久的明确撤销时间。
+	InvalidatedAt time.Time `json:"invalidated_at,omitempty"`
+	// InvalidationReason identifies the safe closed revocation cause.
+	// InvalidationReason 标识安全封闭的撤销原因。
+	InvalidationReason execution.ContinuationInvalidationReason `json:"invalidation_reason,omitempty"`
+}
+
 // marshalProviderTask preserves private task affinity while the public record hides upstream identifiers.
 // marshalProviderTask 在公开记录隐藏上游标识的同时保留私有任务亲和性。
 func marshalProviderTask(ctx context.Context, secrets secret.Store, task *execution.ProviderTaskSnapshot) ([]byte, string, bool, error) {
@@ -677,7 +834,7 @@ func marshalProviderTask(ctx context.Context, secrets secret.Store, task *execut
 	if errProtect != nil {
 		return nil, "", false, errProtect
 	}
-	payload, errMarshal := json.Marshal(executionProviderTaskPayload{Target: task.Target, Definition: task.Definition, Endpoint: task.Endpoint, Credential: task.Credential, PollAfter: task.PollAfter, PollAttempts: task.PollAttempts})
+	payload, errMarshal := json.Marshal(executionProviderTaskPayload{Target: task.Target, Definition: task.Definition, Endpoint: task.Endpoint, Credential: task.Credential, PollAfter: task.PollAfter, PollAttempts: task.PollAttempts, CancellationRequestedAt: task.CancellationRequestedAt, CancellationAfter: task.CancellationAfter, CancellationAttempts: task.CancellationAttempts})
 	if errMarshal != nil && created {
 		cleanupCreatedExecutionSecrets(ctx, secrets, []string{secretRef})
 	}
@@ -695,6 +852,23 @@ func marshalProviderPreparation(ctx context.Context, secrets secret.Store, prepa
 		return nil, "", false, errProtect
 	}
 	payload, errMarshal := json.Marshal(executionProviderPreparationPayload{Target: preparation.Target, ExpiresAt: preparation.ExpiresAt})
+	if errMarshal != nil && created {
+		cleanupCreatedExecutionSecrets(ctx, secrets, []string{secretRef})
+	}
+	return payload, secretRef, created, errMarshal
+}
+
+// marshalProviderContinuation protects the upstream response identifier and persists only exact non-secret affinity.
+// marshalProviderContinuation 保护上游响应标识且仅持久化精确的非秘密亲和性。
+func marshalProviderContinuation(ctx context.Context, secrets secret.Store, continuation *execution.ProviderContinuationSnapshot) ([]byte, string, bool, error) {
+	if continuation == nil {
+		return nil, "", false, nil
+	}
+	secretRef, created, errProtect := ensureExecutionSecret(ctx, secrets, continuation.ProtectedResponseIDRef, continuation.UpstreamResponseID)
+	if errProtect != nil {
+		return nil, "", false, errProtect
+	}
+	payload, errMarshal := json.Marshal(executionProviderContinuationPayload{Target: continuation.Target, LogicalResponseID: continuation.LogicalResponseID, CreatedAt: continuation.CreatedAt, LastUsedAt: continuation.LastUsedAt, ExpiresAt: continuation.ExpiresAt, InvalidatedAt: continuation.InvalidatedAt, InvalidationReason: continuation.InvalidationReason})
 	if errMarshal != nil && created {
 		cleanupCreatedExecutionSecrets(ctx, secrets, []string{secretRef})
 	}
@@ -759,6 +933,9 @@ func assignExecutionSecretRefs(record *execution.Record, encoded executionEncode
 	if record.ProviderPreparation != nil {
 		record.ProviderPreparation.ProtectedHandleRef = encoded.providerPreparationSecretRef
 	}
+	if record.ProviderContinuation != nil {
+		record.ProviderContinuation.ProtectedResponseIDRef = encoded.providerContinuationSecretRef
+	}
 }
 
 // cleanupCreatedExecutionSecrets removes transaction-local values after a failed SQL write.
@@ -793,7 +970,7 @@ func nullString(value string) any {
 
 // marshalOptional preserves SQL NULL for absent typed payloads.
 // marshalOptional 为不存在的类型化载荷保留 SQL NULL。
-func marshalOptional(value any) ([]byte, error) {
+func marshalOptional[T any](value *T) ([]byte, error) {
 	if value == nil {
 		return nil, nil
 	}

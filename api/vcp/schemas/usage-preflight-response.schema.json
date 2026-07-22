@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/usage-preflight-response.schema.json",
+  "title": "VCP Usage Preflight Response",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "target", "usage", "metrics"],
+  "properties": {
+    "protocol_version": {"const": "1.0"},
+    "request_id": {"type": "string", "minLength": 1},
+    "target": {"type": "object", "minProperties": 1, "maxProperties": 1},
+    "usage": {"$ref": "./usage-observation.schema.json"},
+    "metrics": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["unit", "accuracy", "accounting_basis"],
+        "properties": {
+          "unit": {"type": "string", "minLength": 1},
+          "value": {"type": "number", "minimum": 0},
+          "accuracy": {"enum": ["exact", "estimated", "unknown"]},
+          "accounting_basis": {"type": "string", "minLength": 1}
+        },
+        "allOf": [
+          {"if": {"properties": {"accuracy": {"const": "unknown"}}}, "then": {"not": {"required": ["value"]}}, "else": {"required": ["value"]}}
+        ]
+      }
+    }
+  }
+}

@@ -30,18 +30,48 @@ func TestMiniMaxMusicGenerationEnablesLyricsOptimizer(t *testing.T) {
 		if upstream.Model != "music-3.0" || upstream.Prompt != "Warm orchestral pop" || upstream.Lyrics != "" || !upstream.LyricsOptimizer || upstream.Stream || upstream.OutputFormat != "url" || upstream.AudioSetting.Format != "wav" {
 			t.Errorf("upstream = %#v", upstream)
 		}
-		_, _ = io.WriteString(writer, `{"data":{"audio":"https://outputs.example/song.wav","status":2},"trace_id":"trace-music","base_resp":{"status_code":0,"status_msg":"success"}}`)
+		_, _ = io.WriteString(writer, `{"data":{"audio_url":"https://outputs.example/song.wav","status":2},"trace_id":"trace-music","base_resp":{"status_code":0,"status_msg":"success"}}`)
 	}))
 	defer server.Close()
 
 	driver, execution := newMiniMaxMusicExecution(t, server.URL, MusicGenerateActionBindingID, MusicGenerateProtocolProfileID, vcp.OperationMusicGenerate, "music-3.0")
-	execution.Execution.Payload.MusicGenerate = &vcp.MusicGenerateOperation{Prompt: "Warm orchestral pop", OutputFormat: "wav"}
+	lyricsOptimizer := true
+	execution.Execution.Payload.MusicGenerate = &vcp.MusicGenerateOperation{Prompt: "Warm orchestral pop", OutputFormat: "wav", LyricsOptimizer: &lyricsOptimizer}
 	result, errExecute := driver.Execute(context.Background(), execution)
 	if errExecute != nil {
 		t.Fatalf("Execute() error = %v", errExecute)
 	}
 	if result.UpstreamResponseID != "trace-music" || len(result.GeneratedResources) != 1 || result.GeneratedResources[0].DownloadURL != "https://outputs.example/song.wav" || result.GeneratedResources[0].MIMEType != "audio/wav" {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestMiniMaxMusicGenerationStreamsRealAudioProgress verifies native audio chunks use hex streaming and stable output identity.
+// TestMiniMaxMusicGenerationStreamsRealAudioProgress 验证原生音频分片使用十六进制流式输出与稳定输出身份。
+func TestMiniMaxMusicGenerationStreamsRealAudioProgress(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var upstream musicGenerationRequest
+		if request.Header.Get("Accept") != "text/event-stream" || json.NewDecoder(request.Body).Decode(&upstream) != nil || !upstream.Stream || upstream.OutputFormat != "hex" {
+			t.Errorf("stream request Accept=%q body=%#v", request.Header.Get("Accept"), upstream)
+		}
+		writer.Header().Set("Content-Type", "text/event-stream")
+		_, _ = io.WriteString(writer, "data: {\"data\":{\"audio\":\"494433\",\"status\":1},\"base_resp\":{\"status_code\":0}}\n\n")
+		_, _ = io.WriteString(writer, "data: {\"data\":{\"audio\":\"6d75736963\",\"status\":2},\"base_resp\":{\"status_code\":0}}\n\n")
+	}))
+	defer server.Close()
+
+	driver, execution := newMiniMaxMusicExecution(t, server.URL, MusicGenerateActionBindingID, MusicGenerateProtocolProfileID, vcp.OperationMusicGenerate, "music-3.0")
+	execution.Definition.ActionBindings[0].Delivery.Streaming = true
+	execution.Execution.Stream = true
+	execution.Execution.Payload.MusicGenerate = &vcp.MusicGenerateOperation{Prompt: "instrumental soundtrack", Instrumental: true, OutputFormat: "mp3"}
+	sink := &collectingResourceSink{}
+	execution.ResourceSink = sink
+	result, errExecute := driver.Execute(context.Background(), execution)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if len(result.GeneratedResources) != 1 || string(result.GeneratedResources[0].Data) != "ID3music" || len(sink.observations) != 2 || sink.observations[0].PartialBytes != 3 || sink.observations[1].PartialBytes != 8 || sink.observations[1].OutputID != "music-0" {
+		t.Fatalf("result=%#v progress=%#v", result, sink.observations)
 	}
 }
 
@@ -75,7 +105,7 @@ func TestMiniMaxMusicCoverKeepsProviderHandlePrivate(t *testing.T) {
 		if upstream.Model != "music-cover" || upstream.CoverFeatureID != "private-feature" || upstream.Prompt != "Gentle acoustic folk cover" || upstream.Lyrics != "Ten final lyric characters" {
 			t.Errorf("cover request = %#v", upstream)
 		}
-		_, _ = io.WriteString(writer, `{"data":{"audio":"https://outputs.example/cover.mp3","status":2},"trace_id":"trace-cover","base_resp":{"status_code":0,"status_msg":"success"}}`)
+		_, _ = io.WriteString(writer, `{"data":{"audio_url":"https://outputs.example/cover.mp3","status":2},"trace_id":"trace-cover","base_resp":{"status_code":0,"status_msg":"success"}}`)
 	}))
 	defer server.Close()
 
@@ -103,6 +133,54 @@ func TestMiniMaxMusicCoverKeepsProviderHandlePrivate(t *testing.T) {
 	}
 }
 
+// TestMiniMaxMusicCoverUsesDirectAudioWithoutLyrics verifies the pinned direct URL cover path.
+// TestMiniMaxMusicCoverUsesDirectAudioWithoutLyrics 验证固定源码中的无歌词直接 URL 翻唱路径。
+func TestMiniMaxMusicCoverUsesDirectAudioWithoutLyrics(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var upstream musicGenerationRequest
+		if request.URL.Path != "/v1/music_generation" {
+			t.Errorf("cover path = %q", request.URL.Path)
+		}
+		if errDecode := json.NewDecoder(request.Body).Decode(&upstream); errDecode != nil {
+			t.Errorf("decode cover request: %v", errDecode)
+		}
+		if upstream.Model != "music-cover-free" || upstream.AudioURL != "https://media.example/source.mp3" || upstream.AudioBase64 != "" || upstream.CoverFeatureID != "" || upstream.Lyrics != "" || upstream.Prompt != "Energetic electronic cover" {
+			t.Errorf("cover request = %#v", upstream)
+		}
+		_, _ = io.WriteString(writer, `{"data":{"audio_url":"https://outputs.example/direct-cover.mp3","status":2},"trace_id":"trace-direct-cover","base_resp":{"status_code":0,"status_msg":"success"}}`)
+	}))
+	defer server.Close()
+
+	driver, execution := newMiniMaxMusicExecution(t, server.URL, MusicCoverActionBindingID, MusicCoverProtocolProfileID, vcp.OperationMusicCover, "music-cover-free")
+	source := vcp.MediaInput{ID: "cover-source", Kind: vcp.MediaAudio, Role: vcp.MediaRoleCoverReference, Resource: vcp.ResourceReference{ResourceID: "resource-cover"}}
+	execution.Execution.Payload.MusicCover = &vcp.MusicCoverOperation{Source: &source, Prompt: "Energetic electronic cover", OutputFormat: "mp3"}
+	execution.MaterializedInputs = []resource.MaterializedInput{{InputID: source.ID, ResourceID: source.Resource.ResourceID, Kind: source.Kind, Role: source.Role, MIMEType: "audio/mpeg", Mode: catalog.MaterializationDirectRemoteURL, RemoteURL: "https://media.example/source.mp3"}}
+	result, errExecute := driver.Execute(context.Background(), execution)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if len(result.GeneratedResources) != 1 || result.GeneratedResources[0].DownloadURL != "https://outputs.example/direct-cover.mp3" {
+		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestMiniMaxMusicCoverUsesOptionalLyricsWithDirectAudio verifies the pinned CLI direct-source lyrics carrier.
+// TestMiniMaxMusicCoverUsesOptionalLyricsWithDirectAudio 验证固定 CLI 的直接来源可选歌词载体。
+func TestMiniMaxMusicCoverUsesOptionalLyricsWithDirectAudio(t *testing.T) {
+	_, execution := newMiniMaxMusicExecution(t, "https://api.minimax.io", MusicCoverActionBindingID, MusicCoverProtocolProfileID, vcp.OperationMusicCover, "music-cover")
+	source := vcp.MediaInput{ID: "cover-source", Kind: vcp.MediaAudio, Role: vcp.MediaRoleCoverReference, Resource: vcp.ResourceReference{ResourceID: "resource-cover"}}
+	execution.Execution.Payload.MusicCover = &vcp.MusicCoverOperation{Source: &source, Prompt: "Energetic electronic cover", Lyrics: "Optional direct cover lyrics"}
+	execution.MaterializedInputs = []resource.MaterializedInput{{InputID: source.ID, ResourceID: source.Resource.ResourceID, Kind: source.Kind, Role: source.Role, MIMEType: "audio/mpeg", Mode: catalog.MaterializationDirectRemoteURL, RemoteURL: "https://media.example/source.mp3"}}
+	request, errProject := projectPreparedMusicCoverRequest(execution)
+	if errProject != nil {
+		t.Fatalf("projectPreparedMusicCoverRequest() error = %v", errProject)
+	}
+	var upstream musicGenerationRequest
+	if errDecode := json.Unmarshal(request.Body, &upstream); errDecode != nil || upstream.AudioURL != "https://media.example/source.mp3" || upstream.Lyrics != "Optional direct cover lyrics" {
+		t.Fatalf("request = %#v, error = %v", upstream, errDecode)
+	}
+}
+
 // TestMiniMaxMusicRejectsUnsupportedAndExpiredInputs verifies explicit lossless boundaries.
 // TestMiniMaxMusicRejectsUnsupportedAndExpiredInputs 验证显式无损边界。
 func TestMiniMaxMusicRejectsUnsupportedAndExpiredInputs(t *testing.T) {
@@ -111,11 +189,40 @@ func TestMiniMaxMusicRejectsUnsupportedAndExpiredInputs(t *testing.T) {
 	if _, errExecute := driver.Execute(context.Background(), execution); errExecute == nil {
 		t.Fatal("expected unsupported negative prompt rejection")
 	}
+	execution.Execution.Payload.MusicGenerate = &vcp.MusicGenerateOperation{Prompt: "music"}
+	if _, errProject := projectMusicGenerationRequest(execution); errProject == nil {
+		t.Fatal("expected prompt-only generation without explicit lyrics_optimizer to be rejected")
+	}
 	coverDriver, coverExecution := newMiniMaxMusicExecution(t, "https://api.minimax.io", MusicCoverActionBindingID, MusicCoverProtocolProfileID, vcp.OperationMusicCover, "music-cover")
 	coverExecution.Execution.Payload.MusicCover = &vcp.MusicCoverOperation{PreparationID: "router-preparation", Prompt: "Gentle acoustic cover", Lyrics: "Ten final lyric characters"}
 	coverExecution.PreparedWorkflow = &provider.PreparedWorkflowBinding{PreparationID: "router-preparation", ProviderHandle: "private-feature", ExpiresAt: coverExecution.Now}
 	if _, errExecute := coverDriver.Execute(context.Background(), coverExecution); errExecute == nil {
 		t.Fatal("expected expired preparation rejection")
+	}
+}
+
+// TestMiniMaxMusicModelSetsMatchPinnedCLI verifies exact generation and cover model acceptance without wildcard compatibility.
+// TestMiniMaxMusicModelSetsMatchPinnedCLI 验证生成与翻唱模型精确接受且不存在通配兼容。
+func TestMiniMaxMusicModelSetsMatchPinnedCLI(t *testing.T) {
+	for _, model := range []string{"music-3.0", "music-2.6", "music-2.6-free", "music-2.5+", "music-2.5"} {
+		driver, execution := newMiniMaxMusicExecution(t, "https://api.minimax.io", MusicGenerateActionBindingID, MusicGenerateProtocolProfileID, vcp.OperationMusicGenerate, model)
+		_ = driver
+		lyricsOptimizer := true
+		execution.Execution.Payload.MusicGenerate = &vcp.MusicGenerateOperation{Prompt: "music", LyricsOptimizer: &lyricsOptimizer}
+		if _, errProject := projectMusicGenerationRequest(execution); errProject != nil {
+			t.Fatalf("generation model %q error = %v", model, errProject)
+		}
+	}
+	if supportedMiniMaxMusicGenerationModel("music-3.0-free") {
+		t.Fatal("undocumented music-3.0-free model was accepted")
+	}
+	for _, model := range []string{"music-cover", "music-cover-free"} {
+		if !supportedMiniMaxMusicCoverModel(model) {
+			t.Fatalf("cover model %q was rejected", model)
+		}
+	}
+	if supportedMiniMaxMusicCoverModel("music-cover-plus") {
+		t.Fatal("undocumented cover model was accepted")
 	}
 }
 
@@ -128,7 +235,7 @@ func newMiniMaxMusicExecution(t *testing.T, baseURL string, actionBindingID stri
 	if errDriver != nil {
 		t.Fatalf("NewMusicActionDriver() error = %v", errDriver)
 	}
-	action := providerconfig.ProviderActionBinding{ID: actionBindingID, Operation: operation, DriverID: "minimax", DriverVersion: "1", ProtocolProfileID: profileID, EndpointProfileID: "minimax_music", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL}, Revision: 1}
+	action := providerconfig.ProviderActionBinding{ID: actionBindingID, Operation: operation, DriverID: "minimax", DriverVersion: "1", ProtocolProfileID: profileID, EndpointProfileID: "minimax_music", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true, Streaming: actionBindingID != MusicCoverPrepareActionBindingID}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationInline, providerconfig.ResourceMaterializationDirectURL}, Revision: 1}
 	execution.Definition.ProtocolProfileID = profileID
 	execution.Definition.ActionBindings = []providerconfig.ProviderActionBinding{action}
 	execution.Binding.Target.ChannelID = profileID

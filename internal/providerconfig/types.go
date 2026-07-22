@@ -540,8 +540,8 @@ type Endpoint struct {
 	// ProviderInstanceID owns the endpoint.
 	// ProviderInstanceID 是拥有该端点的供应商实例。
 	ProviderInstanceID string
-	// ChannelID identifies the provider channel served by the endpoint.
-	// ChannelID 标识该端点服务的供应商通道。
+	// ChannelID anchors the endpoint to one definition-owned channel while access bindings may reuse the same Origin for other channels.
+	// ChannelID 将端点锚定到一个定义拥有的通道，而访问绑定可对其他通道复用同一 Origin。
 	ChannelID string
 	// BaseURL is the validated upstream base URL.
 	// BaseURL 是经过校验的上游基础 URL。

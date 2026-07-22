@@ -30,9 +30,9 @@ var (
 	ErrPlatformSecretStoreUnavailable = errors.New("platform secret store is unavailable")
 )
 
-// protector encrypts and decrypts opaque secret bytes using an operating-system protection boundary.
-// protector 使用操作系统保护边界加密和解密不透明 Secret 字节。
-type protector interface {
+// Protector encrypts and decrypts opaque secret bytes through an OS, KMS, or HSM boundary.
+// Protector 通过操作系统、KMS 或 HSM 边界加密和解密不透明 Secret 字节。
+type Protector interface {
 	// Protect encrypts one plaintext secret for durable storage.
 	// Protect 加密一个明文 Secret 以便持久化存储。
 	Protect([]byte) ([]byte, error)
@@ -52,7 +52,7 @@ type LocalStore struct {
 	directory string
 	// protector owns the operating-system encryption and decryption boundary.
 	// protector 管理操作系统加密和解密边界。
-	protector protector
+	protector Protector
 }
 
 // NewLocalStore creates the durable platform-protected SecretStore used by the local process.
@@ -67,9 +67,15 @@ func NewLocalStore(directory string) (*LocalStore, error) {
 	return newLocalStore(directory, platformProtector)
 }
 
+// NewProtectedStore creates a durable store backed by an explicitly supplied KMS, HSM, or OS protector.
+// NewProtectedStore 创建由显式提供的 KMS、HSM 或操作系统保护器支持的持久存储。
+func NewProtectedStore(directory string, secretProtector Protector) (*LocalStore, error) {
+	return newLocalStore(directory, secretProtector)
+}
+
 // newLocalStore creates one LocalStore with an injected protector for platform code and focused tests.
 // newLocalStore 使用注入的保护器为平台代码和聚焦测试创建一个 LocalStore。
-func newLocalStore(directory string, localProtector protector) (*LocalStore, error) {
+func newLocalStore(directory string, localProtector Protector) (*LocalStore, error) {
 	// normalizedDirectory is cleaned before it becomes the only file-system ownership root.
 	// normalizedDirectory 在成为唯一文件系统归属根之前先完成清理。
 	normalizedDirectory := strings.TrimSpace(directory)

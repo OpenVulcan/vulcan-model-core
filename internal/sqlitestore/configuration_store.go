@@ -936,7 +936,7 @@ func (s *ConfigurationStore) SaveBinding(ctx context.Context, binding providerco
 	if endpoint.ProviderInstanceID != binding.ProviderInstanceID || credential.ProviderInstanceID != binding.ProviderInstanceID {
 		return invalidConfiguration("access binding cannot cross provider instances")
 	}
-	if endpoint.ChannelID != binding.ChannelID || !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
+	if !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
 		return invalidConfiguration("access binding channel is incompatible with endpoint or credential auth method")
 	}
 	payload, errPayload := marshalPayload(binding)

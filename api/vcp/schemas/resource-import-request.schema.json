@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/resource-import-request.schema.json",
+  "title": "VCP Resource Import Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind", "retention"],
+  "properties": {
+    "kind": {"enum": ["image", "audio", "video", "file"]},
+    "declared_mime": {"type": "string"},
+    "retention": {"enum": ["ephemeral", "explicit_expiry", "persistent"]},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "url": {"type": "object", "additionalProperties": false, "required": ["location"], "properties": {"location": {"type": "string", "format": "uri"}}},
+    "base64": {"type": "object", "additionalProperties": false, "required": ["encoding", "data"], "properties": {"encoding": {"enum": ["standard", "url"]}, "data": {"type": "string"}}}
+  },
+  "oneOf": [{"required": ["url"], "not": {"required": ["base64"]}}, {"required": ["base64"], "not": {"required": ["url"]}}]
+}

@@ -238,7 +238,7 @@ func (d *Driver) executeResponse(ctx context.Context, execution provider.Executi
 	if errDecode != nil {
 		return provider.ExecutionResult{}, errDecode
 	}
-	return provider.ExecutionResult{Response: decoded.Response, Events: decoded.Events, Report: mergeReports(projected.Base.Report, decoded.Report), UpstreamResponseID: decoded.UpstreamResponseID}, nil
+	return provider.ExecutionResult{Response: decoded.Response, Events: decoded.Events, Report: mergeReports(projected.Base.Report, decoded.Report), UpstreamResponseID: decoded.UpstreamResponseID, ContinuationUpstreamResponseID: decoded.UpstreamResponseID}, nil
 }
 
 // executeStream executes, frames, translates, and decodes one provider SSE response.
@@ -270,8 +270,11 @@ func (d *Driver) executeStream(ctx context.Context, execution provider.Execution
 				continue
 			}
 			if errRead := openairesponses.ReadSSE(bytes.NewReader(translatedChunk), func(envelope openairesponses.SSEEnvelope) error {
-				_, errPush := decoder.PushSSE(envelope)
-				return errPush
+				events, errPush := decoder.PushSSE(envelope)
+				if errPush != nil {
+					return errPush
+				}
+				return provider.EmitExecutionEvents(ctx, execution.EventSink, events)
 			}); errRead != nil {
 				return errRead
 			}
@@ -279,7 +282,8 @@ func (d *Driver) executeStream(ctx context.Context, execution provider.Execution
 		return nil
 	}
 	if errRead := readUpstreamStream(upstreamResponse.Body, d.configuration.StreamInputMode, consume); errRead != nil {
-		_, _ = decoder.Close(errRead)
+		closingEvents, _ := decoder.Close(errRead)
+		_ = provider.EmitExecutionEvents(context.WithoutCancel(ctx), execution.EventSink, closingEvents)
 		return provider.ExecutionResult{}, errRead
 	}
 	if d.configuration.SendDonePayload {
@@ -288,10 +292,14 @@ func (d *Driver) executeStream(ctx context.Context, execution provider.Execution
 			return provider.ExecutionResult{}, errDone
 		}
 	}
-	if _, errClose := decoder.Close(nil); errClose != nil {
+	closingEvents, errClose := decoder.Close(nil)
+	if errClose != nil {
 		return provider.ExecutionResult{}, errClose
 	}
-	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Base.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID()}, nil
+	if errEmit := provider.EmitExecutionEvents(ctx, execution.EventSink, closingEvents); errEmit != nil {
+		return provider.ExecutionResult{}, errEmit
+	}
+	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Base.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID(), ContinuationUpstreamResponseID: decoder.UpstreamResponseID()}, nil
 }
 
 // readUpstreamStream preserves the copied executor's line, frame, or payload feeding behavior.

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	accesspkg "github.com/OpenVulcan/vulcan-model-core/internal/access"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/execution"
 	"github.com/OpenVulcan/vulcan-model-core/internal/inputplan"
@@ -197,6 +198,12 @@ func (staticManagementCommands) OnboardSystemProvider(context.Context, managemen
 // OnboardKimiDeviceProvider returns an empty onboarding result for route-table tests.
 // OnboardKimiDeviceProvider 为路由表测试返回空录入结果。
 func (staticManagementCommands) OnboardKimiDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
+	return providerconfig.SystemOnboarding{}, nil
+}
+
+// OnboardMiniMaxDeviceProvider returns an empty onboarding result for route-table tests.
+// OnboardMiniMaxDeviceProvider 为路由表测试返回空录入结果。
+func (staticManagementCommands) OnboardMiniMaxDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error) {
 	return providerconfig.SystemOnboarding{}, nil
 }
 
@@ -404,6 +411,19 @@ func (staticCustomCatalogOperations) SaveCustomCatalog(context.Context, manageme
 // staticControlAccess 提供确定性的独立管理和调用面凭据。
 type staticControlAccess struct{}
 
+// staticOIDCVerifier accepts one external token and returns one closed caller identity.
+// staticOIDCVerifier 接受一个外部 Token 并返回一个封闭调用者身份。
+type staticOIDCVerifier struct{}
+
+// Verify returns a deterministic caller only for the OIDC fixture token.
+// Verify 仅为 OIDC 夹具 Token 返回确定性调用者。
+func (staticOIDCVerifier) Verify(_ context.Context, token string) (accesspkg.Principal, error) {
+	if token != "oidc-token" {
+		return accesspkg.Principal{}, accesspkg.ErrAccessDenied
+	}
+	return accesspkg.Principal{SubjectID: "external-subject", TenantID: "external-tenant", ProjectID: "external-project", Roles: []accesspkg.Role{accesspkg.RoleCaller}}, nil
+}
+
 // staticExecutionAccess provides an inert durable execution dependency for unrelated route tests.
 // staticExecutionAccess 为无关路由测试提供一个惰性持久化执行依赖。
 type staticExecutionAccess struct{}
@@ -536,6 +556,20 @@ func (staticControlAccess) DeleteAPIKey(identifier string) error {
 // ProviderIDs 返回隔离后的供应商标识快照。
 func (c staticCatalog) ProviderIDs() []string {
 	return append([]string(nil), c.providerIDs...)
+}
+
+// staticCatalogChanges returns one deterministic global catalog invalidation page.
+// staticCatalogChanges 返回一个确定性全局目录失效页。
+type staticCatalogChanges struct{}
+
+// ListChanges returns one change strictly after the fixture cursor.
+// ListChanges 返回严格晚于夹具游标的一条变更。
+func (staticCatalogChanges) ListChanges(_ context.Context, afterRevision uint64, limit int) (catalog.ChangePage, error) {
+	page := catalog.ChangePage{CurrentRevision: 2, Changes: []catalog.Change{}}
+	if afterRevision < 2 && limit > 0 {
+		page.Changes = append(page.Changes, catalog.Change{GlobalRevision: 2, ProviderInstanceID: "pvi_test", ProviderRevision: 3, Type: catalog.ChangeSnapshotUpsert, ObservedAt: time.Date(2026, 7, 22, 8, 0, 0, 0, time.UTC)})
+	}
+	return page, nil
 }
 
 // TestHealthEndpointIsAlwaysLive verifies process liveness semantics.
@@ -674,8 +708,12 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	// metadataRefresh records only an authenticated explicit account-data refresh.
 	// metadataRefresh 仅记录经过认证的显式账号数据刷新。
 	metadataRefresh := &staticMetadataRefresh{}
+	accessController, errAccessController := accesspkg.NewLocalController(accesspkg.Limits{RequestsPerMinute: 1000, ConcurrentRequests: 10, AuditEntries: 1000})
+	if errAccessController != nil {
+		t.Fatalf("create access controller: %v", errAccessController)
+	}
 	server, errServer := NewWithControlPlane(staticCatalog{}, ControlPlane{
-		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: metadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access, Resources: access, InputPlans: access, Executions: staticExecutionAccess{}, Targets: access,
+		Query: staticManagementQuery{}, Commands: staticManagementCommands{}, ModelAccess: staticModelAccessCommands{}, CustomCatalogs: staticCustomCatalogOperations{}, MetadataRefresh: metadataRefresh, Protocols: staticProtocolProfiles{}, APIKeys: access, Auth: access, Access: accessController, CallIdentityVerifier: staticOIDCVerifier{}, Resources: access, InputPlans: access, Executions: staticExecutionAccess{}, CatalogChanges: staticCatalogChanges{}, Targets: access,
 	})
 	if errServer != nil {
 		t.Fatalf("create control-plane server: %v", errServer)
@@ -765,6 +803,22 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	if !strings.Contains(callRecorder.Body.String(), `"get":"models"`) || !strings.Contains(callRecorder.Body.String(), `"max_item_bytes":{"known":true,"value":1024}`) || strings.Contains(callRecorder.Body.String(), `"MaxItemBytes"`) {
 		t.Fatalf("model discovery did not preserve the snake-case capability contract: %s", callRecorder.Body.String())
 	}
+	// oidcCallRequest proves one configured external caller reaches only the call plane through the same strong contract.
+	// oidcCallRequest 证明一个已配置外部调用者仅通过同一强类型合同访问调用面。
+	oidcCallRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"models"}`))
+	oidcCallRequest.Header.Set("Authorization", "Bearer oidc-token")
+	oidcCallRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(oidcCallRecorder, oidcCallRequest)
+	if oidcCallRecorder.Code != http.StatusOK {
+		t.Fatalf("OIDC call-plane status=%d body=%s", oidcCallRecorder.Code, oidcCallRecorder.Body.String())
+	}
+	oidcManagementRequest := httptest.NewRequest(http.MethodGet, "/vulcan/manage/provider-groups", nil)
+	oidcManagementRequest.Header.Set("Authorization", "Bearer oidc-token")
+	oidcManagementRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(oidcManagementRecorder, oidcManagementRequest)
+	if oidcManagementRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("OIDC management status=%d, want %d", oidcManagementRecorder.Code, http.StatusUnauthorized)
+	}
 	// instancesRequest verifies another information shape uses the same authenticated protocol entry.
 	// instancesRequest 验证另一种信息形态使用相同的已认证协议入口。
 	instancesRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"instances"}`))
@@ -794,6 +848,13 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	server.Handler().ServeHTTP(serviceRecorder, serviceRequest)
 	if serviceRecorder.Code != http.StatusOK || !strings.Contains(serviceRecorder.Body.String(), `"backend_kind":"direct_search_api"`) || strings.Contains(serviceRecorder.Body.String(), `"Models"`) || strings.Contains(serviceRecorder.Body.String(), `"BackendKind"`) {
 		t.Fatalf("service discovery status=%d body=%s", serviceRecorder.Code, serviceRecorder.Body.String())
+	}
+	catalogRequest := httptest.NewRequest(http.MethodPost, "/vulcan/v1/info", strings.NewReader(`{"get":"catalog","after_revision":1,"limit":10}`))
+	catalogRequest.Header.Set("Authorization", "Bearer call-key")
+	catalogRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(catalogRecorder, catalogRequest)
+	if catalogRecorder.Code != http.StatusOK || !strings.Contains(catalogRecorder.Body.String(), `"current_revision":2`) || !strings.Contains(catalogRecorder.Body.String(), `"global_revision":2`) || !strings.Contains(catalogRecorder.Body.String(), `"type":"snapshot_upsert"`) {
+		t.Fatalf("catalog information status=%d body=%s", catalogRecorder.Code, catalogRecorder.Body.String())
 	}
 	// ambiguousCallRequest proves the same duplicate-header rejection protects the call plane.
 	// ambiguousCallRequest 证明相同的重复请求头拒绝规则也保护调用面。
@@ -838,5 +899,15 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	server.Handler().ServeHTTP(legacyRecorder, legacyRequest)
 	if legacyRecorder.Code != http.StatusNotFound {
 		t.Fatalf("legacy management route status=%d, want %d", legacyRecorder.Code, http.StatusNotFound)
+	}
+	audit := accessController.Audit()
+	containsAuthorized := false
+	containsUnauthenticated := false
+	for _, event := range audit {
+		containsAuthorized = containsAuthorized || event.Outcome == accesspkg.AuditOutcomeAuthorized && event.Principal != nil
+		containsUnauthenticated = containsUnauthenticated || event.Outcome == accesspkg.AuditOutcomeUnauthenticated && event.Principal == nil
+	}
+	if !containsAuthorized || !containsUnauthenticated {
+		t.Fatalf("access audit omitted authentication outcomes: %+v", audit)
 	}
 }

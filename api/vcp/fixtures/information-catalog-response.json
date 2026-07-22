@@ -1,0 +1,25 @@
+{
+  "get": "catalog",
+  "catalog": {
+    "current_revision": 42,
+    "changes": [
+      {
+        "global_revision": 42,
+        "provider_instance_id": "pvi_minimax_global",
+        "provider_revision": 7,
+        "type": "snapshot_upsert",
+        "observed_at": "2026-07-22T08:00:00Z",
+        "source_revision": "minimax-models-20260722",
+        "etag": "minimax-models-20260722",
+        "refresh_status": "fresh",
+        "tombstones": [
+          {
+            "kind": "model",
+            "id": "model_retired",
+            "removed_at": "2026-07-22T08:00:00Z"
+          }
+        ]
+      }
+    ]
+  }
+}

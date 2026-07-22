@@ -1,0 +1,14 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "preflight_fixture",
+  "execution": {
+    "protocol_version": "1.0",
+    "request_id": "preflight_execution_fixture",
+    "target": {"model": {"target": "exact", "provider_instance_id": "pvi_fixture", "provider_model_id": "model_fixture", "execution_profile_id": "profile_fixture"}},
+    "operation": "conversation.respond",
+    "stream": false,
+    "payload": {"conversation": {}},
+    "projection_policy": {},
+    "budget": {}
+  }
+}

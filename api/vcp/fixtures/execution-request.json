@@ -1,0 +1,13 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "request_fixture",
+  "idempotency_key": "fixture-idempotency",
+  "target": {"model": {"target": "exact", "provider_instance_id": "pvi_fixture", "provider_model_id": "model_fixture", "execution_profile_id": "profile_fixture", "required_region": "Global"}},
+  "operation": "conversation.respond",
+  "stream": true,
+  "dispatch_mode": "deferred",
+  "payload": {"conversation": {}},
+  "projection_policy": {},
+  "budget": {"max_execution_milliseconds": 60000},
+  "retry_policy": {"backoff": "exponential", "initial_delay_milliseconds": 5000, "maximum_delay_milliseconds": 1800000, "multiplier": 2, "max_attempts": 20}
+}

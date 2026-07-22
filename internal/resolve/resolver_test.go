@@ -13,10 +13,91 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
+// TestSelectChoosesOneProviderScopedSufficientProfile verifies capability preselection never widens beyond the caller-fixed instance.
+// TestSelectChoosesOneProviderScopedSufficientProfile 验证能力预选绝不会扩大到调用方固定实例之外。
+func TestSelectChoosesOneProviderScopedSufficientProfile(t *testing.T) {
+	fixture := newResolverFixture(t)
+	selection, errSelect := fixture.resolver.Select(context.Background(), vcp.ExecutionSelectionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "selection-k3", ProviderInstanceID: "pvi_kimi", Operation: vcp.OperationConversationRespond, RequiredContextTokens: 500_000, RequiredMaxOutputTokens: 16_000, RequiredInputModalities: []string{"text"}, RequiredOutputModalities: []string{"text"}, RequiredCapabilities: []string{"streaming", "reasoning", "tool_calling"}, PreferredModelIDs: []string{"model_kimi_k3"}}, fixture.now)
+	if errSelect != nil {
+		t.Fatalf("Select() error = %v", errSelect)
+	}
+	if selection.Target.Model == nil || selection.Target.Service != nil || selection.Target.Model.Target != vcp.ModelTargetExact || selection.Target.Model.ProviderInstanceID != "pvi_kimi" || selection.Target.Model.ProviderModelID != "model_kimi_k3" || selection.Target.Model.ExecutionProfileID != "profile_kimi_k3_1m" || selection.EffectiveContextTokens == nil || *selection.EffectiveContextTokens != 1_048_576 {
+		t.Fatalf("selection = %#v", selection)
+	}
+	if _, errSelect := fixture.resolver.Select(context.Background(), vcp.ExecutionSelectionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "selection-invalid", ProviderInstanceID: "pvi_kimi", Operation: vcp.OperationConversationRespond, RequiredCapabilities: []string{"unknown_capability"}}, fixture.now); !errors.Is(errSelect, vcp.ErrInvalidRequest) {
+		t.Fatalf("unknown capability error = %v", errSelect)
+	}
+	if _, errSelect := fixture.resolver.Select(context.Background(), vcp.ExecutionSelectionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "selection-output-too-large", ProviderInstanceID: "pvi_kimi", Operation: vcp.OperationConversationRespond, RequiredMaxOutputTokens: 32_768}, fixture.now); !errors.Is(errSelect, ErrNoEligibleTarget) {
+		t.Fatalf("excessive output requirement error = %v", errSelect)
+	}
+	if _, errSelect := fixture.resolver.Select(context.Background(), vcp.ExecutionSelectionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "selection-video-input", ProviderInstanceID: "pvi_kimi", Operation: vcp.OperationConversationRespond, RequiredInputModalities: []string{"video"}}, fixture.now); !errors.Is(errSelect, ErrNoEligibleTarget) {
+		t.Fatalf("unsupported modality requirement error = %v", errSelect)
+	}
+}
+
+// TestSelectChoosesOneProviderScopedSearchService verifies search preselection returns an executable service target.
+// TestSelectChoosesOneProviderScopedSearchService 验证搜索预选返回一个可执行服务 Target。
+func TestSelectChoosesOneProviderScopedSearchService(t *testing.T) {
+	fixture := newResolverFixture(t)
+	installResolverSearchService(t, &fixture)
+	selection, errSelect := fixture.resolver.Select(context.Background(), vcp.ExecutionSelectionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "selection-search", ProviderInstanceID: "pvi_kimi", Operation: vcp.OperationSearchWeb}, fixture.now)
+	if errSelect != nil {
+		t.Fatalf("Select() error = %v", errSelect)
+	}
+	if selection.Target.Model != nil || selection.Target.Service == nil || selection.Target.Service.ProviderInstanceID != "pvi_kimi" || selection.Target.Service.ProviderServiceID != "service_web_search" || selection.Target.Service.ServiceOfferingID != "service_offer_web_search" || selection.Target.Service.ExecutionProfileID != "profile_web_search" || selection.EffectiveContextTokens != nil {
+		t.Fatalf("search selection = %#v", selection)
+	}
+	if _, errInvalid := fixture.resolver.Select(context.Background(), vcp.ExecutionSelectionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "selection-search-invalid", ProviderInstanceID: "pvi_kimi", Operation: vcp.OperationSearchWeb, PreferredModelIDs: []string{"model_kimi_k3"}}, fixture.now); !errors.Is(errInvalid, vcp.ErrInvalidRequest) {
+		t.Fatalf("search model preference error = %v, want ErrInvalidRequest", errInvalid)
+	}
+}
+
 // TestResolveSelectsExactModelGroundedSearchService verifies service target immutability.
 // TestResolveSelectsExactModelGroundedSearchService 校验服务目标不可变性。
 func TestResolveSelectsExactModelGroundedSearchService(t *testing.T) {
 	fixture := newResolverFixture(t)
+	installResolverSearchService(t, &fixture)
+	pools, errPools := fixture.resolver.SummarizeSnapshot(context.Background(), fixture.snapshot, fixture.now, fixture.snapshot.Revision)
+	if errPools != nil {
+		t.Fatalf("summarize search service snapshot: %v", errPools)
+	}
+	var searchPool catalog.PoolSummary
+	for _, pool := range pools {
+		if pool.ExecutionProfileID == "profile_web_search" {
+			searchPool = pool
+			break
+		}
+	}
+	if searchPool.EntitledCredentials != 2 || searchPool.ReadyCredentials != 2 {
+		t.Fatalf("search service pool=%+v, want two ready credentials", searchPool)
+	}
+
+	target, diagnostics, errResolve := fixture.resolver.Resolve(context.Background(), Request{
+		ProviderInstanceID: "pvi_kimi",
+		ProviderServiceID:  "service_web_search",
+		ServiceOfferingID:  "service_offer_web_search",
+		ExecutionProfileID: "profile_web_search",
+		Operation:          vcp.OperationSearchWeb,
+		Now:                fixture.now,
+	})
+	if errResolve != nil {
+		t.Fatalf("resolve search service: %v", errResolve)
+	}
+	if target.ProviderServiceID != "service_web_search" || target.ServiceOfferingID != "service_offer_web_search" || target.ActionBindingID != "action_web_search" {
+		t.Fatalf("unexpected search target: %+v", target)
+	}
+	if target.ProviderModelID != "" || target.OfferingID != "" || target.ServiceCapabilities == nil {
+		t.Fatalf("service target leaked model subject fields: %+v", target)
+	}
+	if diagnostics.ReadyCandidates != 2 || target.CredentialID != "cred_kimi_1m" {
+		t.Fatalf("search service selection diagnostics=%+v target=%+v", diagnostics, target)
+	}
+}
+
+// installResolverSearchService adds one complete executable search service to a resolver fixture.
+// installResolverSearchService 向 Resolver 夹具增加一个完整可执行的搜索服务。
+func installResolverSearchService(t *testing.T, fixture *resolverFixture) {
+	t.Helper()
 	capabilities := resolverSearchCapabilities()
 	fixture.snapshot.Services = []catalog.ProviderService{{
 		ID:                 "service_web_search",
@@ -55,41 +136,6 @@ func TestResolveSelectsExactModelGroundedSearchService(t *testing.T) {
 	fixture.snapshot.ObservedAt = fixture.snapshot.ObservedAt.Add(time.Second)
 	if errSave := fixture.catalogs.Save(context.Background(), fixture.snapshot); errSave != nil {
 		t.Fatalf("save search service snapshot: %v", errSave)
-	}
-	pools, errPools := fixture.resolver.SummarizeSnapshot(context.Background(), fixture.snapshot, fixture.now, fixture.snapshot.Revision)
-	if errPools != nil {
-		t.Fatalf("summarize search service snapshot: %v", errPools)
-	}
-	var searchPool catalog.PoolSummary
-	for _, pool := range pools {
-		if pool.ExecutionProfileID == "profile_web_search" {
-			searchPool = pool
-			break
-		}
-	}
-	if searchPool.EntitledCredentials != 2 || searchPool.ReadyCredentials != 2 {
-		t.Fatalf("search service pool=%+v, want two ready credentials", searchPool)
-	}
-
-	target, diagnostics, errResolve := fixture.resolver.Resolve(context.Background(), Request{
-		ProviderInstanceID: "pvi_kimi",
-		ProviderServiceID:  "service_web_search",
-		ServiceOfferingID:  "service_offer_web_search",
-		ExecutionProfileID: "profile_web_search",
-		Operation:          vcp.OperationSearchWeb,
-		Now:                fixture.now,
-	})
-	if errResolve != nil {
-		t.Fatalf("resolve search service: %v", errResolve)
-	}
-	if target.ProviderServiceID != "service_web_search" || target.ServiceOfferingID != "service_offer_web_search" || target.ActionBindingID != "action_web_search" {
-		t.Fatalf("unexpected search target: %+v", target)
-	}
-	if target.ProviderModelID != "" || target.OfferingID != "" || target.ServiceCapabilities == nil {
-		t.Fatalf("service target leaked model subject fields: %+v", target)
-	}
-	if diagnostics.ReadyCandidates != 2 || target.CredentialID != "cred_kimi_1m" {
-		t.Fatalf("search service selection diagnostics=%+v target=%+v", diagnostics, target)
 	}
 }
 

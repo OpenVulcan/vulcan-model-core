@@ -127,7 +127,7 @@ func (d *VideoTaskDriver) validateExecution(execution provider.ExecutionRequest)
 	if d == nil || d.client == nil || execution.Binding.Target.ProviderDefinitionID != d.definitionID {
 		return fmt.Errorf("%w: target definition does not belong to this driver", provider.ErrExecutionBinding)
 	}
-	_, errValidate := execution.ValidateForAction(VideoGenerateActionBindingID, providerconfig.AuthMethodAPIKey)
+	_, errValidate := execution.ValidateForAction(VideoGenerateActionBindingID, providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodDeviceFlow)
 	return errValidate
 }
 
@@ -146,6 +146,9 @@ type videoRequest struct {
 	// LastFrameImage is an optional final-frame URL or Base64 data URL.
 	// LastFrameImage 是可选末帧 URL 或 Base64 Data URL。
 	LastFrameImage string `json:"last_frame_image,omitempty"`
+	// SubjectReference contains the sole S2V character image.
+	// SubjectReference 包含唯一的 S2V 角色图片。
+	SubjectReference []videoSubjectReference `json:"subject_reference,omitempty"`
 	// Duration is six or ten seconds.
 	// Duration 为六秒或十秒。
 	Duration int `json:"duration,omitempty"`
@@ -155,6 +158,17 @@ type videoRequest struct {
 	// PromptOptimizer controls provider-native prompt optimization.
 	// PromptOptimizer 控制供应商原生提示词优化。
 	PromptOptimizer *bool `json:"prompt_optimizer,omitempty"`
+}
+
+// videoSubjectReference is MiniMax's exact S2V character carrier.
+// videoSubjectReference 是 MiniMax 精确的 S2V 角色载体。
+type videoSubjectReference struct {
+	// Type is fixed to character by the documented S2V contract.
+	// Type 按文档声明的 S2V 合同固定为 character。
+	Type string `json:"type"`
+	// Image contains exactly one URL or Base64 data URL.
+	// Image 精确包含一个 URL 或 Base64 Data URL。
+	Image []string `json:"image"`
 }
 
 // videoBaseResponse contains MiniMax's stable application status.
@@ -209,7 +223,7 @@ type videoFileResponse struct {
 // projectVideoStart 映射规范文本、首帧与末帧模式。
 func projectVideoStart(execution provider.ExecutionRequest) (transport.Request, error) {
 	operation := execution.Execution.Payload.VideoGenerate
-	if operation == nil || (strings.TrimSpace(operation.Prompt) == "" && len(operation.Inputs) == 0) || len(operation.Prompt) > 2000 || operation.NegativePrompt != "" || operation.AspectRatio != "" || operation.Width != 0 || operation.Height != 0 || operation.FramesPerSecond != 0 || operation.Seed != nil || operation.Watermark != nil || operation.Count > 1 || (operation.OutputFormat != "" && operation.OutputFormat != "mp4") {
+	if operation == nil || strings.TrimSpace(operation.Prompt) == "" || len(operation.Prompt) > 2000 || operation.NegativePrompt != "" || operation.AspectRatio != "" || operation.Width != 0 || operation.Height != 0 || operation.FramesPerSecond != 0 || operation.Seed != nil || operation.Watermark != nil || operation.Count > 1 || (operation.OutputFormat != "" && operation.OutputFormat != "mp4") {
 		return transport.Request{}, ErrInvalidVideoDriver
 	}
 	duration := int(operation.DurationSeconds)
@@ -239,6 +253,11 @@ func projectVideoStart(execution provider.ExecutionRequest) (transport.Request, 
 				return transport.Request{}, fmt.Errorf("%w: duplicate last frame", ErrInvalidVideoDriver)
 			}
 			body.LastFrameImage = image
+		case vcp.MediaRoleSubjectReference:
+			if len(body.SubjectReference) != 0 {
+				return transport.Request{}, fmt.Errorf("%w: duplicate subject reference", ErrInvalidVideoDriver)
+			}
+			body.SubjectReference = []videoSubjectReference{{Type: "character", Image: []string{image}}}
 		default:
 			return transport.Request{}, fmt.Errorf("%w: unsupported image role", ErrInvalidVideoDriver)
 		}
@@ -260,6 +279,10 @@ func projectVideoStart(execution provider.ExecutionRequest) (transport.Request, 
 // validateVideoModelControls 强制执行 MiniMax 按模型与模式划分的时长及分辨率矩阵。
 func validateVideoModelControls(body videoRequest) error {
 	imageMode := body.FirstFrameImage != ""
+	subjectMode := len(body.SubjectReference) == 1
+	if subjectMode && (imageMode || body.LastFrameImage != "") {
+		return fmt.Errorf("%w: subject reference cannot be combined with frame inputs", ErrInvalidVideoDriver)
+	}
 	switch body.Model {
 	case "MiniMax-Hailuo-2.3":
 	case "MiniMax-Hailuo-2.3-Fast":
@@ -267,11 +290,18 @@ func validateVideoModelControls(body videoRequest) error {
 			return fmt.Errorf("%w: fast model requires a first frame", ErrInvalidVideoDriver)
 		}
 	case "MiniMax-Hailuo-02":
+	case "S2V-01":
+		if !subjectMode {
+			return fmt.Errorf("%w: S2V-01 requires one subject reference", ErrInvalidVideoDriver)
+		}
 	default:
 		return fmt.Errorf("%w: unsupported video model", ErrInvalidVideoDriver)
 	}
 	if body.LastFrameImage != "" && body.Model != "MiniMax-Hailuo-02" {
 		return fmt.Errorf("%w: first-and-last-frame mode requires MiniMax-Hailuo-02", ErrInvalidVideoDriver)
+	}
+	if subjectMode && body.Model != "S2V-01" {
+		return fmt.Errorf("%w: subject-reference mode requires S2V-01", ErrInvalidVideoDriver)
 	}
 	if body.Duration != 6 && body.Duration != 10 {
 		return fmt.Errorf("%w: duration must be six or ten seconds", ErrInvalidVideoDriver)
@@ -337,7 +367,7 @@ func decodeVideoPoll(reader io.Reader, providerTaskID string, now time.Time) (pr
 			return provider.TaskResult{}, "", fmt.Errorf("%w: successful task has no file ID", ErrInvalidVideoResponse)
 		}
 		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskSucceeded}, response.FileID, nil
-	case "Fail":
+	case "Failed":
 		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskFailed, ErrorCode: "minimax_video_generation_failed"}, "", nil
 	default:
 		return provider.TaskResult{}, "", fmt.Errorf("%w: unknown task status %q", ErrInvalidVideoResponse, response.Status)

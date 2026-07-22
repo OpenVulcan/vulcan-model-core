@@ -2,7 +2,7 @@ import path from "node:path";
 
 import tailwindcss from "@tailwindcss/vite";
 import react from "@vitejs/plugin-react";
-import { defineConfig } from "vite";
+import { defineConfig } from "vitest/config";
 
 // default exports the loopback-only Vite development configuration for the local management interface.
 // default 导出本地管理界面的仅环回 Vite 开发配置。

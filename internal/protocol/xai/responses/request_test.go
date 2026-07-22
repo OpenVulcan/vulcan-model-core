@@ -48,7 +48,7 @@ func TestProjectRequestNormalizesNamespaceCustomAndXSearch(t *testing.T) {
 	if len(projected.Upstream.Input) != 3 || projected.Upstream.Input[1].Type != "function_call" || projected.Upstream.Input[1].CallID != "upstream-call-1" || projected.Upstream.Input[1].Name != "ops__run" || projected.Upstream.Input[1].Arguments != `{"input":"raw input"}` {
 		t.Fatalf("input = %#v", projected.Upstream.Input)
 	}
-	if output := projected.Upstream.Input[2]; output.Type != "function_call_output" || output.Output != "done" {
+	if output := projected.Upstream.Input[2]; output.Type != "function_call_output" || output.Output == nil || output.Output.Text == nil || *output.Output.Text != "done" || output.Output.ComputerScreenshot != nil {
 		t.Fatalf("custom output = %#v", output)
 	}
 	if len(projected.StreamOptions.ToolReferences) != 2 || !projected.StreamOptions.FilterInternalXSearch {

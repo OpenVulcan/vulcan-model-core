@@ -108,7 +108,7 @@ func (d *VertexCompatDriver) Execute(ctx context.Context, execution provider.Exe
 		Stream:         execution.Request.Stream, IdempotencyKey: execution.Request.IdempotencyKey,
 	}
 	if execution.Request.Stream {
-		return d.decoder.executeStream(ctx, outbound, projected, execution.Now)
+		return d.decoder.executeStream(ctx, execution, outbound, projected, execution.Now)
 	}
 	return d.decoder.executeResponse(ctx, outbound, projected, execution.Now)
 }
@@ -177,6 +177,16 @@ func (d *VertexCompatDriver) CountTokens(ctx context.Context, execution provider
 	}
 	report := aistudio.CountTokensReport(projected.Report, usage, upstream)
 	return aistudio.CountTokensResult{TotalTokens: upstream.TotalTokens, Usage: usage, Report: report, Projected: projected}, nil
+}
+
+// PreflightUsage exposes Vertex-compatible countTokens through the provider-neutral preflight contract.
+// PreflightUsage 通过供应商无关预检合同公开 Vertex 兼容 countTokens。
+func (d *VertexCompatDriver) PreflightUsage(ctx context.Context, execution provider.ExecutionRequest) (provider.UsagePreflightResult, error) {
+	result, errCount := d.CountTokens(ctx, execution)
+	if errCount != nil {
+		return provider.UsagePreflightResult{}, errCount
+	}
+	return provider.UsagePreflightResult{Usage: result.Usage, Accuracy: vcp.PreflightExact}, nil
 }
 
 // vertexCompatEndpointPath builds CLIProxyAPI's exact v1 publisher, model, and action path.

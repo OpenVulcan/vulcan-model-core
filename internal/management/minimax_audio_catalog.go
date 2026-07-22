@@ -11,10 +11,14 @@ import (
 // miniMaxSpeechModels returns synchronous and long-text profiles for current Speech 2.8 models.
 // miniMaxSpeechModels 返回当前 Speech 2.8 模型的同步与长文本配置。
 func miniMaxSpeechModels() []systemModelTemplate {
-	models := make([]systemModelTemplate, 0, 4)
+	models := make([]systemModelTemplate, 0, 6)
 	for _, identity := range []systemModelIdentity{{upstreamID: "speech-2.8-hd", displayName: "MiniMax Speech 2.8 HD"}, {upstreamID: "speech-2.8-turbo", displayName: "MiniMax Speech 2.8 Turbo"}} {
 		models = append(models, miniMaxSpeechTemplate(identity, false), miniMaxSpeechTemplate(identity, true))
 	}
+	models = append(models,
+		miniMaxSpeechTemplate(systemModelIdentity{upstreamID: "speech-2.6", displayName: "MiniMax Speech 2.6"}, false),
+		miniMaxSpeechTemplate(systemModelIdentity{upstreamID: "speech-02", displayName: "MiniMax Speech 02"}, false),
+	)
 	return models
 }
 
@@ -22,12 +26,18 @@ func miniMaxSpeechModels() []systemModelTemplate {
 // miniMaxSpeechTemplate 构建一个执行模式专属的 MiniMax T2A 合同。
 func miniMaxSpeechTemplate(identity systemModelIdentity, asynchronous bool) systemModelTemplate {
 	actionBindingID := providerminimax.SpeechSynthesizeActionBindingID
-	delivery := catalog.DeliveryCapabilities{Synchronous: true}
+	delivery := catalog.DeliveryCapabilities{Synchronous: true, Streaming: true, PartialResults: true, Cancellation: true}
 	maximumCharacters := int64(9999)
 	if asynchronous {
 		actionBindingID = providerminimax.SpeechSynthesizeAsyncActionBindingID
 		delivery = catalog.DeliveryCapabilities{Asynchronous: true, Polling: true}
 		maximumCharacters = 50000
+	}
+	outputFormats := []string{"mp3", "pcm", "flac", "wav", "pcmu_raw", "pcmu_wav", "opus"}
+	outputEncodings := append([]string(nil), outputFormats...)
+	if asynchronous {
+		outputFormats = []string{"mp3", "wav"}
+		outputEncodings = []string{"mp3", "wav"}
 	}
 	minimumSpeed, maximumSpeed, defaultSpeed := 0.5, 2.0, 1.0
 	minimumVolume, maximumVolume, defaultVolume := math.SmallestNonzeroFloat64, 10.0, 1.0
@@ -36,7 +46,7 @@ func miniMaxSpeechTemplate(identity systemModelIdentity, asynchronous bool) syst
 		upstreamID: identity.upstreamID, displayName: identity.displayName, inputModalities: []string{"text"},
 		reasoning: catalog.CapabilityUnsupported, toolCalling: catalog.CapabilityUnsupported, parallelTools: catalog.CapabilityUnsupported, streamingTools: catalog.CapabilityUnsupported, strictSchema: catalog.CapabilityUnsupported, entitlementMode: catalog.EntitlementAllBoundCredentials,
 		operation: vcp.OperationSpeechSynthesize, actionBindingID: actionBindingID,
-		mediaOutputs: []catalog.MediaOutputCapability{{Kind: vcp.MediaAudio, Level: catalog.CapabilityNative, Formats: []string{"mp3", "wav"}, MaxOutputs: catalog.OptionalLimit{Known: true, Value: 1}, Audio: &catalog.AudioMediaLimits{Encodings: []string{"mp3", "pcm"}}, Delivery: delivery, Evidence: []catalog.CapabilityEvidence{{Source: catalog.ModelSourceProviderAPI, Reference: miniMaxSpeechEvidenceURL(asynchronous), ObservedAt: mediaEvidenceObservedAt(), Revision: 1}}, EvidenceRevision: 1}},
+		mediaOutputs: []catalog.MediaOutputCapability{{Kind: vcp.MediaAudio, Level: catalog.CapabilityNative, Formats: outputFormats, MaxOutputs: catalog.OptionalLimit{Known: true, Value: 1}, Audio: &catalog.AudioMediaLimits{Encodings: outputEncodings}, Delivery: delivery, Evidence: []catalog.CapabilityEvidence{{Source: catalog.ModelSourceProviderAPI, Reference: miniMaxSpeechEvidenceURL(asynchronous), ObservedAt: mediaEvidenceObservedAt(), Revision: 1}}, EvidenceRevision: 1}},
 		parameters: []catalog.ParameterDescriptor{
 			{ID: "text", Kind: catalog.ParameterString, Required: true, StringRange: &catalog.StringRange{MinimumLength: catalogInt64(1), MaximumLength: &maximumCharacters}},
 			{ID: "voice_id", Kind: catalog.ParameterString, Required: true, StringRange: &catalog.StringRange{}},
@@ -47,7 +57,9 @@ func miniMaxSpeechTemplate(identity systemModelIdentity, asynchronous bool) syst
 			{ID: "sample_rate", Kind: catalog.ParameterEnum, AllowedValues: []string{"8000", "16000", "22050", "24000", "32000", "44100"}},
 			{ID: "bitrate", Kind: catalog.ParameterEnum, AllowedValues: []string{"32000", "64000", "128000", "256000"}},
 			{ID: "channels", Kind: catalog.ParameterEnum, AllowedValues: []string{"1", "2"}},
-			{ID: "output_format", Kind: catalog.ParameterFormat, AllowedValues: []string{"mp3", "wav"}},
+			{ID: "output_format", Kind: catalog.ParameterFormat, AllowedValues: outputFormats},
+			{ID: "timestamps", Kind: catalog.ParameterBoolean},
+			{ID: "pronunciations", Kind: catalog.ParameterStringList, StringRange: &catalog.StringRange{}},
 		},
 	}
 }

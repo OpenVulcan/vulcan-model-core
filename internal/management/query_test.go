@@ -1,6 +1,7 @@
 package management
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,6 +15,18 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestAllowanceViewFromPreservesProviderPresentationWindow verifies management output retains MiniMax period and boost facts.
+// TestAllowanceViewFromPreservesProviderPresentationWindow 验证管理输出保留 MiniMax 周期与展示倍率事实。
+func TestAllowanceViewFromPreservesProviderPresentationWindow(t *testing.T) {
+	startAt := time.Date(2026, time.July, 19, 0, 0, 0, 0, time.UTC)
+	resetAt := time.Date(2026, time.July, 26, 0, 0, 0, 0, time.UTC)
+	multiplier := int64(1500)
+	view := allowanceViewFrom(catalog.AllowanceSnapshot{DisplayMultiplierPermille: &multiplier, Window: &catalog.AllowanceWindow{Kind: catalog.WindowCalendar, CalendarUnit: "week", StartAt: &startAt, ResetAt: &resetAt}}, nil)
+	if view.DisplayMultiplierPermille == nil || *view.DisplayMultiplierPermille != multiplier || view.Window == nil || view.Window.StartAt == nil || !view.Window.StartAt.Equal(startAt) || view.Window.ResetAt == nil || !view.Window.ResetAt.Equal(resetAt) {
+		t.Fatalf("allowance view = %#v", view)
+	}
+}
 
 // TestQueryServiceReturnsModelContextsAndAccountUsage verifies the public discovery graph preserves exact model-profile-account ownership.
 // TestQueryServiceReturnsModelContextsAndAccountUsage 验证公开发现图保留精确模型规格账号归属关系。
@@ -336,5 +349,28 @@ func TestCatalogViewSortsPlansByEveryIdentityField(t *testing.T) {
 	}
 	if plans[0].PlanName != "Alpha" || plans[0].Status != "active" || plans[1].PlanName != "Alpha" || plans[1].Status != "inactive" || plans[2].PlanName != "Zulu" {
 		t.Fatalf("plan ordering = %#v", plans)
+	}
+}
+
+// TestCatalogViewSerializesEmptyVoiceDescriptionsAsArray verifies a legal empty provider trait list cannot invalidate the management response.
+// TestCatalogViewSerializesEmptyVoiceDescriptionsAsArray 验证合法的空供应商特征列表不会使管理响应失效。
+func TestCatalogViewSerializesEmptyVoiceDescriptionsAsArray(t *testing.T) {
+	// observedAt fixes both voice timestamps so the encoded contract remains deterministic.
+	// observedAt 固定两个声音时间戳，使编码合同保持确定性。
+	observedAt := time.Date(2026, time.July, 22, 1, 0, 0, 0, time.UTC)
+	// snapshot mirrors a MiniMax system voice whose documented description array is empty.
+	// snapshot 镜像说明数组为空的 MiniMax 系统声音。
+	snapshot := catalog.Snapshot{Voices: []catalog.VoiceSnapshot{{VoiceID: "voice-empty-description", DisplayName: "Voice", CredentialID: "cred_minimax", Descriptions: []string{}, ObservedAt: observedAt, ExpiresAt: observedAt.Add(time.Hour)}}}
+	// view is the exact management response projection under test.
+	// view 是待测的精确管理响应投影。
+	view := catalogView(snapshot, nil, nil, nil, map[string]string{"cred_minimax": "MiniMax"}, observedAt)
+	// encoded is the public JSON representation consumed by the management Web application.
+	// encoded 是管理 Web 应用消费的公共 JSON 表示。
+	encoded, errEncode := json.Marshal(view)
+	if errEncode != nil {
+		t.Fatalf("marshal catalog view: %v", errEncode)
+	}
+	if !bytes.Contains(encoded, []byte(`"descriptions":[]`)) || bytes.Contains(encoded, []byte(`"descriptions":null`)) {
+		t.Fatalf("empty voice descriptions JSON = %s", encoded)
 	}
 }

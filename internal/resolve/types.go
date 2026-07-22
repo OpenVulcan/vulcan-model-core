@@ -68,6 +68,12 @@ type Request struct {
 	// RequiredCredentialID constrains endpoint failover to the credential that owned the failed attempt.
 	// RequiredCredentialID 将入口故障切换限制在失败尝试所属的凭据内。
 	RequiredCredentialID string
+	// RequiredEndpointID constrains continuation replay to the endpoint that owns the provider state.
+	// RequiredEndpointID 将续接重放限制在拥有供应商状态的入口内。
+	RequiredEndpointID string
+	// RequiredRegion constrains selection to endpoints in one caller-selected provider region.
+	// RequiredRegion 将选择限制在调用方指定的供应商区域入口内。
+	RequiredRegion string
 	// ExcludedEndpointIDs lists same-instance endpoints already attempted by this logical execution.
 	// ExcludedEndpointIDs 列出该逻辑执行已经尝试过的同实例入口。
 	ExcludedEndpointIDs []string

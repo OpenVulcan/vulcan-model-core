@@ -1,0 +1,6 @@
+{
+  "continuation_id": "cont_example_01",
+  "logical_response_id": "response_example_01",
+  "affinity_summary": "system_openai/openai-main/gpt-5/profile-default",
+  "expires_at": "2026-07-22T12:00:00Z"
+}

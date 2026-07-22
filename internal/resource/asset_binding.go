@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -127,6 +128,12 @@ type AssetBindingStore interface {
 	// FindExact returns one live binding for exact resource bytes, target, and mode.
 	// FindExact 为精确资源字节、Target 与方式返回一个有效绑定。
 	FindExact(context.Context, string, string, AssetBindingTarget, catalog.UpstreamMaterializationMode, time.Time) (ProviderAssetBinding, error)
+	// ListByResource returns an isolated stable-order binding snapshot for cleanup.
+	// ListByResource 为清理返回一个隔离且顺序稳定的绑定快照。
+	ListByResource(context.Context, string) ([]ProviderAssetBinding, error)
+	// Delete removes one exact binding after its provider handle has been deleted.
+	// Delete 在供应商句柄已删除后移除一个精确绑定。
+	Delete(context.Context, string) error
 	// DeleteByResource removes every binding owned by one Router resource.
 	// DeleteByResource 移除一个 Router 资源拥有的每个绑定。
 	DeleteByResource(context.Context, string) error
@@ -189,6 +196,42 @@ func (s *MemoryAssetBindingStore) FindExact(ctx context.Context, resourceID stri
 	return ProviderAssetBinding{}, ErrAssetBindingNotFound
 }
 
+// ListByResource returns stable identifier order for deterministic cleanup.
+// ListByResource 为确定性清理返回稳定标识顺序。
+func (s *MemoryAssetBindingStore) ListByResource(ctx context.Context, resourceID string) ([]ProviderAssetBinding, error) {
+	if ctx == nil || s == nil || !validResourceID(resourceID) {
+		return nil, ErrInvalidAssetBinding
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return nil, errContext
+	}
+	s.mu.RLock()
+	bindings := make([]ProviderAssetBinding, 0)
+	for _, binding := range s.bindings {
+		if binding.ResourceID == resourceID {
+			bindings = append(bindings, binding)
+		}
+	}
+	s.mu.RUnlock()
+	sort.Slice(bindings, func(left int, right int) bool { return bindings[left].ID < bindings[right].ID })
+	return bindings, nil
+}
+
+// Delete removes one exact binding identifier.
+// Delete 移除一个精确绑定标识。
+func (s *MemoryAssetBindingStore) Delete(ctx context.Context, bindingID string) error {
+	if ctx == nil || s == nil || !validAssetBindingID(bindingID) {
+		return ErrInvalidAssetBinding
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return errContext
+	}
+	s.mu.Lock()
+	delete(s.bindings, bindingID)
+	s.mu.Unlock()
+	return nil
+}
+
 // DeleteByResource removes every binding for one Router resource.
 // DeleteByResource 移除一个 Router 资源的每个绑定。
 func (s *MemoryAssetBindingStore) DeleteByResource(ctx context.Context, resourceID string) error {
@@ -206,12 +249,6 @@ func (s *MemoryAssetBindingStore) DeleteByResource(ctx context.Context, resource
 		}
 	}
 	return nil
-}
-
-// CleanupResourceBindings satisfies resource deletion with exact binding removal.
-// CleanupResourceBindings 通过精确绑定移除满足资源删除。
-func (s *MemoryAssetBindingStore) CleanupResourceBindings(ctx context.Context, resourceID string) error {
-	return s.DeleteByResource(ctx, resourceID)
 }
 
 // validAssetBindingID verifies the 128-bit binding identifier shape.

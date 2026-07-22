@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/access"
 	"github.com/OpenVulcan/vulcan-model-core/internal/execution"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
@@ -99,6 +101,17 @@ type ExecutionDiagnostics interface {
 	ListDiagnostics(context.Context, int) ([]execution.Record, error)
 }
 
+// AccessDiagnostics exposes only bounded redacted audit entries and aggregate request metrics.
+// AccessDiagnostics 仅暴露有界脱敏审计条目与聚合请求指标。
+type AccessDiagnostics interface {
+	// Audit returns a bounded isolated audit snapshot.
+	// Audit 返回有界且隔离的审计快照。
+	Audit() []access.AuditEvent
+	// Metrics returns aggregate content-free request metrics.
+	// Metrics 返回不含内容的聚合请求指标。
+	Metrics() access.Snapshot
+}
+
 // resourceDiagnosticListResponse is the bounded management resource envelope.
 // resourceDiagnosticListResponse 是有界的管理资源信封。
 type resourceDiagnosticListResponse struct {
@@ -113,6 +126,33 @@ type executionDiagnosticListResponse struct {
 	// Executions contains lifecycle and safe terminal results only.
 	// Executions 仅包含生命周期与安全终态结果。
 	Executions []executionDiagnosticView `json:"executions"`
+}
+
+// providerFileDiagnosticListResponse is a credential-scoped protected provider-file envelope.
+// providerFileDiagnosticListResponse 是凭据作用域且受保护的供应商文件信封。
+type providerFileDiagnosticListResponse struct {
+	// Files contains provider metadata only and never downloads file content.
+	// Files 仅包含供应商元数据且绝不下载文件正文。
+	Files []provider.ProviderFileDiagnostic `json:"files"`
+}
+
+// providerFileDiagnosticResponse is one credential-scoped protected provider-file envelope.
+// providerFileDiagnosticResponse 是一个凭据作用域且受保护的供应商文件信封。
+type providerFileDiagnosticResponse struct {
+	// File contains metadata only and never includes the provider temporary download URL.
+	// File 仅包含元数据且绝不包含供应商临时下载地址。
+	File provider.ProviderFileDiagnostic `json:"file"`
+}
+
+// accessDiagnosticResponse is the protected redacted access observability envelope.
+// accessDiagnosticResponse 是受保护且脱敏的访问可观测性信封。
+type accessDiagnosticResponse struct {
+	// Audit contains bounded route metadata and validated non-secret principal identifiers.
+	// Audit 包含有界路由元数据与经过验证的非秘密主体标识。
+	Audit []access.AuditEvent `json:"audit"`
+	// Metrics contains aggregate request counts and duration.
+	// Metrics 包含聚合请求数与耗时。
+	Metrics access.Snapshot `json:"metrics"`
 }
 
 // projectResourceDiagnostics removes content-derived and owner-private fields before serialization.
@@ -159,4 +199,47 @@ func (s *Server) handleExecutionDiagnostics(writer http.ResponseWriter, request 
 		return
 	}
 	writeJSON(writer, http.StatusOK, executionDiagnosticListResponse{Executions: projectExecutionDiagnostics(executions)})
+}
+
+// handleAccessDiagnostics returns bounded redacted authorization audit and metrics under management authentication.
+// handleAccessDiagnostics 在管理认证下返回有界脱敏授权审计与指标。
+func (s *Server) handleAccessDiagnostics(writer http.ResponseWriter, _ *http.Request) {
+	writeJSON(writer, http.StatusOK, accessDiagnosticResponse{Audit: s.control.AccessDiagnostics.Audit(), Metrics: s.control.AccessDiagnostics.Metrics()})
+}
+
+// handleProviderFileDiagnostics lists files for one explicit instance, endpoint, and credential.
+// handleProviderFileDiagnostics 为一个显式实例、入口与凭据列出文件。
+func (s *Server) handleProviderFileDiagnostics(writer http.ResponseWriter, request *http.Request) {
+	instanceID := request.PathValue("provider_instance_id")
+	credentialID := request.PathValue("credential_id")
+	endpointID := request.URL.Query().Get("endpoint_id")
+	if instanceID == "" || credentialID == "" || endpointID == "" {
+		writeControlError(writer, vcp.ErrInvalidRequest)
+		return
+	}
+	files, errList := s.control.ProviderFileDiagnostics.ListProviderFiles(request.Context(), instanceID, endpointID, credentialID)
+	if errList != nil {
+		writeControlError(writer, errList)
+		return
+	}
+	writeJSON(writer, http.StatusOK, providerFileDiagnosticListResponse{Files: files})
+}
+
+// handleProviderFileDiagnostic retrieves one exact protected provider-file metadata record.
+// handleProviderFileDiagnostic 获取一条精确且受保护的供应商文件元数据记录。
+func (s *Server) handleProviderFileDiagnostic(writer http.ResponseWriter, request *http.Request) {
+	instanceID := request.PathValue("provider_instance_id")
+	credentialID := request.PathValue("credential_id")
+	fileID := request.PathValue("file_id")
+	endpointID := request.URL.Query().Get("endpoint_id")
+	if instanceID == "" || credentialID == "" || fileID == "" || endpointID == "" {
+		writeControlError(writer, vcp.ErrInvalidRequest)
+		return
+	}
+	file, errGet := s.control.ProviderFileDiagnostics.GetProviderFile(request.Context(), instanceID, endpointID, credentialID, fileID)
+	if errGet != nil {
+		writeControlError(writer, errGet)
+		return
+	}
+	writeJSON(writer, http.StatusOK, providerFileDiagnosticResponse{File: file})
 }

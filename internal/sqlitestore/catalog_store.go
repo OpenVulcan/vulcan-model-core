@@ -3,9 +3,11 @@ package sqlitestore
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 )
@@ -43,7 +45,12 @@ func (s *CatalogStore) Save(ctx context.Context, snapshot catalog.Snapshot) erro
 	if errPayload != nil {
 		return errPayload
 	}
-	result, errExec := s.database.sql.ExecContext(ctx, `
+	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return fmt.Errorf("begin provider catalog save: %w", errBegin)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	result, errExec := transaction.ExecContext(ctx, `
 		INSERT INTO catalog_snapshots(provider_instance_id, revision, observed_at, payload) VALUES (?, ?, ?, ?)
 		ON CONFLICT(provider_instance_id) DO UPDATE SET revision = excluded.revision,
 		observed_at = excluded.observed_at, payload = excluded.payload
@@ -58,6 +65,12 @@ func (s *CatalogStore) Save(ctx context.Context, snapshot catalog.Snapshot) erro
 	if rowsAffected != 1 {
 		return fmt.Errorf("%w: catalog revision must increase", catalog.ErrInvalidCatalog)
 	}
+	if errChange := insertCatalogChange(ctx, transaction, catalog.ChangeFromSnapshot(snapshot)); errChange != nil {
+		return errChange
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit provider catalog save: %w", errCommit)
+	}
 	return nil
 }
 
@@ -67,7 +80,26 @@ func (s *CatalogStore) Delete(ctx context.Context, providerInstanceID string) er
 	if err := validateContext(ctx); err != nil {
 		return err
 	}
-	result, errExec := s.database.sql.ExecContext(ctx, `DELETE FROM catalog_snapshots WHERE provider_instance_id = ?`, providerInstanceID)
+	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return fmt.Errorf("begin provider catalog delete: %w", errBegin)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var providerRevision int64
+	var observedAtEncoded string
+	if errRead := transaction.QueryRowContext(ctx, `SELECT revision, observed_at FROM catalog_snapshots WHERE provider_instance_id = ?`, providerInstanceID).Scan(&providerRevision, &observedAtEncoded); errors.Is(errRead, sql.ErrNoRows) {
+		return fmt.Errorf("%w: %s", catalog.ErrSnapshotNotFound, providerInstanceID)
+	} else if errRead != nil {
+		return fmt.Errorf("read provider catalog before deletion: %w", errRead)
+	}
+	observedAt, errObservedAt := time.Parse("2006-01-02T15:04:05.999999999Z07:00", observedAtEncoded)
+	if errObservedAt != nil {
+		return fmt.Errorf("decode provider catalog deletion metadata: %w", errObservedAt)
+	}
+	if providerRevision <= 0 {
+		return errors.New("persisted provider catalog revision is invalid")
+	}
+	result, errExec := transaction.ExecContext(ctx, `DELETE FROM catalog_snapshots WHERE provider_instance_id = ?`, providerInstanceID)
 	if errExec != nil {
 		return fmt.Errorf("delete provider catalog snapshot: %w", errExec)
 	}
@@ -77,6 +109,75 @@ func (s *CatalogStore) Delete(ctx context.Context, providerInstanceID string) er
 	}
 	if rowsAffected == 0 {
 		return fmt.Errorf("%w: %s", catalog.ErrSnapshotNotFound, providerInstanceID)
+	}
+	change := catalog.Change{ProviderInstanceID: providerInstanceID, ProviderRevision: uint64(providerRevision), Type: catalog.ChangeSnapshotDelete, ObservedAt: observedAt.UTC()}
+	if errChange := insertCatalogChange(ctx, transaction, change); errChange != nil {
+		return errChange
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit provider catalog delete: %w", errCommit)
+	}
+	return nil
+}
+
+// ListChanges returns one globally ordered mutation-safe incremental catalog page.
+// ListChanges 返回一个全局有序且防止外部修改的增量目录页。
+func (s *CatalogStore) ListChanges(ctx context.Context, afterRevision uint64, limit int) (catalog.ChangePage, error) {
+	if errContext := validateContext(ctx); errContext != nil {
+		return catalog.ChangePage{}, errContext
+	}
+	if afterRevision > math.MaxInt64 || limit <= 0 || limit > 1000 {
+		return catalog.ChangePage{}, fmt.Errorf("%w: catalog change cursor or limit is outside the allowed boundary", catalog.ErrInvalidCatalog)
+	}
+	var currentRevision int64
+	if errCurrent := s.database.sql.QueryRowContext(ctx, `SELECT COALESCE(MAX(global_revision), 0) FROM catalog_changes`).Scan(&currentRevision); errCurrent != nil {
+		return catalog.ChangePage{}, fmt.Errorf("read current catalog revision: %w", errCurrent)
+	}
+	rows, errQuery := s.database.sql.QueryContext(ctx, `SELECT global_revision, provider_instance_id, provider_revision, change_type, observed_at, source_revision, etag, refresh_status, tombstones_payload FROM catalog_changes WHERE global_revision > ? ORDER BY global_revision LIMIT ?`, int64(afterRevision), limit)
+	if errQuery != nil {
+		return catalog.ChangePage{}, fmt.Errorf("query catalog changes: %w", errQuery)
+	}
+	defer rows.Close()
+	page := catalog.ChangePage{CurrentRevision: uint64(currentRevision), Changes: make([]catalog.Change, 0, limit)}
+	for rows.Next() {
+		var globalRevision int64
+		var providerRevision int64
+		var observedAtEncoded string
+		var tombstonesPayload []byte
+		var change catalog.Change
+		if errScan := rows.Scan(&globalRevision, &change.ProviderInstanceID, &providerRevision, &change.Type, &observedAtEncoded, &change.SourceRevision, &change.ETag, &change.RefreshStatus, &tombstonesPayload); errScan != nil {
+			return catalog.ChangePage{}, fmt.Errorf("scan catalog change: %w", errScan)
+		}
+		observedAt, errObservedAt := time.Parse("2006-01-02T15:04:05.999999999Z07:00", observedAtEncoded)
+		if errObservedAt != nil || globalRevision <= 0 || providerRevision <= 0 {
+			return catalog.ChangePage{}, errors.New("persisted catalog change metadata is invalid")
+		}
+		change.GlobalRevision = uint64(globalRevision)
+		change.ProviderRevision = uint64(providerRevision)
+		change.ObservedAt = observedAt.UTC()
+		if errDecode := json.Unmarshal(tombstonesPayload, &change.Tombstones); errDecode != nil {
+			return catalog.ChangePage{}, fmt.Errorf("decode catalog change tombstones: %w", errDecode)
+		}
+		if errValidate := change.Validate(); errValidate != nil {
+			return catalog.ChangePage{}, fmt.Errorf("validate persisted catalog change: %w", errValidate)
+		}
+		page.Changes = append(page.Changes, change)
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return catalog.ChangePage{}, fmt.Errorf("iterate catalog changes: %w", errRows)
+	}
+	return page, nil
+}
+
+// insertCatalogChange appends one invalidation fact in the same transaction as its snapshot mutation.
+// insertCatalogChange 在快照变更的同一事务中追加一个失效事实。
+func insertCatalogChange(ctx context.Context, transaction *sql.Tx, change catalog.Change) error {
+	tombstonesPayload, errPayload := json.Marshal(change.Tombstones)
+	if errPayload != nil {
+		return fmt.Errorf("encode catalog change tombstones: %w", errPayload)
+	}
+	if _, errInsert := transaction.ExecContext(ctx, `INSERT INTO catalog_changes(provider_instance_id, provider_revision, change_type, observed_at, source_revision, etag, refresh_status, tombstones_payload) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`, change.ProviderInstanceID, int64(change.ProviderRevision), change.Type, change.ObservedAt.UTC().Format("2006-01-02T15:04:05.999999999Z07:00"), change.SourceRevision, change.ETag, change.RefreshStatus, tombstonesPayload); errInsert != nil {
+		return fmt.Errorf("append catalog change: %w", errInsert)
 	}
 	return nil
 }

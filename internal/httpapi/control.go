@@ -2,6 +2,8 @@ package httpapi
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -11,6 +13,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/access"
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
@@ -18,6 +21,7 @@ import (
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
+	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -46,6 +50,14 @@ type KeyAuthenticator interface {
 	AuthenticateAPIKeyID(string) (string, bool)
 }
 
+// PrincipalAuthenticator returns a validated tenant-scoped identity for an enabled call-plane key.
+// PrincipalAuthenticator 为启用的调用面密钥返回经过验证的租户作用域身份。
+type PrincipalAuthenticator interface {
+	// AuthenticateAPIPrincipal verifies one bearer and returns no raw credential material.
+	// AuthenticateAPIPrincipal 校验一个 Bearer 且不返回原始凭据材料。
+	AuthenticateAPIPrincipal(string) (access.Principal, bool)
+}
+
 // APIKeyManager exposes management-only call-plane API key lifecycle operations.
 // APIKeyManager 暴露仅限管理面的调用面 API 密钥生命周期操作。
 type APIKeyManager interface {
@@ -72,6 +84,9 @@ type ManagementCommands interface {
 	// OnboardKimiDeviceProvider accepts only a server-acquired and validated Kimi device credential.
 	// OnboardKimiDeviceProvider 仅接受由服务端获取并校验的 Kimi 设备凭据。
 	OnboardKimiDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
+	// OnboardMiniMaxDeviceProvider accepts only a server-acquired region-bound MiniMax credential.
+	// OnboardMiniMaxDeviceProvider 仅接受服务端获取且绑定区域的 MiniMax 凭据。
+	OnboardMiniMaxDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
 	// OnboardXAIDeviceProvider accepts only a server-acquired and validated xAI device credential.
 	// OnboardXAIDeviceProvider 仅接受由服务端获取并校验的 xAI 设备凭据。
 	OnboardXAIDeviceProvider(context.Context, management.OnboardSystemProviderInput) (providerconfig.SystemOnboarding, error)
@@ -176,6 +191,31 @@ type KimiDeviceFlows interface {
 	// Cancel consumes one incomplete or completed local authorization session.
 	// Cancel 消费一个未完成或已完成的本地授权会话。
 	Cancel(string)
+}
+
+// MiniMaxDeviceFlows owns transient region-explicit MiniMax authorization sessions without exposing tokens.
+// MiniMaxDeviceFlows 管理临时且显式指定区域的 MiniMax 授权会话，且不暴露 Token。
+type MiniMaxDeviceFlows interface {
+	// Start creates one verification session in exactly global or cn.
+	// Start 仅在 global 或 cn 精确区域创建一个验证会话。
+	Start(context.Context, string) (providerminimax.Flow, error)
+	// Poll performs one bounded exchange against the flow-owned regional Origin.
+	// Poll 针对流程拥有的区域 Origin 执行一次有界交换。
+	Poll(context.Context, string) (providerminimax.Token, error)
+	// Release returns one completed token lease after downstream failure.
+	// Release 在下游失败后归还一个已完成 Token 租约。
+	Release(string)
+	// Cancel consumes one local authorization flow.
+	// Cancel 消费一个本地授权流程。
+	Cancel(string)
+}
+
+// MiniMaxTokenCommands refreshes one protected MiniMax device-flow credential.
+// MiniMaxTokenCommands 刷新一个受保护的 MiniMax 设备授权凭据。
+type MiniMaxTokenCommands interface {
+	// RefreshCredential replaces one exact refreshable credential.
+	// RefreshCredential 替换一个精确的可刷新凭据。
+	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
 }
 
 // KimiTokenCommands refreshes completed Coding Plan credentials behind the protected secret boundary.
@@ -404,6 +444,15 @@ type ControlPlane struct {
 	// Auth verifies route-scoped bearer values.
 	// Auth 校验路由作用域 Bearer 值。
 	Auth KeyAuthenticator
+	// Access optionally enforces tenant authorization, rate limits, concurrency, audit, and metrics.
+	// Access 可选地强制执行租户授权、限流、并发、审计和指标。
+	Access access.Controller
+	// CallIdentityVerifier optionally accepts external OIDC identities on call-plane routes.
+	// CallIdentityVerifier 可选地在调用面路由接受外部 OIDC 身份。
+	CallIdentityVerifier access.IdentityVerifier
+	// AccessDiagnostics optionally exposes bounded redacted access audit and aggregate metrics to management routes.
+	// AccessDiagnostics 可选地向管理路由暴露有界脱敏访问审计与聚合指标。
+	AccessDiagnostics AccessDiagnostics
 	// Resources owns authenticated Router resource ingestion and lifecycle operations.
 	// Resources 拥有已认证 Router 资源接收与生命周期操作。
 	Resources ResourceGateway
@@ -413,12 +462,21 @@ type ControlPlane struct {
 	// Executions owns authenticated durable execution lifecycle operations.
 	// Executions 拥有已认证持久化执行生命周期操作。
 	Executions ExecutionService
+	// Preflight optionally exposes side-effect-free provider accounting.
+	// Preflight 可选暴露无副作用供应商计量。
+	Preflight UsagePreflightService
 	// ResourceDiagnostics optionally exposes management-safe resource metadata without call-plane owner secrets.
 	// ResourceDiagnostics 可选暴露不含调用面所有者秘密的管理安全资源元数据。
 	ResourceDiagnostics ResourceDiagnostics
 	// ExecutionDiagnostics optionally exposes management-safe execution lifecycle snapshots.
 	// ExecutionDiagnostics 可选暴露管理安全执行生命周期快照。
 	ExecutionDiagnostics ExecutionDiagnostics
+	// CatalogChanges optionally exposes globally ordered catalog invalidations to the call plane.
+	// CatalogChanges 可选地向调用面暴露全局有序目录失效事实。
+	CatalogChanges catalog.ChangeStore
+	// ProviderFileDiagnostics optionally exposes credential-scoped upstream file metadata.
+	// ProviderFileDiagnostics 可选暴露凭据作用域的上游文件元数据。
+	ProviderFileDiagnostics provider.ProviderFileDiagnosticsReader
 	// Targets verifies that discovery profiles are currently executable.
 	// Targets 校验发现规格当前可执行。
 	Targets TargetAvailability
@@ -428,6 +486,12 @@ type ControlPlane struct {
 	// KimiTokens optionally enables explicit protected Coding Plan token refresh.
 	// KimiTokens 可选启用显式受保护 Coding Plan 令牌刷新。
 	KimiTokens KimiTokenCommands
+	// MiniMaxDeviceFlows optionally enables region-explicit MiniMax device authorization routes.
+	// MiniMaxDeviceFlows 可选启用显式区域的 MiniMax 设备授权路由。
+	MiniMaxDeviceFlows MiniMaxDeviceFlows
+	// MiniMaxTokens optionally enables protected MiniMax token refresh.
+	// MiniMaxTokens 可选启用受保护 MiniMax Token 刷新。
+	MiniMaxTokens MiniMaxTokenCommands
 	// XAIDeviceFlows optionally enables server-owned xAI device authorization routes.
 	// XAIDeviceFlows 可选启用服务端拥有的 xAI 设备授权路由。
 	XAIDeviceFlows XAIDeviceFlows
@@ -470,7 +534,7 @@ func (c ControlPlane) validate() error {
 	}
 	// optionalDependencies may be absent, but a typed nil would register or dispatch an unusable service.
 	// optionalDependencies 可以缺省，但带类型的 nil 会注册或分派一个不可用服务。
-	optionalDependencies := []any{c.MetadataRefresh, c.Routing, c.KimiDeviceFlows, c.KimiTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
+	optionalDependencies := []any{c.MetadataRefresh, c.Routing, c.Access, c.CallIdentityVerifier, c.Preflight, c.KimiDeviceFlows, c.KimiTokens, c.MiniMaxDeviceFlows, c.MiniMaxTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
 	for _, dependency := range optionalDependencies {
 		if dependency != nil && isNilHTTPDependency(dependency) {
 			return errors.New("control-plane optional dependency must not contain a typed nil reference")
@@ -611,6 +675,9 @@ const (
 	// callInformationUsage selects current usage for one exact model-account pair.
 	// callInformationUsage 选择一个精确模型账号组合的当前用量。
 	callInformationUsage callInformationKind = "usage"
+	// callInformationCatalog selects globally ordered catalog invalidation facts.
+	// callInformationCatalog 选择全局有序目录失效事实。
+	callInformationCatalog callInformationKind = "catalog"
 )
 
 // callInformationRequest selects one information shape and its exact provider-owned identifiers.
@@ -631,6 +698,12 @@ type callInformationRequest struct {
 	// ProviderServiceID optionally selects one exact special service.
 	// ProviderServiceID 可选选择一个精确特殊服务。
 	ProviderServiceID string `json:"provider_service_id,omitempty"`
+	// AfterRevision is the exclusive global catalog cursor only for catalog information.
+	// AfterRevision 仅用于目录信息，是排他的全局目录游标。
+	AfterRevision *uint64 `json:"after_revision,omitempty"`
+	// Limit bounds one catalog change page only for catalog information.
+	// Limit 仅用于目录信息，限制单个目录变更页大小。
+	Limit *int `json:"limit,omitempty"`
 }
 
 // callInformationInstancesResponse returns the instances branch of the information union.
@@ -675,6 +748,17 @@ type callInformationUsageResponse struct {
 	// Usage contains current usage for the exact selected model and account.
 	// Usage 包含精确选定模型与账号的当前用量。
 	Usage management.ModelCredentialUsageView `json:"usage"`
+}
+
+// callInformationCatalogResponse returns the globally ordered catalog invalidation branch.
+// callInformationCatalogResponse 返回全局有序目录失效分支。
+type callInformationCatalogResponse struct {
+	// Get echoes the selected projection.
+	// Get 回显已选投影。
+	Get callInformationKind `json:"get"`
+	// Catalog contains the latest global revision and ordered incremental invalidations.
+	// Catalog 包含最新全局修订与有序增量失效事实。
+	Catalog catalog.ChangePage `json:"catalog"`
 }
 
 // callModelView identifies one selected provider instance and its local model capability view.
@@ -1031,6 +1115,14 @@ type deviceFlowOnboardRequest struct {
 	Name string `json:"name"`
 }
 
+// miniMaxDeviceFlowStartRequest selects one exact OAuth Origin without credential inspection.
+// miniMaxDeviceFlowStartRequest 在不检查凭据的情况下选择一个精确 OAuth Origin。
+type miniMaxDeviceFlowStartRequest struct {
+	// Region must be exactly global or cn.
+	// Region 必须精确为 global 或 cn。
+	Region string `json:"region"`
+}
+
 // credentialReauthorizationTarget optionally selects an existing credential instead of creating a provider instance.
 // credentialReauthorizationTarget 可选选择一个既有凭据而不是创建供应商实例。
 type credentialReauthorizationTarget struct {
@@ -1355,6 +1447,15 @@ type apiKeyRequest struct {
 	// Enabled controls immediate call-plane authentication availability.
 	// Enabled 控制立即调用面认证可用性。
 	Enabled bool `json:"enabled"`
+	// OrganizationID optionally assigns the key to one administrative organization.
+	// OrganizationID 可选地将密钥分配给一个管理组织。
+	OrganizationID string `json:"organization_id,omitempty"`
+	// TenantID optionally assigns the key to a shared tenant isolation boundary.
+	// TenantID 可选地将密钥分配给共享租户隔离边界。
+	TenantID string `json:"tenant_id,omitempty"`
+	// ProjectID optionally assigns the key to a project budget and concurrency boundary.
+	// ProjectID 可选地将密钥分配给项目预算与并发边界。
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // requireManagement authenticates one request only against the management credential namespace.
@@ -1362,28 +1463,168 @@ type apiKeyRequest struct {
 func (s *Server) requireManagement(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if s.control == nil || !s.control.Auth.AuthenticateManagementKey(bearerToken(request)) {
+			s.recordAccessOutcome(request, nil, access.PermissionManage, access.AuditOutcomeUnauthenticated, http.StatusUnauthorized, time.Now())
 			writeUnauthorized(writer)
 			return
 		}
-		next.ServeHTTP(writer, request)
+		principal := access.Principal{SubjectID: "local-management", TenantID: "local-management", ProjectID: "local-management", Roles: []access.Role{access.RoleAdministrator}}
+		s.serveAuthorized(writer, request, next, principal, access.PermissionManage)
 	})
 }
 
-// requireAPIKey authenticates one request only against enabled call-plane API keys.
-// requireAPIKey 仅针对启用的调用面 API 密钥认证一个请求。
+// requireAPIKey authenticates one request against an enabled API key or the explicitly configured OIDC issuer.
+// requireAPIKey 使用启用的 API 密钥或显式配置的 OIDC 颁发者认证一个请求。
 func (s *Server) requireAPIKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		rejectAuthentication := func() {
+			s.recordAccessOutcome(request, nil, access.PermissionInvoke, access.AuditOutcomeUnauthenticated, http.StatusUnauthorized, time.Now())
+			writeUnauthorized(writer)
+		}
 		if s.control == nil {
-			writeUnauthorized(writer)
+			rejectAuthentication()
 			return
 		}
-		apiKeyID, authenticated := s.control.Auth.AuthenticateAPIKeyID(bearerToken(request))
-		if !authenticated || strings.TrimSpace(apiKeyID) == "" {
-			writeUnauthorized(writer)
+		bearer := bearerToken(request)
+		ownerID, authenticated := s.control.Auth.AuthenticateAPIKeyID(bearer)
+		principal := access.Principal{}
+		if authenticated && strings.TrimSpace(ownerID) != "" {
+			principal = access.Principal{SubjectID: ownerID, TenantID: ownerID, ProjectID: ownerID, Roles: []access.Role{access.RoleCaller}}
+			if authenticator, supported := s.control.Auth.(PrincipalAuthenticator); supported {
+				resolved, authenticatedPrincipal := authenticator.AuthenticateAPIPrincipal(bearer)
+				if !authenticatedPrincipal || resolved.SubjectID != ownerID {
+					rejectAuthentication()
+					return
+				}
+				principal = resolved
+			}
+		} else if s.control.CallIdentityVerifier != nil {
+			resolved, errIdentity := s.control.CallIdentityVerifier.Verify(request.Context(), bearer)
+			if errIdentity != nil || resolved.Validate() != nil || !principalHasRole(resolved, access.RoleCaller) {
+				rejectAuthentication()
+				return
+			}
+			principal = resolved
+			ownerID = oidcOwnerID(resolved)
+		} else {
+			rejectAuthentication()
 			return
 		}
-		next.ServeHTTP(writer, request.WithContext(context.WithValue(request.Context(), callAPIKeyIDContextKey{}, apiKeyID)))
+		requestContext := context.WithValue(request.Context(), callAPIKeyIDContextKey{}, ownerID)
+		s.serveAuthorized(writer, request.WithContext(requestContext), next, principal, access.PermissionInvoke)
 	})
+}
+
+// principalHasRole reports whether one validated principal explicitly owns a required route role.
+// principalHasRole 报告一个已验证主体是否显式拥有所需路由角色。
+func principalHasRole(principal access.Principal, required access.Role) bool {
+	for _, role := range principal.Roles {
+		if role == required {
+			return true
+		}
+	}
+	return false
+}
+
+// oidcOwnerID derives a stable non-reversible execution and resource owner key from the validated identity boundary.
+// oidcOwnerID 从经过校验的身份边界派生稳定且不可逆的执行与资源所有者键。
+func oidcOwnerID(principal access.Principal) string {
+	digest := sha256.Sum256([]byte(principal.TenantID + "\x00" + principal.ProjectID + "\x00" + principal.SubjectID))
+	return "oidc_" + hex.EncodeToString(digest[:])
+}
+
+// statusResponseWriter records a final status while preserving streaming flush support.
+// statusResponseWriter 记录最终状态并保留流式刷新支持。
+type statusResponseWriter struct {
+	http.ResponseWriter
+	// statusCode is the first committed HTTP response status.
+	// statusCode 是第一个已提交的 HTTP 响应状态。
+	statusCode int
+}
+
+// WriteHeader records the first final status and forwards it exactly once.
+// WriteHeader 记录第一个最终状态并精确转发一次。
+func (w *statusResponseWriter) WriteHeader(statusCode int) {
+	if w.statusCode != 0 {
+		return
+	}
+	w.statusCode = statusCode
+	w.ResponseWriter.WriteHeader(statusCode)
+}
+
+// Write establishes HTTP 200 when a handler writes a body without an explicit status.
+// Write 在处理器未显式设置状态便写入正文时建立 HTTP 200。
+func (w *statusResponseWriter) Write(content []byte) (int, error) {
+	if w.statusCode == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	return w.ResponseWriter.Write(content)
+}
+
+// flushingStatusResponseWriter preserves event-stream support only when the underlying writer supports it.
+// flushingStatusResponseWriter 仅在底层 Writer 支持时保留事件流能力。
+type flushingStatusResponseWriter struct {
+	*statusResponseWriter
+	// flusher is the verified underlying streaming writer.
+	// flusher 是已验证的底层流式 Writer。
+	flusher http.Flusher
+}
+
+// Flush preserves event-stream semantics through the status recorder.
+// Flush 通过状态记录器保留事件流语义。
+func (w *flushingStatusResponseWriter) Flush() {
+	if w.statusCode == 0 {
+		w.WriteHeader(http.StatusOK)
+	}
+	w.flusher.Flush()
+}
+
+// serveAuthorized applies the optional public-service controller without changing local authentication semantics.
+// serveAuthorized 应用可选公共服务控制器且不改变本地认证语义。
+func (s *Server) serveAuthorized(writer http.ResponseWriter, request *http.Request, next http.Handler, principal access.Principal, permission access.Permission) {
+	if s.control.Access == nil {
+		next.ServeHTTP(writer, request)
+		return
+	}
+	startedAt := time.Now()
+	if errAuthorize := s.control.Access.Authorize(request.Context(), principal, permission); errAuthorize != nil {
+		s.recordAccessOutcome(request, &principal, permission, access.AuditOutcomeForbidden, http.StatusForbidden, startedAt)
+		writeJSON(writer, http.StatusForbidden, errorResponse{Error: "forbidden"})
+		return
+	}
+	release, errAcquire := s.control.Access.Acquire(request.Context(), principal)
+	if errAcquire != nil {
+		s.recordAccessOutcome(request, &principal, permission, access.AuditOutcomeRateLimited, http.StatusTooManyRequests, startedAt)
+		writer.Header().Set("Retry-After", "60")
+		writeJSON(writer, http.StatusTooManyRequests, errorResponse{Error: "rate_limited"})
+		return
+	}
+	defer release()
+	recorder := &statusResponseWriter{ResponseWriter: writer}
+	var observedWriter http.ResponseWriter = recorder
+	if flusher, supported := writer.(http.Flusher); supported {
+		observedWriter = &flushingStatusResponseWriter{statusResponseWriter: recorder, flusher: flusher}
+	}
+	next.ServeHTTP(observedWriter, request)
+	statusCode := recorder.statusCode
+	if statusCode == 0 {
+		statusCode = http.StatusOK
+	}
+	s.recordAccessOutcome(request, &principal, permission, access.AuditOutcomeAuthorized, statusCode, startedAt)
+}
+
+// recordAccessOutcome records one content-free authentication, authorization, or admitted-request observation.
+// recordAccessOutcome 记录一项不含内容的认证、授权或已接收请求观测。
+func (s *Server) recordAccessOutcome(request *http.Request, principal *access.Principal, permission access.Permission, outcome access.AuditOutcome, statusCode int, startedAt time.Time) {
+	if s == nil || s.control == nil || s.control.Access == nil || request == nil {
+		return
+	}
+	completedAt := time.Now().UTC()
+	projectID := "unauthenticated"
+	if principal != nil {
+		projectID = principal.ProjectID
+	}
+	s.control.Access.Record(access.AuditEvent{Time: completedAt, Principal: principal, Outcome: outcome, Permission: permission, Method: request.Method, Path: request.URL.Path, StatusCode: statusCode})
+	s.control.Access.Observe(access.Observation{ProjectID: projectID, Permission: permission, StatusCode: statusCode, Duration: completedAt.Sub(startedAt)})
 }
 
 // callAPIKeyIDContextKey isolates the non-secret authenticated owner identifier from caller context values.
@@ -1873,6 +2114,84 @@ func (s *Server) handleCancelKimiDeviceFlow(writer http.ResponseWriter, request 
 	writer.WriteHeader(http.StatusNoContent)
 }
 
+// handleStartMiniMaxDeviceFlow starts one explicitly regional MiniMax verification session.
+// handleStartMiniMaxDeviceFlow 启动一个显式指定区域的 MiniMax 验证会话。
+func (s *Server) handleStartMiniMaxDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[miniMaxDeviceFlowStartRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flow, errStart := s.control.MiniMaxDeviceFlows.Start(request.Context(), body.Region)
+	if errStart != nil {
+		writeControlError(writer, errStart)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, flow)
+}
+
+// handleOnboardMiniMaxDeviceFlow polls once and persists only a definition-matching regional token.
+// handleOnboardMiniMaxDeviceFlow 轮询一次，并仅持久化与定义匹配的区域 Token。
+func (s *Server) handleOnboardMiniMaxDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	body, errDecode := decodeControlJSON[deviceFlowOnboardRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	flowID := request.PathValue("flow_id")
+	token, errPoll := s.control.MiniMaxDeviceFlows.Poll(request.Context(), flowID)
+	if errors.Is(errPoll, providerminimax.ErrAuthorizationPending) {
+		writeJSON(writer, http.StatusAccepted, map[string]string{"status": "authorization_pending"})
+		return
+	}
+	if errPoll != nil {
+		writeControlError(writer, errPoll)
+		return
+	}
+	defer s.control.MiniMaxDeviceFlows.Release(flowID)
+	secretValue, errMarshal := providerminimax.MarshalToken(token)
+	if errMarshal != nil {
+		writeControlError(writer, errMarshal)
+		return
+	}
+	defer clear(secretValue)
+	credential, reauthorized, errReauthorize := s.reauthorizeCredential(request.Context(), body.credentialReauthorizationTarget, "device_flow", body.Name, secretValue)
+	if errReauthorize != nil {
+		writeControlError(writer, errReauthorize)
+		return
+	}
+	if reauthorized {
+		s.control.MiniMaxDeviceFlows.Cancel(flowID)
+		s.triggerMetadataRefresh(credential.ProviderInstanceID)
+		writeJSON(writer, http.StatusOK, credentialReplacementResponse(credential))
+		return
+	}
+	onboarding, errOnboard := s.control.Commands.OnboardMiniMaxDeviceProvider(request.Context(), management.OnboardSystemProviderInput{
+		DefinitionID: body.DefinitionID, DisplayName: body.Name, AuthMethodID: "device_flow", Secret: secretValue,
+	})
+	if errOnboard != nil {
+		writeControlError(writer, errOnboard)
+		return
+	}
+	s.control.MiniMaxDeviceFlows.Cancel(flowID)
+	response := onboardSystemProviderResponse{ProviderInstanceID: onboarding.Instance.ID, CredentialID: onboarding.Credential.ID}
+	for _, endpoint := range onboarding.Endpoints {
+		response.EndpointIDs = append(response.EndpointIDs, endpoint.ID)
+	}
+	for _, binding := range onboarding.Bindings {
+		response.BindingIDs = append(response.BindingIDs, binding.ID)
+	}
+	s.triggerMetadataRefresh(onboarding.Instance.ID)
+	writeJSON(writer, http.StatusCreated, response)
+}
+
+// handleCancelMiniMaxDeviceFlow removes one incomplete regional MiniMax session.
+// handleCancelMiniMaxDeviceFlow 删除一个未完成的 MiniMax 区域会话。
+func (s *Server) handleCancelMiniMaxDeviceFlow(writer http.ResponseWriter, request *http.Request) {
+	s.control.MiniMaxDeviceFlows.Cancel(request.PathValue("flow_id"))
+	writer.WriteHeader(http.StatusNoContent)
+}
+
 // handleStartXAIDeviceFlow starts one server-owned xAI account verification session.
 // handleStartXAIDeviceFlow 启动一个服务端拥有的 xAI 账号验证会话。
 func (s *Server) handleStartXAIDeviceFlow(writer http.ResponseWriter, request *http.Request) {
@@ -2247,6 +2566,12 @@ func (s *Server) handleRefreshProviderCredential(writer http.ResponseWriter, req
 			errRefresh = errors.New("Kimi token refresh is unavailable")
 		} else {
 			credential, errRefresh = s.control.KimiTokens.RefreshCredential(request.Context(), instanceID, credentialID)
+		}
+	case bootstrap.MiniMaxGlobalDefinitionID, bootstrap.MiniMaxCNDefinitionID:
+		if s.control.MiniMaxTokens == nil {
+			errRefresh = errors.New("MiniMax token refresh is unavailable")
+		} else {
+			credential, errRefresh = s.control.MiniMaxTokens.RefreshCredential(request.Context(), instanceID, credentialID)
 		}
 	case bootstrap.XAIOAuthDefinitionID:
 		if s.control.XAITokens == nil {
@@ -2984,7 +3309,7 @@ func (s *Server) handleCreateAPIKey(writer http.ResponseWriter, request *http.Re
 		writeControlError(writer, errDecode)
 		return
 	}
-	apiKey, errCreate := s.control.APIKeys.CreateAPIKey(runtimeconfig.APIKeyInput{Name: payload.Name, Key: payload.Key, Enabled: payload.Enabled})
+	apiKey, errCreate := s.control.APIKeys.CreateAPIKey(runtimeconfig.APIKeyInput{Name: payload.Name, Key: payload.Key, Enabled: payload.Enabled, OrganizationID: payload.OrganizationID, TenantID: payload.TenantID, ProjectID: payload.ProjectID})
 	if errCreate != nil {
 		writeControlError(writer, errCreate)
 		return
@@ -3000,7 +3325,7 @@ func (s *Server) handleUpdateAPIKey(writer http.ResponseWriter, request *http.Re
 		writeControlError(writer, errDecode)
 		return
 	}
-	apiKey, errUpdate := s.control.APIKeys.UpdateAPIKey(request.PathValue("api_key_id"), runtimeconfig.APIKeyInput{Name: payload.Name, Key: payload.Key, Enabled: payload.Enabled})
+	apiKey, errUpdate := s.control.APIKeys.UpdateAPIKey(request.PathValue("api_key_id"), runtimeconfig.APIKeyInput{Name: payload.Name, Key: payload.Key, Enabled: payload.Enabled, OrganizationID: payload.OrganizationID, TenantID: payload.TenantID, ProjectID: payload.ProjectID})
 	if errUpdate != nil {
 		writeControlError(writer, errUpdate)
 		return
@@ -3021,29 +3346,34 @@ func (s *Server) handleDeleteAPIKey(writer http.ResponseWriter, request *http.Re
 // Validate enforces the exact identifier contract for the selected information projection.
 // Validate 强制执行已选信息投影的精确标识契约。
 func (r callInformationRequest) Validate() error {
+	hasCatalogCursor := r.AfterRevision != nil || r.Limit != nil
 	switch r.Get {
 	case callInformationInstances:
-		if r.ProviderInstanceID != "" || r.ProviderModelID != "" || r.CredentialID != "" || r.ProviderServiceID != "" {
+		if r.ProviderInstanceID != "" || r.ProviderModelID != "" || r.CredentialID != "" || r.ProviderServiceID != "" || hasCatalogCursor {
 			return errors.New("instances information does not accept selectors")
 		}
 	case callInformationModels:
-		if r.CredentialID != "" || r.ProviderServiceID != "" || (r.ProviderModelID != "" && r.ProviderInstanceID == "") {
+		if r.CredentialID != "" || r.ProviderServiceID != "" || hasCatalogCursor || (r.ProviderModelID != "" && r.ProviderInstanceID == "") {
 			return errors.New("models information accepts an optional instance and an instance-owned model only")
 		}
 	case callInformationAccounts:
-		if r.ProviderInstanceID == "" || r.ProviderModelID == "" || r.CredentialID != "" || r.ProviderServiceID != "" {
+		if r.ProviderInstanceID == "" || r.ProviderModelID == "" || r.CredentialID != "" || r.ProviderServiceID != "" || hasCatalogCursor {
 			return errors.New("accounts information requires provider_instance_id and provider_model_id only")
 		}
 	case callInformationServices:
-		if r.ProviderModelID != "" || r.CredentialID != "" || (r.ProviderServiceID != "" && r.ProviderInstanceID == "") {
+		if r.ProviderModelID != "" || r.CredentialID != "" || hasCatalogCursor || (r.ProviderServiceID != "" && r.ProviderInstanceID == "") {
 			return errors.New("services information accepts an optional instance and an instance-owned service only")
 		}
 	case callInformationUsage:
-		if r.ProviderInstanceID == "" || r.ProviderModelID == "" || r.CredentialID == "" || r.ProviderServiceID != "" {
+		if r.ProviderInstanceID == "" || r.ProviderModelID == "" || r.CredentialID == "" || r.ProviderServiceID != "" || hasCatalogCursor {
 			return errors.New("usage information requires provider_instance_id, provider_model_id, and credential_id only")
 		}
+	case callInformationCatalog:
+		if r.ProviderInstanceID != "" || r.ProviderModelID != "" || r.CredentialID != "" || r.ProviderServiceID != "" || r.Limit != nil && (*r.Limit <= 0 || *r.Limit > 1000) {
+			return errors.New("catalog information accepts only after_revision and a limit from 1 to 1000")
+		}
 	default:
-		return errors.New("get must be one of instances, models, accounts, services, or usage")
+		return errors.New("get must be one of instances, models, accounts, services, usage, or catalog")
 	}
 	return nil
 }
@@ -3096,6 +3426,25 @@ func (s *Server) handleCallInformation(writer http.ResponseWriter, request *http
 			return
 		}
 		writeJSON(writer, http.StatusOK, callInformationUsageResponse{Get: payload.Get, Usage: usage})
+	case callInformationCatalog:
+		if s.control.CatalogChanges == nil {
+			writeControlError(writer, errors.New("catalog change information is unavailable"))
+			return
+		}
+		afterRevision := uint64(0)
+		if payload.AfterRevision != nil {
+			afterRevision = *payload.AfterRevision
+		}
+		limit := 100
+		if payload.Limit != nil {
+			limit = *payload.Limit
+		}
+		changes, errChanges := s.control.CatalogChanges.ListChanges(request.Context(), afterRevision, limit)
+		if errChanges != nil {
+			writeControlError(writer, errChanges)
+			return
+		}
+		writeJSON(writer, http.StatusOK, callInformationCatalogResponse{Get: payload.Get, Catalog: changes})
 	}
 }
 

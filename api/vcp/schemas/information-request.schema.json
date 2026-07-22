@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/information-request.schema.json",
+  "title": "VCP Information Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["get"],
+  "properties": {
+    "get": {"enum": ["instances", "models", "accounts", "usage", "services", "catalog"]},
+    "provider_instance_id": {"type": "string"},
+    "provider_model_id": {"type": "string"},
+    "credential_id": {"type": "string"},
+    "provider_service_id": {"type": "string"},
+    "after_revision": {"type": "integer", "minimum": 0},
+    "limit": {"type": "integer", "minimum": 1, "maximum": 1000}
+  },
+  "oneOf": [
+    {"properties": {"get": {"const": "instances"}}, "not": {"anyOf": [{"required": ["provider_instance_id"]}, {"required": ["provider_model_id"]}, {"required": ["credential_id"]}, {"required": ["provider_service_id"]}, {"required": ["after_revision"]}, {"required": ["limit"]}]}},
+    {"properties": {"get": {"const": "models"}}, "not": {"anyOf": [{"required": ["credential_id"]}, {"required": ["provider_service_id"]}, {"required": ["after_revision"]}, {"required": ["limit"]}]}, "allOf": [{"if": {"required": ["provider_model_id"]}, "then": {"required": ["provider_instance_id"]}}]},
+    {"properties": {"get": {"const": "accounts"}}, "required": ["provider_instance_id", "provider_model_id"], "not": {"anyOf": [{"required": ["credential_id"]}, {"required": ["provider_service_id"]}, {"required": ["after_revision"]}, {"required": ["limit"]}]}},
+    {"properties": {"get": {"const": "services"}}, "not": {"anyOf": [{"required": ["provider_model_id"]}, {"required": ["credential_id"]}, {"required": ["after_revision"]}, {"required": ["limit"]}]}, "allOf": [{"if": {"required": ["provider_service_id"]}, "then": {"required": ["provider_instance_id"]}}]},
+    {"properties": {"get": {"const": "usage"}}, "required": ["provider_instance_id", "provider_model_id", "credential_id"], "not": {"anyOf": [{"required": ["provider_service_id"]}, {"required": ["after_revision"]}, {"required": ["limit"]}]}},
+    {"properties": {"get": {"const": "catalog"}}, "not": {"anyOf": [{"required": ["provider_instance_id"]}, {"required": ["provider_model_id"]}, {"required": ["credential_id"]}, {"required": ["provider_service_id"]}]}}
+  ]
+}

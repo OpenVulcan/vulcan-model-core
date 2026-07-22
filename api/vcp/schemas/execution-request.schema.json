@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/execution-request.schema.json",
+  "title": "VCP Execution Request 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "target", "operation", "stream", "payload", "projection_policy", "budget"],
+  "properties": {
+    "protocol_version": {"const": "1.0"},
+    "request_id": {"type": "string", "minLength": 1},
+    "idempotency_key": {"type": "string"},
+    "input_plan_id": {"type": "string"},
+    "input_plan_resources": {"type": "array", "items": {"type": "object", "additionalProperties": false, "required": ["input_id", "resource_id"], "properties": {"input_id": {"type": "string"}, "resource_id": {"type": "string"}}}},
+    "target": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "model": {"$ref": "#/$defs/modelTarget"},
+        "service": {"$ref": "#/$defs/serviceTarget"}
+      },
+      "oneOf": [
+        {"required": ["model"], "not": {"required": ["service"]}},
+        {"required": ["service"], "not": {"required": ["model"]}}
+      ]
+    },
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "music.generate", "music.cover.prepare", "music.cover"]},
+    "stream": {"type": "boolean"},
+    "dispatch_mode": {"enum": ["inline", "deferred"]},
+    "payload": {"$ref": "./operation-payload.schema.json"},
+    "projection_policy": {"type": "object", "additionalProperties": false, "properties": {"allow_frame_sequence": {"type": "boolean"}, "allow_audio_track": {"type": "boolean"}, "allow_transcode": {"type": "boolean"}}},
+    "budget": {"$ref": "#/$defs/budget"},
+    "retry_policy": {"$ref": "#/$defs/retryPolicy"}
+  },
+  "oneOf": [
+    {"properties": {"operation": {"const": "conversation.respond"}, "payload": {"type": "object", "required": ["conversation"]}}},
+    {"properties": {"operation": {"const": "media.analyze"}, "payload": {"type": "object", "required": ["media_analyze"]}}},
+    {"properties": {"operation": {"const": "image.generate"}, "payload": {"type": "object", "required": ["image_generate"]}}},
+    {"properties": {"operation": {"const": "image.edit"}, "payload": {"type": "object", "required": ["image_edit"]}}},
+    {"properties": {"operation": {"const": "video.generate"}, "payload": {"type": "object", "required": ["video_generate"]}}},
+    {"properties": {"operation": {"const": "video.edit"}, "payload": {"type": "object", "required": ["video_edit"]}}},
+    {"properties": {"operation": {"const": "video.extend"}, "payload": {"type": "object", "required": ["video_extend"]}}},
+    {"properties": {"operation": {"const": "speech.synthesize"}, "payload": {"type": "object", "required": ["speech_synthesize"]}}},
+    {"properties": {"operation": {"const": "speech.transcribe"}, "payload": {"type": "object", "required": ["speech_transcribe"]}}},
+    {"properties": {"operation": {"const": "embedding.create"}, "payload": {"type": "object", "required": ["embedding_create"]}}},
+    {"properties": {"operation": {"const": "rerank.documents"}, "payload": {"type": "object", "required": ["rerank_documents"]}}},
+    {"properties": {"operation": {"const": "search.web"}, "payload": {"type": "object", "required": ["search_web"]}}},
+    {"properties": {"operation": {"const": "music.generate"}, "payload": {"type": "object", "required": ["music_generate"]}}},
+    {"properties": {"operation": {"const": "music.cover.prepare"}, "payload": {"type": "object", "required": ["music_cover_prepare"]}}},
+    {"properties": {"operation": {"const": "music.cover"}, "payload": {"type": "object", "required": ["music_cover"]}}}
+  ],
+  "$defs": {
+    "modelTarget": {"type": "object", "additionalProperties": false, "required": ["target"], "properties": {"target": {"enum": ["exact", "alias", "auto"]}, "provider_instance_id": {"type": "string"}, "provider_model_id": {"type": "string"}, "execution_profile_id": {"type": "string"}, "required_region": {"type": "string"}}, "allOf": [{"if": {"properties": {"target": {"const": "exact"}}}, "then": {"required": ["provider_instance_id", "provider_model_id"]}}]},
+    "serviceTarget": {"type": "object", "additionalProperties": false, "required": ["provider_instance_id", "provider_service_id"], "properties": {"provider_instance_id": {"type": "string"}, "provider_service_id": {"type": "string"}, "service_offering_id": {"type": "string"}, "execution_profile_id": {"type": "string"}}},
+    "budget": {"type": "object", "additionalProperties": false, "properties": {"max_input_bytes": {"type": "integer", "minimum": 1}, "max_output_bytes": {"type": "integer", "minimum": 1}, "max_execution_milliseconds": {"type": "integer", "minimum": 1}, "max_provider_tasks": {"type": "integer", "minimum": 1}}},
+    "retryPolicy": {"type": "object", "additionalProperties": false, "properties": {"backoff": {"enum": ["fixed", "exponential"]}, "initial_delay_milliseconds": {"type": "integer", "minimum": 1, "maximum": 1800000}, "maximum_delay_milliseconds": {"type": "integer", "minimum": 1, "maximum": 1800000}, "multiplier": {"type": "number", "minimum": 1, "maximum": 100}, "max_attempts": {"type": "integer", "minimum": 1}}}
+  }
+}

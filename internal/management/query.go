@@ -387,6 +387,9 @@ type CatalogView struct {
 	// Allowances contains redacted quota, balance, and credit state.
 	// Allowances 包含已经脱敏的额度、余额与 Credit 状态。
 	Allowances []AllowanceView `json:"allowances"`
+	// Voices contains cached credential-scoped provider voice catalog entries.
+	// Voices 包含缓存的凭据作用域供应商声音目录项。
+	Voices []VoiceView `json:"voices"`
 	// Plans contains account-identity-free commercial plan aggregates.
 	// Plans 包含不带账号身份的商业套餐聚合。
 	Plans []PlanView `json:"plans"`
@@ -396,6 +399,32 @@ type CatalogView struct {
 	// ObservedAt records when the catalog was produced.
 	// ObservedAt 记录目录生成时间。
 	ObservedAt time.Time `json:"observed_at"`
+}
+
+// VoiceView contains one client-safe cached voice and its exact account scope.
+// VoiceView 包含一个客户端安全缓存声音及其精确账号作用域。
+type VoiceView struct {
+	// VoiceID is the exact value accepted by speech synthesis.
+	// VoiceID 是语音合成接受的精确值。
+	VoiceID string `json:"voice_id"`
+	// DisplayName is the provider-authored voice label.
+	// DisplayName 是供应商编写的声音标签。
+	DisplayName string `json:"display_name"`
+	// Descriptions contains ordered provider-authored traits.
+	// Descriptions 包含供应商编写的有序特征。
+	Descriptions []string `json:"descriptions"`
+	// CredentialID identifies the exact account exposing this voice.
+	// CredentialID 标识公开该声音的精确账号。
+	CredentialID string `json:"credential_id"`
+	// CredentialLabel contains the configured client-safe account name.
+	// CredentialLabel 包含已配置的客户端安全账号名称。
+	CredentialLabel string `json:"credential_label"`
+	// ObservedAt records the successful provider read time.
+	// ObservedAt 记录成功读取供应商的时间。
+	ObservedAt time.Time `json:"observed_at"`
+	// ExpiresAt is the cache freshness boundary.
+	// ExpiresAt 是缓存新鲜度边界。
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // ServiceView describes one provider-scoped special service.
@@ -692,6 +721,9 @@ type AllowanceView struct {
 	// RemainingRatio is the optional normalized remaining ratio.
 	// RemainingRatio 是可选规范化剩余比例。
 	RemainingRatio *float64 `json:"remaining_ratio,omitempty"`
+	// DisplayMultiplierPermille preserves a provider-authored presentation multiplier without changing accounting values.
+	// DisplayMultiplierPermille 在不改变计量值的情况下保留供应商编写的展示倍率。
+	DisplayMultiplierPermille *int64 `json:"display_multiplier_permille,omitempty"`
 	// Status is the normalized resource state.
 	// Status 是规范化资源状态。
 	Status catalog.AllowanceStatus `json:"status"`
@@ -904,6 +936,9 @@ type AllowanceWindowView struct {
 	// TimeZone identifies the provider calendar time zone when known.
 	// TimeZone 标识已知时的供应商日历时区。
 	TimeZone string `json:"time_zone,omitempty"`
+	// StartAt is the active provider window beginning when known.
+	// StartAt 是已知时当前供应商窗口的起始时间。
+	StartAt *time.Time `json:"start_at,omitempty"`
 	// ResetAt is the next known reset time.
 	// ResetAt 是下一次已知重置时间。
 	ResetAt *time.Time `json:"reset_at,omitempty"`
@@ -1424,6 +1459,19 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 	for _, allowance := range snapshot.Allowances {
 		allowances = append(allowances, allowanceViewFrom(allowance, credentialLabels))
 	}
+	voices := make([]VoiceView, 0, len(snapshot.Voices))
+	for _, voice := range snapshot.Voices {
+		// descriptions preserves an empty JSON array because the management contract never exposes collection absence as null.
+		// descriptions 保留空 JSON 数组，因为管理合同绝不会用 null 表示集合缺失。
+		descriptions := append(make([]string, 0, len(voice.Descriptions)), voice.Descriptions...)
+		voices = append(voices, VoiceView{VoiceID: voice.VoiceID, DisplayName: voice.DisplayName, Descriptions: descriptions, CredentialID: voice.CredentialID, CredentialLabel: credentialLabels[voice.CredentialID], ObservedAt: voice.ObservedAt, ExpiresAt: voice.ExpiresAt})
+	}
+	sort.Slice(voices, func(left int, right int) bool {
+		if voices[left].VoiceID != voices[right].VoiceID {
+			return voices[left].VoiceID < voices[right].VoiceID
+		}
+		return voices[left].CredentialID < voices[right].CredentialID
+	})
 	plansByKey := make(map[string]*PlanView)
 	for _, plan := range snapshot.Plans {
 		planKey := plan.PlanCode + "\x00" + plan.PlanName + "\x00" + plan.Status + "\x00" + string(plan.EvidenceSource)
@@ -1455,7 +1503,7 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 		}
 		return plans[left].EvidenceSource < plans[right].EvidenceSource
 	})
-	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters), Models: models, Services: services, Allowances: allowances, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters), Models: models, Services: services, Allowances: allowances, Voices: voices, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
 }
 
 // modelAuthorizationStatus derives three-state access without treating absent or expired evidence as denial.
@@ -1558,13 +1606,13 @@ func applicableAllowanceProfiles(allowances []catalog.AllowanceSnapshot, credent
 // allowanceViewFrom converts one raw usage observation without exposing shared-scope identifiers.
 // allowanceViewFrom 转换一条原始用量观测且不暴露共享作用域标识。
 func allowanceViewFrom(allowance catalog.AllowanceSnapshot, credentialLabels map[string]string) AllowanceView {
-	view := AllowanceView{Kind: allowance.Kind, Scope: allowance.Scope, Metric: allowance.Metric, Unit: allowance.Unit, Currency: allowance.Currency, Limit: cloneString(allowance.Limit), Used: cloneString(allowance.Used), Remaining: cloneString(allowance.Remaining), RemainingRatio: cloneFloat(allowance.RemainingRatio), Status: allowance.Status, Mandatory: allowance.Mandatory, ObservedAt: allowance.ObservedAt, ExpiresAt: allowance.ExpiresAt}
+	view := AllowanceView{Kind: allowance.Kind, Scope: allowance.Scope, Metric: allowance.Metric, Unit: allowance.Unit, Currency: allowance.Currency, Limit: cloneString(allowance.Limit), Used: cloneString(allowance.Used), Remaining: cloneString(allowance.Remaining), RemainingRatio: cloneFloat(allowance.RemainingRatio), DisplayMultiplierPermille: cloneInt64(allowance.DisplayMultiplierPermille), Status: allowance.Status, Mandatory: allowance.Mandatory, ObservedAt: allowance.ObservedAt, ExpiresAt: allowance.ExpiresAt}
 	if allowance.Scope == catalog.ScopeCredential {
 		view.CredentialID = allowance.ScopeID
 		view.CredentialLabel = credentialLabels[allowance.ScopeID]
 	}
 	if allowance.Window != nil {
-		view.Window = &AllowanceWindowView{Kind: allowance.Window.Kind, Duration: strconv.FormatInt(int64(allowance.Window.Duration), 10), CalendarUnit: allowance.Window.CalendarUnit, TimeZone: allowance.Window.TimeZone, ResetAt: cloneTime(allowance.Window.ResetAt)}
+		view.Window = &AllowanceWindowView{Kind: allowance.Window.Kind, Duration: strconv.FormatInt(int64(allowance.Window.Duration), 10), CalendarUnit: allowance.Window.CalendarUnit, TimeZone: allowance.Window.TimeZone, StartAt: cloneTime(allowance.Window.StartAt), ResetAt: cloneTime(allowance.Window.ResetAt)}
 	}
 	return view
 }
@@ -1695,6 +1743,16 @@ func cloneString(value *string) *string {
 // cloneFloat copies one optional normalized ratio.
 // cloneFloat 复制一个可选规范化比例。
 func cloneFloat(value *float64) *float64 {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
+
+// cloneInt64 copies one optional signed integer.
+// cloneInt64 复制一个可选有符号整数。
+func cloneInt64(value *int64) *int64 {
 	if value == nil {
 		return nil
 	}

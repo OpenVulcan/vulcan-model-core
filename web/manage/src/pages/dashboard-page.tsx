@@ -48,6 +48,8 @@ function resolvePageTitleKey(currentPath: string): TranslationKey {
       return "diagnostics.resourcesTitle"
     case "/diagnostics/executions":
       return "diagnostics.executionsTitle"
+    case "/diagnostics/access":
+      return "diagnostics.accessTitle"
     case "/settings":
       return "sidebar.settings"
     default:
@@ -71,6 +73,8 @@ function renderAuthenticatedPage(currentPath: string, managementAuthToken: strin
       return <DiagnosticsPage kind="resources" managementAuthToken={managementAuthToken} />
     case "/diagnostics/executions":
       return <DiagnosticsPage kind="executions" managementAuthToken={managementAuthToken} />
+    case "/diagnostics/access":
+      return <DiagnosticsPage kind="access" managementAuthToken={managementAuthToken} />
     case "/settings":
       return <SettingsPage managementAuthToken={managementAuthToken} />
     default:

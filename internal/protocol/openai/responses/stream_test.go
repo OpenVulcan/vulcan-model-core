@@ -250,22 +250,23 @@ func TestStreamDecoderRejectsNonIncreasingProviderSequence(t *testing.T) {
 	}
 }
 
-// TestStreamDecoderRejectsOutOfScopeResponseNodes verifies unsupported first-phase Responses nodes fail explicitly instead of being silently discarded.
-// TestStreamDecoderRejectsOutOfScopeResponseNodes 验证超出第一阶段范围的 Responses 节点会显式失败而不会被静默丢弃。
-func TestStreamDecoderRejectsOutOfScopeResponseNodes(t *testing.T) {
+// TestStreamDecoderAcceptsProviderHostedToolTraces verifies provider-owned calls do not abort the final assistant response and remain content-free.
+// TestStreamDecoderAcceptsProviderHostedToolTraces 验证供应商拥有调用不会中止最终助手响应且保持不含内容。
+func TestStreamDecoderAcceptsProviderHostedToolTraces(t *testing.T) {
 	// outputIndex supplies the required stable provider position for the output-item fixture.
 	// outputIndex 为输出项目夹具提供必需的稳定 Provider 位置。
 	outputIndex := 0
 	testCases := []struct {
-		// name identifies the independent unsupported protocol node.
-		// name 标识独立的不受支持协议节点。
+		// name identifies the independent provider-hosted protocol node.
+		// name 标识独立的供应商托管协议节点。
 		name string
-		// event is the provider event that must not become a VCP fallback.
-		// event 是绝不能变成 VCP 兜底的 Provider 事件。
+		// event is the provider event reduced to one safe omission warning.
+		// event 是归并为一条安全省略警告的 Provider 事件。
 		event StreamEvent
 	}{
 		{name: "file-search-event", event: StreamEvent{Type: "response.file_search_call.in_progress"}},
-		{name: "file-search-output", event: StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "fs_1", Type: "file_search_call"}}},
+		{name: "file-search-output", event: StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "fs_1", Type: "file_search_call", Status: "in_progress"}}},
+		{name: "code-interpreter-output", event: StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "ci_1", Type: "code_interpreter_call", Status: "in_progress"}}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -273,10 +274,65 @@ func TestStreamDecoderRejectsOutOfScopeResponseNodes(t *testing.T) {
 			if errNew != nil {
 				t.Fatalf("NewStreamDecoder() error = %v", errNew)
 			}
-			if _, errPush := decoder.Push(testCase.event); !errors.Is(errPush, ErrInvalidUpstreamResponse) {
-				t.Fatalf("Push() error = %v, want ErrInvalidUpstreamResponse", errPush)
+			events, errPush := decoder.Push(testCase.event)
+			if errPush != nil || len(events) != 1 || events[0].Type != vcp.EventWarningRaised || events[0].WarningCode == "" {
+				t.Fatalf("Push() events = %+v, error = %v", events, errPush)
 			}
 		})
+	}
+}
+
+// TestStreamDecoderProjectsComputerCalls verifies both GA batches and legacy preview actions remain executable VCP calls.
+// TestStreamDecoderProjectsComputerCalls 验证 GA 批次与旧版预览动作均保持为可执行 VCP 调用。
+func TestStreamDecoderProjectsComputerCalls(t *testing.T) {
+	// x and y preserve zero-capable pointer coordinates in the wire fixture.
+	// x 与 y 在 Wire 夹具中保留可为零的指针坐标。
+	x := 405
+	y := 157
+	testCases := []struct {
+		// name identifies the computer wire generation.
+		// name 标识计算机 Wire 代际。
+		name string
+		// item contains one complete upstream computer call.
+		// item 包含一个完整上游计算机调用。
+		item OutputItem
+		// expectedActions is the exact canonical action count.
+		// expectedActions 是精确规范动作数量。
+		expectedActions int
+	}{
+		{name: "ga-batch", item: OutputItem{ID: "cu_ga", Type: "computer_call", Status: "completed", CallID: "call_ga", Actions: []OutputAction{{Type: "click", X: &x, Y: &y, Button: "left"}, {Type: "type", Text: "penguin"}}}, expectedActions: 2},
+		{name: "preview-single", item: OutputItem{ID: "cu_preview", Type: "computer_call", Status: "completed", CallID: "call_preview", Action: &OutputAction{Type: "screenshot"}}, expectedActions: 1},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			decoder, errNew := NewStreamDecoder("response-vcp-computer-"+testCase.name, responsesNow())
+			if errNew != nil {
+				t.Fatalf("NewStreamDecoder() error = %v", errNew)
+			}
+			outputIndex := 0
+			events, errPush := decoder.Push(StreamEvent{Type: "response.output_item.done", OutputIndex: &outputIndex, Item: &testCase.item})
+			if errPush != nil || len(events) != 2 || events[0].Type != vcp.EventItemStarted || events[1].Type != vcp.EventItemCompleted {
+				t.Fatalf("Push() events = %+v, error = %v", events, errPush)
+			}
+			call := events[0].Item.ToolCall
+			if call == nil || call.ToolCallID != testCase.item.CallID || call.UpstreamID != testCase.item.CallID || call.Name != "computer_use" || call.Status != vcp.ToolCallCompleted || len(call.ComputerActions) != testCase.expectedActions {
+				t.Fatalf("computer call = %#v", call)
+			}
+		})
+	}
+}
+
+// TestStreamDecoderRejectsMixedComputerWireGenerations verifies preview and GA action carriers cannot be merged.
+// TestStreamDecoderRejectsMixedComputerWireGenerations 验证预览与 GA 动作载体不能混合。
+func TestStreamDecoderRejectsMixedComputerWireGenerations(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("response-vcp-computer-mixed", responsesNow())
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	outputIndex := 0
+	item := OutputItem{ID: "cu_mixed", Type: "computer_call", Status: "completed", CallID: "call_mixed", Action: &OutputAction{Type: "wait"}, Actions: []OutputAction{{Type: "screenshot"}}}
+	if _, errPush := decoder.Push(StreamEvent{Type: "response.output_item.done", OutputIndex: &outputIndex, Item: &item}); !errors.Is(errPush, ErrInvalidUpstreamResponse) {
+		t.Fatalf("Push() error = %v, want ErrInvalidUpstreamResponse", errPush)
 	}
 }
 

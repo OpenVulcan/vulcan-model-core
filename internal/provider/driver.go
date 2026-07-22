@@ -30,6 +30,9 @@ type DiscoveryRequest struct {
 	// Credential optionally narrows discovery to one account-specific scope.
 	// Credential 可选地将发现范围限制到一个账号特定作用域。
 	Credential *providerconfig.Credential
+	// ETag is the opaque validator from the last successful provider discovery.
+	// ETag 是上一次供应商发现成功返回的不透明校验值。
+	ETag string
 }
 
 // ModelDiscoveryResult contains provider-scoped model metadata without protocol payloads.
@@ -47,6 +50,18 @@ type ModelDiscoveryResult struct {
 	// ObservedAt records when discovery completed.
 	// ObservedAt 记录发现完成时间。
 	ObservedAt time.Time
+	// ExpiresAt is the provider-owned freshness boundary for this complete result.
+	// ExpiresAt 是该完整结果由供应商确定的新鲜度边界。
+	ExpiresAt time.Time
+	// SourceRevision is the provider-owned revision or monotonic catalog version.
+	// SourceRevision 是供应商拥有的修订号或单调递增目录版本。
+	SourceRevision string
+	// ETag is the opaque conditional validator returned by the provider.
+	// ETag 是供应商返回的不透明条件校验值。
+	ETag string
+	// NotModified confirms that the ETag still identifies the complete last-good result.
+	// NotModified 确认 ETag 仍标识完整的最后有效结果。
+	NotModified bool
 }
 
 // ModelDiscoverer is implemented by drivers that can query provider-native models.
@@ -79,6 +94,48 @@ type AllowanceReader interface {
 	// ReadAllowances returns arbitrary consumable resource snapshots for one credential and its shared scopes.
 	// ReadAllowances 返回一个凭据及其共享作用域的任意可消费资源快照。
 	ReadAllowances(context.Context, providerconfig.ProviderInstance, providerconfig.Credential) ([]catalog.AllowanceSnapshot, error)
+}
+
+// VoiceCatalogReader is implemented by providers that expose credential-scoped preset voices.
+// VoiceCatalogReader 由公开凭据作用域预设声音的供应商实现。
+type VoiceCatalogReader interface {
+	// ReadVoices returns one complete current voice catalog for the exact credential.
+	// ReadVoices 为精确凭据返回一份完整的当前声音目录。
+	ReadVoices(context.Context, providerconfig.ProviderInstance, providerconfig.Credential) ([]catalog.VoiceSnapshot, error)
+}
+
+// ProviderFileDiagnostic is management-safe metadata for one provider-owned file.
+// ProviderFileDiagnostic 是一个供应商拥有文件的管理安全元数据。
+type ProviderFileDiagnostic struct {
+	// FileID is the provider file identifier visible only through the protected management plane.
+	// FileID 是仅通过受保护管理面可见的供应商文件标识。
+	FileID string `json:"file_id"`
+	// Filename is the provider-recorded basename.
+	// Filename 是供应商记录的文件基本名。
+	Filename string `json:"filename"`
+	// Purpose is the provider-recorded file purpose.
+	// Purpose 是供应商记录的文件用途。
+	Purpose string `json:"purpose"`
+	// SizeBytes is the provider-reported object size.
+	// SizeBytes 是供应商报告的对象大小。
+	SizeBytes int64 `json:"size_bytes"`
+	// CreatedAt is the provider-reported creation time.
+	// CreatedAt 是供应商报告的创建时间。
+	CreatedAt time.Time `json:"created_at"`
+	// DownloadAvailable reports whether the provider returned a temporary download URL without exposing it.
+	// DownloadAvailable 表示供应商是否返回临时下载地址，但不暴露该地址。
+	DownloadAvailable bool `json:"download_available"`
+}
+
+// ProviderFileDiagnosticsReader lists provider files for one exact protected account target.
+// ProviderFileDiagnosticsReader 为一个精确且受保护的账号 Target 列出供应商文件。
+type ProviderFileDiagnosticsReader interface {
+	// ListProviderFiles returns current provider file metadata without downloading content.
+	// ListProviderFiles 返回当前供应商文件元数据且不下载正文。
+	ListProviderFiles(context.Context, string, string, string) ([]ProviderFileDiagnostic, error)
+	// GetProviderFile returns current metadata for one exact provider file without exposing its temporary download URL.
+	// GetProviderFile 返回一个精确供应商文件的当前元数据，但不暴露其临时下载地址。
+	GetProviderFile(context.Context, string, string, string, string) (ProviderFileDiagnostic, error)
 }
 
 // CredentialMetadataResult contains every account fact decoded from one provider observation.

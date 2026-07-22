@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/selection-request.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "provider_instance_id", "operation"],
+  "properties": {
+    "protocol_version": {"const": "1.0"},
+    "request_id": {"type": "string", "minLength": 1},
+    "provider_instance_id": {"type": "string", "minLength": 1},
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "music.generate", "music.cover.prepare", "music.cover"]},
+    "required_context_tokens": {"type": "integer", "minimum": 0},
+    "required_max_output_tokens": {"type": "integer", "minimum": 0},
+    "required_input_modalities": {"type": "array", "uniqueItems": true, "items": {"enum": ["text", "image", "audio", "video", "file"]}},
+    "required_output_modalities": {"type": "array", "uniqueItems": true, "items": {"enum": ["text", "image", "audio", "video", "file"]}},
+    "required_capabilities": {"type": "array", "uniqueItems": true, "items": {"enum": ["streaming", "tool_calling", "parallel_tool_calls", "strict_json_schema", "reasoning", "image_input", "audio_input", "video_input", "file_input"]}},
+    "preferred_capabilities": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "preferred_model_ids": {"type": "array", "uniqueItems": true, "items": {"type": "string"}},
+    "required_region": {"type": "string"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"operation": {"const": "search.web"}}, "required": ["operation"]},
+      "then": {
+        "not": {
+          "anyOf": [
+            {"required": ["required_context_tokens"]},
+            {"required": ["required_max_output_tokens"]},
+            {"required": ["required_input_modalities"]},
+            {"required": ["required_output_modalities"]},
+            {"required": ["required_capabilities"]},
+            {"required": ["preferred_capabilities"]},
+            {"required": ["preferred_model_ids"]}
+          ]
+        }
+      }
+    }
+  ]
+}

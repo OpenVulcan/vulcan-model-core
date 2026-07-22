@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/retry-state.schema.json",
+  "title": "VCP Durable Retry State",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["consecutive_failures", "next_retry_at", "category", "scope", "action"],
+  "properties": {
+    "consecutive_failures": {"type": "integer", "minimum": 1},
+    "next_retry_at": {"type": "string", "format": "date-time"},
+    "category": {"type": "string", "minLength": 1},
+    "scope": {"enum": ["request", "credential", "subscription", "billing_account", "endpoint", "model", "provider"]},
+    "action": {"enum": ["stop", "retry_same_target", "retry_other_credential", "retry_other_endpoint", "retry_after_reset"]},
+    "max_attempts": {"type": "integer", "minimum": 1}
+  }
+}

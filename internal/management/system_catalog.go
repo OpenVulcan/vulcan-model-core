@@ -164,6 +164,20 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 		snapshot.ServiceOfferings = append(snapshot.ServiceOfferings, catalog.ServiceOffering{ID: "service_offer_tavily_search", ProviderInstanceID: onboarding.Instance.ID, ProviderServiceID: "service_web_search", ChannelID: action.ProtocolProfileID, UpstreamServiceID: "tavily-search", Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
 		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_tavily_search", ProviderInstanceID: onboarding.Instance.ID, ServiceOfferingID: "service_offer_tavily_search", Operation: vcp.OperationSearchWeb, ActionBindingID: action.ID, DisplayName: "Tavily Results", Default: true, ServiceCapabilities: &capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
 	}
+	if definition.ModelCatalogID == "minimax_api" {
+		action, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
+		if errAction != nil {
+			return catalog.Snapshot{}, errAction
+		}
+		capabilities := catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{
+			BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest,
+			OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}, EvidenceKinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}, EvidenceRequirements: []vcp.SearchEvidenceRequirement{vcp.SearchEvidenceBestEffort, vcp.SearchEvidenceVerified},
+			Filters: catalog.SearchFilterCapabilities{DomainAllow: catalog.CapabilityUnsupported, DomainBlock: catalog.CapabilityUnsupported, PublicationTime: catalog.CapabilityUnsupported, Language: catalog.CapabilityUnsupported, Region: catalog.CapabilityUnsupported, Location: catalog.CapabilityUnsupported, SafeSearch: catalog.CapabilityUnsupported}, MaxResults: catalog.OptionalCountLimit{Known: true, Value: 10},
+		}}
+		snapshot.Services = append(snapshot.Services, catalog.ProviderService{ID: "service_web_search", ProviderInstanceID: onboarding.Instance.ID, DisplayName: "MiniMax Web Search", Operation: vcp.OperationSearchWeb, Source: catalog.ModelSourceSystem, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1})
+		snapshot.ServiceOfferings = append(snapshot.ServiceOfferings, catalog.ServiceOffering{ID: "service_offer_minimax_search", ProviderInstanceID: onboarding.Instance.ID, ProviderServiceID: "service_web_search", ChannelID: action.ProtocolProfileID, UpstreamServiceID: "minimax-coding-plan-search", Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
+		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_minimax_search", ProviderInstanceID: onboarding.Instance.ID, ServiceOfferingID: "service_offer_minimax_search", Operation: vcp.OperationSearchWeb, ActionBindingID: action.ID, DisplayName: "MiniMax Structured Search", Default: true, ServiceCapabilities: &capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
+	}
 	if definition.ModelCatalogID == "openai_api" {
 		action, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
 		if errAction != nil {
@@ -525,5 +539,5 @@ func systemOutputModalities(template systemModelTemplate) []string {
 // catalogIdentifier converts one trusted upstream model identifier to the portable catalog identifier alphabet.
 // catalogIdentifier 将一个受信任上游模型标识转换为可移植目录标识字母表。
 func catalogIdentifier(value string) string {
-	return strings.ToLower(strings.NewReplacer("-", "_", ".", "_", "/", "_").Replace(value))
+	return strings.ToLower(strings.NewReplacer("+", "_plus", "-", "_", ".", "_", "/", "_").Replace(value))
 }

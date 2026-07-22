@@ -115,6 +115,27 @@ func TestLoadAcceptsExistingBcryptHash(t *testing.T) {
 	}
 }
 
+// TestLoadPreservesEnabledOIDCTrustConfiguration verifies API-key rewrites do not drop external identity settings.
+// TestLoadPreservesEnabledOIDCTrustConfiguration 验证 API 密钥重写不会丢失外部身份设置。
+func TestLoadPreservesEnabledOIDCTrustConfiguration(t *testing.T) {
+	configurationPath := writeConfiguration(t, "management:\n  secret-key: management-key\napi:\n  keys: []\n  oidc:\n    enabled: true\n    issuer: https://identity.example.com\n    audience: vulcan-model-router\n    jwks-url: https://identity.example.com/keys\n")
+	store, errLoad := Load(configurationPath)
+	if errLoad != nil {
+		t.Fatalf("Load() error = %v", errLoad)
+	}
+	configuration := store.OIDCConfiguration()
+	if configuration == nil || !configuration.Enabled || configuration.Issuer != "https://identity.example.com" || configuration.Audience != "vulcan-model-router" || configuration.JWKSURL != "https://identity.example.com/keys" {
+		t.Fatalf("OIDCConfiguration() = %+v", configuration)
+	}
+	if _, errCreate := store.CreateAPIKey(APIKeyInput{Name: "caller", Key: "call-key", Enabled: true}); errCreate != nil {
+		t.Fatalf("CreateAPIKey() error = %v", errCreate)
+	}
+	reloaded, errReload := Load(configurationPath)
+	if errReload != nil || reloaded.OIDCConfiguration() == nil || !reloaded.OIDCConfiguration().Enabled {
+		t.Fatalf("reloaded OIDC configuration = %+v, error = %v", reloaded.OIDCConfiguration(), errReload)
+	}
+}
+
 // writeConfiguration creates one temporary configuration file and returns its absolute path.
 // writeConfiguration 创建一个临时配置文件并返回其绝对路径。
 func writeConfiguration(t *testing.T, content string) string {

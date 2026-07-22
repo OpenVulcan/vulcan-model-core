@@ -1,33 +1,41 @@
 package vcp
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 // TestReducerSnapshotDeepIsolation verifies every reference-bearing response field is detached from reducer state.
 // TestReducerSnapshotDeepIsolation 校验响应中每个引用型字段均与 reducer 内部状态彻底隔离。
 func TestReducerSnapshotDeepIsolation(t *testing.T) {
 	inputTokens := int64(11)
+	now := time.Date(2026, 7, 22, 6, 0, 0, 0, time.UTC)
 	reducer := NewReducer("resp_snapshot")
 	applyTestEvent(t, reducer, Event{
 		ResponseID: "resp_snapshot",
 		EventID:    "evt_message",
 		Sequence:   1,
+		Time:       now,
 		Type:       EventItemStarted,
 		ItemID:     "item_message",
 		Item: &OutputItem{
 			ItemID:  "item_message",
 			Kind:    ContextMessage,
 			Content: []ContentBlock{{Type: ContentText, Text: "original content"}},
+			Status:  OutputItemInProgress,
 		},
 	})
 	applyTestEvent(t, reducer, Event{
 		ResponseID: "resp_snapshot",
 		EventID:    "evt_tool",
 		Sequence:   2,
+		Time:       now,
 		Type:       EventItemStarted,
 		ItemID:     "item_tool",
 		Item: &OutputItem{
 			ItemID: "item_tool",
 			Kind:   ContextToolCall,
+			Status: OutputItemInProgress,
 			ToolCall: &ToolCallItem{
 				ToolCallID: "call_original",
 				Name:       "original_tool",
@@ -40,6 +48,7 @@ func TestReducerSnapshotDeepIsolation(t *testing.T) {
 		ResponseID:  "resp_snapshot",
 		EventID:     "evt_warning",
 		Sequence:    3,
+		Time:        now,
 		Type:        EventWarningRaised,
 		WarningCode: "original_warning",
 	})
@@ -47,12 +56,14 @@ func TestReducerSnapshotDeepIsolation(t *testing.T) {
 		ResponseID: "resp_snapshot",
 		EventID:    "evt_usage",
 		Sequence:   4,
+		Time:       now,
 		Type:       EventUsageUpdated,
 		Usage: &UsageObservation{
-			InputTokens: &inputTokens,
-			Source:      "provider_reported",
-			Aggregation: "snapshot",
-			Phase:       "terminal",
+			InputTokens:     &inputTokens,
+			Source:          "provider_reported",
+			Aggregation:     "snapshot",
+			Phase:           "terminal",
+			AccountingBasis: "test_provider_usage",
 		},
 	})
 

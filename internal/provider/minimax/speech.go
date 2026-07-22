@@ -90,11 +90,27 @@ func (d *SpeechActionDriver) Execute(ctx context.Context, execution provider.Exe
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}
-	response, errRequest := d.client.Do(ctx, transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/v1/t2a_v2", Body: projection.body, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey})
+	outbound := transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/v1/t2a_v2", Body: projection.body, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}
+	var (
+		response   *http.Response
+		errRequest error
+	)
+	if execution.Execution.Stream {
+		response, errRequest = d.client.DoStream(ctx, outbound)
+	} else {
+		response, errRequest = d.client.Do(ctx, outbound)
+	}
 	if errRequest != nil {
 		return provider.ExecutionResult{}, errRequest
 	}
 	defer func() { _ = transport.DrainAndClose(response) }()
+	if execution.Execution.Stream {
+		streamed, errStream := decodeMiniMaxAudioHTTPStream(ctx, response, execution.ResourceSink, "audio-0", vcp.MediaAudio, projection.mimeType, execution.Execution.Budget.MaxOutputBytes)
+		if errStream != nil {
+			return provider.ExecutionResult{}, errStream
+		}
+		return miniMaxSpeechResult(streamed.Audio, streamed.SubtitleURL, projection.mimeType), nil
+	}
 	return decodeMiniMaxSpeech(response.Body, projection.mimeType)
 }
 
@@ -172,7 +188,7 @@ func (d *SpeechTaskDriver) Poll(ctx context.Context, execution provider.Executio
 		return provider.TaskResult{}, errFile
 	}
 	defer func() { _ = transport.DrainAndClose(fileResponse) }()
-	_, mimeType, errFormat := miniMaxSpeechOutput(execution.Execution.Payload.SpeechSynthesize.OutputFormat)
+	_, mimeType, errFormat := miniMaxSpeechOutput(execution.Execution.Payload.SpeechSynthesize.OutputFormat, true)
 	if errFormat != nil {
 		return provider.TaskResult{}, errFormat
 	}
@@ -228,8 +244,8 @@ type miniMaxSyncAudioSetting struct {
 	// Bitrate is one documented MP3 bitrate.
 	// Bitrate 是一个文档规定的 MP3 比特率。
 	Bitrate int `json:"bitrate,omitempty"`
-	// Format is MP3 or WAV.
-	// Format 是 MP3 或 WAV。
+	// Format is one synchronous MiniMax T2A encoding.
+	// Format 是一种同步 MiniMax T2A 编码。
 	Format string `json:"format"`
 	// Channel is mono or stereo.
 	// Channel 是单声道或立体声。
@@ -262,8 +278,8 @@ type miniMaxSyncSpeechRequest struct {
 	// Text is the exact caller text.
 	// Text 是调用方的精确文本。
 	Text string `json:"text"`
-	// Stream explicitly disables provider streaming.
-	// Stream 显式关闭供应商流式输出。
+	// Stream follows the caller's explicitly selected streaming delivery.
+	// Stream 遵循调用方明确选择的流式交付方式。
 	Stream bool `json:"stream"`
 	// LanguageBoost is one documented provider language value.
 	// LanguageBoost 是一个文档规定的供应商语言值。
@@ -277,6 +293,20 @@ type miniMaxSyncSpeechRequest struct {
 	// AudioSetting contains exact encoding controls.
 	// AudioSetting 包含精确的编码控制。
 	AudioSetting miniMaxSyncAudioSetting `json:"audio_setting"`
+	// PronunciationDictionary contains exact provider-compatible tone mappings.
+	// PronunciationDictionary 包含精确且与供应商兼容的音调映射。
+	PronunciationDictionary *miniMaxPronunciationDictionary `json:"pronunciation_dict,omitempty"`
+	// SubtitleEnable requests a provider-generated timing document.
+	// SubtitleEnable 请求供应商生成计时文档。
+	SubtitleEnable bool `json:"subtitle_enable,omitempty"`
+}
+
+// miniMaxPronunciationDictionary contains exact pronunciation replacements.
+// miniMaxPronunciationDictionary 包含精确发音替换。
+type miniMaxPronunciationDictionary struct {
+	// Tone contains ordered provider syntax entries.
+	// Tone 包含有序供应商语法项。
+	Tone []string `json:"tone"`
 }
 
 // miniMaxAsyncSpeechRequest is the closed direct-text asynchronous T2A body.
@@ -319,6 +349,9 @@ type miniMaxSpeechResponse struct {
 		// Status is two for complete non-streaming output.
 		// Status 对完整非流式输出为二。
 		Status int `json:"status"`
+		// SubtitleFile is the temporary subtitle timing JSON URL when requested.
+		// SubtitleFile 是请求字幕时返回的临时字幕计时 JSON URL。
+		SubtitleFile string `json:"subtitle_file"`
 	} `json:"data"`
 	// BaseResponse records application-level success.
 	// BaseResponse 记录应用层成功状态。
@@ -384,7 +417,7 @@ func validateMiniMaxSpeechExecution(definitionID string, client *transport.Clien
 	if strings.TrimSpace(definitionID) == "" || client == nil || execution.Binding.Target.ProviderDefinitionID != definitionID {
 		return fmt.Errorf("%w: target definition does not belong to this driver", provider.ErrExecutionBinding)
 	}
-	_, errValidate := execution.ValidateForAction(actionBindingID, providerconfig.AuthMethodAPIKey)
+	_, errValidate := execution.ValidateForAction(actionBindingID, providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodDeviceFlow)
 	return errValidate
 }
 
@@ -393,8 +426,11 @@ func validateMiniMaxSpeechExecution(definitionID string, client *transport.Clien
 func projectMiniMaxSpeech(execution provider.ExecutionRequest, asynchronous bool) (miniMaxSpeechProjection, error) {
 	operation := execution.Execution.Payload.SpeechSynthesize
 	model := execution.Binding.Target.UpstreamModelID
-	if operation == nil || (model != "speech-2.8-hd" && model != "speech-2.8-turbo") || len(operation.Segments) != 0 || operation.Style != "" || operation.Timestamps {
-		return miniMaxSpeechProjection{}, fmt.Errorf("%w: model, multi-speaker segments, style, or timestamps are unsupported", ErrInvalidSpeechDriver)
+	if operation == nil || !supportedMiniMaxSpeechModel(model, asynchronous) || len(operation.Segments) != 0 || operation.Style != "" {
+		return miniMaxSpeechProjection{}, fmt.Errorf("%w: model, multi-speaker segments, or style are unsupported", ErrInvalidSpeechDriver)
+	}
+	if asynchronous && (operation.Timestamps || len(operation.Pronunciations) > 0) {
+		return miniMaxSpeechProjection{}, fmt.Errorf("%w: asynchronous T2A has no subtitle or pronunciation carrier", ErrInvalidSpeechDriver)
 	}
 	textLimit := 9999
 	if asynchronous {
@@ -410,7 +446,7 @@ func projectMiniMaxSpeech(execution provider.ExecutionRequest, asynchronous bool
 	if errVoice != nil {
 		return miniMaxSpeechProjection{}, errVoice
 	}
-	format, mimeType, errFormat := miniMaxSpeechOutput(operation.OutputFormat)
+	format, mimeType, errFormat := miniMaxSpeechOutput(operation.OutputFormat, asynchronous)
 	if errFormat != nil {
 		return miniMaxSpeechProjection{}, errFormat
 	}
@@ -423,12 +459,33 @@ func projectMiniMaxSpeech(execution provider.ExecutionRequest, asynchronous bool
 	if asynchronous {
 		body, errEncode = json.Marshal(miniMaxAsyncSpeechRequest{Model: model, Text: operation.Text, LanguageBoost: operation.Language, VoiceSetting: voice, AudioSetting: miniMaxAsyncAudioSetting{SampleRate: sampleRate, Bitrate: bitrate, Format: format, Channel: channels}})
 	} else {
-		body, errEncode = json.Marshal(miniMaxSyncSpeechRequest{Model: model, Text: operation.Text, Stream: false, LanguageBoost: operation.Language, OutputFormat: "hex", VoiceSetting: voice, AudioSetting: miniMaxSyncAudioSetting{SampleRate: sampleRate, Bitrate: bitrate, Format: format, Channel: channels}})
+		if execution.Execution.Stream && format == "wav" {
+			return miniMaxSpeechProjection{}, fmt.Errorf("%w: WAV is not supported by MiniMax streaming T2A", ErrInvalidSpeechDriver)
+		}
+		var pronunciationDictionary *miniMaxPronunciationDictionary
+		if len(operation.Pronunciations) > 0 {
+			pronunciationDictionary = &miniMaxPronunciationDictionary{Tone: append([]string(nil), operation.Pronunciations...)}
+		}
+		body, errEncode = json.Marshal(miniMaxSyncSpeechRequest{Model: model, Text: operation.Text, Stream: execution.Execution.Stream, LanguageBoost: operation.Language, OutputFormat: "hex", VoiceSetting: voice, AudioSetting: miniMaxSyncAudioSetting{SampleRate: sampleRate, Bitrate: bitrate, Format: format, Channel: channels}, PronunciationDictionary: pronunciationDictionary, SubtitleEnable: operation.Timestamps})
 	}
 	if errEncode != nil {
 		return miniMaxSpeechProjection{}, fmt.Errorf("%w: encode speech request: %v", ErrInvalidSpeechDriver, errEncode)
 	}
 	return miniMaxSpeechProjection{body: body, mimeType: mimeType}, nil
+}
+
+// supportedMiniMaxSpeechModel applies the exact synchronous CLI set and the independently documented asynchronous set.
+// supportedMiniMaxSpeechModel 应用精确的同步 CLI 集合及独立记录的异步集合。
+func supportedMiniMaxSpeechModel(model string, asynchronous bool) bool {
+	if asynchronous {
+		return model == "speech-2.8-hd" || model == "speech-2.8-turbo"
+	}
+	switch model {
+	case "speech-2.8-hd", "speech-2.8-turbo", "speech-2.6", "speech-02":
+		return true
+	default:
+		return false
+	}
 }
 
 // miniMaxVoiceControls applies documented defaults and exact control ranges.
@@ -457,7 +514,14 @@ func miniMaxVoiceControls(operation *vcp.SpeechSynthesizeOperation) (miniMaxVoic
 func miniMaxAudioControls(operation *vcp.SpeechSynthesizeOperation, format string) (int, int, int, error) {
 	sampleRate := operation.SampleRate
 	if sampleRate == 0 {
-		sampleRate = 32000
+		switch format {
+		case "opus":
+			sampleRate = 24000
+		case "pcmu_raw", "pcmu_wav":
+			sampleRate = 8000
+		default:
+			sampleRate = 32000
+		}
 	}
 	if sampleRate != 8000 && sampleRate != 16000 && sampleRate != 22050 && sampleRate != 24000 && sampleRate != 32000 && sampleRate != 44100 {
 		return 0, 0, 0, fmt.Errorf("%w: unsupported sample rate", ErrInvalidSpeechDriver)
@@ -478,22 +542,42 @@ func miniMaxAudioControls(operation *vcp.SpeechSynthesizeOperation, format strin
 			return 0, 0, 0, fmt.Errorf("%w: unsupported MP3 bitrate", ErrInvalidSpeechDriver)
 		}
 	} else if bitrate != 0 {
-		return 0, 0, 0, fmt.Errorf("%w: WAV does not accept an MP3 bitrate", ErrInvalidSpeechDriver)
+		return 0, 0, 0, fmt.Errorf("%w: non-MP3 output does not accept an MP3 bitrate", ErrInvalidSpeechDriver)
 	}
 	return sampleRate, bitrate, channels, nil
 }
 
 // miniMaxSpeechOutput resolves only formats the Router can verify and persist.
 // miniMaxSpeechOutput 仅解析 Router 能够验证并持久化的格式。
-func miniMaxSpeechOutput(format string) (string, string, error) {
+func miniMaxSpeechOutput(format string, asynchronous bool) (string, string, error) {
 	switch format {
 	case "", "mp3":
 		return "mp3", "audio/mpeg", nil
 	case "wav":
 		return "wav", "audio/wav", nil
+	case "pcm":
+		if !asynchronous {
+			return "pcm", "audio/pcm", nil
+		}
+	case "flac":
+		if !asynchronous {
+			return "flac", "audio/flac", nil
+		}
+	case "pcmu_raw":
+		if !asynchronous {
+			return "pcmu_raw", "audio/basic", nil
+		}
+	case "pcmu_wav":
+		if !asynchronous {
+			return "pcmu_wav", "audio/wav", nil
+		}
+	case "opus":
+		if !asynchronous {
+			return "opus", "audio/opus", nil
+		}
 	default:
-		return "", "", fmt.Errorf("%w: output format %q is not Router-probeable", ErrInvalidSpeechDriver, format)
 	}
+	return "", "", fmt.Errorf("%w: output format %q is unsupported for the selected execution mode", ErrInvalidSpeechDriver, format)
 }
 
 // supportedMiniMaxLanguage reports the exact current language_boost enumeration.
@@ -518,7 +602,17 @@ func decodeMiniMaxSpeech(reader io.Reader, mimeType string) (provider.ExecutionR
 	if errHex != nil || len(audio) == 0 {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: invalid hexadecimal audio", ErrInvalidSpeechResponse)
 	}
-	return provider.ExecutionResult{GeneratedResources: []provider.GeneratedResource{{OutputID: "audio-0", Kind: vcp.MediaAudio, MIMEType: mimeType, Data: audio}}}, nil
+	return miniMaxSpeechResult(audio, response.Data.SubtitleFile, mimeType), nil
+}
+
+// miniMaxSpeechResult joins one audio output with an optional provider subtitle timing document.
+// miniMaxSpeechResult 将一个音频输出与可选供应商字幕计时文档组合。
+func miniMaxSpeechResult(audio []byte, subtitleURL string, mimeType string) provider.ExecutionResult {
+	outputs := []provider.GeneratedResource{{OutputID: "audio-0", Kind: vcp.MediaAudio, MIMEType: mimeType, Data: audio}}
+	if validatePublicMusicURL(subtitleURL) == nil {
+		outputs = append(outputs, provider.GeneratedResource{OutputID: "subtitle-0", Kind: vcp.MediaFile, MIMEType: "application/json", DownloadURL: strings.TrimSpace(subtitleURL)})
+	}
+	return provider.ExecutionResult{GeneratedResources: outputs}
 }
 
 // decodeMiniMaxSpeechStart decodes one successful asynchronous task creation.

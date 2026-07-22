@@ -1,0 +1,61 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/selection-response.schema.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request_id", "target", "operation", "capability_revision", "catalog_revision"],
+  "properties": {
+    "request_id": {"type": "string"},
+    "target": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["model"],
+          "properties": {
+            "model": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["target", "provider_instance_id", "provider_model_id", "execution_profile_id"],
+              "properties": {
+                "target": {"const": "exact"},
+                "provider_instance_id": {"type": "string", "minLength": 1},
+                "provider_model_id": {"type": "string", "minLength": 1},
+                "execution_profile_id": {"type": "string", "minLength": 1},
+                "required_region": {"type": "string"}
+              }
+            }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["service"],
+          "properties": {
+            "service": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["provider_instance_id", "provider_service_id", "service_offering_id", "execution_profile_id"],
+              "properties": {
+                "provider_instance_id": {"type": "string", "minLength": 1},
+                "provider_service_id": {"type": "string", "minLength": 1},
+                "service_offering_id": {"type": "string", "minLength": 1},
+                "execution_profile_id": {"type": "string", "minLength": 1}
+              }
+            }
+          }
+        }
+      ]
+    },
+    "operation": {"type": "string"},
+    "effective_context_tokens": {"type": "integer", "minimum": 1},
+    "capability_revision": {"type": "integer", "minimum": 1},
+    "catalog_revision": {"type": "integer", "minimum": 1}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"target": {"required": ["service"]}}},
+      "then": {"not": {"required": ["effective_context_tokens"]}}
+    }
+  ]
+}

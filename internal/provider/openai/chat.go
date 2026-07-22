@@ -187,7 +187,7 @@ func (d *ChatDriver) Execute(ctx context.Context, execution provider.ExecutionRe
 		Stream:         projected.Upstream.Stream, IdempotencyKey: execution.Request.IdempotencyKey,
 	}
 	if projected.Upstream.Stream {
-		return d.executeStream(ctx, outbound, projected, execution.Now)
+		return d.executeStream(ctx, execution, outbound, projected, execution.Now)
 	}
 	return d.executeResponse(ctx, outbound, projected, execution.Now)
 }
@@ -223,7 +223,7 @@ func (d *ChatDriver) executeResponse(ctx context.Context, outbound transport.Req
 
 // executeStream executes one Chat SSE request and converts each syntactically complete upstream frame into VCP replay events.
 // executeStream 执行一条 Chat SSE 请求，并将每个语法完整的上游帧转换为 VCP 回放事件。
-func (d *ChatDriver) executeStream(ctx context.Context, outbound transport.Request, projected chatprofile.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
+func (d *ChatDriver) executeStream(ctx context.Context, execution provider.ExecutionRequest, outbound transport.Request, projected chatprofile.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
 	upstreamResponse, errRequest := d.client.DoStream(ctx, outbound)
 	if errRequest != nil {
 		return provider.ExecutionResult{}, errRequest
@@ -243,15 +243,23 @@ func (d *ChatDriver) executeStream(ctx context.Context, outbound transport.Reque
 		if errDecode := json.Unmarshal(envelope.Data, &chunk); errDecode != nil {
 			return fmt.Errorf("%w: SSE JSON: %v", chatprofile.ErrInvalidUpstreamResponse, errDecode)
 		}
-		_, errPush := decoder.Push(chunk)
-		return errPush
+		events, errPush := decoder.Push(chunk)
+		if errPush != nil {
+			return errPush
+		}
+		return provider.EmitExecutionEvents(ctx, execution.EventSink, events)
 	})
 	if errRead != nil {
-		_, _ = decoder.Close(errRead)
+		closingEvents, _ := decoder.Close(errRead)
+		_ = provider.EmitExecutionEvents(context.WithoutCancel(ctx), execution.EventSink, closingEvents)
 		return provider.ExecutionResult{}, errRead
 	}
-	if _, errClose := decoder.Close(nil); errClose != nil {
+	closingEvents, errClose := decoder.Close(nil)
+	if errClose != nil {
 		return provider.ExecutionResult{}, errClose
+	}
+	if errEmit := provider.EmitExecutionEvents(ctx, execution.EventSink, closingEvents); errEmit != nil {
+		return provider.ExecutionResult{}, errEmit
 	}
 	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID()}, nil
 }

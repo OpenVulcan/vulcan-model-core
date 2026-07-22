@@ -18,7 +18,7 @@ import (
 const (
 	// currentSchemaVersion is the latest schema migration understood by this binary.
 	// currentSchemaVersion 是当前程序理解的最新 Schema 迁移版本。
-	currentSchemaVersion = 9
+	currentSchemaVersion = 13
 )
 
 var (
@@ -337,6 +337,40 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 				PRIMARY KEY(provider_instance_id, scope, scope_id)
 			)`,
 			`CREATE INDEX runtime_scope_states_instance_idx ON runtime_scope_states(provider_instance_id, scope, status, scope_id)`,
+		}
+	case 10:
+		statements = []string{
+			`ALTER TABLE executions ADD COLUMN provider_continuation_payload BLOB`,
+			`ALTER TABLE executions ADD COLUMN provider_continuation_secret_ref TEXT`,
+		}
+	case 11:
+		statements = []string{
+			`ALTER TABLE executions ADD COLUMN retry_payload BLOB`,
+		}
+	case 12:
+		statements = []string{
+			`CREATE TABLE execution_leases (
+				execution_id TEXT PRIMARY KEY REFERENCES executions(id) ON DELETE CASCADE,
+				owner_id TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0)
+			)`,
+			`CREATE INDEX execution_leases_expiry_idx ON execution_leases(expires_at, execution_id)`,
+		}
+	case 13:
+		statements = []string{
+			`CREATE TABLE catalog_changes (
+				global_revision INTEGER PRIMARY KEY AUTOINCREMENT,
+				provider_instance_id TEXT NOT NULL,
+				provider_revision INTEGER NOT NULL CHECK (provider_revision > 0),
+				change_type TEXT NOT NULL CHECK (change_type IN ('snapshot_upsert', 'snapshot_delete')),
+				observed_at TEXT NOT NULL,
+				source_revision TEXT NOT NULL,
+				etag TEXT NOT NULL,
+				refresh_status TEXT NOT NULL,
+				tombstones_payload BLOB NOT NULL
+			)`,
+			`CREATE INDEX catalog_changes_provider_idx ON catalog_changes(provider_instance_id, global_revision)`,
 		}
 	default:
 		return fmt.Errorf("unknown sqlite migration version %d", version)

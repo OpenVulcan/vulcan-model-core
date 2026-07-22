@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
@@ -136,6 +137,18 @@ type ServiceOptions struct {
 	// RuntimeFeedback receives trusted classified execution outcomes.
 	// RuntimeFeedback 接收可信的分类执行结果。
 	RuntimeFeedback RuntimeFeedback
+	// Leases coordinates deferred recovery when multiple Router instances share storage.
+	// Leases 在多个 Router 实例共享存储时协调延迟恢复。
+	Leases LeaseStore
+	// WorkerID is the non-secret unique lease owner identity.
+	// WorkerID 是非秘密的唯一租约所有者身份。
+	WorkerID string
+	// LeaseTTL controls takeover and heartbeat timing.
+	// LeaseTTL 控制接管与心跳时间。
+	LeaseTTL time.Duration
+	// EventDistributor waits for events through a shared-store-safe or deployment-specific distribution mechanism.
+	// EventDistributor 通过共享存储安全或部署特定的分发机制等待事件。
+	EventDistributor EventDistributor
 }
 
 // Service orchestrates durable admission, exact target execution, replay, and cancellation.
@@ -162,6 +175,24 @@ type Service struct {
 	// options contains validated deterministic runtime configuration.
 	// options 包含已校验的确定性运行配置。
 	options ServiceOptions
+	// activeMu protects process-local cancellation handles for currently running synchronous drivers.
+	// activeMu 保护当前运行同步 Driver 的进程内取消句柄。
+	activeMu sync.Mutex
+	// activeCancels maps execution identities to their exact running context cancellation.
+	// activeCancels 将执行身份映射到其精确运行 Context 取消函数。
+	activeCancels map[string]context.CancelFunc
+	// leases coordinates optional multi-instance recovery ownership.
+	// leases 协调可选的多实例恢复所有权。
+	leases LeaseStore
+	// workerID identifies this process in durable leases.
+	// workerID 在持久租约中标识当前进程。
+	workerID string
+	// leaseTTL bounds crash takeover delay.
+	// leaseTTL 限制崩溃接管延迟。
+	leaseTTL time.Duration
+	// eventDistributor observes durable event visibility for local and multi-instance SSE followers.
+	// eventDistributor 为本地与多实例 SSE 跟随者观察持久事件可见性。
+	eventDistributor EventDistributor
 }
 
 // ListDiagnostics returns bounded management-safe execution snapshots when supported by the durable store.
@@ -189,7 +220,26 @@ func NewService(store Store, resolver TargetResolver, configurations Configurati
 	if options.Retention <= 0 {
 		options.Retention = 24 * time.Hour
 	}
-	return &Service{store: store, resolver: resolver, configurations: configurations, plans: plans, materializer: materializer, providers: providers, options: options}, nil
+	if options.Leases != nil {
+		if options.LeaseTTL <= 0 {
+			options.LeaseTTL = 30 * time.Second
+		}
+		if strings.TrimSpace(options.WorkerID) == "" {
+			identity, errIdentity := options.NewID()
+			if errIdentity != nil {
+				return nil, fmt.Errorf("create execution worker identity: %w", errIdentity)
+			}
+			options.WorkerID = "worker_" + strings.TrimPrefix(identity, "exe_")
+		}
+	}
+	if options.EventDistributor == nil {
+		defaultDistributor, errDistributor := NewPollingEventDistributor(store, 0)
+		if errDistributor != nil {
+			return nil, errDistributor
+		}
+		options.EventDistributor = defaultDistributor
+	}
+	return &Service{store: store, resolver: resolver, configurations: configurations, plans: plans, materializer: materializer, providers: providers, options: options, activeCancels: make(map[string]context.CancelFunc), leases: options.Leases, workerID: options.WorkerID, leaseTTL: options.LeaseTTL, eventDistributor: options.EventDistributor}, nil
 }
 
 // Create durably admits and executes one validated VCP request or returns an exact idempotent replay.
@@ -214,9 +264,29 @@ func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.
 	// now freezes identity, resolution, events, and retention for deterministic admission.
 	// now 为确定性接收冻结身份、解析、事件与保留时间。
 	now := s.options.Now().UTC()
-	target, errTarget := s.resolveTarget(ctx, request, now)
+	continuation, errContinuation := s.resolveRequestedContinuation(ctx, ownerAPIKeyID, request, now)
+	if errContinuation != nil {
+		return Record{}, false, errContinuation
+	}
+	target, errTarget := s.resolveTarget(ctx, request, now, continuation)
 	if errTarget != nil {
+		if continuation != nil && continuationTargetPermanentlyUnavailable(errTarget) {
+			if errInvalidate := s.updateContinuationState(ctx, ownerAPIKeyID, continuation.ContinuationID, now, false, ContinuationInvalidatedTargetUnavailable); errInvalidate != nil {
+				return Record{}, false, errors.Join(errTarget, fmt.Errorf("invalidate unavailable continuation: %w", errInvalidate))
+			}
+		}
 		return Record{}, false, errTarget
+	}
+	if continuation != nil {
+		if errAffinity := continuation.Validate(target); errAffinity != nil {
+			if errInvalidate := s.updateContinuationState(ctx, ownerAPIKeyID, continuation.ContinuationID, now, false, ContinuationInvalidatedTargetUnavailable); errInvalidate != nil {
+				return Record{}, false, errors.Join(fmt.Errorf("%w: continuation target is no longer available", vcp.ErrInvalidRequest), fmt.Errorf("invalidate mismatched continuation: %w", errInvalidate))
+			}
+			return Record{}, false, fmt.Errorf("%w: continuation target is no longer available", vcp.ErrInvalidRequest)
+		}
+		if errTouch := s.updateContinuationState(ctx, ownerAPIKeyID, continuation.ContinuationID, now, true, ""); errTouch != nil {
+			return Record{}, false, fmt.Errorf("touch continuation: %w", errTouch)
+		}
 	}
 	if errCapabilities := validateRequestAgainstTarget(request, target); errCapabilities != nil {
 		return Record{}, false, errCapabilities
@@ -231,6 +301,9 @@ func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.
 	if errCreate != nil || replayed {
 		return created, replayed, errCreate
 	}
+	if request.DispatchMode == vcp.DispatchDeferred {
+		return created, false, nil
+	}
 	return s.execute(ctx, created)
 }
 
@@ -244,6 +317,12 @@ func (s *Service) Get(ctx context.Context, ownerAPIKeyID string, executionID str
 // Events 返回指定序号之后的持久化事件。
 func (s *Service) Events(ctx context.Context, ownerAPIKeyID string, executionID string, afterSequence uint64) ([]Event, error) {
 	return s.store.ListEvents(ctx, ownerAPIKeyID, executionID, afterSequence)
+}
+
+// WaitEvents waits for the next durable event batch through the configured distribution boundary.
+// WaitEvents 通过配置的分发边界等待下一批持久事件。
+func (s *Service) WaitEvents(ctx context.Context, ownerAPIKeyID string, executionID string, afterSequence uint64, maxWait time.Duration) ([]Event, error) {
+	return s.eventDistributor.Wait(ctx, ownerAPIKeyID, executionID, afterSequence, maxWait)
 }
 
 // Cancel confirms cancellation only before provider execution starts; running provider tasks require an exact cancel driver.
@@ -261,23 +340,63 @@ func (s *Service) Cancel(ctx context.Context, ownerAPIKeyID string, executionID 
 		if !ok {
 			return Record{}, fmt.Errorf("%w: provider task cancellation is not registered", ErrInvalidExecution)
 		}
-		providerRequest := taskExecutionRequest(record)
-		result, errCancel := taskExecutor.CancelTask(ctx, providerRequest, record.ProviderTask.ProviderTaskID)
-		if errCancel != nil {
-			s.classifyAndRecordFailure(ctx, providerRequest, errCancel)
-			return Record{}, errCancel
+		if record.ProviderTask.CancellationRequestedAt == nil {
+			now := s.options.Now().UTC()
+			record.ProviderTask.CancellationRequestedAt = &now
+			record.ProviderTask.CancellationAfter = now
+			var errIntent error
+			record, errIntent = s.appendLifecycle(ctx, record, EventExecutionCancellationRequested)
+			if errIntent != nil {
+				return Record{}, errIntent
+			}
 		}
-		return s.applyTaskResult(ctx, record, result)
+		cancelled, _, errCancel := s.cancelProviderTaskOnce(ctx, record, taskExecutor)
+		return cancelled, errCancel
+	}
+	if record.Status == StatusWaitingRetry {
+		var errAborted error
+		record, errAborted = s.appendRetryEvent(ctx, record, EventRetryAborted, uint32(len(record.Attempts)+1), nil, record.Retry.Category)
+		if errAborted != nil {
+			return Record{}, errAborted
+		}
+		return s.transition(ctx, record, StatusCancelled, EventExecutionCancelled, nil)
 	}
 	if record.Status == StatusRunning || record.Status == StatusQueued {
-		return Record{}, fmt.Errorf("%w: running execution has no cancellable provider task", ErrInvalidExecution)
+		if record.Status == StatusRunning {
+			s.activeMu.Lock()
+			cancel := s.activeCancels[record.ID]
+			s.activeMu.Unlock()
+			if cancel != nil {
+				now := s.options.Now().UTC()
+				expectedRevision := record.Revision
+				sequence, errSequence := s.nextEventSequence(ctx, record)
+				if errSequence != nil {
+					return Record{}, errSequence
+				}
+				record.Status = StatusCancelled
+				record.UpdatedAt = now
+				record.Revision++
+				event := lifecycleEvent(record.ID, sequence, now, EventExecutionCancelled, StatusCancelled, nil)
+				if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
+					return Record{}, errSave
+				}
+				cancel()
+				return record, nil
+			}
+		}
+		return Record{}, fmt.Errorf("%w: running execution has no cancellable provider task or local driver", ErrInvalidExecution)
 	}
 	now := s.options.Now().UTC()
 	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, errSequence
+	}
 	record.Status = StatusCancelled
+	record.Retry = nil
 	record.UpdatedAt = now
 	record.Revision++
-	event := lifecycleEvent(record.ID, expectedRevision+1, now, EventExecutionCancelled, StatusCancelled, nil)
+	event := lifecycleEvent(record.ID, sequence, now, EventExecutionCancelled, StatusCancelled, nil)
 	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
 		return Record{}, errSave
 	}
@@ -287,6 +406,10 @@ func (s *Service) Cancel(ctx context.Context, ownerAPIKeyID string, executionID 
 // execute prepares inputs, loads immutable wire snapshots, dispatches, and commits one terminal reduction.
 // execute 准备输入、加载不可变 Wire 快照、分派并提交一个终态归并结果。
 func (s *Service) execute(ctx context.Context, record Record) (Record, bool, error) {
+	if executionBudgetExpired(record, s.options.Now().UTC()) {
+		failed, errFail := s.fail(ctx, record, "execution_time_budget_exceeded", false)
+		return failed, false, errFail
+	}
 	materialized, updated, errInputs := s.prepareInputs(ctx, record)
 	if errInputs != nil {
 		failed, errFail := s.fail(ctx, updated, stableFailureCode(errInputs), retryableFailure(errInputs))
@@ -296,6 +419,10 @@ func (s *Service) execute(ctx context.Context, record Record) (Record, bool, err
 		return failed, false, nil
 	}
 	record = updated
+	if errBudget := validateMaterializedInputBudget(record.Request.Budget, materialized); errBudget != nil {
+		failed, errFail := s.fail(ctx, record, stableFailureCode(errBudget), false)
+		return failed, false, errFail
+	}
 	binding, definition, errBinding := s.loadBinding(ctx, record.Target)
 	if errBinding != nil {
 		failed, errFail := s.fail(ctx, record, stableFailureCode(errBinding), retryableFailure(errBinding))
@@ -312,36 +439,90 @@ func (s *Service) execute(ctx context.Context, record Record) (Record, bool, err
 		}
 		return failed, false, nil
 	}
+	continuation, errContinuation := s.resolveRequestedContinuation(ctx, record.OwnerAPIKeyID, record.Request, s.options.Now().UTC())
+	if errContinuation != nil {
+		failed, errFail := s.fail(ctx, record, stableFailureCode(errContinuation), false)
+		if errFail != nil {
+			return Record{}, false, errFail
+		}
+		return failed, false, nil
+	}
 	if requiresProviderTask(record.Target) {
 		return s.startTask(ctx, record, binding, definition, materialized)
 	}
-	running, errRunning := s.transition(ctx, record, StatusRunning, EventExecutionRunning, nil)
+	executionContext, cancelExecution := executionContextForBudget(ctx, record)
+	s.registerActiveCancellation(record.ID, cancelExecution)
+	defer func() {
+		cancelExecution()
+		s.unregisterActiveCancellation(record.ID)
+	}()
+	running, errRunning := s.transition(executionContext, record, StatusRunning, EventExecutionRunning, nil)
 	if errRunning != nil {
 		return Record{}, false, errRunning
 	}
-	return s.executeSynchronous(ctx, running, binding, definition, materialized, preparedWorkflow)
+	return s.executeSynchronous(executionContext, running, binding, definition, materialized, preparedWorkflow, continuation)
+}
+
+// registerActiveCancellation installs the sole process-local cancellation handle for a running execution.
+// registerActiveCancellation 为一个运行中执行安装唯一进程内取消句柄。
+func (s *Service) registerActiveCancellation(executionID string, cancel context.CancelFunc) {
+	s.activeMu.Lock()
+	s.activeCancels[executionID] = cancel
+	s.activeMu.Unlock()
+}
+
+// unregisterActiveCancellation removes a completed process-local cancellation handle.
+// unregisterActiveCancellation 删除一个已完成的进程内取消句柄。
+func (s *Service) unregisterActiveCancellation(executionID string) {
+	s.activeMu.Lock()
+	delete(s.activeCancels, executionID)
+	s.activeMu.Unlock()
 }
 
 // executeSynchronous dispatches a bounded sequence of same-provider attempts before any semantic output is committed.
 // executeSynchronous 在提交任何语义输出前分派有界的同供应商尝试序列。
-func (s *Service) executeSynchronous(ctx context.Context, record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, preparedWorkflow *provider.PreparedWorkflowBinding) (Record, bool, error) {
+func (s *Service) executeSynchronous(ctx context.Context, record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, preparedWorkflow *provider.PreparedWorkflowBinding, continuation *provider.ContinuationBinding) (Record, bool, error) {
 	excludedCredentials := make([]string, 0, maxSameProviderExecutionAttempts)
 	excludedEndpoints := make([]string, 0, maxSameProviderExecutionAttempts)
-	for attemptIndex := 0; attemptIndex < maxSameProviderExecutionAttempts; attemptIndex++ {
-		providerRequest := providerRequestForRecord(record, binding, definition, materialized, preparedWorkflow)
+	cycleAttempts := maximumCycleAttempts(record)
+	for attemptIndex := 0; attemptIndex < cycleAttempts; attemptIndex++ {
+		providerRequest := providerRequestForRecord(record, binding, definition, materialized, preparedWorkflow, continuation)
+		// eventSink is present only for an explicitly streaming request and commits each decoded event before the Driver reads another frame.
+		// eventSink 仅用于显式流式请求，并在 Driver 读取下一帧前提交每个已解码事件。
+		var eventSink *durableProviderEventSink
+		if record.Request.Stream {
+			eventSink = newDurableProviderEventSink(s, record)
+			providerRequest.EventSink = eventSink
+			providerRequest.ResourceSink = eventSink
+		}
 		startedAt := s.options.Now().UTC()
 		providerResult, errExecute := s.providers.Execute(ctx, providerRequest)
 		endedAt := s.options.Now().UTC()
-		semanticOutput := providerResultHasSemanticOutput(providerResult)
+		if eventSink != nil {
+			refreshed, errRefresh := s.store.Get(context.WithoutCancel(ctx), record.OwnerAPIKeyID, record.ID)
+			if errRefresh != nil {
+				return Record{}, false, errRefresh
+			}
+			record = refreshed
+			providerResult.Events = eventSink.filterPending(providerResult.Events)
+		}
+		semanticOutput := providerResultHasSemanticOutput(providerResult) || eventSink != nil && eventSink.emittedCount() > 0
 		attempt := Attempt{Sequence: uint32(len(record.Attempts) + 1), Target: record.Target, StartedAt: startedAt, EndedAt: endedAt, SemanticOutput: semanticOutput}
 		if errExecute != nil {
+			continuationRejected := continuation != nil && errors.Is(errExecute, provider.ErrContinuationRejected)
+			if errors.Is(errExecute, context.Canceled) {
+				cancelled, errCancelled := s.store.Get(context.WithoutCancel(ctx), record.OwnerAPIKeyID, record.ID)
+				if errCancelled == nil && cancelled.Status == StatusCancelled {
+					return cancelled, false, nil
+				}
+			}
 			classified, classifiedOK := s.classifyAndRecordFailure(ctx, providerRequest, errExecute)
 			if classifiedOK {
 				attempt.FailureCategory = classified.Category
 				attempt.RetryAction = classified.Action
 			}
 			nextTarget, retry := s.resolveRetryTarget(ctx, record, classified, classifiedOK, semanticOutput, materialized, preparedWorkflow, &excludedCredentials, &excludedEndpoints)
-			if retry && attemptIndex+1 < maxSameProviderExecutionAttempts {
+			if retry && attemptIndex+1 < cycleAttempts {
 				updated, errPersist := s.persistAttempt(ctx, record, attempt, &nextTarget)
 				if errPersist != nil {
 					return Record{}, false, errPersist
@@ -358,9 +539,19 @@ func (s *Service) executeSynchronous(ctx context.Context, record Record, binding
 			if errPersist != nil {
 				return Record{}, false, errPersist
 			}
-			failed, errFail := s.fail(ctx, updated, stableFailureCode(errExecute), retryableFailure(errExecute) || classifiedRetryable(classified, classifiedOK))
+			if scheduled, didSchedule, errSchedule := s.scheduleRetry(ctx, updated, classified, classifiedOK, semanticOutput); errSchedule != nil {
+				return Record{}, false, errSchedule
+			} else if didSchedule {
+				return scheduled, false, nil
+			}
+			failed, errFail := s.failClassified(ctx, updated, stableFailureCode(errExecute), retryableFailure(errExecute) || classifiedRetryable(classified, classifiedOK), classified, classifiedOK)
 			if errFail != nil {
 				return Record{}, false, errFail
+			}
+			if continuationRejected {
+				if errInvalidate := s.updateContinuationState(context.WithoutCancel(ctx), record.OwnerAPIKeyID, continuation.ContinuationID, endedAt, false, ContinuationInvalidatedProviderRejected); errInvalidate != nil {
+					return failed, false, fmt.Errorf("invalidate provider-rejected continuation: %w", errInvalidate)
+				}
 			}
 			return failed, false, nil
 		}
@@ -377,6 +568,7 @@ func (s *Service) executeSynchronous(ctx context.Context, record Record, binding
 			return failed, false, nil
 		}
 		attempt.Succeeded = true
+		attempt.Usage, _ = usageObservationForResult(providerResult)
 		record.Attempts = append(record.Attempts, attempt)
 		s.recordSuccessfulRequest(ctx, providerRequest)
 		generatedResources, errResources := s.ingestGeneratedResources(ctx, record, providerResult.GeneratedResources)
@@ -386,6 +578,13 @@ func (s *Service) executeSynchronous(ctx context.Context, record Record, binding
 				return Record{}, false, errFail
 			}
 			return failed, false, nil
+		}
+		if record.RetryCycles > 0 {
+			var errRetrySucceeded error
+			record, errRetrySucceeded = s.appendRetryEvent(ctx, record, EventRetrySucceeded, uint32(len(record.Attempts)), nil, "")
+			if errRetrySucceeded != nil {
+				return Record{}, false, errRetrySucceeded
+			}
 		}
 		return s.succeed(ctx, record, providerResult, generatedResources)
 	}
@@ -399,6 +598,9 @@ func (s *Service) resolvePreparedWorkflow(ctx context.Context, record Record) (*
 		return nil, nil
 	}
 	operation := record.Request.Payload.MusicCover
+	if operation != nil && operation.Source != nil {
+		return nil, nil
+	}
 	if operation == nil || strings.TrimSpace(operation.PreparationID) == "" {
 		return nil, fmt.Errorf("%w: cover preparation is required", vcp.ErrInvalidRequest)
 	}
@@ -428,6 +630,7 @@ func (s *Service) ingestGeneratedResources(ctx context.Context, record Record, o
 	}
 	resources := make([]resource.Resource, 0, len(outputs))
 	seen := make(map[string]struct{}, len(outputs))
+	remainingBytes := record.Request.Budget.MaxOutputBytes
 	for _, output := range outputs {
 		hasData := len(output.Data) > 0
 		hasURL := strings.TrimSpace(output.DownloadURL) != ""
@@ -439,7 +642,10 @@ func (s *Service) ingestGeneratedResources(ctx context.Context, record Record, o
 		}
 		seen[output.OutputID] = struct{}{}
 		generatedBy := generatedResourceProvenance(record)
-		input := resource.CreateInput{OwnerAPIKeyID: record.OwnerAPIKeyID, Kind: output.Kind, DeclaredMIME: output.MIMEType, Retention: resource.RetentionEphemeral, GeneratedBy: &generatedBy}
+		if remainingBytes != nil && int64(len(output.Data)) > *remainingBytes {
+			return nil, fmt.Errorf("%w: generated output exceeds max_output_bytes", ErrExecutionBudgetExceeded)
+		}
+		input := resource.CreateInput{OwnerAPIKeyID: record.OwnerAPIKeyID, Kind: output.Kind, DeclaredMIME: output.MIMEType, Retention: resource.RetentionEphemeral, GeneratedBy: &generatedBy, MaxBytes: remainingBytes}
 		var (
 			created   resource.Resource
 			errCreate error
@@ -448,14 +654,54 @@ func (s *Service) ingestGeneratedResources(ctx context.Context, record Record, o
 			input.Reader = bytes.NewReader(output.Data)
 			created, errCreate = s.options.OutputResources.CreateGenerated(ctx, input)
 		} else {
-			created, errCreate = s.options.OutputResources.ImportGeneratedURL(ctx, resource.URLImportInput{OwnerAPIKeyID: record.OwnerAPIKeyID, URL: output.DownloadURL, Kind: output.Kind, DeclaredMIME: output.MIMEType, Retention: resource.RetentionEphemeral, GeneratedBy: &generatedBy})
+			created, errCreate = s.options.OutputResources.ImportGeneratedURL(ctx, resource.URLImportInput{OwnerAPIKeyID: record.OwnerAPIKeyID, URL: output.DownloadURL, Kind: output.Kind, DeclaredMIME: output.MIMEType, Retention: resource.RetentionEphemeral, GeneratedBy: &generatedBy, MaxBytes: remainingBytes})
 		}
 		if errCreate != nil {
 			return nil, fmt.Errorf("import generated resource: %w", errCreate)
 		}
 		resources = append(resources, created)
+		if remainingBytes != nil {
+			updatedRemaining := *remainingBytes - created.SizeBytes
+			remainingBytes = &updatedRemaining
+		}
 	}
 	return resources, nil
+}
+
+// validateMaterializedInputBudget checks exact Router resource sizes without estimating remote content.
+// validateMaterializedInputBudget 使用精确 Router 资源大小进行校验且不估算远程内容。
+func validateMaterializedInputBudget(budget vcp.OperationBudget, inputs []resource.MaterializedInput) error {
+	if budget.MaxInputBytes == nil {
+		return nil
+	}
+	var total int64
+	for _, input := range inputs {
+		if input.SizeBytes < 0 || total > *budget.MaxInputBytes-input.SizeBytes {
+			return fmt.Errorf("%w: materialized input exceeds max_input_bytes", ErrExecutionBudgetExceeded)
+		}
+		total += input.SizeBytes
+	}
+	return nil
+}
+
+// executionContextForBudget creates a deadline tied to durable admission rather than retry start time.
+// executionContextForBudget 创建绑定持久接收时间而非重试开始时间的截止 Context。
+func executionContextForBudget(ctx context.Context, record Record) (context.Context, context.CancelFunc) {
+	if record.Request.Budget.MaxExecutionMilliseconds == nil {
+		return context.WithCancel(ctx)
+	}
+	deadline := record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
+	return context.WithDeadline(ctx, deadline)
+}
+
+// executionBudgetExpired reports whether the caller's durable wall-clock ceiling has elapsed.
+// executionBudgetExpired 表示调用方的持久墙钟上限是否已经届满。
+func executionBudgetExpired(record Record, now time.Time) bool {
+	if record.Request.Budget.MaxExecutionMilliseconds == nil {
+		return false
+	}
+	deadline := record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
+	return !deadline.After(now)
 }
 
 // generatedResourceProvenance derives safe immutable origin facts from the accepted execution snapshot.
@@ -478,6 +724,11 @@ func validateRequestAgainstTarget(request vcp.ExecutionRequest, target resolve.T
 	}
 	switch request.Operation {
 	case vcp.OperationConversationRespond:
+		for _, tool := range request.Payload.Conversation.Tools {
+			if isProviderHostedTool(tool.Kind) && !containsHostedTool(target.ModelCapabilities.HostedTools, tool.Kind) {
+				return fmt.Errorf("%w: selected profile does not support hosted tool %s", vcp.ErrInvalidRequest, tool.Kind)
+			}
+		}
 		return validateConversationMediaRequest(request, target.ModelCapabilities.MediaInputs)
 	case vcp.OperationMediaAnalyze:
 		return validateMediaAnalyzeRequest(*request.Payload.MediaAnalyze, target.ModelCapabilities.MediaInputs)
@@ -488,6 +739,23 @@ func validateRequestAgainstTarget(request vcp.ExecutionRequest, target resolve.T
 	default:
 		return nil
 	}
+}
+
+// isProviderHostedTool reports tool kinds executed by an upstream provider rather than Vulcan Code.
+// isProviderHostedTool 表示由上游供应商而非 Vulcan Code 执行的工具类型。
+func isProviderHostedTool(kind vcp.ToolKind) bool {
+	return kind == vcp.ToolNativeWebSearch || kind == vcp.ToolProviderFileSearch || kind == vcp.ToolProviderCodeInterpreter || kind == vcp.ToolProviderComputerUse
+}
+
+// containsHostedTool reports exact membership in a profile's provider-hosted tools.
+// containsHostedTool 报告规格供应商托管工具中的精确成员关系。
+func containsHostedTool(values []vcp.ToolKind, target vcp.ToolKind) bool {
+	for _, value := range values {
+		if value == target {
+			return true
+		}
+	}
+	return false
 }
 
 // validateConversationMediaRequest enforces role, placement, interaction mode, and feature-combination declarations for media blocks.
@@ -699,6 +967,9 @@ func validateRerankRequest(operation vcp.RerankOperation, capabilities catalog.R
 // validateProviderResult enforces the operation-specific closed result union before persistence and event emission.
 // validateProviderResult 在持久化和事件发出前强制执行操作专属的封闭结果联合体。
 func validateProviderResult(request vcp.ExecutionRequest, result provider.ExecutionResult, complete bool) error {
+	if _, errUsage := usageObservationForResult(result); errUsage != nil {
+		return errUsage
+	}
 	hasGenerated := len(result.GeneratedResources) > 0
 	hasTranscript := result.Transcript != nil
 	hasMusicPreparation := result.MusicCoverPreparation != nil
@@ -751,7 +1022,12 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 			return fmt.Errorf("%w: video result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
-	case vcp.OperationSpeechSynthesize, vcp.OperationMusicGenerate, vcp.OperationMusicCover:
+	case vcp.OperationSpeechSynthesize:
+		if !hasGenerated || !generatedSpeechKindsAre(result.GeneratedResources) || hasTranscript || hasMusicPreparation {
+			return fmt.Errorf("%w: speech result union is invalid", ErrInvalidProviderResult)
+		}
+		return validateGeneratedResources(result.GeneratedResources)
+	case vcp.OperationMusicGenerate, vcp.OperationMusicCover:
 		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaAudio) || hasTranscript || hasMusicPreparation {
 			return fmt.Errorf("%w: audio result union is invalid", ErrInvalidProviderResult)
 		}
@@ -820,6 +1096,22 @@ func generatedKindsAre(outputs []provider.GeneratedResource, kind vcp.MediaKind)
 	return true
 }
 
+// generatedSpeechKindsAre requires exactly one audio output and permits only optional file artifacts such as subtitles.
+// generatedSpeechKindsAre 要求精确一个音频输出，并仅允许字幕等可选文件产物。
+func generatedSpeechKindsAre(outputs []provider.GeneratedResource) bool {
+	audioCount := 0
+	for _, output := range outputs {
+		switch output.Kind {
+		case vcp.MediaAudio:
+			audioCount++
+		case vcp.MediaFile:
+		default:
+			return false
+		}
+	}
+	return audioCount == 1
+}
+
 // containsEmbeddingTask reports exact membership in a closed task list.
 // containsEmbeddingTask 报告封闭任务列表中的精确成员关系。
 func containsEmbeddingTask(values []vcp.EmbeddingInputTask, target vcp.EmbeddingInputTask) bool {
@@ -886,7 +1178,7 @@ func (s *Service) prepareInputs(ctx context.Context, record Record) ([]resource.
 	}
 	preparing := record
 	emitCompletedEvent := false
-	if record.Status == StatusAccepted {
+	if record.Status == StatusAccepted || record.Status == StatusWaitingRetry {
 		var errTransition error
 		preparing, errTransition = s.transition(ctx, record, StatusPreparingInputs, EventInputMaterializationStarted, nil)
 		if errTransition != nil {
@@ -933,8 +1225,19 @@ func (s *Service) startTask(ctx context.Context, record Record, binding transpor
 	}
 	excludedCredentials := make([]string, 0, maxSameProviderExecutionAttempts)
 	excludedEndpoints := make([]string, 0, maxSameProviderExecutionAttempts)
-	for attemptIndex := 0; attemptIndex < maxSameProviderExecutionAttempts; attemptIndex++ {
-		providerRequest := providerRequestForRecord(record, binding, definition, materialized, nil)
+	cycleAttempts := maximumCycleAttempts(record)
+	if record.Request.Budget.MaxProviderTasks != nil {
+		remainingTasks := *record.Request.Budget.MaxProviderTasks - len(record.Attempts)
+		if remainingTasks < cycleAttempts {
+			cycleAttempts = remainingTasks
+		}
+	}
+	if cycleAttempts <= 0 {
+		failed, errFail := s.fail(ctx, record, "provider_task_budget_exceeded", false)
+		return failed, false, errFail
+	}
+	for attemptIndex := 0; attemptIndex < cycleAttempts; attemptIndex++ {
+		providerRequest := providerRequestForRecord(record, binding, definition, materialized, nil, nil)
 		startedAt := s.options.Now().UTC()
 		result, errStart := taskExecutor.StartTask(ctx, providerRequest)
 		endedAt := s.options.Now().UTC()
@@ -947,7 +1250,7 @@ func (s *Service) startTask(ctx context.Context, record Record, binding transpor
 				attempt.RetryAction = classified.Action
 			}
 			nextTarget, retry := s.resolveRetryTarget(ctx, record, classified, classifiedOK, acceptedByProvider, materialized, nil, &excludedCredentials, &excludedEndpoints)
-			if retry && attemptIndex+1 < maxSameProviderExecutionAttempts {
+			if retry && attemptIndex+1 < cycleAttempts {
 				updated, errPersist := s.persistAttempt(ctx, record, attempt, &nextTarget)
 				if errPersist != nil {
 					return Record{}, false, errPersist
@@ -964,7 +1267,12 @@ func (s *Service) startTask(ctx context.Context, record Record, binding transpor
 			if errPersist != nil {
 				return Record{}, false, errPersist
 			}
-			failed, errFail := s.fail(ctx, updated, stableFailureCode(errStart), retryableFailure(errStart) || classifiedRetryable(classified, classifiedOK))
+			if scheduled, didSchedule, errSchedule := s.scheduleRetry(ctx, updated, classified, classifiedOK, acceptedByProvider); errSchedule != nil {
+				return Record{}, false, errSchedule
+			} else if didSchedule {
+				return scheduled, false, nil
+			}
+			failed, errFail := s.failClassified(ctx, updated, stableFailureCode(errStart), retryableFailure(errStart) || classifiedRetryable(classified, classifiedOK), classified, classifiedOK)
 			return failed, false, errFail
 		}
 		if errResult := result.Validate(); errResult != nil {
@@ -1018,43 +1326,177 @@ func (s *Service) RecoverOnce(ctx context.Context) error {
 	if errList != nil {
 		return errList
 	}
-	taskExecutor, ok := s.providers.(ProviderTaskExecutor)
-	if !ok {
-		return nil
-	}
-	now := s.options.Now().UTC()
+	taskExecutor, taskExecutionSupported := s.providers.(ProviderTaskExecutor)
 	for _, record := range records {
-		if !record.ExpiresAt.After(now) {
-			if _, errExpire := s.transition(ctx, record, StatusExpired, EventExecutionExpired, nil); errExpire != nil && !errors.Is(errExpire, ErrRevisionConflict) {
-				return errExpire
-			}
+		now := s.options.Now().UTC()
+		if !recoveryDue(record, now) {
 			continue
 		}
-		if record.ProviderTask == nil {
-			if _, _, errExecute := s.execute(ctx, record); errExecute != nil && !errors.Is(errExecute, ErrRevisionConflict) {
-				return errExecute
-			}
-			continue
-		}
-		if record.ProviderTask.PollAfter.After(now) {
-			continue
-		}
-		providerRequest := taskExecutionRequest(record)
-		result, errPoll := taskExecutor.PollTask(ctx, providerRequest, record.ProviderTask.ProviderTaskID)
-		if errPoll != nil {
-			s.classifyAndRecordFailure(ctx, providerRequest, errPoll)
-			record.ProviderTask.PollAttempts++
-			record.ProviderTask.PollAfter = now.Add(taskPollBackoff(record.ProviderTask.PollAttempts))
-			if _, errSave := s.saveTaskObservation(ctx, record); errSave != nil && !errors.Is(errSave, ErrRevisionConflict) {
-				return errSave
-			}
-			continue
-		}
-		if _, errApply := s.applyTaskResult(ctx, record, result); errApply != nil && !errors.Is(errApply, ErrRevisionConflict) {
-			return errApply
+		errRecover := s.withRecoveryLease(ctx, record.ID, func(leaseContext context.Context) error {
+			return s.recoverRecordOnce(leaseContext, record, taskExecutor, taskExecutionSupported, now)
+		})
+		if errRecover != nil && !errors.Is(errRecover, ErrRevisionConflict) {
+			return errRecover
 		}
 	}
 	return nil
+}
+
+// recoveryDue avoids lease traffic for records whose provider or retry schedule is not ready.
+// recoveryDue 避免为供应商或重试计划尚未到期的记录产生租约流量。
+func recoveryDue(record Record, now time.Time) bool {
+	if !record.ExpiresAt.After(now) || executionBudgetExpired(record, now) {
+		return true
+	}
+	if record.Status == StatusWaitingRetry && record.Retry != nil && record.Retry.NextRetryAt.After(now) {
+		return false
+	}
+	if record.ProviderTask != nil && record.ProviderTask.CancellationRequestedAt != nil {
+		return !record.ProviderTask.CancellationAfter.After(now)
+	}
+	return record.ProviderTask == nil || !record.ProviderTask.PollAfter.After(now)
+}
+
+// recoverRecordOnce applies one due recovery observation while its caller owns the execution lease.
+// recoverRecordOnce 在调用方拥有执行租约时应用一次到期恢复观测。
+func (s *Service) recoverRecordOnce(ctx context.Context, record Record, taskExecutor ProviderTaskExecutor, taskExecutionSupported bool, now time.Time) error {
+	if !record.ExpiresAt.After(now) {
+		if _, errExpire := s.transition(ctx, record, StatusExpired, EventExecutionExpired, nil); errExpire != nil && !errors.Is(errExpire, ErrRevisionConflict) {
+			return errExpire
+		}
+		return nil
+	}
+	if executionBudgetExpired(record, now) {
+		if _, errFail := s.fail(ctx, record, "execution_time_budget_exceeded", false); errFail != nil && !errors.Is(errFail, ErrRevisionConflict) {
+			return errFail
+		}
+		return nil
+	}
+	if record.Status == StatusWaitingRetry {
+		if record.Retry == nil {
+			return fmt.Errorf("%w: waiting retry has no durable schedule", ErrInvalidExecution)
+		}
+		if record.Retry.NextRetryAt.After(now) {
+			return nil
+		}
+		var errStarted error
+		record, errStarted = s.appendRetryEvent(ctx, record, EventRetryStarted, uint32(len(record.Attempts)+1), nil, record.Retry.Category)
+		if errStarted != nil {
+			if errors.Is(errStarted, ErrRevisionConflict) {
+				return nil
+			}
+			return errStarted
+		}
+	}
+	if record.ProviderTask == nil {
+		if _, _, errExecute := s.execute(ctx, record); errExecute != nil && !errors.Is(errExecute, ErrRevisionConflict) {
+			return errExecute
+		}
+		return nil
+	}
+	if !taskExecutionSupported {
+		return fmt.Errorf("%w: persisted provider task has no registered task executor", ErrInvalidExecution)
+	}
+	if record.ProviderTask.CancellationRequestedAt != nil {
+		if record.ProviderTask.CancellationAfter.After(now) {
+			return nil
+		}
+		_, deferred, errCancel := s.cancelProviderTaskOnce(ctx, record, taskExecutor)
+		if errCancel != nil && !deferred && !errors.Is(errCancel, ErrRevisionConflict) {
+			return errCancel
+		}
+		return nil
+	}
+	if record.ProviderTask.PollAfter.After(now) {
+		return nil
+	}
+	providerRequest := taskExecutionRequest(record)
+	result, errPoll := taskExecutor.PollTask(ctx, providerRequest, record.ProviderTask.ProviderTaskID)
+	if errPoll != nil {
+		s.classifyAndRecordFailure(ctx, providerRequest, errPoll)
+		record.ProviderTask.PollAttempts++
+		record.ProviderTask.PollAfter = now.Add(taskPollBackoff(record.ProviderTask.PollAttempts))
+		if _, errSave := s.saveTaskObservation(ctx, record); errSave != nil && !errors.Is(errSave, ErrRevisionConflict) {
+			return errSave
+		}
+		return nil
+	}
+	if _, errApply := s.applyTaskResult(ctx, record, result); errApply != nil && !errors.Is(errApply, ErrRevisionConflict) {
+		return errApply
+	}
+	return nil
+}
+
+// cancelProviderTaskOnce performs one upstream cancellation attempt after durable intent and preserves restart backoff on failure.
+// cancelProviderTaskOnce 在持久化意图后执行一次上游取消尝试，并在失败时保留可重启退避状态。
+func (s *Service) cancelProviderTaskOnce(ctx context.Context, record Record, taskExecutor ProviderTaskExecutor) (Record, bool, error) {
+	if record.ProviderTask == nil || record.ProviderTask.CancellationRequestedAt == nil {
+		return Record{}, false, fmt.Errorf("%w: provider task cancellation intent is required", ErrInvalidExecution)
+	}
+	providerRequest := taskExecutionRequest(record)
+	record.ProviderTask.CancellationAttempts++
+	record.ProviderTask.CancellationAfter = s.options.Now().UTC().Add(taskPollBackoff(record.ProviderTask.CancellationAttempts))
+	result, errCancel := taskExecutor.CancelTask(ctx, providerRequest, record.ProviderTask.ProviderTaskID)
+	if errCancel != nil {
+		s.classifyAndRecordFailure(ctx, providerRequest, errCancel)
+		persisted, errSave := s.saveTaskObservation(context.WithoutCancel(ctx), record)
+		if errSave != nil {
+			return Record{}, false, errSave
+		}
+		return persisted, true, errCancel
+	}
+	updated, errApply := s.applyTaskResult(ctx, record, result)
+	return updated, false, errApply
+}
+
+// withRecoveryLease acquires, heartbeats, and releases one optional multi-instance execution lease.
+// withRecoveryLease 获取、续约并释放一个可选的多实例执行租约。
+func (s *Service) withRecoveryLease(ctx context.Context, executionID string, run func(context.Context) error) error {
+	if s.leases == nil {
+		return run(ctx)
+	}
+	now := s.options.Now().UTC()
+	acquired, errAcquire := s.leases.AcquireLease(ctx, executionID, s.workerID, now, now.Add(s.leaseTTL))
+	if errAcquire != nil || !acquired {
+		return errAcquire
+	}
+	leaseContext, cancelLease := context.WithCancel(ctx)
+	heartbeatResult := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(s.leaseTTL / 3)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseContext.Done():
+				heartbeatResult <- nil
+				return
+			case <-ticker.C:
+				renewedAt := s.options.Now().UTC()
+				renewed, errRenew := s.leases.RenewLease(leaseContext, executionID, s.workerID, renewedAt, renewedAt.Add(s.leaseTTL))
+				if errRenew != nil {
+					heartbeatResult <- errRenew
+					cancelLease()
+					return
+				}
+				if !renewed {
+					heartbeatResult <- fmt.Errorf("%w: execution recovery lease was lost", ErrRevisionConflict)
+					cancelLease()
+					return
+				}
+			}
+		}
+	}()
+	errRun := run(leaseContext)
+	cancelLease()
+	errHeartbeat := <-heartbeatResult
+	errRelease := s.leases.ReleaseLease(context.WithoutCancel(ctx), executionID, s.workerID)
+	if errRun != nil {
+		return errRun
+	}
+	if errHeartbeat != nil {
+		return errHeartbeat
+	}
+	return errRelease
 }
 
 // taskPollBackoff returns a bounded deterministic delay after an upstream poll transport failure.
@@ -1098,6 +1540,7 @@ func (s *Service) applyTaskResult(ctx context.Context, record Record, result pro
 		if errResult := validateProviderResult(record.Request, *result.Result, true); errResult != nil {
 			return s.fail(ctx, record, stableFailureCode(errResult), false)
 		}
+		attachUsageToLastAttempt(&record, *result.Result)
 		resources, errResources := s.ingestGeneratedResources(ctx, record, result.Result.GeneratedResources)
 		if errResources != nil {
 			return s.fail(ctx, record, stableFailureCode(errResources), retryableFailure(errResources))
@@ -1116,6 +1559,7 @@ func (s *Service) applyTaskResult(ctx context.Context, record Record, result pro
 		if errResult := validateProviderResult(record.Request, *result.Result, false); errResult != nil {
 			return s.fail(ctx, record, stableFailureCode(errResult), false)
 		}
+		attachUsageToLastAttempt(&record, *result.Result)
 		resources, errResources := s.ingestGeneratedResources(ctx, record, result.Result.GeneratedResources)
 		if errResources != nil {
 			return s.fail(ctx, record, stableFailureCode(errResources), retryableFailure(errResources))
@@ -1128,6 +1572,18 @@ func (s *Service) applyTaskResult(ctx context.Context, record Record, result pro
 		return s.transition(ctx, record, StatusCancelled, EventExecutionCancelled, nil)
 	default:
 		return Record{}, fmt.Errorf("%w: unknown provider task state", ErrInvalidExecution)
+	}
+}
+
+// attachUsageToLastAttempt associates terminal task usage with the exact accepted provider attempt.
+// attachUsageToLastAttempt 将终态任务用量关联到精确的已接受供应商尝试。
+func attachUsageToLastAttempt(record *Record, result provider.ExecutionResult) {
+	if record == nil || len(record.Attempts) == 0 {
+		return
+	}
+	usage, errUsage := usageObservationForResult(result)
+	if errUsage == nil {
+		record.Attempts[len(record.Attempts)-1].Usage = usage
 	}
 }
 
@@ -1147,7 +1603,7 @@ func (s *Service) saveTaskObservation(ctx context.Context, record Record) (Recor
 // taskExecutionRequest 仅从持久化不可变任务快照重建供应商请求。
 func taskExecutionRequest(record Record) provider.ExecutionRequest {
 	task := record.ProviderTask
-	return providerRequestForRecord(record, transport.Binding{Target: task.Target, Endpoint: task.Endpoint, Credential: task.Credential}, task.Definition, nil, nil)
+	return providerRequestForRecord(record, transport.Binding{Target: task.Target, Endpoint: task.Endpoint, Credential: task.Credential}, task.Definition, nil, nil, nil)
 }
 
 // providerRequestForRecord builds one provider request with a Router-owned replay-stable idempotency identity.
@@ -1156,10 +1612,10 @@ func taskExecutionRequest(record Record) provider.ExecutionRequest {
 // 参数：record 拥有不可变公开请求与执行身份；binding、definition、inputs 与 workflow 冻结精确上游目标。
 // Returns: a provider request whose private execution copy never forwards the caller's idempotency key upstream.
 // 返回：一个使用私有执行副本且绝不向上游转发调用方幂等键的供应商请求。
-func providerRequestForRecord(record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, workflow *provider.PreparedWorkflowBinding) provider.ExecutionRequest {
+func providerRequestForRecord(record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, workflow *provider.PreparedWorkflowBinding, continuation *provider.ContinuationBinding) provider.ExecutionRequest {
 	request := record.Request
 	request.IdempotencyKey = record.ID
-	return provider.ExecutionRequest{Binding: binding, Definition: definition, Execution: &request, MaterializedInputs: materialized, LineageID: record.ID, Now: record.UpdatedAt, PreparedWorkflow: workflow}
+	return provider.ExecutionRequest{Binding: binding, Definition: definition, Execution: &request, MaterializedInputs: materialized, LineageID: record.ID, Now: record.UpdatedAt, PreparedWorkflow: workflow, Continuation: continuation}
 }
 
 // requiresProviderTask reports an async-only model execution contract.
@@ -1168,10 +1624,130 @@ func requiresProviderTask(target resolve.Target) bool {
 	return target.SubjectKind == resolve.ExecutionSubjectModel && target.ModelCapabilities.Delivery.Asynchronous && !target.ModelCapabilities.Delivery.Synchronous
 }
 
+// requestedContinuationID returns the sole Router continuation reference carried by a conversation request.
+// requestedContinuationID 返回会话请求携带的唯一 Router 续接引用。
+func requestedContinuationID(request vcp.ExecutionRequest) string {
+	if request.Operation != vcp.OperationConversationRespond || request.Payload.Conversation == nil {
+		return ""
+	}
+	operation := request.Payload.Conversation
+	if operation.ReasoningPolicy.ContinuationID != "" {
+		return operation.ReasoningPolicy.ContinuationID
+	}
+	if operation.RemoteCompaction != nil {
+		return operation.RemoteCompaction.PreviousResponseID
+	}
+	return ""
+}
+
+// resolveRequestedContinuation loads one owner-scoped protected response and verifies its complete immutable affinity before dispatch.
+// resolveRequestedContinuation 在分派前加载一个所有者作用域受保护响应并校验其完整不可变亲和性。
+func (s *Service) resolveRequestedContinuation(ctx context.Context, ownerAPIKeyID string, request vcp.ExecutionRequest, now time.Time) (*provider.ContinuationBinding, error) {
+	continuationID := requestedContinuationID(request)
+	if continuationID == "" {
+		return nil, nil
+	}
+	if request.Target.Model == nil || request.Target.Model.Target != vcp.ModelTargetExact {
+		return nil, fmt.Errorf("%w: continuation replay requires exact model selection", vcp.ErrInvalidRequest)
+	}
+	source, errSource := s.store.Get(ctx, ownerAPIKeyID, continuationID)
+	if errSource != nil {
+		return nil, fmt.Errorf("%w: continuation is unavailable", vcp.ErrInvalidRequest)
+	}
+	continuation := source.ProviderContinuation
+	if source.Status != StatusSucceeded || continuation == nil || source.Result == nil || source.Result.Continuation == nil || source.Result.Continuation.ContinuationID != continuationID {
+		return nil, fmt.Errorf("%w: continuation is expired or incomplete", vcp.ErrInvalidRequest)
+	}
+	if !continuation.InvalidatedAt.IsZero() {
+		return nil, fmt.Errorf("%w: continuation is invalidated", vcp.ErrInvalidRequest)
+	}
+	if !continuation.ExpiresAt.After(now) {
+		if errInvalidate := s.updateContinuationState(ctx, ownerAPIKeyID, continuationID, now, false, ContinuationInvalidatedExpired); errInvalidate != nil {
+			return nil, errors.Join(fmt.Errorf("%w: continuation is expired", vcp.ErrInvalidRequest), fmt.Errorf("record continuation expiry: %w", errInvalidate))
+		}
+		return nil, fmt.Errorf("%w: continuation is expired", vcp.ErrInvalidRequest)
+	}
+	selection := request.Target.Model
+	if selection.ProviderInstanceID != continuation.Target.ProviderInstanceID || selection.ProviderModelID != continuation.Target.ProviderModelID || selection.ExecutionProfileID != "" && selection.ExecutionProfileID != continuation.Target.ExecutionProfileID {
+		return nil, fmt.Errorf("%w: continuation belongs to a different model target", vcp.ErrInvalidRequest)
+	}
+	binding := &provider.ContinuationBinding{
+		ContinuationID:       continuationID,
+		ProviderDefinitionID: continuation.Target.ProviderDefinitionID,
+		ProviderInstanceID:   continuation.Target.ProviderInstanceID,
+		ChannelID:            continuation.Target.ChannelID,
+		EndpointID:           continuation.Target.EndpointID,
+		CredentialID:         continuation.Target.CredentialID,
+		ProviderModelID:      continuation.Target.ProviderModelID,
+		UpstreamModelID:      continuation.Target.UpstreamModelID,
+		ExecutionProfileID:   continuation.Target.ExecutionProfileID,
+		UpstreamResponseID:   continuation.UpstreamResponseID,
+	}
+	if errBinding := binding.Validate(continuation.Target); errBinding != nil {
+		return nil, fmt.Errorf("%w: continuation affinity is invalid", vcp.ErrInvalidRequest)
+	}
+	return binding, nil
+}
+
+// updateContinuationState durably touches or invalidates one owner-scoped continuation through bounded optimistic retries.
+// updateContinuationState 通过有界乐观重试持久更新或失效一个所有者作用域续接。
+func (s *Service) updateContinuationState(ctx context.Context, ownerAPIKeyID string, continuationID string, observedAt time.Time, markUsed bool, reason ContinuationInvalidationReason) error {
+	if markUsed == (reason != "") || observedAt.IsZero() {
+		return fmt.Errorf("%w: continuation state update requires exactly one outcome and a time", ErrInvalidExecution)
+	}
+	for attempt := 0; attempt < maxSameProviderExecutionAttempts; attempt++ {
+		source, errSource := s.store.Get(ctx, ownerAPIKeyID, continuationID)
+		if errSource != nil {
+			return errSource
+		}
+		if source.ProviderContinuation == nil {
+			return fmt.Errorf("%w: continuation state is absent", ErrInvalidExecution)
+		}
+		continuation := source.ProviderContinuation
+		if !continuation.InvalidatedAt.IsZero() {
+			if !markUsed && continuation.InvalidationReason == reason {
+				return nil
+			}
+			return fmt.Errorf("%w: continuation is already invalidated", vcp.ErrInvalidRequest)
+		}
+		effectiveTime := observedAt.UTC()
+		if effectiveTime.Before(source.UpdatedAt) {
+			effectiveTime = source.UpdatedAt
+		}
+		if markUsed {
+			continuation.LastUsedAt = effectiveTime
+		} else {
+			continuation.InvalidatedAt = effectiveTime
+			continuation.InvalidationReason = reason
+		}
+		expectedRevision := source.Revision
+		source.UpdatedAt = effectiveTime
+		source.Revision++
+		if errSave := s.store.Save(ctx, source, expectedRevision, nil); errSave != nil {
+			if errors.Is(errSave, ErrRevisionConflict) {
+				continue
+			}
+			return errSave
+		}
+		return nil
+	}
+	return ErrRevisionConflict
+}
+
+// continuationTargetPermanentlyUnavailable reports only explicit catalog or configuration facts that revoke exact affinity.
+// continuationTargetPermanentlyUnavailable 仅报告会撤销精确亲和性的明确目录或配置事实。
+func continuationTargetPermanentlyUnavailable(errValue error) bool {
+	return errors.Is(errValue, providerconfig.ErrNotFound) || errors.Is(errValue, catalog.ErrSnapshotNotFound) || errors.Is(errValue, resolve.ErrInstanceNotExecutable) || errors.Is(errValue, resolve.ErrModelNotFound) || errors.Is(errValue, resolve.ErrModelDisabled) || errors.Is(errValue, resolve.ErrProfileNotFound) || errors.Is(errValue, resolve.ErrNoEligibleTarget)
+}
+
 // resolveTarget maps the exact closed target selection into one resolver request.
 // resolveTarget 将精确封闭 Target 选择映射为一个解析请求。
-func (s *Service) resolveTarget(ctx context.Context, request vcp.ExecutionRequest, now time.Time, excludedCredentialIDs ...string) (resolve.Target, error) {
+func (s *Service) resolveTarget(ctx context.Context, request vcp.ExecutionRequest, now time.Time, continuation *provider.ContinuationBinding, excludedCredentialIDs ...string) (resolve.Target, error) {
 	resolution := resolve.Request{Operation: request.Operation, Now: now, ExcludedCredentialIDs: append([]string(nil), excludedCredentialIDs...)}
+	if continuation != nil {
+		resolution.RequiredCredentialID = continuation.CredentialID
+		resolution.RequiredEndpointID = continuation.EndpointID
+	}
 	return s.resolveTargetWithRequest(ctx, request, resolution)
 }
 
@@ -1182,6 +1758,7 @@ func (s *Service) resolveTargetWithRequest(ctx context.Context, request vcp.Exec
 		resolution.ProviderInstanceID = request.Target.Model.ProviderInstanceID
 		resolution.ProviderModelID = request.Target.Model.ProviderModelID
 		resolution.ExecutionProfileID = request.Target.Model.ExecutionProfileID
+		resolution.RequiredRegion = request.Target.Model.RequiredRegion
 	} else {
 		resolution.ProviderInstanceID = request.Target.Service.ProviderInstanceID
 		resolution.ProviderServiceID = request.Target.Service.ProviderServiceID
@@ -1195,7 +1772,7 @@ func (s *Service) resolveTargetWithRequest(ctx context.Context, request vcp.Exec
 // resolveRetryTarget chooses another endpoint or credential only within the original provider instance and subject.
 // resolveRetryTarget 仅在原始供应商实例与主体内选择另一个入口或凭据。
 func (s *Service) resolveRetryTarget(ctx context.Context, record Record, classified provider.ClassifiedError, classifiedOK bool, semanticOutput bool, materialized []resource.MaterializedInput, preparedWorkflow *provider.PreparedWorkflowBinding, excludedCredentials *[]string, excludedEndpoints *[]string) (resolve.Target, bool) {
-	if !classifiedOK || semanticOutput || len(materialized) != 0 || preparedWorkflow != nil {
+	if !classifiedOK || semanticOutput || len(materialized) != 0 || preparedWorkflow != nil || requestedContinuationID(record.Request) != "" {
 		return resolve.Target{}, false
 	}
 	request := resolve.Request{Operation: record.Operation, Now: s.options.Now().UTC()}
@@ -1225,13 +1802,163 @@ func (s *Service) resolveRetryTarget(ctx context.Context, record Record, classif
 // persistAttempt 原子记录一次已结束尝试以及可选的下一个同供应商 Target。
 func (s *Service) persistAttempt(ctx context.Context, record Record, attempt Attempt, nextTarget *resolve.Target) (Record, error) {
 	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, errSequence
+	}
 	record.Attempts = append(record.Attempts, attempt)
 	if nextTarget != nil {
 		record.Target = *nextTarget
 	}
 	record.UpdatedAt = s.options.Now().UTC()
 	record.Revision++
-	event := attemptCompletedEvent(record.ID, expectedRevision+1, record.UpdatedAt, attempt.Sequence)
+	event := attemptCompletedEvent(record.ID, sequence, record.UpdatedAt, attempt.Sequence)
+	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
+		return Record{}, errSave
+	}
+	return record, nil
+}
+
+// normalizedRetryPolicy contains the bounded defaults used by the durable scheduler.
+// normalizedRetryPolicy 包含持久调度器使用的有界默认值。
+type normalizedRetryPolicy struct {
+	// backoff is the closed delay algorithm.
+	// backoff 是封闭的延迟算法。
+	backoff vcp.RetryBackoff
+	// initial is the first retry delay.
+	// initial 是首次重试延迟。
+	initial time.Duration
+	// maximum is the hard retry-delay ceiling.
+	// maximum 是重试延迟硬上限。
+	maximum time.Duration
+	// multiplier controls exponential growth.
+	// multiplier 控制指数增长。
+	multiplier float64
+	// maxAttempts optionally limits total provider dispatches.
+	// maxAttempts 可选地限制供应商分派总次数。
+	maxAttempts *uint32
+}
+
+// executionRetryPolicy resolves the validated caller policy or the durable deferred defaults.
+// executionRetryPolicy 解析已校验的调用方策略或持久延迟执行默认值。
+func executionRetryPolicy(request vcp.ExecutionRequest) normalizedRetryPolicy {
+	policy := normalizedRetryPolicy{backoff: vcp.RetryBackoffExponential, initial: 5 * time.Second, maximum: 30 * time.Minute, multiplier: 2}
+	if request.RetryPolicy == nil {
+		return policy
+	}
+	configured := request.RetryPolicy
+	if configured.Backoff != "" {
+		policy.backoff = configured.Backoff
+	}
+	if configured.InitialDelayMilliseconds != nil {
+		policy.initial = time.Duration(*configured.InitialDelayMilliseconds) * time.Millisecond
+	}
+	if configured.MaximumDelayMilliseconds != nil {
+		policy.maximum = time.Duration(*configured.MaximumDelayMilliseconds) * time.Millisecond
+	}
+	if configured.Multiplier != nil {
+		policy.multiplier = *configured.Multiplier
+	}
+	if configured.MaxAttempts != nil {
+		maximum := *configured.MaxAttempts
+		policy.maxAttempts = &maximum
+	}
+	return policy
+}
+
+// maximumCycleAttempts bounds immediate same-provider failover by the remaining configured total.
+// maximumCycleAttempts 使用剩余配置总次数限制即时同供应商故障切换。
+func maximumCycleAttempts(record Record) int {
+	maximum := maxSameProviderExecutionAttempts
+	policy := executionRetryPolicy(record.Request)
+	if policy.maxAttempts == nil {
+		return maximum
+	}
+	completed := uint32(len(record.Attempts))
+	if completed >= *policy.maxAttempts {
+		return 0
+	}
+	remaining := int(*policy.maxAttempts - completed)
+	if remaining < maximum {
+		return remaining
+	}
+	return maximum
+}
+
+// scheduleRetry persists one future retry only for deferred, classified, pre-semantic transient failures.
+// scheduleRetry 仅为延迟、已分类且产生语义输出前的瞬态失败持久化未来重试。
+func (s *Service) scheduleRetry(ctx context.Context, record Record, classified provider.ClassifiedError, classifiedOK bool, semanticOutput bool) (Record, bool, error) {
+	if record.Request.DispatchMode != vcp.DispatchDeferred || !classifiedOK || semanticOutput {
+		return record, false, nil
+	}
+	switch classified.Category {
+	case "network_unavailable", "transient_upstream", "quota_exhausted":
+	default:
+		return record, false, nil
+	}
+	policy := executionRetryPolicy(record.Request)
+	if policy.maxAttempts != nil && uint32(len(record.Attempts)) >= *policy.maxAttempts {
+		return record, false, nil
+	}
+	failureCycles := uint32((len(record.Attempts) - 1) / maxSameProviderExecutionAttempts)
+	delay := policy.initial
+	if policy.backoff == vcp.RetryBackoffExponential {
+		for cycle := uint32(0); cycle < failureCycles && delay < policy.maximum; cycle++ {
+			next := time.Duration(float64(delay) * policy.multiplier)
+			if next <= delay || next > policy.maximum {
+				delay = policy.maximum
+				break
+			}
+			delay = next
+		}
+	}
+	if delay > policy.maximum {
+		delay = policy.maximum
+	}
+	now := s.options.Now().UTC()
+	nextRetryAt := now.Add(delay)
+	if classified.RetryAt != nil && classified.RetryAt.After(nextRetryAt) {
+		nextRetryAt = classified.RetryAt.UTC()
+	}
+	if !nextRetryAt.Before(record.ExpiresAt) {
+		return record, false, nil
+	}
+	if record.Request.Budget.MaxExecutionMilliseconds != nil {
+		deadline := record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
+		if !nextRetryAt.Before(deadline) {
+			return record, false, nil
+		}
+	}
+	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, false, errSequence
+	}
+	record.Status = StatusWaitingRetry
+	record.Failure = nil
+	record.RetryCycles++
+	record.Retry = &RetryState{ConsecutiveFailures: uint32(len(record.Attempts)), NextRetryAt: nextRetryAt, Category: classified.Category, Scope: classified.Scope, Action: classified.Action, MaxAttempts: policy.maxAttempts}
+	record.UpdatedAt = now
+	record.Revision++
+	event := retryEvent(record.ID, sequence, now, EventRetryScheduled, uint32(len(record.Attempts)+1), &nextRetryAt, classified.Category)
+	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
+		return Record{}, false, errSave
+	}
+	return record, true, nil
+}
+
+// appendRetryEvent persists one scheduler observation without changing lifecycle status.
+// appendRetryEvent 持久化一次调度器观测且不改变生命周期状态。
+func (s *Service) appendRetryEvent(ctx context.Context, record Record, eventType EventType, attempt uint32, nextRetryAt *time.Time, category string) (Record, error) {
+	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, errSequence
+	}
+	now := s.options.Now().UTC()
+	record.UpdatedAt = now
+	record.Revision++
+	event := retryEvent(record.ID, sequence, now, eventType, attempt, nextRetryAt, category)
 	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
 		return Record{}, errSave
 	}
@@ -1264,7 +1991,7 @@ func classifiedRetryable(classified provider.ClassifiedError, classifiedOK bool)
 // providerResultHasSemanticOutput reports whether an errored dispatch already returned any provider-accepted state or client-visible result.
 // providerResultHasSemanticOutput 表示失败分派是否已经返回任何供应商接收状态或客户端可见结果。
 func providerResultHasSemanticOutput(result provider.ExecutionResult) bool {
-	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Transcript != nil || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
+	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || result.ContinuationUpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Transcript != nil || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
 }
 
 // appendUniqueString appends one exact identifier only when it has not already been recorded.
@@ -1333,9 +2060,16 @@ func (s *Service) transition(ctx context.Context, record Record, status Status, 
 		return Record{}, errTransition
 	}
 	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, errSequence
+	}
 	now := s.options.Now().UTC()
 	record.Status = status
 	record.Failure = failure
+	if status != StatusWaitingRetry {
+		record.Retry = nil
+	}
 	if status.IsTerminal() {
 		// ProviderTask is no longer needed after a confirmed terminal transition, allowing protected-handle cleanup.
 		// ProviderTask 在确认进入终态后不再需要，从而允许清理受保护句柄。
@@ -1343,7 +2077,7 @@ func (s *Service) transition(ctx context.Context, record Record, status Status, 
 	}
 	record.UpdatedAt = now
 	record.Revision++
-	event := lifecycleEvent(record.ID, expectedRevision+1, now, eventType, status, failure)
+	event := lifecycleEvent(record.ID, sequence, now, eventType, status, failure)
 	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
 		return Record{}, errSave
 	}
@@ -1354,10 +2088,14 @@ func (s *Service) transition(ctx context.Context, record Record, status Status, 
 // appendLifecycle 持久化一个不改变当前执行状态的真实生命周期事件。
 func (s *Service) appendLifecycle(ctx context.Context, record Record, eventType EventType) (Record, error) {
 	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, errSequence
+	}
 	now := s.options.Now().UTC()
 	record.UpdatedAt = now
 	record.Revision++
-	event := lifecycleEvent(record.ID, expectedRevision+1, now, eventType, record.Status, record.Failure)
+	event := lifecycleEvent(record.ID, sequence, now, eventType, record.Status, record.Failure)
 	if errSave := s.store.Save(ctx, record, expectedRevision, []Event{event}); errSave != nil {
 		return Record{}, errSave
 	}
@@ -1373,7 +2111,11 @@ func (s *Service) succeed(ctx context.Context, record Record, providerResult pro
 // succeedWithStatus commits provider semantic events and one exact successful terminal status.
 // succeedWithStatus 提交供应商语义事件与一个精确成功终态。
 func (s *Service) succeedWithStatus(ctx context.Context, record Record, providerResult provider.ExecutionResult, resources []resource.Resource, terminalStatus Status, terminalEvent EventType) (Record, bool, error) {
-	result := Result{Embeddings: append([]vcp.EmbeddingItem(nil), providerResult.Embeddings...), Rerank: append([]vcp.RerankResult(nil), providerResult.Rerank...), Search: providerResult.Search, Transcript: providerResult.Transcript, Resources: append([]resource.Resource(nil), resources...)}
+	usage, errUsage := usageObservationForResult(providerResult)
+	if errUsage != nil {
+		return Record{}, false, errUsage
+	}
+	result := Result{Embeddings: append([]vcp.EmbeddingItem(nil), providerResult.Embeddings...), Rerank: append([]vcp.RerankResult(nil), providerResult.Rerank...), Search: providerResult.Search, Transcript: providerResult.Transcript, Resources: append([]resource.Resource(nil), resources...), Usage: usage}
 	if providerResult.MusicCoverPreparation != nil {
 		preparation := providerResult.MusicCoverPreparation
 		publicPreparation := vcp.MusicCoverPreparation{PreparationID: record.ID, FormattedLyrics: preparation.FormattedLyrics, Structure: append([]vcp.MusicStructureSegment(nil), preparation.Structure...), AudioDurationSeconds: preparation.AudioDurationSeconds, ExpiresAt: preparation.ExpiresAt}
@@ -1392,9 +2134,21 @@ func (s *Service) succeedWithStatus(ctx context.Context, record Record, provider
 		result.Analysis = &response
 	}
 	expectedRevision := record.Revision
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, false, errSequence
+	}
 	now := s.options.Now().UTC()
+	if terminalStatus == StatusSucceeded && record.Operation == vcp.OperationConversationRespond && strings.TrimSpace(providerResult.ContinuationUpstreamResponseID) != "" {
+		logicalResponseID := strings.TrimSpace(providerResult.Response.ResponseID)
+		if logicalResponseID == "" {
+			return Record{}, false, fmt.Errorf("%w: continuation-capable result requires a public response identifier", ErrInvalidProviderResult)
+		}
+		publicContinuation := &vcp.Continuation{ContinuationID: record.ID, LogicalResponseID: logicalResponseID, AffinitySummary: continuationAffinitySummary(record.Target), ExpiresAt: record.ExpiresAt}
+		result.Continuation = publicContinuation
+		record.ProviderContinuation = &ProviderContinuationSnapshot{ContinuationID: record.ID, UpstreamResponseID: providerResult.ContinuationUpstreamResponseID, Target: record.Target, LogicalResponseID: logicalResponseID, CreatedAt: now, ExpiresAt: record.ExpiresAt}
+	}
 	events := make([]Event, 0, len(providerResult.Events)+1)
-	sequence := expectedRevision + 1
 	for _, providerEvent := range providerResult.Events {
 		eventCopy := providerEvent
 		events = append(events, Event{ExecutionID: record.ID, EventID: fmt.Sprintf("evt_%s_%d", record.ID[4:], sequence), Sequence: sequence, Time: now, Type: EventProviderSemantic, ProviderEvent: &eventCopy})
@@ -1415,6 +2169,117 @@ func (s *Service) succeedWithStatus(ctx context.Context, record Record, provider
 		return Record{}, false, errSave
 	}
 	return record, false, nil
+}
+
+// nextEventSequence returns the durable event boundary independently from record revisions that may advance without events.
+// nextEventSequence 独立于可能无事件递增的记录修订号返回持久事件边界。
+func (s *Service) nextEventSequence(ctx context.Context, record Record) (uint64, error) {
+	events, errEvents := s.store.ListEvents(ctx, record.OwnerAPIKeyID, record.ID, 0)
+	if errEvents != nil {
+		return 0, errEvents
+	}
+	if len(events) == 0 {
+		return 0, fmt.Errorf("%w: execution event log is empty", ErrInvalidExecution)
+	}
+	return events[len(events)-1].Sequence + 1, nil
+}
+
+// usageObservationForResult returns the sole consistent terminal usage observation carried by a provider result.
+// usageObservationForResult 返回供应商结果携带的唯一一致终态用量观测。
+func usageObservationForResult(result provider.ExecutionResult) (*vcp.UsageObservation, error) {
+	observations := make([]*vcp.UsageObservation, 0, 3)
+	if result.Response.Usage != nil {
+		observations = append(observations, result.Response.Usage)
+	}
+	if result.Report.Usage != nil {
+		observations = append(observations, result.Report.Usage)
+	}
+	if result.Search != nil && result.Search.Usage != nil {
+		observations = append(observations, result.Search.Usage)
+	}
+	if len(observations) == 0 {
+		return nil, nil
+	}
+	for _, observation := range observations {
+		if errValidate := validateUsageObservation(*observation); errValidate != nil {
+			return nil, errValidate
+		}
+		if !usageObservationsEqual(*observations[0], *observation) {
+			return nil, fmt.Errorf("%w: provider result contains conflicting usage observations", ErrInvalidProviderResult)
+		}
+	}
+	copy := *observations[0]
+	return &copy, nil
+}
+
+// validateUsageObservation enforces explicit provenance and non-negative provider-reported values.
+// validateUsageObservation 强制要求显式来源，并校验供应商报告数值非负。
+func validateUsageObservation(observation vcp.UsageObservation) error {
+	if strings.TrimSpace(observation.Source) == "" || strings.TrimSpace(observation.Aggregation) == "" || strings.TrimSpace(observation.Phase) == "" || strings.TrimSpace(observation.AccountingBasis) == "" {
+		return fmt.Errorf("%w: usage observation provenance is incomplete", ErrInvalidProviderResult)
+	}
+	if !validUsageSource(observation.Source) || !validUsageAggregation(observation.Aggregation) || !validUsagePhase(observation.Phase) {
+		return fmt.Errorf("%w: usage observation provenance is outside the closed VCP vocabulary", ErrInvalidProviderResult)
+	}
+	for _, value := range []*int64{observation.InputTokens, observation.OutputTokens, observation.ReasoningTokens, observation.CacheReadTokens, observation.CacheCreationTokens, observation.TotalTokens} {
+		if value != nil && *value < 0 {
+			return fmt.Errorf("%w: usage observation contains a negative token value", ErrInvalidProviderResult)
+		}
+	}
+	if observation.ServiceUnits != nil && (*observation.ServiceUnits < 0 || strings.TrimSpace(observation.ServiceUnit) == "") {
+		return fmt.Errorf("%w: usage observation service units are invalid", ErrInvalidProviderResult)
+	}
+	if observation.ServiceUnits == nil && strings.TrimSpace(observation.ServiceUnit) != "" {
+		return fmt.Errorf("%w: usage observation service unit has no value", ErrInvalidProviderResult)
+	}
+	return nil
+}
+
+// validUsageSource reports whether provenance belongs to the closed VCP usage vocabulary.
+// validUsageSource 报告来源是否属于封闭的 VCP 用量词汇表。
+func validUsageSource(source string) bool {
+	switch source {
+	case "provider_reported", "exact", "estimated", "derived", "unknown":
+		return true
+	default:
+		return false
+	}
+}
+
+// validUsageAggregation reports whether one observation declares closed aggregation semantics.
+// validUsageAggregation 报告观测是否声明了封闭的聚合语义。
+func validUsageAggregation(aggregation string) bool {
+	switch aggregation {
+	case "delta", "cumulative", "snapshot":
+		return true
+	default:
+		return false
+	}
+}
+
+// validUsagePhase reports whether one observation belongs to a recognized accounting phase.
+// validUsagePhase 报告观测是否属于已识别的计量阶段。
+func validUsagePhase(phase string) bool {
+	switch phase {
+	case "preflight", "streaming", "terminal", "billing":
+		return true
+	default:
+		return false
+	}
+}
+
+// usageObservationsEqual compares every defined usage dimension and its accounting semantics.
+// usageObservationsEqual 比较每个已定义用量维度及其计量语义。
+func usageObservationsEqual(first vcp.UsageObservation, second vcp.UsageObservation) bool {
+	firstJSON, errFirst := json.Marshal(first)
+	secondJSON, errSecond := json.Marshal(second)
+	return errFirst == nil && errSecond == nil && bytes.Equal(firstJSON, secondJSON)
+}
+
+// continuationAffinitySummary returns a stable secret-free description of the exact replay boundary.
+// continuationAffinitySummary 返回精确重放边界的稳定无秘密描述。
+func continuationAffinitySummary(target resolve.Target) string {
+	return fmt.Sprintf("provider=%s;instance=%s;model=%s;profile=%s", target.ProviderDefinitionID, target.ProviderInstanceID, target.ProviderModelID, target.ExecutionProfileID)
 }
 
 // typedResultEvents projects only real completed provider results into operation-specific semantic events.
@@ -1441,9 +2306,16 @@ func typedResultEvents(executionID string, firstSequence uint64, at time.Time, r
 			}
 		}
 	}
-	for _, generated := range resources {
+	for resourceIndex, generated := range resources {
 		value := generated
-		events = append(events, Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventResourceCompleted, Resource: &ResourceEvent{ResourceID: value.ID, Resource: &value}})
+		outputID := result.GeneratedResources[resourceIndex].OutputID
+		events = append(events, Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventResourceCompleted, Resource: &ResourceEvent{OutputID: outputID, ResourceID: value.ID, Resource: &value}})
+		sequence++
+	}
+	usage, _ := usageObservationForResult(result)
+	for _, usageMetric := range usageEvents(usage) {
+		value := usageMetric
+		events = append(events, Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventUsageUpdated, Usage: &value})
 		sequence++
 	}
 	if result.Search == nil {
@@ -1476,11 +2348,104 @@ func typedResultEvents(executionID string, firstSequence uint64, at time.Time, r
 	return events
 }
 
+// usageEvents expands one typed observation into independently replayable closed metrics.
+// usageEvents 将一个类型化观测展开为可独立重放的封闭指标。
+func usageEvents(observation *vcp.UsageObservation) []UsageEvent {
+	if observation == nil {
+		return nil
+	}
+	accuracy := "exact"
+	if observation.Source == "estimated" {
+		accuracy = "estimated"
+	} else if observation.Source == "unknown" {
+		accuracy = "unknown"
+	}
+	metrics := make([]UsageEvent, 0, 7)
+	appendMetric := func(unit string, value float64) {
+		metrics = append(metrics, UsageEvent{Unit: unit, Value: value, Accuracy: accuracy, Source: observation.Source, Aggregation: observation.Aggregation, Phase: observation.Phase, AccountingBasis: observation.AccountingBasis, Final: observation.Final})
+	}
+	if observation.ServiceUnits != nil {
+		appendMetric(observation.ServiceUnit, *observation.ServiceUnits)
+	}
+	for _, metric := range []struct {
+		// unit identifies the closed VCP accounting dimension.
+		// unit 标识封闭的 VCP 计量维度。
+		unit string
+		// value references the optional measured integer for this dimension.
+		// value 引用该维度的可选整数测量值。
+		value *int64
+	}{{"input_tokens", observation.InputTokens}, {"output_tokens", observation.OutputTokens}, {"reasoning_tokens", observation.ReasoningTokens}, {"cache_read_tokens", observation.CacheReadTokens}, {"cache_creation_tokens", observation.CacheCreationTokens}, {"total_tokens", observation.TotalTokens}} {
+		if metric.value != nil {
+			appendMetric(metric.unit, float64(*metric.value))
+		}
+	}
+	return metrics
+}
+
 // fail commits one safe terminal failure.
 // fail 提交一个安全终态失败。
 func (s *Service) fail(ctx context.Context, record Record, code string, retryable bool) (Record, error) {
-	failure := &Failure{Code: code, Retryable: retryable}
+	updated, errAborted := s.appendRetryAbortBeforeTerminalFailure(ctx, record)
+	if errAborted != nil {
+		return Record{}, errAborted
+	}
+	record = updated
+	failure := failureForRecord(record, code, retryable)
 	return s.transition(ctx, record, StatusFailed, EventExecutionFailed, failure)
+}
+
+// failClassified commits a terminal failure with trusted provider classification and no response body data.
+// failClassified 提交带可信供应商分类且不含响应正文数据的终态失败。
+func (s *Service) failClassified(ctx context.Context, record Record, code string, retryable bool, classified provider.ClassifiedError, classifiedOK bool) (Record, error) {
+	if !classifiedOK {
+		return s.fail(ctx, record, code, retryable)
+	}
+	updated, errAborted := s.appendRetryAbortBeforeTerminalFailure(ctx, record)
+	if errAborted != nil {
+		return Record{}, errAborted
+	}
+	record = updated
+	failure := failureForRecord(record, code, retryable)
+	failure.Category = classified.Category
+	failure.Scope = classified.Scope
+	failure.RetryAction = classified.Action
+	failure.ProviderRequestID = classified.ProviderRequestID
+	if classified.RetryAt != nil {
+		nextRetryAt := classified.RetryAt.UTC()
+		failure.NextRetryAt = &nextRetryAt
+		delay := nextRetryAt.Sub(s.options.Now().UTC()).Milliseconds()
+		if delay < 0 {
+			delay = 0
+		}
+		failure.RetryAfterMilliseconds = &delay
+	}
+	return s.transition(ctx, record, StatusFailed, EventExecutionFailed, failure)
+}
+
+// appendRetryAbortBeforeTerminalFailure closes a previously scheduled retry sequence exactly once before failure.
+// appendRetryAbortBeforeTerminalFailure 在失败前精确关闭一次先前已计划的重试序列。
+func (s *Service) appendRetryAbortBeforeTerminalFailure(ctx context.Context, record Record) (Record, error) {
+	if record.RetryCycles == 0 {
+		return record, nil
+	}
+	return s.appendRetryEvent(ctx, record, EventRetryAborted, uint32(len(record.Attempts)+1), nil, "")
+}
+
+// failureForRecord creates stable request and redacted target diagnostics.
+// failureForRecord 创建稳定请求与脱敏 Target 诊断信息。
+func failureForRecord(record Record, code string, retryable bool) *Failure {
+	policy := executionRetryPolicy(record.Request)
+	return &Failure{Code: code, Retryable: retryable, Attempt: uint32(len(record.Attempts)), MaxAttempts: policy.maxAttempts, RouterRequestID: record.Request.RequestID, TargetSummary: safeTargetSummary(record.Target)}
+}
+
+// safeTargetSummary returns only non-secret immutable routing coordinates.
+// safeTargetSummary 仅返回非秘密不可变路由坐标。
+func safeTargetSummary(target resolve.Target) string {
+	subject := target.ProviderModelID
+	if subject == "" {
+		subject = target.ProviderServiceID
+	}
+	return fmt.Sprintf("instance=%s;subject=%s;profile=%s;region=%s", target.ProviderInstanceID, subject, target.ExecutionProfileID, target.EndpointRegion)
 }
 
 // lifecycleEvent builds one stable Router-owned event.
@@ -1493,6 +2458,12 @@ func lifecycleEvent(executionID string, sequence uint64, at time.Time, eventType
 // attemptCompletedEvent 为一次已持久审计的私有供应商尝试构建安全事件。
 func attemptCompletedEvent(executionID string, sequence uint64, at time.Time, attemptSequence uint32) Event {
 	return Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventExecutionAttemptCompleted, Attempt: &AttemptEvent{Sequence: attemptSequence}}
+}
+
+// retryEvent builds one client-safe durable scheduler event.
+// retryEvent 构建一个客户端安全的持久调度器事件。
+func retryEvent(executionID string, sequence uint64, at time.Time, eventType EventType, attempt uint32, nextRetryAt *time.Time, category string) Event {
+	return Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: eventType, Retry: &RetryEvent{Attempt: attempt, NextRetryAt: nextRetryAt, Category: category}}
 }
 
 // canonicalRequestHash hashes canonical JSON after removing the transport idempotency key itself.
@@ -1543,6 +2514,8 @@ func stableFailureCode(errValue error) string {
 		return "provider_action_unavailable"
 	case errors.Is(errValue, ErrInvalidProviderResult):
 		return "provider_invalid_response"
+	case errors.Is(errValue, ErrExecutionBudgetExceeded), errors.Is(errValue, provider.ErrOutputBudgetExceeded):
+		return "execution_budget_exceeded"
 	default:
 		return "provider_execution_failed"
 	}

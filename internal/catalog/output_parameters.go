@@ -53,6 +53,9 @@ const (
 	// ParameterString represents free text with explicit length bounds.
 	// ParameterString 表示具有显式长度边界的自由文本。
 	ParameterString ParameterKind = "string"
+	// ParameterStringList represents an ordered list of free-text entries with per-entry length bounds.
+	// ParameterStringList 表示具有逐项长度边界的有序自由文本列表。
+	ParameterStringList ParameterKind = "string_list"
 	// ParameterBoolean represents a boolean switch.
 	// ParameterBoolean 表示布尔开关。
 	ParameterBoolean ParameterKind = "boolean"
@@ -482,8 +485,8 @@ func validateDeliveryCapabilities(delivery DeliveryCapabilities) error {
 	if !delivery.Synchronous && !delivery.Streaming && !delivery.Asynchronous {
 		return fmt.Errorf("%w: capability requires a delivery mode", ErrInvalidCatalog)
 	}
-	if (delivery.Polling || delivery.Cancellation) && !delivery.Asynchronous {
-		return fmt.Errorf("%w: polling and cancellation require asynchronous delivery", ErrInvalidCatalog)
+	if delivery.Polling && !delivery.Asynchronous || delivery.Cancellation && !delivery.Asynchronous && !delivery.Streaming {
+		return fmt.Errorf("%w: polling requires asynchronous delivery and cancellation requires asynchronous or streaming delivery", ErrInvalidCatalog)
 	}
 	return nil
 }
@@ -496,7 +499,7 @@ func (p ParameterDescriptor) Validate() error {
 	}
 	integerKind := p.Kind == ParameterInteger || p.Kind == ParameterCount
 	floatKind := p.Kind == ParameterFloat || p.Kind == ParameterDuration
-	stringKind := p.Kind == ParameterString
+	stringKind := p.Kind == ParameterString || p.Kind == ParameterStringList
 	choiceKind := p.Kind == ParameterEnum || p.Kind == ParameterFormat || p.Kind == ParameterSize
 	if (p.IntegerRange != nil) != integerKind || (p.FloatRange != nil) != floatKind || (p.StringRange != nil) != stringKind || (len(p.AllowedValues) > 0) != choiceKind || (len(p.AllowedResourceRoles) > 0) != (p.Kind == ParameterResourceRole) {
 		return fmt.Errorf("%w: parameter %q constraint shape does not match kind", ErrInvalidCatalog, p.ID)
@@ -549,7 +552,7 @@ func (d ParameterDefault) validate(parameter ParameterDescriptor) error {
 	if count != 1 {
 		return fmt.Errorf("%w: parameter %q default requires exactly one value", ErrInvalidCatalog, parameter.ID)
 	}
-	if (parameter.Kind == ParameterBoolean) != (d.Boolean != nil) || ((parameter.Kind == ParameterInteger || parameter.Kind == ParameterCount) != (d.Integer != nil)) || ((parameter.Kind == ParameterFloat || parameter.Kind == ParameterDuration) != (d.Float != nil)) || ((parameter.Kind == ParameterString || parameter.Kind == ParameterEnum || parameter.Kind == ParameterFormat || parameter.Kind == ParameterSize) != (d.String != nil)) || (parameter.Kind == ParameterResourceRole) != (d.ResourceRole != nil) {
+	if parameter.Kind == ParameterStringList || (parameter.Kind == ParameterBoolean) != (d.Boolean != nil) || ((parameter.Kind == ParameterInteger || parameter.Kind == ParameterCount) != (d.Integer != nil)) || ((parameter.Kind == ParameterFloat || parameter.Kind == ParameterDuration) != (d.Float != nil)) || ((parameter.Kind == ParameterString || parameter.Kind == ParameterEnum || parameter.Kind == ParameterFormat || parameter.Kind == ParameterSize) != (d.String != nil)) || (parameter.Kind == ParameterResourceRole) != (d.ResourceRole != nil) {
 		return fmt.Errorf("%w: parameter %q default type mismatch", ErrInvalidCatalog, parameter.ID)
 	}
 	if d.Integer != nil && parameter.IntegerRange != nil && ((parameter.IntegerRange.Minimum != nil && *d.Integer < *parameter.IntegerRange.Minimum) || (parameter.IntegerRange.Maximum != nil && *d.Integer > *parameter.IntegerRange.Maximum)) {
@@ -612,7 +615,7 @@ func (r ParameterRule) validate(parameters map[string]ParameterDescriptor) error
 // validParameterKind reports whether one parameter kind belongs to the closed contract.
 // validParameterKind 报告一个参数类型是否属于封闭合同。
 func validParameterKind(kind ParameterKind) bool {
-	return kind == ParameterString || kind == ParameterBoolean || kind == ParameterInteger || kind == ParameterFloat || kind == ParameterEnum || kind == ParameterSize || kind == ParameterDuration || kind == ParameterFormat || kind == ParameterCount || kind == ParameterResourceRole
+	return kind == ParameterString || kind == ParameterStringList || kind == ParameterBoolean || kind == ParameterInteger || kind == ParameterFloat || kind == ParameterEnum || kind == ParameterSize || kind == ParameterDuration || kind == ParameterFormat || kind == ParameterCount || kind == ParameterResourceRole
 }
 
 // containsExactString reports whether a list contains one exact declared value.

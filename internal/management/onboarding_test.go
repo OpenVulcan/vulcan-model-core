@@ -67,8 +67,8 @@ func TestOnboardSystemProviderCommitsClosedKimiConfiguration(t *testing.T) {
 	}
 }
 
-// TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel verifies that native actions receive independently resolvable endpoint bindings.
-// TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel 验证原生动作分别获得可解析的 Endpoint 绑定。
+// TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel verifies that native actions share one Origin through independently resolvable bindings.
+// TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel 验证原生动作通过独立可解析绑定共享一个 Origin。
 func TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel(t *testing.T) {
 	ctx := context.Background()
 	service, _, _ := newKimiOnboardingService(t)
@@ -79,15 +79,20 @@ func TestOnboardSystemProviderCreatesEveryOpenRouterActionChannel(t *testing.T) 
 	if errOnboard != nil {
 		t.Fatalf("OnboardSystemProvider() error = %v", errOnboard)
 	}
-	if len(onboarding.Endpoints) != 6 || len(onboarding.Bindings) != 6 {
-		t.Fatalf("OpenRouter endpoint/binding counts = %d/%d, want 6/6", len(onboarding.Endpoints), len(onboarding.Bindings))
+	if len(onboarding.Endpoints) != 1 || len(onboarding.Bindings) != 6 {
+		t.Fatalf("OpenRouter endpoint/binding counts = %d/%d, want 1/6", len(onboarding.Endpoints), len(onboarding.Bindings))
 	}
-	channels := make(map[string]struct{}, len(onboarding.Endpoints))
+	channels := make(map[string]struct{}, len(onboarding.Bindings))
 	for _, endpoint := range onboarding.Endpoints {
 		if endpoint.BaseURL != "https://openrouter.ai/api" {
 			t.Fatalf("OpenRouter endpoint base URL = %q", endpoint.BaseURL)
 		}
-		channels[endpoint.ChannelID] = struct{}{}
+	}
+	for _, binding := range onboarding.Bindings {
+		if binding.EndpointID != onboarding.Endpoints[0].ID {
+			t.Fatalf("OpenRouter binding endpoint = %q, want shared endpoint %q", binding.EndpointID, onboarding.Endpoints[0].ID)
+		}
+		channels[binding.ChannelID] = struct{}{}
 	}
 	for _, channelID := range []string{"openrouter.embeddings.v1", provideropenrouter.ImageGenerateProtocolProfileID, "openrouter.rerank.v1", provideropenrouter.SpeechSynthesizeProtocolProfileID, provideropenrouter.SpeechTranscribeProtocolProfileID} {
 		if _, exists := channels[channelID]; !exists {

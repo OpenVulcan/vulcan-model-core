@@ -12,6 +12,7 @@ package responses
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
@@ -80,6 +81,18 @@ type ProfileCapabilities struct {
 	// NativeWebSearch reports verified provider-hosted web search support.
 	// NativeWebSearch 表示经过验证的供应商托管网页搜索支持。
 	NativeWebSearch bool
+	// ProviderFileSearch reports verified Responses file_search wire support.
+	// ProviderFileSearch 表示经过验证的 Responses file_search Wire 支持。
+	ProviderFileSearch bool
+	// ProviderCodeInterpreter reports verified Responses code_interpreter wire support.
+	// ProviderCodeInterpreter 表示经过验证的 Responses code_interpreter Wire 支持。
+	ProviderCodeInterpreter bool
+	// ProviderComputerUsePreview reports verified legacy computer_use_preview wire support.
+	// ProviderComputerUsePreview 表示经过验证的旧版 computer_use_preview Wire 支持。
+	ProviderComputerUsePreview bool
+	// ProviderComputerUseGA reports verified current computer wire support.
+	// ProviderComputerUseGA 表示经过验证的当前 computer Wire 支持。
+	ProviderComputerUseGA bool
 }
 
 // Request is the typed OpenAI Responses request body.
@@ -147,12 +160,49 @@ type InputItem struct {
 	// Input contains freeform custom-tool input without JSON wrapping.
 	// Input 包含不使用 JSON 包装的自由格式 custom tool 输入。
 	Input string `json:"input,omitempty"`
-	// Output contains caller-returned tool output text.
-	// Output 包含调用方返回的工具输出文本。
-	Output string `json:"output,omitempty"`
+	// Output contains one closed caller-returned text or computer screenshot result.
+	// Output 包含一个封闭的调用方返回文本或计算机截图结果。
+	Output *InputItemOutput `json:"output,omitempty"`
 	// Summary contains visible reasoning summary content only.
 	// Summary 仅包含可见推理摘要内容。
 	Summary []ReasoningSummary `json:"summary,omitempty"`
+}
+
+// InputItemOutput is the closed string-or-computer-screenshot Responses output union.
+// InputItemOutput 是封闭的 Responses 字符串或计算机截图输出联合。
+type InputItemOutput struct {
+	// Text contains an ordinary function or custom tool result.
+	// Text 包含普通 function 或 custom 工具结果。
+	Text *string
+	// ComputerScreenshot contains one coordinate-preserving computer screenshot.
+	// ComputerScreenshot 包含一张保持坐标的计算机截图。
+	ComputerScreenshot *ComputerScreenshotOutput
+}
+
+// MarshalJSON emits exactly one documented Responses output union arm.
+// MarshalJSON 仅发出一个文档化 Responses 输出联合分支。
+func (o InputItemOutput) MarshalJSON() ([]byte, error) {
+	if (o.Text == nil) == (o.ComputerScreenshot == nil) {
+		return nil, errors.New("input item output requires exactly one union arm")
+	}
+	if o.Text != nil {
+		return json.Marshal(*o.Text)
+	}
+	return json.Marshal(o.ComputerScreenshot)
+}
+
+// ComputerScreenshotOutput is the documented Responses computer_call_output payload.
+// ComputerScreenshotOutput 是文档化的 Responses computer_call_output 载荷。
+type ComputerScreenshotOutput struct {
+	// Type is fixed to computer_screenshot.
+	// Type 固定为 computer_screenshot。
+	Type string `json:"type"`
+	// ImageURL contains the exact imported screenshot Data URL.
+	// ImageURL 包含精确导入的截图 Data URL。
+	ImageURL string `json:"image_url"`
+	// Detail is fixed to original to preserve action coordinates.
+	// Detail 固定为 original 以保持动作坐标。
+	Detail string `json:"detail"`
 }
 
 // InputContent is one closed text, image, audio, or file input part.
@@ -203,11 +253,11 @@ type ReasoningSummary struct {
 	Text string `json:"text"`
 }
 
-// Tool is one typed OpenAI Responses tool declaration.
-// Tool 是一个类型化 OpenAI Responses 工具声明。
+// Tool is one typed OpenAI Responses caller or provider-hosted tool declaration.
+// Tool 是一个类型化 OpenAI Responses 调用方或供应商托管工具声明。
 type Tool struct {
-	// Type identifies function, custom, or web_search.
-	// Type 标识 function、custom 或 web_search。
+	// Type identifies the exact Responses built-in or caller tool type.
+	// Type 标识精确的 Responses 内置或调用方工具类型。
 	Type string `json:"type"`
 	// Name identifies function or custom tools.
 	// Name 标识 function 或 custom 工具。
@@ -221,6 +271,57 @@ type Tool struct {
 	// Strict requests verified strict function schema behavior.
 	// Strict 请求经过验证的严格函数 Schema 行为。
 	Strict bool `json:"strict,omitempty"`
+	// VectorStoreIDs binds file search to exact caller-authorized provider stores.
+	// VectorStoreIDs 将文件搜索绑定到调用方明确授权的供应商存储。
+	VectorStoreIDs []string `json:"vector_store_ids,omitempty"`
+	// MaxNumResults limits provider file-search results when requested.
+	// MaxNumResults 在请求时限制供应商文件搜索结果数。
+	MaxNumResults *int `json:"max_num_results,omitempty"`
+	// Container selects an explicit code-interpreter container or provider auto-allocation.
+	// Container 选择明确的代码解释器容器或供应商自动分配。
+	Container *CodeInterpreterContainer `json:"container,omitempty"`
+	// Environment is the legacy computer-use preview environment.
+	// Environment 是旧版计算机使用预览环境。
+	Environment string `json:"environment,omitempty"`
+	// DisplayWidth is the legacy preview virtual display width.
+	// DisplayWidth 是旧版预览虚拟显示宽度。
+	DisplayWidth int `json:"display_width,omitempty"`
+	// DisplayHeight is the legacy preview virtual display height.
+	// DisplayHeight 是旧版预览虚拟显示高度。
+	DisplayHeight int `json:"display_height,omitempty"`
+}
+
+// CodeInterpreterContainer is the exact string-or-auto-object Responses container union.
+// CodeInterpreterContainer 是精确的 Responses 字符串或自动对象容器联合。
+type CodeInterpreterContainer struct {
+	// ID selects one already authorized explicit provider container.
+	// ID 选择一个已经授权的明确供应商容器。
+	ID string
+	// MemoryLimit optionally selects the documented auto-container memory tier.
+	// MemoryLimit 可选地选择文档声明的自动容器内存档位。
+	MemoryLimit string
+}
+
+// MarshalJSON emits either one explicit container ID or a closed auto-container object.
+// MarshalJSON 输出一个明确容器 ID 或封闭的自动容器对象。
+func (c CodeInterpreterContainer) MarshalJSON() ([]byte, error) {
+	if c.ID != "" {
+		if c.MemoryLimit != "" {
+			return nil, fmt.Errorf("%w: explicit code-interpreter container cannot select memory", ErrUnsupportedContext)
+		}
+		return json.Marshal(c.ID)
+	}
+	// automaticContainer is the closed current Responses auto-container representation.
+	// automaticContainer 是封闭的当前 Responses 自动容器表示。
+	automaticContainer := struct {
+		// Type fixes provider-managed automatic allocation.
+		// Type 固定供应商管理的自动分配。
+		Type string `json:"type"`
+		// MemoryLimit optionally selects a documented memory tier.
+		// MemoryLimit 可选地选择文档声明的内存档位。
+		MemoryLimit string `json:"memory_limit,omitempty"`
+	}{Type: "auto", MemoryLimit: c.MemoryLimit}
+	return json.Marshal(automaticContainer)
 }
 
 // ToolChoice is a typed OpenAI Responses tool-choice union.
@@ -461,16 +562,19 @@ type OutputItem struct {
 	// EncryptedContent is sealed provider state and must never be converted to ordinary text.
 	// EncryptedContent 是密封供应商状态，绝不能转换为普通文本。
 	EncryptedContent string `json:"encrypted_content,omitempty"`
-	// Action contains one typed native web-search action for web_search_call items.
-	// Action 为 web_search_call 项目包含一个类型化原生网页搜索动作。
-	Action *WebSearchAction `json:"action,omitempty"`
+	// Action contains one legacy preview computer action or native web-search action.
+	// Action 包含一个旧版预览计算机动作或原生网页搜索动作。
+	Action *OutputAction `json:"action,omitempty"`
+	// Actions contains the ordered current-GA computer action batch.
+	// Actions 包含有序的当前 GA 计算机动作批次。
+	Actions []OutputAction `json:"actions,omitempty"`
 }
 
-// WebSearchAction contains one documented Responses native web-search action.
-// WebSearchAction 包含一个文档记录的 Responses 原生网页搜索动作。
-type WebSearchAction struct {
-	// Type identifies search, open_page, or find_in_page.
-	// Type 标识 search、open_page 或 find_in_page。
+// OutputAction contains the exact fields owned by a web-search or computer action union arm.
+// OutputAction 包含网页搜索或计算机动作联合分支拥有的精确字段。
+type OutputAction struct {
+	// Type identifies the exact action variant.
+	// Type 标识精确动作变体。
 	Type string `json:"type"`
 	// Query is the actual provider query for search actions.
 	// Query 是搜索动作的真实供应商查询。
@@ -484,6 +588,45 @@ type WebSearchAction struct {
 	// Sources contains the complete consulted-source list when requested.
 	// Sources 包含请求时返回的完整已咨询来源列表。
 	Sources []WebSearchSource `json:"sources,omitempty"`
+	// X is the optional horizontal computer coordinate.
+	// X 是可选的计算机水平坐标。
+	X *int `json:"x,omitempty"`
+	// Y is the optional vertical computer coordinate.
+	// Y 是可选的计算机垂直坐标。
+	Y *int `json:"y,omitempty"`
+	// Button identifies the computer click button.
+	// Button 标识计算机点击按钮。
+	Button string `json:"button,omitempty"`
+	// ScrollX is the horizontal computer scroll delta.
+	// ScrollX 是计算机水平滚动增量。
+	ScrollX *int `json:"scroll_x,omitempty"`
+	// ScrollY is the vertical computer scroll delta.
+	// ScrollY 是计算机垂直滚动增量。
+	ScrollY *int `json:"scroll_y,omitempty"`
+	// Text is the exact computer type action text.
+	// Text 是计算机输入动作的精确文本。
+	Text string `json:"text,omitempty"`
+	// Keys contains the exact key chord or optional modifiers.
+	// Keys 包含精确按键组合或可选修饰键。
+	Keys []string `json:"keys,omitempty"`
+	// Path contains the ordered drag coordinates.
+	// Path 包含有序拖动坐标。
+	Path []ComputerPoint `json:"path,omitempty"`
+}
+
+// WebSearchAction preserves the historical source name for the now-explicit output action union.
+// WebSearchAction 为现已明确的输出动作联合保留历史源码名称。
+type WebSearchAction = OutputAction
+
+// ComputerPoint is one Responses drag-path coordinate.
+// ComputerPoint 是一个 Responses 拖动路径坐标。
+type ComputerPoint struct {
+	// X is the horizontal pixel coordinate.
+	// X 是水平像素坐标。
+	X int `json:"x"`
+	// Y is the vertical pixel coordinate.
+	// Y 是垂直像素坐标。
+	Y int `json:"y"`
 }
 
 // WebSearchSource contains one provider-reported consulted source.

@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/resource.schema.json",
+  "title": "VCP Resource",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "kind", "mime_type", "size_bytes", "sha256", "metadata", "source", "state", "retention", "created_at", "updated_at", "revision"],
+  "properties": {
+    "id": {"type": "string", "pattern": "^res_[0-9a-f]{32}$"},
+    "kind": {"enum": ["image", "audio", "video", "file"]},
+    "mime_type": {"type": "string"},
+    "size_bytes": {"type": "integer", "minimum": 0},
+    "sha256": {"type": "string", "pattern": "^$|^[0-9a-f]{64}$"},
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "image": {"type": "object"},
+        "audio": {"type": "object"},
+        "video": {"type": "object"}
+      }
+    },
+    "source": {"enum": ["multipart", "url_import", "base64_import", "generated"]},
+    "generated_by": {"type": "object"},
+    "state": {"enum": ["receiving", "ready", "failed", "deleting", "deleted", "expired"]},
+    "retention": {"enum": ["ephemeral", "explicit_expiry", "persistent"]},
+    "error_code": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "updated_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "revision": {"type": "integer", "minimum": 1}
+  }
+}

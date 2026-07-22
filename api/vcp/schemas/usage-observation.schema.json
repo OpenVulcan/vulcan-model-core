@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/usage-observation.schema.json",
+  "title": "VCP Usage Observation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["source", "aggregation", "phase", "accounting_basis", "final"],
+  "properties": {
+    "service_units": {"type": "number", "minimum": 0},
+    "service_unit": {"type": "string"},
+    "input_tokens": {"type": "integer", "minimum": 0},
+    "output_tokens": {"type": "integer", "minimum": 0},
+    "reasoning_tokens": {"type": "integer", "minimum": 0},
+    "cache_read_tokens": {"type": "integer", "minimum": 0},
+    "cache_creation_tokens": {"type": "integer", "minimum": 0},
+    "total_tokens": {"type": "integer", "minimum": 0},
+    "source": {"enum": ["provider_reported", "exact", "estimated", "derived", "unknown"]},
+    "aggregation": {"enum": ["delta", "cumulative", "snapshot"]},
+    "phase": {"enum": ["preflight", "streaming", "terminal", "billing"]},
+    "accounting_basis": {"type": "string"},
+    "final": {"type": "boolean"}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/continuation.schema.json",
+  "title": "VCP Continuation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["continuation_id", "logical_response_id", "affinity_summary", "expires_at"],
+  "properties": {
+    "continuation_id": {"type": "string", "minLength": 1},
+    "logical_response_id": {"type": "string", "minLength": 1},
+    "affinity_summary": {"type": "string", "minLength": 1},
+    "expires_at": {"type": "string", "format": "date-time"}
+  }
+}

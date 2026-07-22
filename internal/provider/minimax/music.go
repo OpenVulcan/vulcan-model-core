@@ -107,7 +107,7 @@ func (d *MusicActionDriver) Execute(ctx context.Context, execution provider.Exec
 	if execution.Binding.Target.ProviderDefinitionID != d.definitionID {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: target definition does not belong to this driver", provider.ErrExecutionBinding)
 	}
-	if _, errValidate := execution.ValidateForAction(d.actionBindingID, providerconfig.AuthMethodAPIKey); errValidate != nil {
+	if _, errValidate := execution.ValidateForAction(d.actionBindingID, providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodDeviceFlow); errValidate != nil {
 		return provider.ExecutionResult{}, errValidate
 	}
 	var outbound transport.Request
@@ -123,11 +123,26 @@ func (d *MusicActionDriver) Execute(ctx context.Context, execution provider.Exec
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}
-	response, errRequest := d.client.Do(ctx, outbound)
+	var (
+		response   *http.Response
+		errRequest error
+	)
+	if execution.Execution.Stream && d.actionBindingID != MusicCoverPrepareActionBindingID {
+		response, errRequest = d.client.DoStream(ctx, outbound)
+	} else {
+		response, errRequest = d.client.Do(ctx, outbound)
+	}
 	if errRequest != nil {
 		return provider.ExecutionResult{}, errRequest
 	}
 	defer func() { _ = transport.DrainAndClose(response) }()
+	if execution.Execution.Stream {
+		streamed, errStream := decodeMiniMaxAudioHTTPStream(ctx, response, execution.ResourceSink, "music-0", vcp.MediaAudio, musicMIMEType(executionMusicOutputFormat(execution)), execution.Execution.Budget.MaxOutputBytes)
+		if errStream != nil {
+			return provider.ExecutionResult{}, errStream
+		}
+		return provider.ExecutionResult{GeneratedResources: []provider.GeneratedResource{{OutputID: "music-0", Kind: vcp.MediaAudio, MIMEType: musicMIMEType(executionMusicOutputFormat(execution)), Data: streamed.Audio}}}, nil
+	}
 	bounded, errBound := transport.NewBoundedResponseReader(response.Body, transport.MaximumNonStreamingResponseBytes)
 	if errBound != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: bound response: %v", ErrInvalidMusicResponse, errBound)
@@ -150,8 +165,8 @@ type musicGenerationRequest struct {
 	// Lyrics contains exact lyrics or remains absent for instrumental or optimized generation.
 	// Lyrics 包含精确歌词，纯音乐或优化生成时保持缺省。
 	Lyrics string `json:"lyrics,omitempty"`
-	// Stream remains false because VCP imports one complete generated resource.
-	// Stream 保持 false，因为 VCP 导入一个完整生成资源。
+	// Stream follows explicitly selected native audio streaming.
+	// Stream 遵循明确选择的原生音频流式输出。
 	Stream bool `json:"stream"`
 	// OutputFormat is URL so Router can promptly and privately import the result.
 	// OutputFormat 为 URL，以便 Router 及时私有导入结果。
@@ -168,6 +183,18 @@ type musicGenerationRequest struct {
 	// CoverFeatureID is the private prepared handle for a two-step cover.
 	// CoverFeatureID 是两阶段翻唱使用的私有准备句柄。
 	CoverFeatureID string `json:"cover_feature_id,omitempty"`
+	// AudioURL is one direct public cover source when no lyrics are supplied.
+	// AudioURL 是未提供歌词时的一个直接公网翻唱来源。
+	AudioURL string `json:"audio_url,omitempty"`
+	// AudioBase64 is one direct inline cover source when no lyrics are supplied.
+	// AudioBase64 是未提供歌词时的一个直接内联翻唱来源。
+	AudioBase64 string `json:"audio_base64,omitempty"`
+	// Seed requests provider-relative deterministic sampling.
+	// Seed 请求供应商相对确定性采样。
+	Seed *int64 `json:"seed,omitempty"`
+	// Watermark requests provider AIGC watermarking.
+	// Watermark 请求供应商 AIGC 水印。
+	Watermark *bool `json:"aigc_watermark,omitempty"`
 }
 
 // musicAudioSetting is one documented MiniMax audio encoding.
@@ -182,6 +209,9 @@ type musicAudioSetting struct {
 	// Format is mp3, wav, or pcm.
 	// Format 为 mp3、wav 或 pcm。
 	Format string `json:"format"`
+	// Channel is the requested channel count when explicitly supplied.
+	// Channel 是明确提供时请求的声道数量。
+	Channel int `json:"channel,omitempty"`
 }
 
 // musicCoverPreparationRequest is the closed official MiniMax preprocessing request.
@@ -202,8 +232,8 @@ type musicCoverPreparationRequest struct {
 // projectMusicGenerationRequest 在不丢弃控制项的前提下映射 VCP 文本生成音乐输入。
 func projectMusicGenerationRequest(execution provider.ExecutionRequest) (transport.Request, error) {
 	operation := execution.Execution.Payload.MusicGenerate
-	if operation == nil || operation.NegativePrompt != "" || len(operation.References) != 0 || operation.DurationSeconds != 0 || operation.Seed != nil || operation.Count > 1 {
-		return transport.Request{}, fmt.Errorf("%w: negative_prompt, references, duration_seconds, seed, and multiple outputs have no MiniMax carrier", ErrInvalidMusicDriver)
+	if operation == nil || !supportedMiniMaxMusicGenerationModel(execution.Binding.Target.UpstreamModelID) || operation.NegativePrompt != "" || len(operation.References) != 0 || operation.DurationSeconds != 0 || operation.Count > 1 {
+		return transport.Request{}, fmt.Errorf("%w: negative_prompt, references, duration_seconds, and multiple outputs have no MiniMax carrier", ErrInvalidMusicDriver)
 	}
 	promptLength := utf8.RuneCountInString(operation.Prompt)
 	lyricsLength := utf8.RuneCountInString(operation.Lyrics)
@@ -216,11 +246,26 @@ func projectMusicGenerationRequest(execution provider.ExecutionRequest) (transpo
 	if !operation.Instrumental && lyricsLength == 0 && promptLength == 0 {
 		return transport.Request{}, fmt.Errorf("%w: automatic lyrics generation requires a prompt", ErrInvalidMusicDriver)
 	}
+	lyricsOptimizer := false
+	if operation.LyricsOptimizer != nil {
+		lyricsOptimizer = *operation.LyricsOptimizer
+	}
+	if lyricsOptimizer && (operation.Instrumental || lyricsLength > 0) || !lyricsOptimizer && !operation.Instrumental && lyricsLength == 0 {
+		return transport.Request{}, fmt.Errorf("%w: lyrics_optimizer must match instrumental and explicit lyrics intent", ErrInvalidMusicDriver)
+	}
 	format, errFormat := normalizeMusicOutputFormat(operation.OutputFormat)
 	if errFormat != nil {
 		return transport.Request{}, errFormat
 	}
-	body := musicGenerationRequest{Model: execution.Binding.Target.UpstreamModelID, Prompt: operation.Prompt, Lyrics: operation.Lyrics, Stream: false, OutputFormat: "url", AudioSetting: defaultMusicAudioSetting(format), LyricsOptimizer: !operation.Instrumental && lyricsLength == 0, IsInstrumental: operation.Instrumental}
+	outputFormat := "url"
+	if execution.Execution.Stream {
+		outputFormat = "hex"
+	}
+	audioSetting, errAudio := miniMaxMusicAudioSetting(format, operation.SampleRate, operation.Bitrate, operation.Channels)
+	if errAudio != nil {
+		return transport.Request{}, errAudio
+	}
+	body := musicGenerationRequest{Model: execution.Binding.Target.UpstreamModelID, Prompt: operation.Prompt, Lyrics: operation.Lyrics, Stream: execution.Execution.Stream, OutputFormat: outputFormat, AudioSetting: audioSetting, LyricsOptimizer: lyricsOptimizer, IsInstrumental: operation.Instrumental, Seed: operation.Seed, Watermark: operation.Watermark}
 	return encodeMusicRequest(execution, "/v1/music_generation", body)
 }
 
@@ -253,25 +298,78 @@ func projectMusicCoverPreparationRequest(execution provider.ExecutionRequest) (t
 	return encodeMusicRequest(execution, "/v1/music_cover_preprocess", body)
 }
 
-// projectPreparedMusicCoverRequest consumes only the Router-resolved private feature handle.
-// projectPreparedMusicCoverRequest 仅消费 Router 已解析的私有特征句柄。
+// projectPreparedMusicCoverRequest maps the exclusive direct-source or Router-prepared cover workflow.
+// projectPreparedMusicCoverRequest 映射互斥的直接来源或 Router 已准备翻唱工作流。
 func projectPreparedMusicCoverRequest(execution provider.ExecutionRequest) (transport.Request, error) {
 	operation := execution.Execution.Payload.MusicCover
-	prepared := execution.PreparedWorkflow
-	if operation == nil || prepared == nil || prepared.PreparationID != operation.PreparationID || strings.TrimSpace(prepared.ProviderHandle) == "" || !execution.Now.Before(prepared.ExpiresAt) {
-		return transport.Request{}, fmt.Errorf("%w: valid Router-resolved cover preparation is required", ErrInvalidMusicDriver)
+	if operation == nil || !supportedMiniMaxMusicCoverModel(execution.Binding.Target.UpstreamModelID) {
+		return transport.Request{}, fmt.Errorf("%w: supported MiniMax cover operation is required", ErrInvalidMusicDriver)
 	}
 	promptLength := utf8.RuneCountInString(operation.Prompt)
 	lyricsLength := utf8.RuneCountInString(operation.Lyrics)
-	if promptLength < 10 || promptLength > 300 || lyricsLength < 10 || lyricsLength > 1000 {
-		return transport.Request{}, fmt.Errorf("%w: cover prompt must contain 10-300 characters and lyrics 10-1000 characters", ErrInvalidMusicDriver)
+	if promptLength < 10 || promptLength > 300 || lyricsLength > 1000 || lyricsLength > 0 && lyricsLength < 10 {
+		return transport.Request{}, fmt.Errorf("%w: cover prompt must contain 10-300 characters and lyrics at most 1000 characters", ErrInvalidMusicDriver)
 	}
 	format, errFormat := normalizeMusicOutputFormat(operation.OutputFormat)
 	if errFormat != nil {
 		return transport.Request{}, errFormat
 	}
-	body := musicGenerationRequest{Model: execution.Binding.Target.UpstreamModelID, Prompt: operation.Prompt, Lyrics: operation.Lyrics, Stream: false, OutputFormat: "url", AudioSetting: defaultMusicAudioSetting(format), CoverFeatureID: prepared.ProviderHandle}
+	outputFormat := "url"
+	if execution.Execution.Stream {
+		outputFormat = "hex"
+	}
+	audioSetting, errAudio := miniMaxMusicAudioSetting(format, operation.SampleRate, operation.Bitrate, operation.Channels)
+	if errAudio != nil {
+		return transport.Request{}, errAudio
+	}
+	body := musicGenerationRequest{Model: execution.Binding.Target.UpstreamModelID, Prompt: operation.Prompt, Lyrics: operation.Lyrics, Stream: execution.Execution.Stream, OutputFormat: outputFormat, AudioSetting: audioSetting, Seed: operation.Seed, Watermark: operation.Watermark}
+	if operation.Source != nil {
+		if execution.PreparedWorkflow != nil || len(execution.MaterializedInputs) != 1 {
+			return transport.Request{}, fmt.Errorf("%w: direct cover requires one materialized audio source without preparation", ErrInvalidMusicDriver)
+		}
+		input := execution.MaterializedInputs[0]
+		if input.InputID != operation.Source.ID || input.ResourceID != operation.Source.Resource.ResourceID || input.Kind != vcp.MediaAudio || input.Role != vcp.MediaRoleCoverReference {
+			return transport.Request{}, fmt.Errorf("%w: direct cover materialization does not match VCP input", ErrInvalidMusicDriver)
+		}
+		switch input.Mode {
+		case catalog.MaterializationDirectRemoteURL:
+			if errURL := validatePublicMusicURL(input.RemoteURL); errURL != nil {
+				return transport.Request{}, errURL
+			}
+			body.AudioURL = input.RemoteURL
+		case catalog.MaterializationInlineBase64:
+			if strings.TrimSpace(input.InlineBase64) == "" {
+				return transport.Request{}, fmt.Errorf("%w: inline cover audio is empty", ErrInvalidMusicDriver)
+			}
+			body.AudioBase64 = input.InlineBase64
+		default:
+			return transport.Request{}, fmt.Errorf("%w: direct cover source requires direct URL or inline Base64", ErrInvalidMusicDriver)
+		}
+	} else {
+		prepared := execution.PreparedWorkflow
+		if lyricsLength < 10 || prepared == nil || prepared.PreparationID != operation.PreparationID || strings.TrimSpace(prepared.ProviderHandle) == "" || !execution.Now.Before(prepared.ExpiresAt) || len(execution.MaterializedInputs) != 0 {
+			return transport.Request{}, fmt.Errorf("%w: valid Router-resolved cover preparation and 10-1000 lyrics characters are required", ErrInvalidMusicDriver)
+		}
+		body.CoverFeatureID = prepared.ProviderHandle
+	}
 	return encodeMusicRequest(execution, "/v1/music_generation", body)
+}
+
+// supportedMiniMaxMusicGenerationModel applies the exact model enumeration from the pinned MiniMax CLI source.
+// supportedMiniMaxMusicGenerationModel 应用固定 MiniMax CLI 源码中的精确模型枚举。
+func supportedMiniMaxMusicGenerationModel(model string) bool {
+	switch model {
+	case "music-3.0", "music-2.6", "music-2.6-free", "music-2.5+", "music-2.5":
+		return true
+	default:
+		return false
+	}
+}
+
+// supportedMiniMaxMusicCoverModel applies the exact paid and free cover model enumeration.
+// supportedMiniMaxMusicCoverModel 应用精确的付费与免费翻唱模型枚举。
+func supportedMiniMaxMusicCoverModel(model string) bool {
+	return model == "music-cover" || model == "music-cover-free"
 }
 
 // encodeMusicRequest serializes one authenticated MiniMax JSON request.
@@ -303,6 +401,25 @@ func normalizeMusicOutputFormat(format string) (string, error) {
 // defaultMusicAudioSetting 返回一个高质量且文档声明的 MiniMax 编码。
 func defaultMusicAudioSetting(format string) musicAudioSetting {
 	return musicAudioSetting{SampleRate: 44100, Bitrate: 256000, Format: format}
+}
+
+// miniMaxMusicAudioSetting applies released defaults while preserving explicit positive encoding controls.
+// miniMaxMusicAudioSetting 应用已发布默认值并保留明确的正数编码控制。
+func miniMaxMusicAudioSetting(format string, sampleRate int, bitrate int, channels int) (musicAudioSetting, error) {
+	setting := defaultMusicAudioSetting(format)
+	if sampleRate > 0 {
+		setting.SampleRate = sampleRate
+	}
+	if bitrate > 0 {
+		setting.Bitrate = bitrate
+	}
+	if channels > 0 {
+		setting.Channel = channels
+	}
+	if setting.SampleRate <= 0 || setting.Bitrate <= 0 || setting.Channel < 0 || setting.Channel > 2 {
+		return musicAudioSetting{}, fmt.Errorf("%w: MiniMax music audio controls are invalid", ErrInvalidMusicDriver)
+	}
+	return setting, nil
 }
 
 // executionMusicOutputFormat returns the exact output format of the active music operation.
@@ -355,9 +472,9 @@ type musicGenerationResponse struct {
 // musicGenerationData contains generated audio and completion status.
 // musicGenerationData 包含生成音频与完成状态。
 type musicGenerationData struct {
-	// Audio is the requested temporary result URL.
-	// Audio 是请求的临时结果 URL。
-	Audio string `json:"audio"`
+	// AudioURL is the requested temporary result URL.
+	// AudioURL 是请求的临时结果 URL。
+	AudioURL string `json:"audio_url"`
 	// Status is two only when generation completed.
 	// Status 仅在生成完成时为二。
 	Status int `json:"status"`
@@ -370,10 +487,10 @@ func decodeMusicGenerationResponse(reader io.Reader, mimeType string) (provider.
 	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: decode response: %v", ErrInvalidMusicResponse, errDecode)
 	}
-	if response.BaseResponse.StatusCode != 0 || response.Data.Status != 2 || strings.TrimSpace(response.TraceID) == "" || validatePublicMusicURL(response.Data.Audio) != nil {
+	if response.BaseResponse.StatusCode != 0 || response.Data.Status != 2 || strings.TrimSpace(response.TraceID) == "" || validatePublicMusicURL(response.Data.AudioURL) != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: provider status %d", ErrInvalidMusicResponse, response.BaseResponse.StatusCode)
 	}
-	return provider.ExecutionResult{UpstreamResponseID: response.TraceID, GeneratedResources: []provider.GeneratedResource{{OutputID: "music-1", Kind: vcp.MediaAudio, MIMEType: mimeType, DownloadURL: response.Data.Audio}}}, nil
+	return provider.ExecutionResult{UpstreamResponseID: response.TraceID, GeneratedResources: []provider.GeneratedResource{{OutputID: "music-0", Kind: vcp.MediaAudio, MIMEType: mimeType, DownloadURL: response.Data.AudioURL}}}, nil
 }
 
 // musicCoverPreparationResponse is the closed successful MiniMax preprocessing response.

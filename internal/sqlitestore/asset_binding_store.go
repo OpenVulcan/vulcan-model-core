@@ -73,6 +73,50 @@ func (s *AssetBindingStore) FindExact(ctx context.Context, resourceID string, re
 	return binding, nil
 }
 
+// ListByResource returns validated bindings in stable identifier order.
+// ListByResource 按稳定标识顺序返回经过校验的绑定。
+func (s *AssetBindingStore) ListByResource(ctx context.Context, resourceID string) ([]resource.ProviderAssetBinding, error) {
+	if errContext := validateContext(ctx); errContext != nil {
+		return nil, errContext
+	}
+	rows, errQuery := s.database.sql.QueryContext(ctx, `SELECT payload FROM provider_asset_bindings WHERE resource_id = ? ORDER BY id`, resourceID)
+	if errQuery != nil {
+		return nil, fmt.Errorf("list provider asset bindings: %w", errQuery)
+	}
+	defer rows.Close()
+	bindings := make([]resource.ProviderAssetBinding, 0)
+	for rows.Next() {
+		var payload []byte
+		if errScan := rows.Scan(&payload); errScan != nil {
+			return nil, fmt.Errorf("scan provider asset binding: %w", errScan)
+		}
+		var binding resource.ProviderAssetBinding
+		if errDecode := unmarshalPayload(payload, &binding); errDecode != nil {
+			return nil, errDecode
+		}
+		if errValidate := binding.Validate(); errValidate != nil {
+			return nil, fmt.Errorf("validate persisted asset binding: %w", errValidate)
+		}
+		bindings = append(bindings, binding)
+	}
+	if errRows := rows.Err(); errRows != nil {
+		return nil, fmt.Errorf("iterate provider asset bindings: %w", errRows)
+	}
+	return bindings, nil
+}
+
+// Delete removes one exact provider asset binding after upstream cleanup.
+// Delete 在上游清理后移除一个精确供应商资产绑定。
+func (s *AssetBindingStore) Delete(ctx context.Context, bindingID string) error {
+	if errContext := validateContext(ctx); errContext != nil {
+		return errContext
+	}
+	if _, errExec := s.database.sql.ExecContext(ctx, `DELETE FROM provider_asset_bindings WHERE id = ?`, bindingID); errExec != nil {
+		return fmt.Errorf("delete provider asset binding: %w", errExec)
+	}
+	return nil
+}
+
 // DeleteByResource removes every provider binding for one Router resource.
 // DeleteByResource 移除一个 Router 资源的每个供应商绑定。
 func (s *AssetBindingStore) DeleteByResource(ctx context.Context, resourceID string) error {
@@ -83,10 +127,4 @@ func (s *AssetBindingStore) DeleteByResource(ctx context.Context, resourceID str
 		return fmt.Errorf("delete provider asset bindings: %w", errExec)
 	}
 	return nil
-}
-
-// CleanupResourceBindings satisfies resource lifecycle cleanup.
-// CleanupResourceBindings 满足资源生命周期清理。
-func (s *AssetBindingStore) CleanupResourceBindings(ctx context.Context, resourceID string) error {
-	return s.DeleteByResource(ctx, resourceID)
 }

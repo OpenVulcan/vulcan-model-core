@@ -1,0 +1,14 @@
+{
+  "request_id": "selection_search",
+  "target": {
+    "service": {
+      "provider_instance_id": "pvi_minimax_global",
+      "provider_service_id": "service_minimax_search",
+      "service_offering_id": "offering_minimax_search",
+      "execution_profile_id": "profile_minimax_search"
+    }
+  },
+  "operation": "search.web",
+  "capability_revision": 1,
+  "catalog_revision": 1
+}

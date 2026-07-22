@@ -43,7 +43,7 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 		t.Fatalf("groups = %#v", groups)
 	}
 	definitions := systems.List()
-	if len(definitions) != 25 {
+	if len(definitions) != 26 {
 		t.Fatalf("definition count = %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -71,8 +71,8 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 			}
 			continue
 		}
-		if definition.ID == MiniMaxAPIDefinitionID {
-			if len(definition.ActionBindings) != 7 || definition.ActionBindings[0].Operation != vcp.OperationImageGenerate || definition.ActionBindings[1].Operation != vcp.OperationVideoGenerate || definition.ActionBindings[2].ID != providerminimax.SpeechSynthesizeActionBindingID || definition.ActionBindings[3].ID != providerminimax.SpeechSynthesizeAsyncActionBindingID || definition.ActionBindings[4].ID != providerminimax.MusicGenerateActionBindingID || definition.ActionBindings[5].ID != providerminimax.MusicCoverPrepareActionBindingID || definition.ActionBindings[6].ID != providerminimax.MusicCoverActionBindingID {
+		if definition.ID == MiniMaxGlobalDefinitionID || definition.ID == MiniMaxCNDefinitionID {
+			if len(definition.ActionBindings) != 10 || definition.ActionBindings[0].Operation != vcp.OperationConversationRespond || definition.ActionBindings[1].Operation != vcp.OperationMediaAnalyze || definition.ActionBindings[2].Operation != vcp.OperationSearchWeb || definition.ActionBindings[3].Operation != vcp.OperationImageGenerate || definition.ActionBindings[4].Operation != vcp.OperationVideoGenerate || definition.ActionBindings[5].ID != providerminimax.SpeechSynthesizeActionBindingID || definition.ActionBindings[6].ID != providerminimax.SpeechSynthesizeAsyncActionBindingID || definition.ActionBindings[7].ID != providerminimax.MusicGenerateActionBindingID || definition.ActionBindings[8].ID != providerminimax.MusicCoverPrepareActionBindingID || definition.ActionBindings[9].ID != providerminimax.MusicCoverActionBindingID {
 				t.Fatalf("definition %q MiniMax actions = %#v", definition.ID, definition.ActionBindings)
 			}
 			continue
@@ -225,6 +225,7 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		XAIOAuthDefinitionID:            {groupID: XAIGroupID, baseURL: "https://cli-chat-proxy.grok.com/v1", runtimeReady: true},
 		OpenRouterAPIDefinitionID:       {groupID: OpenRouterGroupID, baseURL: "https://openrouter.ai/api", runtimeReady: true},
 		MiniMaxAPIDefinitionID:          {groupID: MiniMaxGroupID, baseURL: "https://api.minimax.io", runtimeReady: true},
+		MiniMaxCNDefinitionID:           {groupID: MiniMaxGroupID, baseURL: "https://api.minimaxi.com", runtimeReady: true},
 	}
 	for definitionID, want := range expected {
 		definition, exists := systems.Lookup(definitionID)
@@ -246,6 +247,10 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 			if definition.ModelCatalogID != "openai_codex_api_key" || definition.Features.PlanReader != providerconfig.SupportUnsupported || definition.Features.EntitlementReader != providerconfig.SupportUnsupported {
 				t.Errorf("Codex API-key catalog/features = %q / %#v", definition.ModelCatalogID, definition.Features)
 			}
+		} else if definitionID == MiniMaxGlobalDefinitionID || definitionID == MiniMaxCNDefinitionID {
+			if len(definition.AuthMethodIDs) != 2 || len(definition.AuthMethods) != 2 || definition.AuthMethodIDs[0] != "api_key" || definition.AuthMethodIDs[1] != "device_flow" || definition.AuthMethods[0].Type != providerconfig.AuthMethodAPIKey || definition.AuthMethods[1].Type != providerconfig.AuthMethodDeviceFlow {
+				t.Errorf("MiniMax auth methods = %#v / %#v", definition.AuthMethodIDs, definition.AuthMethods)
+			}
 		} else if len(definition.AuthMethodIDs) != 1 || len(definition.AuthMethods) != 1 || definition.AuthMethodIDs[0] != definition.AuthMethods[0].ID {
 			t.Errorf("definition %s auth methods = %#v / %#v", definitionID, definition.AuthMethodIDs, definition.AuthMethods)
 		}
@@ -263,7 +268,8 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		AlibabaModelStudioCNDefinitionID: {}, AlibabaModelStudioGlobalDefinitionID: {},
 		AlibabaModelStudioWorkspaceGlobalDefinitionID: {},
 		OpenRouterAPIDefinitionID:                     {},
-		MiniMaxAPIDefinitionID:                        {},
+		MiniMaxGlobalDefinitionID:                     {},
+		MiniMaxCNDefinitionID:                         {},
 		TavilySearchDefinitionID:                      {},
 	}
 	definitions := systems.List()

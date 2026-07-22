@@ -1,0 +1,12 @@
+{
+  "protocol_version": "1.0",
+  "request_id": "selection_model",
+  "provider_instance_id": "pvi_minimax_global",
+  "operation": "conversation.respond",
+  "required_context_tokens": 100000,
+  "required_input_modalities": ["text"],
+  "required_output_modalities": ["text"],
+  "required_capabilities": ["streaming"],
+  "preferred_model_ids": ["model_minimax_m3"],
+  "required_region": "Global"
+}

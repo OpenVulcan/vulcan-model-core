@@ -25,6 +25,85 @@ const (
 	legacyKimiChatChannelID = "chat"
 )
 
+// ReconcileMiniMaxSharedOrigins collapses historical per-action endpoint copies into one regional Origin per MiniMax instance.
+// ReconcileMiniMaxSharedOrigins 将历史上按动作复制的端点收敛为每个 MiniMax 实例的唯一区域 Origin。
+func ReconcileMiniMaxSharedOrigins(ctx context.Context, configurations providerconfig.Store) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("context is required")
+	}
+	if dependency.IsNil(configurations) {
+		return 0, errors.New("provider configuration store is required")
+	}
+	instances, errInstances := configurations.ListInstances(ctx, "")
+	if errInstances != nil {
+		return 0, fmt.Errorf("list provider instances for MiniMax Origin reconciliation: %w", errInstances)
+	}
+	changedInstances := 0
+	for _, instance := range instances {
+		if instance.DefinitionID != bootstrap.MiniMaxGlobalDefinitionID && instance.DefinitionID != bootstrap.MiniMaxCNDefinitionID {
+			continue
+		}
+		changed, errReconcile := reconcileMiniMaxSharedOrigin(ctx, configurations, instance)
+		if errReconcile != nil {
+			return changedInstances, fmt.Errorf("reconcile MiniMax Origin %s: %w", instance.ID, errReconcile)
+		}
+		if changed {
+			changedInstances++
+		}
+	}
+	return changedInstances, nil
+}
+
+// reconcileMiniMaxSharedOrigin merges only byte-for-byte equivalent network destinations and preserves every action binding.
+// reconcileMiniMaxSharedOrigin 仅合并字节级等价的网络目标，并保留每个动作绑定。
+func reconcileMiniMaxSharedOrigin(ctx context.Context, configurations providerconfig.Store, instance providerconfig.ProviderInstance) (bool, error) {
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return false, errEndpoints
+	}
+	if len(endpoints) <= 1 {
+		return false, nil
+	}
+	bindings, errBindings := configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return false, errBindings
+	}
+	definition, errDefinition := configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return false, errDefinition
+	}
+	sort.Slice(endpoints, func(left int, right int) bool {
+		leftPrimary := endpoints[left].ChannelID == definition.ProtocolProfileID
+		rightPrimary := endpoints[right].ChannelID == definition.ProtocolProfileID
+		if leftPrimary != rightPrimary {
+			return leftPrimary
+		}
+		return endpoints[left].ID < endpoints[right].ID
+	})
+	sharedEndpoint := endpoints[0]
+	for _, endpoint := range endpoints[1:] {
+		if endpoint.BaseURL != sharedEndpoint.BaseURL || endpoint.Region != sharedEndpoint.Region || endpoint.Status != sharedEndpoint.Status || !reflect.DeepEqual(endpoint.Parameters, sharedEndpoint.Parameters) {
+			return false, nil
+		}
+	}
+	replacementBindings := append([]providerconfig.AccessBinding(nil), bindings...)
+	for index := range replacementBindings {
+		if replacementBindings[index].EndpointID == sharedEndpoint.ID {
+			continue
+		}
+		if replacementBindings[index].Revision == math.MaxUint64 {
+			return false, fmt.Errorf("MiniMax binding revision is exhausted for %s", replacementBindings[index].ID)
+		}
+		replacementBindings[index].EndpointID = sharedEndpoint.ID
+		replacementBindings[index].Revision++
+	}
+	replacement := providerconfig.AccessGraphReplacement{ProviderInstanceID: instance.ID, ExpectedEndpoints: endpoints, ExpectedBindings: bindings, Endpoints: []providerconfig.Endpoint{sharedEndpoint}, Bindings: replacementBindings}
+	if errReplace := configurations.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		return false, errReplace
+	}
+	return true, nil
+}
+
 // ReconcileKimiSystemCatalogs migrates persisted Kimi catalogs to the current single Chat protocol contract and returns the changed instance count.
 // ReconcileKimiSystemCatalogs 将持久化的 Kimi 目录迁移到当前唯一 Chat 协议合同，并返回发生变更的实例数量。
 func ReconcileKimiSystemCatalogs(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store) (int, error) {

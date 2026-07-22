@@ -344,6 +344,10 @@ func openAIResponsesCapabilities() protocolresponses.ProfileCapabilities {
 	capabilities := responsesCapabilities()
 	capabilities.MediaInputKinds = []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaFile}
 	capabilities.MediaMaterializations = []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64, catalog.MaterializationProviderFileID}
+	capabilities.ProviderFileSearch = true
+	capabilities.ProviderCodeInterpreter = true
+	capabilities.ProviderComputerUseGA = true
+	capabilities.ProviderComputerUsePreview = true
 	return capabilities
 }
 

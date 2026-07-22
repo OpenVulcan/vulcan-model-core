@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest"
 
-import { executionDiagnosticSchema, fetchExecutionDiagnostics, resourceDiagnosticSchema } from "@/lib/diagnostics"
+import { executionDiagnosticSchema, fetchAccessDiagnostics, fetchExecutionDiagnostics, resourceDiagnosticSchema } from "@/lib/diagnostics"
 
 afterEach(() => {
   vi.unstubAllGlobals()
@@ -25,5 +25,14 @@ describe("management diagnostic schemas", () => {
     const rows = await fetchExecutionDiagnostics("manage-token")
     expect(rows[0]?.status).toBe("running")
     expect(fetchMock).toHaveBeenCalledWith("/vulcan/manage/diagnostics/executions", expect.objectContaining({ headers: { Authorization: "Bearer manage-token" } }))
+  })
+
+  it("loads the redacted access audit and aggregate counters", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ audit: [{ time: "2026-07-21T00:00:00Z", principal: { subject_id: "api_local", tenant_id: "tenant_local", project_id: "project_local", roles: ["caller"] }, outcome: "authorized", permission: "invoke", method: "POST", path: "/vulcan/v1/executions", status_code: 201 }], metrics: { requests: 1, failures: 0, total_duration_nanoseconds: 2500000 } }), { status: 200 }))
+    vi.stubGlobal("fetch", fetchMock)
+    const value = await fetchAccessDiagnostics("manage-token")
+    expect(value.audit[0]?.principal?.subject_id).toBe("api_local")
+    expect(value.metrics.total_duration_nanoseconds).toBe(2500000)
+    expect(fetchMock).toHaveBeenCalledWith("/vulcan/manage/diagnostics/access", expect.objectContaining({ headers: { Authorization: "Bearer manage-token" } }))
   })
 })

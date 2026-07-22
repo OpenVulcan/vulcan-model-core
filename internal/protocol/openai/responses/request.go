@@ -97,7 +97,14 @@ func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 			if item.ToolCall.UpstreamID == "" {
 				return ProjectedRequest{}, fmt.Errorf("%w: historical tool call %q has no verified upstream call identifier", ErrUnsupportedContext, item.ToolCall.ToolCallID)
 			}
-			callProjections[item.ToolCall.ToolCallID] = toolCallProjection{Kind: toolKindByIdentity(toolKinds, item.ToolCall.Namespace, item.ToolCall.Name), UpstreamCallID: item.ToolCall.UpstreamID}
+			kind := toolKindByIdentity(toolKinds, item.ToolCall.Namespace, item.ToolCall.Name)
+			if len(item.ToolCall.ComputerActions) > 0 {
+				if countToolKind(toolKinds, vcp.ToolProviderComputerUse) != 1 {
+					return ProjectedRequest{}, fmt.Errorf("%w: computer call requires exactly one declared provider computer tool", ErrUnsupportedContext)
+				}
+				kind = vcp.ToolProviderComputerUse
+			}
+			callProjections[item.ToolCall.ToolCallID] = toolCallProjection{Kind: kind, UpstreamCallID: item.ToolCall.UpstreamID}
 		}
 	}
 	for _, item := range request.Context {
@@ -185,6 +192,9 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 		{Feature: vcp.FeatureExplicitPromptCache, Native: false},
 		{Feature: vcp.FeatureRemoteCompaction, Native: false},
 		{Feature: vcp.FeatureNativeWebSearch, Native: capabilities.NativeWebSearch},
+		{Feature: vcp.FeatureProviderFileSearch, Native: capabilities.ProviderFileSearch},
+		{Feature: vcp.FeatureProviderCodeInterpreter, Native: capabilities.ProviderCodeInterpreter},
+		{Feature: vcp.FeatureProviderComputerUse, Native: capabilities.ProviderComputerUsePreview || capabilities.ProviderComputerUseGA},
 		{Feature: vcp.FeatureImageInput, Native: capabilities.supportsMediaInput(vcp.MediaImage)}, {Feature: vcp.FeatureAudioInput, Native: capabilities.supportsMediaInput(vcp.MediaAudio)},
 		{Feature: vcp.FeatureVideoInput, Native: capabilities.supportsMediaInput(vcp.MediaVideo)}, {Feature: vcp.FeatureFileInput, Native: capabilities.supportsMediaInput(vcp.MediaFile)},
 	}
@@ -255,6 +265,34 @@ func projectTools(upstream *Request, request vcp.VulcanRequest, capabilities Pro
 				return nil, fmt.Errorf("%w: native web search cannot have a namespace", ErrUnsupportedContext)
 			}
 			upstream.Tools = append(upstream.Tools, Tool{Type: "web_search"})
+		case vcp.ToolProviderFileSearch:
+			if !capabilities.ProviderFileSearch || tool.Namespace != "" || tool.FileSearch == nil {
+				return nil, fmt.Errorf("%w: provider file search is unavailable for this Responses profile", ErrUnsupportedContext)
+			}
+			upstream.Tools = append(upstream.Tools, Tool{Type: "file_search", VectorStoreIDs: append([]string(nil), tool.FileSearch.StoreIDs...), MaxNumResults: tool.FileSearch.MaxResults})
+		case vcp.ToolProviderCodeInterpreter:
+			if !capabilities.ProviderCodeInterpreter || tool.Namespace != "" || tool.CodeInterpreter == nil {
+				return nil, fmt.Errorf("%w: provider code interpreter is unavailable for this Responses profile", ErrUnsupportedContext)
+			}
+			upstream.Tools = append(upstream.Tools, Tool{Type: "code_interpreter", Container: &CodeInterpreterContainer{ID: tool.CodeInterpreter.ContainerID, MemoryLimit: tool.CodeInterpreter.MemoryLimit}})
+		case vcp.ToolProviderComputerUse:
+			if tool.Namespace != "" || tool.ComputerUse == nil {
+				return nil, fmt.Errorf("%w: provider computer use is unavailable for this Responses profile", ErrUnsupportedContext)
+			}
+			switch tool.ComputerUse.Mode {
+			case vcp.ProviderComputerUseGA:
+				if !capabilities.ProviderComputerUseGA {
+					return nil, fmt.Errorf("%w: provider computer use GA is unavailable for this Responses profile", ErrUnsupportedContext)
+				}
+				upstream.Tools = append(upstream.Tools, Tool{Type: "computer"})
+			case vcp.ProviderComputerUsePreview:
+				if !capabilities.ProviderComputerUsePreview {
+					return nil, fmt.Errorf("%w: provider computer use preview is unavailable for this Responses profile", ErrUnsupportedContext)
+				}
+				upstream.Tools = append(upstream.Tools, Tool{Type: "computer_use_preview", Environment: tool.ComputerUse.Environment, DisplayWidth: tool.ComputerUse.DisplayWidth, DisplayHeight: tool.ComputerUse.DisplayHeight})
+			default:
+				return nil, fmt.Errorf("%w: provider computer use mode is unsupported", ErrUnsupportedContext)
+			}
 		default:
 			return nil, fmt.Errorf("%w: tool kind %q", ErrUnsupportedContext, tool.Kind)
 		}
@@ -270,8 +308,8 @@ func projectTools(upstream *Request, request vcp.VulcanRequest, capabilities Pro
 		if count != 1 {
 			return nil, fmt.Errorf("%w: named tool must match exactly one declaration", ErrUnsupportedContext)
 		}
-		if matched.Kind == vcp.ToolNativeWebSearch {
-			return nil, fmt.Errorf("%w: named native web search is not a valid Responses tool choice", ErrUnsupportedContext)
+		if isResponsesHostedTool(matched.Kind) {
+			return nil, fmt.Errorf("%w: named provider-hosted tool is not a valid Responses tool choice", ErrUnsupportedContext)
 		}
 		if matched.Kind == vcp.ToolCustom {
 			choiceType = "custom"
@@ -289,6 +327,12 @@ func projectTools(upstream *Request, request vcp.VulcanRequest, capabilities Pro
 		upstream.ParallelToolCalls = &parallel
 	}
 	return toolKinds, nil
+}
+
+// isResponsesHostedTool reports built-ins whose named selection does not use a caller tool name.
+// isResponsesHostedTool 报告指定选择不使用调用方工具名的内置工具。
+func isResponsesHostedTool(kind vcp.ToolKind) bool {
+	return kind == vcp.ToolNativeWebSearch || kind == vcp.ToolProviderFileSearch || kind == vcp.ToolProviderCodeInterpreter || kind == vcp.ToolProviderComputerUse
 }
 
 // findNamedTool finds an exact VCP tool name and returns its count to prevent ambiguous implicit selection.
@@ -317,9 +361,10 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 		return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: opaque provider state requires a Router-resolved previous_response_id continuation", ErrUnsupportedContext)
 	}
 	userMediaMessage := item.Kind == vcp.ContextMessage && item.Authority == vcp.AuthorityUser && hasResourceContent(item.Content)
+	computerScreenshotResult := item.Kind == vcp.ContextToolResult && item.ToolResult != nil && item.ToolResult.ComputerScreenshot != nil
 	text := ""
 	var errText error
-	if !userMediaMessage {
+	if !userMediaMessage && !computerScreenshotResult {
 		text, errText = vcp.TextContent(item.Content)
 	}
 	if errText != nil && item.Kind != vcp.ContextToolCall {
@@ -355,6 +400,12 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 		if item.ToolCall == nil {
 			return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: missing tool call payload", ErrUnsupportedContext)
 		}
+		if len(item.ToolCall.ComputerActions) > 0 {
+			if request.ReasoningPolicy.ContinuationID == "" {
+				return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: computer call replay requires Router continuation", ErrUnsupportedContext)
+			}
+			return InputItem{}, vcp.CapabilityOmitted, vcp.EquivalenceEquivalent, "openai_responses.computer_call.continuation.v1", "", "", false, nil
+		}
 		kind := toolKindByIdentity(toolKinds, item.ToolCall.Namespace, item.ToolCall.Name)
 		if kind == "" {
 			return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: tool call %q has no declared tool", ErrUnsupportedContext, item.ToolCall.ToolCallID)
@@ -381,13 +432,23 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 		if !exists || projection.Kind == "" {
 			return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: tool result %q has no preceding declared tool call", ErrUnsupportedContext, item.ToolResult.ToolCallID)
 		}
+		if item.ToolResult.ComputerScreenshot != nil {
+			if projection.Kind != vcp.ToolProviderComputerUse || request.ReasoningPolicy.ContinuationID == "" {
+				return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: computer screenshot requires a continued provider computer call", ErrUnsupportedContext)
+			}
+			input, errScreenshot := responsesComputerScreenshot(*item.ToolResult.ComputerScreenshot, projection.UpstreamCallID, materialized)
+			if errScreenshot != nil {
+				return InputItem{}, "", "", "", "", "", false, errScreenshot
+			}
+			return input, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.computer_screenshot.native.v1", "", "", true, nil
+		}
 		if projection.Kind == vcp.ToolCustom {
-			return InputItem{Type: "custom_tool_call_output", CallID: projection.UpstreamCallID, Output: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.custom_tool_result.native.v1", "", "", true, nil
+			return InputItem{Type: "custom_tool_call_output", CallID: projection.UpstreamCallID, Output: textInputItemOutput(text)}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.custom_tool_result.native.v1", "", "", true, nil
 		}
 		if projection.Kind != vcp.ToolFunction {
 			return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: tool result kind %q cannot be historical input", ErrUnsupportedContext, projection.Kind)
 		}
-		return InputItem{Type: "function_call_output", CallID: projection.UpstreamCallID, Output: text}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.function_tool_result.native.v1", "", "", true, nil
+		return InputItem{Type: "function_call_output", CallID: projection.UpstreamCallID, Output: textInputItemOutput(text)}, vcp.CapabilityNative, vcp.EquivalenceEquivalent, "openai_responses.function_tool_result.native.v1", "", "", true, nil
 	case vcp.ContextReasoning:
 		if item.ProviderStateRef != "" || (item.Reasoning != nil && item.Reasoning.ContinuationRef != "") {
 			return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: sealed reasoning state requires previous_response_id continuation", ErrUnsupportedContext)
@@ -401,6 +462,41 @@ func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities P
 	default:
 		return InputItem{}, "", "", "", "", "", false, fmt.Errorf("%w: kind %q", ErrUnsupportedContext, item.Kind)
 	}
+}
+
+// countToolKind counts exact declarations of one closed tool kind.
+// countToolKind 统计一种封闭工具 Kind 的精确声明数量。
+func countToolKind(toolKinds map[string]vcp.ToolKind, target vcp.ToolKind) int {
+	count := 0
+	for _, kind := range toolKinds {
+		if kind == target {
+			count++
+		}
+	}
+	return count
+}
+
+// textInputItemOutput creates the string arm of the closed Responses output union.
+// textInputItemOutput 创建封闭 Responses 输出联合的字符串分支。
+func textInputItemOutput(value string) *InputItemOutput {
+	return &InputItemOutput{Text: &value}
+}
+
+// responsesComputerScreenshot projects one exact PNG materialization into computer_call_output.
+// responsesComputerScreenshot 将一个精确 PNG 物化结果投影为 computer_call_output。
+func responsesComputerScreenshot(screenshot vcp.ComputerScreenshotResult, upstreamCallID string, materialized map[string]resource.MaterializedInput) (InputItem, error) {
+	if strings.TrimSpace(upstreamCallID) == "" {
+		return InputItem{}, fmt.Errorf("%w: computer screenshot requires an upstream call identifier", ErrUnsupportedContext)
+	}
+	input, exists := materialized[screenshot.ResourceRef]
+	if !exists || input.ResourceID != screenshot.ResourceRef {
+		return InputItem{}, fmt.Errorf("%w: computer screenshot resource %q has no accepted materialization", ErrUnsupportedContext, screenshot.ResourceRef)
+	}
+	if input.Kind != vcp.MediaImage || input.Role != vcp.MediaRoleUnderstanding || input.Mode != catalog.MaterializationInlineBase64 || input.MIMEType != "image/png" || strings.TrimSpace(input.InlineBase64) == "" {
+		return InputItem{}, fmt.Errorf("%w: computer screenshot requires an inline PNG understanding input", ErrUnsupportedContext)
+	}
+	output := &InputItemOutput{ComputerScreenshot: &ComputerScreenshotOutput{Type: "computer_screenshot", ImageURL: "data:image/png;base64," + input.InlineBase64, Detail: screenshot.Detail}}
+	return InputItem{Type: "computer_call_output", CallID: upstreamCallID, Output: output}, nil
 }
 
 // messageInput builds one typed text message without using string-or-array wire unions.

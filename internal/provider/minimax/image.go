@@ -82,7 +82,7 @@ func (d *ImageActionDriver) Execute(ctx context.Context, execution provider.Exec
 	if execution.Binding.Target.ProviderDefinitionID != d.definitionID {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: target definition does not belong to this driver", provider.ErrExecutionBinding)
 	}
-	if _, errValidate := execution.ValidateForAction(ImageGenerateActionBindingID, providerconfig.AuthMethodAPIKey); errValidate != nil {
+	if _, errValidate := execution.ValidateForAction(ImageGenerateActionBindingID, providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodDeviceFlow); errValidate != nil {
 		return provider.ExecutionResult{}, errValidate
 	}
 	outbound, errProject := projectImageRequest(execution)
@@ -131,6 +131,12 @@ type imageRequest struct {
 	// Count requests one to nine images.
 	// Count 请求一至九张图片。
 	Count int `json:"n,omitempty"`
+	// PromptOptimizer requests provider-native prompt rewriting.
+	// PromptOptimizer 请求供应商原生提示词改写。
+	PromptOptimizer *bool `json:"prompt_optimizer,omitempty"`
+	// Watermark requests provider AIGC watermarking.
+	// Watermark 请求供应商 AIGC 水印。
+	Watermark *bool `json:"aigc_watermark,omitempty"`
 }
 
 // subjectReference is one MiniMax character reference image.
@@ -139,9 +145,12 @@ type subjectReference struct {
 	// Type is fixed to character by the official API.
 	// Type 由官方 API 固定为 character。
 	Type string `json:"type"`
-	// ImageFile is one public image URL.
-	// ImageFile 是一个公网图片 URL。
-	ImageFile string `json:"image_file"`
+	// ImageURL is one public image URL.
+	// ImageURL 是一个公网图片 URL。
+	ImageURL string `json:"image_url,omitempty"`
+	// ImageFile is one inline data URI when that materialization is selected.
+	// ImageFile 是选择该物化方式时使用的内联 Data URI。
+	ImageFile string `json:"image_file,omitempty"`
 }
 
 // projectImageRequest maps one closed VCP generation payload to MiniMax JSON.
@@ -163,7 +172,11 @@ func projectImageRequest(execution provider.ExecutionRequest) (transport.Request
 	if operation.Width != 0 && (operation.Width < 512 || operation.Width > 2048 || operation.Height < 512 || operation.Height > 2048 || operation.Width%8 != 0 || operation.Height%8 != 0) {
 		return transport.Request{}, fmt.Errorf("%w: dimensions must be 512 to 2048 and divisible by eight", ErrInvalidImageDriver)
 	}
-	body := imageRequest{Model: execution.Binding.Target.UpstreamModelID, Prompt: operation.Prompt, AspectRatio: operation.AspectRatio, Width: operation.Width, Height: operation.Height, ResponseFormat: "base64", Seed: operation.Seed, Count: operation.Count}
+	count := operation.Count
+	if count == 0 {
+		count = 1
+	}
+	body := imageRequest{Model: execution.Binding.Target.UpstreamModelID, Prompt: operation.Prompt, AspectRatio: operation.AspectRatio, Width: operation.Width, Height: operation.Height, ResponseFormat: "base64", Seed: operation.Seed, Count: count, PromptOptimizer: operation.PromptExtend, Watermark: operation.Watermark}
 	materializedByID := make(map[string]resource.MaterializedInput, len(execution.MaterializedInputs))
 	for _, materialized := range execution.MaterializedInputs {
 		materializedByID[materialized.InputID] = materialized
@@ -173,20 +186,46 @@ func projectImageRequest(execution provider.ExecutionRequest) (transport.Request
 			return transport.Request{}, fmt.Errorf("%w: MiniMax subject references require the reference role", ErrInvalidImageDriver)
 		}
 		materialized, exists := materializedByID[reference.ID]
-		if !exists || materialized.ResourceID != reference.Resource.ResourceID || materialized.Kind != vcp.MediaImage || materialized.Role != reference.Role || materialized.Mode != catalog.MaterializationDirectRemoteURL {
-			return transport.Request{}, fmt.Errorf("%w: reference %q requires one exact direct URL materialization", ErrInvalidImageDriver, reference.ID)
+		if !exists || materialized.ResourceID != reference.Resource.ResourceID || materialized.Kind != vcp.MediaImage || materialized.Role != reference.Role {
+			return transport.Request{}, fmt.Errorf("%w: reference %q has no exact image materialization", ErrInvalidImageDriver, reference.ID)
 		}
-		parsed, errParse := url.ParseRequestURI(materialized.RemoteURL)
-		if errParse != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-			return transport.Request{}, fmt.Errorf("%w: reference URL is invalid", ErrInvalidImageDriver)
+		projected, errReference := projectImageSubjectReference(materialized)
+		if errReference != nil {
+			return transport.Request{}, errReference
 		}
-		body.SubjectReference = append(body.SubjectReference, subjectReference{Type: "character", ImageFile: materialized.RemoteURL})
+		body.SubjectReference = append(body.SubjectReference, projected)
 	}
 	encoded, errEncode := json.Marshal(body)
 	if errEncode != nil {
 		return transport.Request{}, fmt.Errorf("%w: encode request: %v", ErrInvalidImageDriver, errEncode)
 	}
 	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/v1/image_generation", Body: encoded, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+}
+
+// projectImageSubjectReference preserves MiniMax CLI's exact remote-URL or inline-data carrier.
+// projectImageSubjectReference 保留 MiniMax CLI 精确的远程 URL 或内联数据载体。
+func projectImageSubjectReference(materialized resource.MaterializedInput) (subjectReference, error) {
+	switch materialized.Mode {
+	case catalog.MaterializationDirectRemoteURL:
+		parsed, errParse := url.ParseRequestURI(materialized.RemoteURL)
+		if errParse != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+			return subjectReference{}, fmt.Errorf("%w: reference URL is invalid", ErrInvalidImageDriver)
+		}
+		return subjectReference{Type: "character", ImageURL: materialized.RemoteURL}, nil
+	case catalog.MaterializationInlineBase64:
+		if !strings.HasPrefix(materialized.MIMEType, "image/") || strings.TrimSpace(materialized.InlineBase64) == "" {
+			return subjectReference{}, fmt.Errorf("%w: inline reference requires an image MIME type and Base64 content", ErrInvalidImageDriver)
+		}
+		decoded, errDecode := base64.StdEncoding.DecodeString(materialized.InlineBase64)
+		if errDecode != nil || len(decoded) == 0 {
+			clear(decoded)
+			return subjectReference{}, fmt.Errorf("%w: inline reference Base64 is invalid", ErrInvalidImageDriver)
+		}
+		clear(decoded)
+		return subjectReference{Type: "character", ImageFile: "data:" + materialized.MIMEType + ";base64," + materialized.InlineBase64}, nil
+	default:
+		return subjectReference{}, fmt.Errorf("%w: unsupported image reference materialization", ErrInvalidImageDriver)
+	}
 }
 
 // supportedAspectRatio reports whether MiniMax documents one image preset.
@@ -214,9 +253,6 @@ func isJPEGOutputFormat(format string) bool {
 // imageResponse is the closed successful MiniMax response.
 // imageResponse 是封闭的成功 MiniMax 响应。
 type imageResponse struct {
-	// ID is the provider trace identifier.
-	// ID 是供应商追踪标识。
-	ID string `json:"id"`
 	// Data contains Base64 output images.
 	// Data 包含 Base64 输出图片。
 	Data imageResponseData `json:"data"`
@@ -228,9 +264,21 @@ type imageResponse struct {
 // imageResponseData contains ordered Base64 JPEG strings.
 // imageResponseData 包含有序 Base64 JPEG 字符串。
 type imageResponseData struct {
+	// TaskID is the provider trace identifier returned inside data.
+	// TaskID 是供应商在 data 内返回的追踪标识。
+	TaskID string `json:"task_id"`
 	// ImageBase64 contains generated image bytes.
 	// ImageBase64 包含生成图片字节。
 	ImageBase64 []string `json:"image_base64"`
+	// ImageURLs contains temporary generated-image URLs when URL acquisition is selected.
+	// ImageURLs 包含选择 URL 获取方式时的临时生成图片地址。
+	ImageURLs []string `json:"image_urls"`
+	// SuccessCount is the provider-reported successful output count.
+	// SuccessCount 是供应商报告的成功输出数量。
+	SuccessCount int `json:"success_count"`
+	// FailedCount is the provider-reported failed output count.
+	// FailedCount 是供应商报告的失败输出数量。
+	FailedCount int `json:"failed_count"`
 }
 
 // baseResponse contains the MiniMax application result code.
@@ -251,10 +299,11 @@ func decodeImageResponse(reader io.Reader) (provider.ExecutionResult, error) {
 	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: decode response: %v", ErrInvalidImageResponse, errDecode)
 	}
-	if strings.TrimSpace(response.ID) == "" || response.BaseResponse.StatusCode != 0 || len(response.Data.ImageBase64) == 0 {
+	base64Count, urlCount := len(response.Data.ImageBase64), len(response.Data.ImageURLs)
+	if strings.TrimSpace(response.Data.TaskID) == "" || response.BaseResponse.StatusCode != 0 || base64Count == 0 && urlCount == 0 || base64Count != 0 && urlCount != 0 || response.Data.SuccessCount != base64Count+urlCount || response.Data.FailedCount < 0 {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: provider status %d", ErrInvalidImageResponse, response.BaseResponse.StatusCode)
 	}
-	resources := make([]provider.GeneratedResource, 0, len(response.Data.ImageBase64))
+	resources := make([]provider.GeneratedResource, 0, response.Data.SuccessCount)
 	for index, encoded := range response.Data.ImageBase64 {
 		decoded, errDecode := base64.StdEncoding.DecodeString(encoded)
 		if errDecode != nil || len(decoded) == 0 {
@@ -262,5 +311,11 @@ func decodeImageResponse(reader io.Reader) (provider.ExecutionResult, error) {
 		}
 		resources = append(resources, provider.GeneratedResource{OutputID: fmt.Sprintf("image-%d", index), Kind: vcp.MediaImage, MIMEType: "image/jpeg", Data: decoded})
 	}
-	return provider.ExecutionResult{UpstreamResponseID: response.ID, GeneratedResources: resources}, nil
+	for index, imageURL := range response.Data.ImageURLs {
+		if validatePublicMusicURL(imageURL) != nil {
+			return provider.ExecutionResult{}, fmt.Errorf("%w: output %d contains an invalid URL", ErrInvalidImageResponse, index)
+		}
+		resources = append(resources, provider.GeneratedResource{OutputID: fmt.Sprintf("image-%d", index), Kind: vcp.MediaImage, MIMEType: "image/jpeg", DownloadURL: imageURL})
+	}
+	return provider.ExecutionResult{UpstreamResponseID: response.Data.TaskID, GeneratedResources: resources}, nil
 }

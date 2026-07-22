@@ -189,7 +189,7 @@ func TestEveryOperationAcceptsOnlyItsOwnPayload(t *testing.T) {
 		{name: "search web", operation: OperationSearchWeb, payload: OperationPayload{SearchWeb: search}},
 		{name: "music generate", operation: OperationMusicGenerate, payload: OperationPayload{MusicGenerate: &MusicGenerateOperation{Prompt: "ambient music"}}},
 		{name: "music cover prepare", operation: OperationMusicCoverPrepare, payload: OperationPayload{MusicCoverPrepare: &MusicCoverPrepareOperation{Source: audioCover}}},
-		{name: "music cover", operation: OperationMusicCover, payload: OperationPayload{MusicCover: &MusicCoverOperation{PreparationID: "execution-preparation", Prompt: "jazz cover"}}},
+		{name: "music cover", operation: OperationMusicCover, payload: OperationPayload{MusicCover: &MusicCoverOperation{PreparationID: "execution-preparation", Prompt: "jazz cover", Lyrics: "prepared lyrics"}}},
 	}
 
 	for _, testCase := range cases {

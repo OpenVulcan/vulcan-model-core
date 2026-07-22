@@ -38,6 +38,12 @@ type MemoryStore struct {
 	// snapshots stores one latest catalog per provider instance.
 	// snapshots 为每个供应商实例存储一个最新目录。
 	snapshots map[string]Snapshot
+	// globalRevision is the latest committed Router-wide catalog change.
+	// globalRevision 是最新已提交 Router 全局目录变更修订。
+	globalRevision uint64
+	// changes contains the append-only globally ordered invalidation log.
+	// changes 包含仅追加的全局有序失效日志。
+	changes []Change
 }
 
 // NewMemoryStore creates an empty atomic provider catalog store.
@@ -64,6 +70,10 @@ func (s *MemoryStore) Save(ctx context.Context, snapshot Snapshot) error {
 		return fmt.Errorf("%w: catalog revision must increase", ErrInvalidCatalog)
 	}
 	s.snapshots[snapshot.ProviderInstanceID] = cloneSnapshot(snapshot)
+	s.globalRevision++
+	change := ChangeFromSnapshot(snapshot)
+	change.GlobalRevision = s.globalRevision
+	s.changes = append(s.changes, change)
 	return nil
 }
 
@@ -78,11 +88,43 @@ func (s *MemoryStore) Delete(ctx context.Context, providerInstanceID string) err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if _, exists := s.snapshots[providerInstanceID]; !exists {
+	snapshot, exists := s.snapshots[providerInstanceID]
+	if !exists {
 		return fmt.Errorf("%w: %s", ErrSnapshotNotFound, providerInstanceID)
 	}
 	delete(s.snapshots, providerInstanceID)
+	s.globalRevision++
+	s.changes = append(s.changes, Change{GlobalRevision: s.globalRevision, ProviderInstanceID: providerInstanceID, ProviderRevision: snapshot.Revision, Type: ChangeSnapshotDelete, ObservedAt: snapshot.ObservedAt.UTC()})
 	return nil
+}
+
+// ListChanges returns one mutation-safe incremental catalog page.
+// ListChanges 返回一个防止外部修改的增量目录页。
+func (s *MemoryStore) ListChanges(ctx context.Context, afterRevision uint64, limit int) (ChangePage, error) {
+	if ctx == nil {
+		return ChangePage{}, errors.New("context is required")
+	}
+	if errContext := ctx.Err(); errContext != nil {
+		return ChangePage{}, errContext
+	}
+	if limit <= 0 || limit > 1000 {
+		return ChangePage{}, fmt.Errorf("%w: catalog change limit is outside the allowed boundary", ErrInvalidCatalog)
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	page := ChangePage{CurrentRevision: s.globalRevision, Changes: make([]Change, 0, limit)}
+	for _, change := range s.changes {
+		if change.GlobalRevision <= afterRevision {
+			continue
+		}
+		cloned := change
+		cloned.Tombstones = append([]CatalogTombstone(nil), change.Tombstones...)
+		page.Changes = append(page.Changes, cloned)
+		if len(page.Changes) == limit {
+			break
+		}
+	}
+	return page, nil
 }
 
 // Get returns one mutation-safe atomic provider catalog snapshot.
@@ -106,6 +148,11 @@ func (s *MemoryStore) Get(ctx context.Context, providerInstanceID string) (Snaps
 // cloneSnapshot returns a deep-enough immutable catalog value for all slice and pointer fields.
 // cloneSnapshot 为全部切片和指针字段返回足够深度的不可变目录值。
 func cloneSnapshot(snapshot Snapshot) Snapshot {
+	if snapshot.Dynamic != nil {
+		dynamic := *snapshot.Dynamic
+		dynamic.Tombstones = append([]CatalogTombstone(nil), snapshot.Dynamic.Tombstones...)
+		snapshot.Dynamic = &dynamic
+	}
 	snapshot.DefaultAdditionalParameters = cloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters)
 	snapshot.Models = append([]ProviderModel(nil), snapshot.Models...)
 	snapshot.Offerings = append([]ModelOffering(nil), snapshot.Offerings...)
@@ -139,6 +186,10 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	snapshot.Allowances = append([]AllowanceSnapshot(nil), snapshot.Allowances...)
 	for index := range snapshot.Allowances {
 		snapshot.Allowances[index] = cloneAllowance(snapshot.Allowances[index])
+	}
+	snapshot.Voices = append([]VoiceSnapshot(nil), snapshot.Voices...)
+	for index := range snapshot.Voices {
+		snapshot.Voices[index].Descriptions = append([]string(nil), snapshot.Voices[index].Descriptions...)
 	}
 	snapshot.Pools = append([]PoolSummary(nil), snapshot.Pools...)
 	for index := range snapshot.Pools {
@@ -191,6 +242,7 @@ func cloneCapabilities(capabilities ModelCapabilities) ModelCapabilities {
 		capabilities.ParameterRules[index].RelatedParameterIDs = append([]string(nil), capabilities.ParameterRules[index].RelatedParameterIDs...)
 	}
 	capabilities.UsageMetrics = append([]UsageMetricCapability(nil), capabilities.UsageMetrics...)
+	capabilities.HostedTools = append([]vcp.ToolKind(nil), capabilities.HostedTools...)
 	return capabilities
 }
 
@@ -396,8 +448,16 @@ func cloneAllowance(allowance AllowanceSnapshot) AllowanceSnapshot {
 		remainingRatio := *allowance.RemainingRatio
 		allowance.RemainingRatio = &remainingRatio
 	}
+	if allowance.DisplayMultiplierPermille != nil {
+		displayMultiplierPermille := *allowance.DisplayMultiplierPermille
+		allowance.DisplayMultiplierPermille = &displayMultiplierPermille
+	}
 	if allowance.Window != nil {
 		window := *allowance.Window
+		if window.StartAt != nil {
+			startAt := *window.StartAt
+			window.StartAt = &startAt
+		}
 		if window.ResetAt != nil {
 			resetAt := *window.ResetAt
 			window.ResetAt = &resetAt

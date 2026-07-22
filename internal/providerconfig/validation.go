@@ -660,12 +660,12 @@ func ValidateAccessGraphReplacement(replacement AccessGraphReplacement, definiti
 		if errBinding := binding.Validate(); errBinding != nil {
 			return errBinding
 		}
-		endpoint, endpointExists := endpointByID[binding.EndpointID]
+		_, endpointExists := endpointByID[binding.EndpointID]
 		credential, credentialExists := credentialByID[binding.CredentialID]
 		if binding.ProviderInstanceID != replacement.ProviderInstanceID || !endpointExists || !credentialExists {
 			return invalid("replacement binding references resources outside provider ownership")
 		}
-		if binding.ChannelID != endpoint.ChannelID || !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
+		if !definition.ChannelAllowsAuth(binding.ChannelID, credential.AuthMethodID) {
 			return invalid("replacement binding channel is incompatible with endpoint or credential auth method")
 		}
 		if _, duplicate := seenBindings[binding.ID]; duplicate {
@@ -990,11 +990,6 @@ func ValidateProviderConfiguration(configuration ProviderConfiguration, definiti
 		}
 		channels[endpoint.ChannelID] = struct{}{}
 	}
-	for _, channelID := range definition.ChannelIDs() {
-		if _, exists := channels[channelID]; !exists {
-			return invalid("provider configuration is missing channel endpoint %q", channelID)
-		}
-	}
 	return nil
 }
 
@@ -1072,8 +1067,8 @@ func ValidateSystemOnboarding(onboarding SystemOnboarding, definition ProviderDe
 		if errBinding := binding.Validate(); errBinding != nil {
 			return errBinding
 		}
-		endpoint, endpointExists := endpoints[binding.EndpointID]
-		if !endpointExists || binding.ProviderInstanceID != onboarding.Instance.ID || binding.CredentialID != onboarding.Credential.ID || endpoint.ChannelID != binding.ChannelID || !definition.ChannelAllowsAuth(binding.ChannelID, onboarding.Credential.AuthMethodID) {
+		_, endpointExists := endpoints[binding.EndpointID]
+		if !endpointExists || binding.ProviderInstanceID != onboarding.Instance.ID || binding.CredentialID != onboarding.Credential.ID || !definition.ChannelAllowsAuth(binding.ChannelID, onboarding.Credential.AuthMethodID) {
 			return invalid("system onboarding binding does not close one exact provider channel")
 		}
 		if _, exists := boundChannels[binding.ChannelID]; exists {

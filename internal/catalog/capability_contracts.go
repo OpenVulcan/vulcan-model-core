@@ -794,7 +794,7 @@ func validateEmbeddingEnums(capability EmbeddingCapabilities) error {
 // validMediaRole 报告一个 VCP 资源角色是否属于封闭协议集合。
 func validMediaRole(role vcp.MediaInputRole) bool {
 	switch role {
-	case vcp.MediaRoleUnderstanding, vcp.MediaRoleReference, vcp.MediaRoleEditSource, vcp.MediaRoleMask, vcp.MediaRoleFirstFrame, vcp.MediaRoleLastFrame, vcp.MediaRoleAudioTrack, vcp.MediaRoleTranscriptionSource, vcp.MediaRoleStyleReference, vcp.MediaRoleCoverReference:
+	case vcp.MediaRoleUnderstanding, vcp.MediaRoleReference, vcp.MediaRoleEditSource, vcp.MediaRoleMask, vcp.MediaRoleFirstFrame, vcp.MediaRoleLastFrame, vcp.MediaRoleSubjectReference, vcp.MediaRoleAudioTrack, vcp.MediaRoleTranscriptionSource, vcp.MediaRoleStyleReference, vcp.MediaRoleCoverReference:
 		return true
 	default:
 		return false

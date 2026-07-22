@@ -15,7 +15,7 @@ type dpapiProtector struct{}
 
 // newPlatformProtector returns the current-user Windows DPAPI implementation.
 // newPlatformProtector 返回当前用户的 Windows DPAPI 实现。
-func newPlatformProtector() (protector, error) {
+func newPlatformProtector() (Protector, error) {
 	return dpapiProtector{}, nil
 }
 

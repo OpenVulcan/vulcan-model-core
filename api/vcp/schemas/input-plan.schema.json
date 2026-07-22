@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/input-plan.schema.json",
+  "title": "VCP Input Plan",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["input_plan_id", "accepted", "operation", "model", "capability_revision", "catalog_revision", "inputs", "requires_provider_preparation", "asynchronous_preparation", "created_at", "expires_at", "revision"],
+  "properties": {
+    "input_plan_id": {"type": "string", "pattern": "^ipl_[0-9a-f]{32}$"},
+    "accepted": {"type": "boolean"},
+    "operation": {"type": "string"},
+    "model": {"type": "object"},
+    "capability_revision": {"type": "integer", "minimum": 0},
+    "catalog_revision": {"type": "integer", "minimum": 0},
+    "inputs": {"type": "array", "items": {"type": "object"}},
+    "requires_provider_preparation": {"type": "boolean"},
+    "asynchronous_preparation": {"type": "boolean"},
+    "error_code": {"type": "string"},
+    "created_at": {"type": "string", "format": "date-time"},
+    "expires_at": {"type": "string", "format": "date-time"},
+    "revision": {"type": "integer", "minimum": 1}
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/execution-result.schema.json",
+  "title": "VCP Closed Execution Result 1.0",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "conversation": {"$ref": "./result-components.schema.json#/$defs/response"},
+    "analysis": {"$ref": "./result-components.schema.json#/$defs/response"},
+    "embeddings": {"type": "array", "items": {"$ref": "./result-components.schema.json#/$defs/embeddingItem"}},
+    "rerank": {"type": "array", "items": {"$ref": "./result-components.schema.json#/$defs/rerankResult"}},
+    "search": {"$ref": "./result-components.schema.json#/$defs/searchResponse"},
+    "transcript": {"$ref": "./result-components.schema.json#/$defs/transcript"},
+    "music_cover_preparation": {"$ref": "./result-components.schema.json#/$defs/musicCoverPreparation"},
+    "resources": {"type": "array", "items": {"$ref": "./resource.schema.json"}},
+    "continuation": {"$ref": "./continuation.schema.json"},
+    "usage": {"$ref": "./usage-observation.schema.json"}
+  },
+  "minProperties": 1
+}

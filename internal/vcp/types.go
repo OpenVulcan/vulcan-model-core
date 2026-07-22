@@ -42,6 +42,9 @@ type ModelSelection struct {
 	// ExecutionProfileID optionally selects one client-visible capability profile.
 	// ExecutionProfileID 可选地选择一个客户端可见能力规格。
 	ExecutionProfileID string `json:"execution_profile_id,omitempty"`
+	// RequiredRegion optionally preserves an explicitly selected provider region for later exact execution.
+	// RequiredRegion 可选地为后续精确执行保留一个显式选择的供应商区域。
+	RequiredRegion string `json:"required_region,omitempty"`
 }
 
 // ContextKind identifies one closed canonical context item variant.
@@ -318,6 +321,9 @@ type ToolCallItem struct {
 	// Status identifies the invocation lifecycle state.
 	// Status 标识调用生命周期状态。
 	Status ToolCallStatus `json:"status"`
+	// ComputerActions contains the ordered provider-requested computer actions when this is a computer-use call.
+	// ComputerActions 在当前调用为计算机使用调用时包含供应商请求的有序计算机动作。
+	ComputerActions []ComputerAction `json:"computer_actions,omitempty"`
 }
 
 // ToolResultItem contains one structured tool result relation.
@@ -326,6 +332,97 @@ type ToolResultItem struct {
 	// ToolCallID identifies the parent VCP tool call.
 	// ToolCallID 标识父级 VCP 工具调用。
 	ToolCallID string `json:"tool_call_id"`
+	// ComputerScreenshot contains the exact Router resource returned after executing computer actions.
+	// ComputerScreenshot 包含执行计算机动作后返回的精确 Router 资源。
+	ComputerScreenshot *ComputerScreenshotResult `json:"computer_screenshot,omitempty"`
+}
+
+// ComputerActionType identifies one closed provider computer action.
+// ComputerActionType 标识一种封闭的供应商计算机动作。
+type ComputerActionType string
+
+const (
+	// ComputerActionClick clicks one mouse button at a coordinate.
+	// ComputerActionClick 在一个坐标点击鼠标按钮。
+	ComputerActionClick ComputerActionType = "click"
+	// ComputerActionDoubleClick double-clicks the primary pointer at a coordinate.
+	// ComputerActionDoubleClick 在一个坐标双击主指针。
+	ComputerActionDoubleClick ComputerActionType = "double_click"
+	// ComputerActionDrag drags the pointer along an ordered path.
+	// ComputerActionDrag 沿有序路径拖动指针。
+	ComputerActionDrag ComputerActionType = "drag"
+	// ComputerActionMove moves the pointer to a coordinate.
+	// ComputerActionMove 将指针移动到一个坐标。
+	ComputerActionMove ComputerActionType = "move"
+	// ComputerActionScroll scrolls at a coordinate by an exact delta.
+	// ComputerActionScroll 在一个坐标按精确增量滚动。
+	ComputerActionScroll ComputerActionType = "scroll"
+	// ComputerActionKeypress presses one or more keys together.
+	// ComputerActionKeypress 同时按下一个或多个按键。
+	ComputerActionKeypress ComputerActionType = "keypress"
+	// ComputerActionTypeText types exact text.
+	// ComputerActionTypeText 输入精确文本。
+	ComputerActionTypeText ComputerActionType = "type"
+	// ComputerActionWait waits for the current interface to settle.
+	// ComputerActionWait 等待当前界面稳定。
+	ComputerActionWait ComputerActionType = "wait"
+	// ComputerActionScreenshot requests a fresh screenshot without another interaction.
+	// ComputerActionScreenshot 请求一张新截图且不执行其他交互。
+	ComputerActionScreenshot ComputerActionType = "screenshot"
+)
+
+// ComputerPoint is one integer coordinate in a drag path.
+// ComputerPoint 是拖动路径中的一个整数坐标。
+type ComputerPoint struct {
+	// X is the horizontal pixel coordinate.
+	// X 是水平像素坐标。
+	X int `json:"x"`
+	// Y is the vertical pixel coordinate.
+	// Y 是垂直像素坐标。
+	Y int `json:"y"`
+}
+
+// ComputerAction contains exactly the fields owned by one computer action variant.
+// ComputerAction 仅包含一个计算机动作变体拥有的字段。
+type ComputerAction struct {
+	// Type identifies the closed action variant.
+	// Type 标识封闭动作变体。
+	Type ComputerActionType `json:"type"`
+	// X is the optional horizontal pixel coordinate.
+	// X 是可选的水平像素坐标。
+	X *int `json:"x,omitempty"`
+	// Y is the optional vertical pixel coordinate.
+	// Y 是可选的垂直像素坐标。
+	Y *int `json:"y,omitempty"`
+	// Button identifies the mouse button for click actions.
+	// Button 标识点击动作使用的鼠标按钮。
+	Button string `json:"button,omitempty"`
+	// ScrollX is the horizontal scroll delta.
+	// ScrollX 是水平滚动增量。
+	ScrollX *int `json:"scroll_x,omitempty"`
+	// ScrollY is the vertical scroll delta.
+	// ScrollY 是垂直滚动增量。
+	ScrollY *int `json:"scroll_y,omitempty"`
+	// Text is the exact text for a type action.
+	// Text 是输入动作使用的精确文本。
+	Text string `json:"text,omitempty"`
+	// Keys contains the exact key chord or optional action modifiers.
+	// Keys 包含精确按键组合或可选动作修饰键。
+	Keys []string `json:"keys,omitempty"`
+	// Path contains the ordered drag coordinates.
+	// Path 包含有序拖动坐标。
+	Path []ComputerPoint `json:"path,omitempty"`
+}
+
+// ComputerScreenshotResult binds one computer result to an imported Router image resource.
+// ComputerScreenshotResult 将一个计算机结果绑定到已导入的 Router 图片资源。
+type ComputerScreenshotResult struct {
+	// ResourceRef identifies the exact screenshot resource prepared by the Router resource layer.
+	// ResourceRef 标识 Router 资源层准备的精确截图资源。
+	ResourceRef string `json:"resource_ref"`
+	// Detail is fixed to original so coordinates remain aligned with the executed display.
+	// Detail 固定为 original，以使坐标与执行显示保持一致。
+	Detail string `json:"detail"`
 }
 
 // ReasoningItem separates visible reasoning from opaque continuation state.
@@ -429,6 +526,15 @@ const (
 	// ToolNativeWebSearch is provider-hosted web search.
 	// ToolNativeWebSearch 是供应商托管网页搜索。
 	ToolNativeWebSearch ToolKind = "native_web_search"
+	// ToolProviderFileSearch is provider-hosted retrieval over explicitly bound stores.
+	// ToolProviderFileSearch 是对显式绑定存储执行的供应商托管检索。
+	ToolProviderFileSearch ToolKind = "provider_file_search"
+	// ToolProviderCodeInterpreter is provider-hosted sandboxed code execution.
+	// ToolProviderCodeInterpreter 是供应商托管的沙箱代码执行。
+	ToolProviderCodeInterpreter ToolKind = "provider_code_interpreter"
+	// ToolProviderComputerUse is provider-hosted computer interaction.
+	// ToolProviderComputerUse 是供应商托管的计算机交互。
+	ToolProviderComputerUse ToolKind = "provider_computer_use"
 )
 
 // ToolDefinition declares one typed tool available to the model.
@@ -452,7 +558,68 @@ type ToolDefinition struct {
 	// Strict requests verified strict schema enforcement.
 	// Strict 请求经过验证的严格 Schema 约束。
 	Strict bool `json:"strict,omitempty"`
+	// FileSearch contains exact provider-hosted retrieval configuration.
+	// FileSearch 包含精确的供应商托管检索配置。
+	FileSearch *ProviderFileSearchTool `json:"file_search,omitempty"`
+	// CodeInterpreter contains exact provider-hosted sandbox configuration.
+	// CodeInterpreter 包含精确的供应商托管沙箱配置。
+	CodeInterpreter *ProviderCodeInterpreterTool `json:"code_interpreter,omitempty"`
+	// ComputerUse contains exact provider-hosted computer configuration.
+	// ComputerUse 包含精确的供应商托管计算机配置。
+	ComputerUse *ProviderComputerUseTool `json:"computer_use,omitempty"`
 }
+
+// ProviderFileSearchTool configures provider-hosted retrieval without local filesystem access.
+// ProviderFileSearchTool 配置不访问本地文件系统的供应商托管检索。
+type ProviderFileSearchTool struct {
+	// StoreIDs identifies caller-authorized provider stores.
+	// StoreIDs 标识调用方授权的供应商存储。
+	StoreIDs []string `json:"store_ids"`
+	// MaxResults optionally limits returned retrieval items.
+	// MaxResults 可选地限制返回的检索条目数。
+	MaxResults *int `json:"max_results,omitempty"`
+}
+
+// ProviderCodeInterpreterTool configures one provider-owned execution container.
+// ProviderCodeInterpreterTool 配置一个供应商拥有的执行容器。
+type ProviderCodeInterpreterTool struct {
+	// ContainerID optionally selects a pre-authorized provider container; omission requests provider auto-allocation.
+	// ContainerID 可选地选择预授权供应商容器；省略时请求供应商自动分配。
+	ContainerID string `json:"container_id,omitempty"`
+	// MemoryLimit optionally selects the provider-documented auto-container memory tier.
+	// MemoryLimit 可选地选择供应商文档声明的自动容器内存档位。
+	MemoryLimit string `json:"memory_limit,omitempty"`
+}
+
+// ProviderComputerUseTool configures one explicit GA or legacy preview provider computer contract.
+// ProviderComputerUseTool 配置一个明确的 GA 或旧版预览供应商计算机契约。
+type ProviderComputerUseTool struct {
+	// Mode selects the current GA tool or the legacy preview wire shape.
+	// Mode 选择当前 GA 工具或旧版预览 Wire 形态。
+	Mode ProviderComputerUseMode `json:"mode"`
+	// Environment is browser, linux, windows, or macos when supported by the provider.
+	// Environment 是供应商支持的 browser、linux、windows 或 macos。
+	Environment string `json:"environment"`
+	// DisplayWidth is the positive virtual display width in pixels.
+	// DisplayWidth 是以像素计的正虚拟显示宽度。
+	DisplayWidth int `json:"display_width"`
+	// DisplayHeight is the positive virtual display height in pixels.
+	// DisplayHeight 是以像素计的正虚拟显示高度。
+	DisplayHeight int `json:"display_height"`
+}
+
+// ProviderComputerUseMode identifies one non-interchangeable provider computer wire generation.
+// ProviderComputerUseMode 标识一个不可互换的供应商计算机 Wire 代际。
+type ProviderComputerUseMode string
+
+const (
+	// ProviderComputerUseGA selects the current configuration-free computer tool declaration.
+	// ProviderComputerUseGA 选择当前无需配置的 computer 工具声明。
+	ProviderComputerUseGA ProviderComputerUseMode = "ga"
+	// ProviderComputerUsePreview selects the legacy virtual-display computer_use_preview declaration.
+	// ProviderComputerUsePreview 选择旧版虚拟显示器 computer_use_preview 声明。
+	ProviderComputerUsePreview ProviderComputerUseMode = "preview"
+)
 
 // ToolChoiceMode identifies how the model may select tools.
 // ToolChoiceMode 标识模型选择工具的方式。
@@ -736,6 +903,15 @@ const (
 	// FeatureNativeWebSearch provides provider-hosted web search.
 	// FeatureNativeWebSearch 提供供应商托管网页搜索。
 	FeatureNativeWebSearch CapabilityFeature = "native_web_search"
+	// FeatureProviderFileSearch provides provider-hosted retrieval over caller-bound stores.
+	// FeatureProviderFileSearch 提供基于调用方绑定存储的供应商托管检索。
+	FeatureProviderFileSearch CapabilityFeature = "provider_file_search"
+	// FeatureProviderCodeInterpreter provides provider-hosted sandboxed code execution.
+	// FeatureProviderCodeInterpreter 提供供应商托管的沙箱代码执行。
+	FeatureProviderCodeInterpreter CapabilityFeature = "provider_code_interpreter"
+	// FeatureProviderComputerUse provides one explicitly selected provider-hosted computer contract.
+	// FeatureProviderComputerUse 提供一个明确选择的供应商托管计算机契约。
+	FeatureProviderComputerUse CapabilityFeature = "provider_computer_use"
 	// FeatureReasoning provides requested reasoning controls or summaries.
 	// FeatureReasoning 提供请求的推理控制或摘要。
 	FeatureReasoning CapabilityFeature = "reasoning"

@@ -1,0 +1,14 @@
+{
+  "get": "usage",
+  "usage": {
+    "provider_instance_id": "pvi_fixture",
+    "provider_model_id": "model_fixture",
+    "credential_id": "credential_fixture",
+    "credential_label": "Fixture Credential",
+    "credential_status": "active",
+    "supported_context_profile_ids": [],
+    "allowances": [],
+    "catalog_revision": 1,
+    "observed_at": "2026-07-21T12:00:00Z"
+  }
+}

@@ -105,6 +105,23 @@ type fakeCredentialRefresher struct {
 	err error
 }
 
+// failingCatalogStore delegates reads and fails every attempted replacement.
+// failingCatalogStore 委托读取并使每次替换尝试失败。
+type failingCatalogStore struct {
+	// Store supplies the previously committed last-good snapshot.
+	// Store 提供先前已提交的最后有效快照。
+	catalog.Store
+	// err is the exact durable persistence failure.
+	// err 是精确的持久化失败。
+	err error
+}
+
+// Save injects the configured durable persistence failure.
+// Save 注入配置的持久化失败。
+func (s failingCatalogStore) Save(context.Context, catalog.Snapshot) error {
+	return s.err
+}
+
 // RefreshCredential records one exact refresh request and returns the configured result.
 // RefreshCredential 记录一次精确刷新请求并返回已配置结果。
 func (r *fakeCredentialRefresher) RefreshCredential(_ context.Context, instanceID string, credentialID string) (providerconfig.Credential, error) {
@@ -187,7 +204,10 @@ func (d fakeKimiDriver) DiscoverModels(_ context.Context, request provider.Disco
 				Revision:                   1,
 			},
 		},
-		ObservedAt: d.observedAt,
+		ObservedAt:     d.observedAt,
+		ExpiresAt:      d.observedAt.Add(time.Hour),
+		SourceRevision: "fake-kimi-1",
+		ETag:           "fake-kimi-etag-1",
 	}, nil
 }
 
@@ -574,6 +594,24 @@ func TestNewServiceRejectsTypedNilDependencies(t *testing.T) {
 	var drivers *provider.Registry
 	if _, errService := NewService(configurations, catalog.NewMemoryStore(), drivers); errService == nil {
 		t.Fatal("NewService() error = nil")
+	}
+}
+
+// TestRecordDiscoveryFailureJoinsPersistenceFailure verifies last-good failure recording can never hide a storage outage.
+// TestRecordDiscoveryFailureJoinsPersistenceFailure 验证最后有效快照的失败记录绝不会隐藏存储故障。
+func TestRecordDiscoveryFailureJoinsPersistenceFailure(t *testing.T) {
+	ctx := context.Background()
+	now := time.Date(2026, time.July, 21, 6, 0, 0, 0, time.UTC)
+	store := catalog.NewMemoryStore()
+	snapshot := catalog.Snapshot{ProviderInstanceID: "pvi_dynamic", Revision: 1, ObservedAt: now.Add(-time.Minute), Dynamic: &catalog.DynamicCatalogMetadata{Authority: catalog.CatalogAuthorityProvider, SourceRevision: "source-1", RefreshedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour), Status: catalog.CatalogRefreshFresh}}
+	if errSave := store.Save(ctx, snapshot); errSave != nil {
+		t.Fatalf("Save() error = %v", errSave)
+	}
+	discoveryErr := errors.New("injected discovery failure")
+	persistenceErr := errors.New("injected persistence failure")
+	errRecord := recordDiscoveryFailure(ctx, failingCatalogStore{Store: store, err: persistenceErr}, snapshot, nil, snapshot.ProviderInstanceID, now, discoveryErr)
+	if !errors.Is(errRecord, discoveryErr) || !errors.Is(errRecord, persistenceErr) {
+		t.Fatalf("recordDiscoveryFailure() error = %v, want both causes", errRecord)
 	}
 }
 

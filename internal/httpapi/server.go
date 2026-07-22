@@ -11,6 +11,7 @@ import (
 	dependencycheck "github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 var (
@@ -90,6 +91,15 @@ type errorResponse struct {
 	// Error is the stable public error category without internal persistence details.
 	// Error 是不包含内部持久化详情的稳定公开错误类别。
 	Error string `json:"error"`
+	// Code repeats the stable code in the formal VCP error field.
+	// Code 在正式 VCP 错误字段中重复稳定代码。
+	Code string `json:"code"`
+	// ProtocolMinimum is the oldest wire version accepted by this server.
+	// ProtocolMinimum 是服务器接受的最旧 Wire 版本。
+	ProtocolMinimum string `json:"protocol_minimum"`
+	// ProtocolMaximum is the newest wire version accepted by this server.
+	// ProtocolMaximum 是服务器接受的最新 Wire 版本。
+	ProtocolMaximum string `json:"protocol_maximum"`
 }
 
 // New creates the minimal HTTP API without legacy protocol routes.
@@ -167,6 +177,11 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 			mux.Handle("POST /vulcan/manage/kimi/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardKimiDeviceFlow)))
 			mux.Handle("DELETE /vulcan/manage/kimi/device-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelKimiDeviceFlow)))
 		}
+		if control.MiniMaxDeviceFlows != nil {
+			mux.Handle("POST /vulcan/manage/minimax/device-flows", server.requireManagement(http.HandlerFunc(server.handleStartMiniMaxDeviceFlow)))
+			mux.Handle("POST /vulcan/manage/minimax/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardMiniMaxDeviceFlow)))
+			mux.Handle("DELETE /vulcan/manage/minimax/device-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelMiniMaxDeviceFlow)))
+		}
 		if control.XAIDeviceFlows != nil {
 			mux.Handle("POST /vulcan/manage/xai/device-flows", server.requireManagement(http.HandlerFunc(server.handleStartXAIDeviceFlow)))
 			mux.Handle("POST /vulcan/manage/xai/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardXAIDeviceFlow)))
@@ -192,7 +207,7 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 			mux.Handle("POST /vulcan/manage/antigravity/oauth-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardAntigravityOAuthFlow)))
 			mux.Handle("DELETE /vulcan/manage/antigravity/oauth-flows/{flow_id}", server.requireManagement(http.HandlerFunc(server.handleCancelAntigravityOAuthFlow)))
 		}
-		if control.KimiTokens != nil || control.XAITokens != nil || control.CodexTokens != nil || control.ClaudeTokens != nil || control.AntigravityTokens != nil {
+		if control.KimiTokens != nil || control.MiniMaxTokens != nil || control.XAITokens != nil || control.CodexTokens != nil || control.ClaudeTokens != nil || control.AntigravityTokens != nil {
 			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderCredential)))
 		}
 		if control.MetadataRefresh != nil {
@@ -216,6 +231,13 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		if control.ExecutionDiagnostics != nil {
 			mux.Handle("GET /vulcan/manage/diagnostics/executions", server.requireManagement(http.HandlerFunc(server.handleExecutionDiagnostics)))
 		}
+		if control.AccessDiagnostics != nil {
+			mux.Handle("GET /vulcan/manage/diagnostics/access", server.requireManagement(http.HandlerFunc(server.handleAccessDiagnostics)))
+		}
+		if control.ProviderFileDiagnostics != nil {
+			mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/files", server.requireManagement(http.HandlerFunc(server.handleProviderFileDiagnostics)))
+			mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/files/{file_id}", server.requireManagement(http.HandlerFunc(server.handleProviderFileDiagnostic)))
+		}
 		// call routes are protected exclusively by enabled call-plane API keys.
 		// call 路由仅受启用的调用面 API 密钥保护。
 		mux.Handle("POST /vulcan/v1/info", server.requireAPIKey(http.HandlerFunc(server.handleCallInformation)))
@@ -225,13 +247,27 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("GET /vulcan/v1/resources/{resource_id}/content", server.requireAPIKey(http.HandlerFunc(server.handleGetResourceContent)))
 		mux.Handle("DELETE /vulcan/v1/resources/{resource_id}", server.requireAPIKey(http.HandlerFunc(server.handleDeleteResource)))
 		mux.Handle("POST /vulcan/v1/input-plans", server.requireAPIKey(http.HandlerFunc(server.handleCreateInputPlan)))
+		mux.Handle("POST /vulcan/v1/selections", server.requireAPIKey(http.HandlerFunc(server.handleCreateExecutionSelection)))
+		if control.Preflight != nil {
+			mux.Handle("POST /vulcan/v1/preflight", server.requireAPIKey(http.HandlerFunc(server.handleUsagePreflight)))
+		}
 		mux.Handle("POST /vulcan/v1/executions", server.requireAPIKey(http.HandlerFunc(server.handleCreateExecution)))
 		mux.Handle("GET /vulcan/v1/executions/{execution_id}", server.requireAPIKey(http.HandlerFunc(server.handleGetExecution)))
 		mux.Handle("GET /vulcan/v1/executions/{execution_id}/events", server.requireAPIKey(http.HandlerFunc(server.handleExecutionEvents)))
 		mux.Handle("POST /vulcan/v1/executions/{execution_id}/cancel", server.requireAPIKey(http.HandlerFunc(server.handleCancelExecution)))
 	}
-	server.handler = mux
+	server.handler = withVCPVersionHeaders(mux)
 	return server, nil
+}
+
+// withVCPVersionHeaders advertises the exact supported protocol range on every response.
+// withVCPVersionHeaders 在每个响应上声明精确支持的协议范围。
+func withVCPVersionHeaders(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		writer.Header().Set("Vulcan-Protocol-Min", vcp.ProtocolVersion)
+		writer.Header().Set("Vulcan-Protocol-Max", vcp.ProtocolVersion)
+		next.ServeHTTP(writer, request)
+	})
 }
 
 // isNilHTTPDependency reports whether an interface is nil or contains a typed nil reference.
@@ -288,6 +324,18 @@ func (s *Server) handleProviders(w http.ResponseWriter, _ *http.Request) {
 // writeJSON writes one compact JSON response.
 // writeJSON 写入一个紧凑的 JSON 响应。
 func writeJSON(w http.ResponseWriter, statusCode int, payload any) {
+	if errorPayload, ok := payload.(errorResponse); ok {
+		if errorPayload.Code == "" {
+			errorPayload.Code = errorPayload.Error
+		}
+		if errorPayload.ProtocolMinimum == "" {
+			errorPayload.ProtocolMinimum = vcp.ProtocolVersion
+		}
+		if errorPayload.ProtocolMaximum == "" {
+			errorPayload.ProtocolMaximum = vcp.ProtocolVersion
+		}
+		payload = errorPayload
+	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(statusCode)
 	_ = json.NewEncoder(w).Encode(payload)

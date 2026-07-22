@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/access"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 )
@@ -61,6 +62,26 @@ type APIConfig struct {
 	// Keys lists every configured call-plane API key in plaintext as explicitly requested.
 	// Keys 按明确需求以明文列出全部配置的调用面 API 密钥。
 	Keys []APIKey `yaml:"keys"`
+	// OIDC optionally enables external call-plane identities in addition to local API keys.
+	// OIDC 可选地在本地 API 密钥之外启用外部调用面身份。
+	OIDC *OIDCConfig `yaml:"oidc,omitempty"`
+}
+
+// OIDCConfig contains only the public trust coordinates for one call-plane issuer.
+// OIDCConfig 仅包含一个调用面颁发者的公开信任坐标。
+type OIDCConfig struct {
+	// Enabled controls whether external identity tokens are accepted.
+	// Enabled 控制是否接受外部身份 Token。
+	Enabled bool `yaml:"enabled"`
+	// Issuer is the exact expected issuer and discovery origin.
+	// Issuer 是预期的精确颁发者与发现源站。
+	Issuer string `yaml:"issuer"`
+	// Audience is the exact Router audience required in every token.
+	// Audience 是每个 Token 中必须包含的精确 Router 受众。
+	Audience string `yaml:"audience"`
+	// JWKSURL optionally pins an explicit signing-key document instead of discovery.
+	// JWKSURL 可选地固定一个显式签名密钥文档以替代发现。
+	JWKSURL string `yaml:"jwks-url,omitempty"`
 }
 
 // APIKey represents one named call-plane credential stored in the local YAML file.
@@ -78,6 +99,15 @@ type APIKey struct {
 	// Enabled controls whether this key currently authenticates call-plane requests.
 	// Enabled 控制该密钥当前是否可认证调用面请求。
 	Enabled bool `yaml:"enabled" json:"enabled"`
+	// OrganizationID optionally groups tenants under one administrative owner.
+	// OrganizationID 可选地在一个管理所有者下组织租户。
+	OrganizationID string `yaml:"organization-id,omitempty" json:"organization_id,omitempty"`
+	// TenantID is the isolation and accounting boundary and defaults to the key identifier for legacy records.
+	// TenantID 是隔离与计量边界，旧记录默认使用密钥标识。
+	TenantID string `yaml:"tenant-id,omitempty" json:"tenant_id,omitempty"`
+	// ProjectID is the workload boundary and defaults to the key identifier for legacy records.
+	// ProjectID 是工作负载边界，旧记录默认使用密钥标识。
+	ProjectID string `yaml:"project-id,omitempty" json:"project_id,omitempty"`
 }
 
 // APIKeyInput supplies editable fields when creating or replacing one API key.
@@ -92,6 +122,15 @@ type APIKeyInput struct {
 	// Enabled controls whether the key may authenticate immediately.
 	// Enabled 控制该密钥是否可立即认证。
 	Enabled bool
+	// OrganizationID optionally assigns an administrative organization.
+	// OrganizationID 可选地分配管理组织。
+	OrganizationID string
+	// TenantID optionally assigns a shared tenant boundary.
+	// TenantID 可选地分配共享租户边界。
+	TenantID string
+	// ProjectID optionally assigns a project boundary.
+	// ProjectID 可选地分配项目边界。
+	ProjectID string
 }
 
 // Store provides synchronized YAML-backed configuration and API key operations.
@@ -215,12 +254,51 @@ func (s *Store) AuthenticateAPIKeyID(provided string) (string, bool) {
 	return "", false
 }
 
+// AuthenticateAPIPrincipal verifies one enabled key and returns its normalized tenant-scoped caller identity.
+// AuthenticateAPIPrincipal 校验一个启用密钥并返回其规范化租户作用域调用者身份。
+func (s *Store) AuthenticateAPIPrincipal(provided string) (access.Principal, bool) {
+	candidate := strings.TrimSpace(provided)
+	if candidate == "" {
+		return access.Principal{}, false
+	}
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	for _, configuredKey := range s.config.API.Keys {
+		if !configuredKey.Enabled || subtle.ConstantTimeCompare([]byte(configuredKey.Key), []byte(candidate)) != 1 {
+			continue
+		}
+		tenantID := strings.TrimSpace(configuredKey.TenantID)
+		if tenantID == "" {
+			tenantID = configuredKey.ID
+		}
+		projectID := strings.TrimSpace(configuredKey.ProjectID)
+		if projectID == "" {
+			projectID = configuredKey.ID
+		}
+		principal := access.Principal{SubjectID: configuredKey.ID, OrganizationID: strings.TrimSpace(configuredKey.OrganizationID), TenantID: tenantID, ProjectID: projectID, Roles: []access.Role{access.RoleCaller}}
+		return principal, principal.Validate() == nil
+	}
+	return access.Principal{}, false
+}
+
 // ListAPIKeys returns an isolated management-plane snapshot of plaintext API keys.
 // ListAPIKeys 返回明文 API 密钥的隔离管理面快照。
 func (s *Store) ListAPIKeys() []APIKey {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	return append([]APIKey(nil), s.config.API.Keys...)
+}
+
+// OIDCConfiguration returns one isolated enabled external identity configuration when present.
+// OIDCConfiguration 在存在时返回一个隔离的已启用外部身份配置。
+func (s *Store) OIDCConfiguration() *OIDCConfig {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.config.API.OIDC == nil {
+		return nil
+	}
+	configuration := *s.config.API.OIDC
+	return &configuration
 }
 
 // CreateAPIKey adds one new call-plane API key and persists the complete configuration atomically.
@@ -240,7 +318,7 @@ func (s *Store) CreateAPIKey(input APIKeyInput) (APIKey, error) {
 	}
 	// created is normalized exactly once before it becomes externally visible.
 	// created 在对外可见前仅进行一次规范化。
-	created := APIKey{ID: keyID, Name: strings.TrimSpace(input.Name), Key: strings.TrimSpace(input.Key), Enabled: input.Enabled}
+	created := APIKey{ID: keyID, Name: strings.TrimSpace(input.Name), Key: strings.TrimSpace(input.Key), Enabled: input.Enabled, OrganizationID: strings.TrimSpace(input.OrganizationID), TenantID: strings.TrimSpace(input.TenantID), ProjectID: strings.TrimSpace(input.ProjectID)}
 	next.API.Keys = append(next.API.Keys, created)
 	if errPersist := s.persist(next); errPersist != nil {
 		return APIKey{}, errPersist
@@ -270,7 +348,7 @@ func (s *Store) UpdateAPIKey(id string, input APIKeyInput) (APIKey, error) {
 		}
 		// replacement preserves the immutable identifier while replacing every mutable field explicitly.
 		// replacement 保留不可变标识，同时显式替换每一个可变字段。
-		replacement := APIKey{ID: normalizedID, Name: strings.TrimSpace(input.Name), Key: strings.TrimSpace(input.Key), Enabled: input.Enabled}
+		replacement := APIKey{ID: normalizedID, Name: strings.TrimSpace(input.Name), Key: strings.TrimSpace(input.Key), Enabled: input.Enabled, OrganizationID: strings.TrimSpace(input.OrganizationID), TenantID: strings.TrimSpace(input.TenantID), ProjectID: strings.TrimSpace(input.ProjectID)}
 		if errDuplicate := ensureUniqueKeyValue(next.API.Keys, replacement.Key, normalizedID); errDuplicate != nil {
 			return APIKey{}, errDuplicate
 		}
@@ -335,13 +413,18 @@ func validateConfig(config Config) error {
 		seenIDs[configuredKey.ID] = struct{}{}
 		seenValues[configuredKey.Key] = struct{}{}
 	}
+	if config.API.OIDC != nil && config.API.OIDC.Enabled {
+		if strings.TrimSpace(config.API.OIDC.Issuer) == "" || strings.TrimSpace(config.API.OIDC.Audience) == "" {
+			return errors.New("enabled OIDC requires issuer and audience")
+		}
+	}
 	return nil
 }
 
 // validateAPIKeyInput validates editable API key fields before creating or replacing a record.
 // validateAPIKeyInput 在创建或替换记录前校验可编辑 API 密钥字段。
 func validateAPIKeyInput(input APIKeyInput) error {
-	return validateAPIKey(APIKey{ID: "api_input", Name: input.Name, Key: input.Key, Enabled: input.Enabled})
+	return validateAPIKey(APIKey{ID: "api_input", Name: input.Name, Key: input.Key, Enabled: input.Enabled, OrganizationID: input.OrganizationID, TenantID: input.TenantID, ProjectID: input.ProjectID})
 }
 
 // validateAPIKey validates one persisted API key record.
@@ -356,7 +439,28 @@ func validateAPIKey(configuredKey APIKey) error {
 	if strings.TrimSpace(configuredKey.Key) == "" {
 		return fmt.Errorf("API key %q value is required", configuredKey.ID)
 	}
+	for fieldName, fieldValue := range map[string]string{"organization-id": configuredKey.OrganizationID, "tenant-id": configuredKey.TenantID, "project-id": configuredKey.ProjectID} {
+		if fieldValue != "" && !validScopeIdentifier(fieldValue) {
+			return fmt.Errorf("API key %q %s is invalid", configuredKey.ID, fieldName)
+		}
+	}
 	return nil
+}
+
+// validScopeIdentifier accepts stable portable public-service scope identifiers.
+// validScopeIdentifier 接受稳定可移植公共服务作用域标识。
+func validScopeIdentifier(value string) bool {
+	value = strings.TrimSpace(value)
+	if len(value) == 0 || len(value) > 128 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' || character == '-' || character == '_' || character == '.' {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // ensureUniqueKeyValue rejects an API key bearer value already assigned to another record.
@@ -455,8 +559,13 @@ func looksLikeBcrypt(value string) bool {
 // cloneConfig isolates mutable API key slices between callers and the authoritative store.
 // cloneConfig 在调用方与权威存储之间隔离可变 API 密钥切片。
 func cloneConfig(config Config) Config {
-	return Config{
+	cloned := Config{
 		Management: config.Management,
 		API:        APIConfig{Keys: append([]APIKey(nil), config.API.Keys...)},
 	}
+	if config.API.OIDC != nil {
+		oidcConfiguration := *config.API.OIDC
+		cloned.API.OIDC = &oidcConfiguration
+	}
+	return cloned
 }

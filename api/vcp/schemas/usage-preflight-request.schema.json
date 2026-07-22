@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://openvulcan.dev/vcp/1.0/usage-preflight-request.schema.json",
+  "title": "VCP Usage Preflight Request",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["protocol_version", "request_id", "execution"],
+  "properties": {
+    "protocol_version": {"const": "1.0"},
+    "request_id": {"type": "string", "minLength": 1},
+    "execution": {"$ref": "./execution-request.schema.json"}
+  },
+  "allOf": [
+    {"not": {"properties": {"execution": {"required": ["retry_policy"]}}}},
+    {"not": {"properties": {"execution": {"properties": {"dispatch_mode": {"const": "deferred"}}, "required": ["dispatch_mode"]}}}}
+  ]
+}

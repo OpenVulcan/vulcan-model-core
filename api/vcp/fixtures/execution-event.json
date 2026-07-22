@@ -1,0 +1,17 @@
+{
+  "execution_id": "exe_0123456789abcdef0123456789abcdef",
+  "event_id": "evt_0123456789abcdef0123456789abcdef_7",
+  "sequence": 7,
+  "time": "2026-07-21T00:00:00Z",
+  "type": "usage.updated",
+  "usage": {
+    "unit": "credits",
+    "value": 0.25,
+    "accuracy": "exact",
+    "source": "provider_reported",
+    "aggregation": "snapshot",
+    "phase": "terminal",
+    "accounting_basis": "provider_credit",
+    "final": true
+  }
+}

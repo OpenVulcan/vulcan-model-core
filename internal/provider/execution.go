@@ -37,6 +37,9 @@ var (
 	// ErrExecutionBinding reports a definition, channel, target, or continuation mismatch.
 	// ErrExecutionBinding 表示 Definition、Channel、Target 或 Continuation 不匹配。
 	ErrExecutionBinding = errors.New("invalid provider execution binding")
+	// ErrContinuationRejected reports explicit upstream rejection of the exact bound continuation handle.
+	// ErrContinuationRejected 表示上游明确拒绝精确绑定的续接句柄。
+	ErrContinuationRejected = errors.New("provider continuation rejected")
 	// ErrActionExecutionDriverRequired reports an empty action execution registration.
 	// ErrActionExecutionDriverRequired 表示空的动作执行 Driver 注册。
 	ErrActionExecutionDriverRequired = errors.New("provider action execution driver is required")
@@ -49,7 +52,60 @@ var (
 	// ErrTaskExecutionDriverDuplicate reports duplicate asynchronous ownership of one definition and action.
 	// ErrTaskExecutionDriverDuplicate 表示同一 Definition 与动作的异步所有权重复。
 	ErrTaskExecutionDriverDuplicate = errors.New("provider task execution driver is already registered")
+	// ErrExecutionEventSinkClosed reports an event emitted after the durable execution reached a terminal state.
+	// ErrExecutionEventSinkClosed 表示持久执行进入终态后仍尝试发送事件。
+	ErrExecutionEventSinkClosed = errors.New("provider execution event sink is closed")
+	// ErrOutputBudgetExceeded reports a provider stream that crossed the caller's hard output byte ceiling.
+	// ErrOutputBudgetExceeded 表示供应商流超过调用方的硬输出字节上限。
+	ErrOutputBudgetExceeded = errors.New("provider output budget exceeded")
 )
+
+// ExecutionEventSink durably accepts validated provider semantic events while an upstream stream is still active.
+// ExecutionEventSink 在上游流仍活跃时持久接收经过校验的供应商语义事件。
+type ExecutionEventSink interface {
+	// Emit validates and durably publishes one provider semantic event before returning to the upstream reader.
+	// Emit 在返回上游读取器前校验并持久发布一个供应商语义事件。
+	Emit(context.Context, vcp.Event) error
+}
+
+// ResourceProgress contains one provider-confirmed cumulative output byte observation.
+// ResourceProgress 包含一个由供应商确认的累计输出字节观测。
+type ResourceProgress struct {
+	// OutputID is stable within the provider result and matches GeneratedResource.OutputID.
+	// OutputID 在供应商结果内保持稳定，并与 GeneratedResource.OutputID 一致。
+	OutputID string
+	// Kind identifies the generated media family.
+	// Kind 标识生成媒体类别。
+	Kind vcp.MediaKind
+	// MIMEType identifies the exact output encoding selected before streaming starts.
+	// MIMEType 标识流式开始前选定的精确输出编码。
+	MIMEType string
+	// PartialBytes is the cumulative count of provider bytes received so far.
+	// PartialBytes 是当前已接收供应商字节的累计数量。
+	PartialBytes int64
+}
+
+// ExecutionResourceSink durably accepts real provider resource progress while an upstream stream is active.
+// ExecutionResourceSink 在上游流活跃时持久接收真实供应商资源进度。
+type ExecutionResourceSink interface {
+	// EmitResourceProgress publishes one strictly increasing cumulative byte observation.
+	// EmitResourceProgress 发布一个严格递增的累计字节观测。
+	EmitResourceProgress(context.Context, ResourceProgress) error
+}
+
+// EmitExecutionEvents forwards one decoded event batch to the optional real-time sink in causal order.
+// EmitExecutionEvents 按因果顺序将一批已解码事件转发到可选实时 Sink。
+func EmitExecutionEvents(ctx context.Context, sink ExecutionEventSink, events []vcp.Event) error {
+	if sink == nil {
+		return nil
+	}
+	for _, event := range events {
+		if errEmit := sink.Emit(ctx, event); errEmit != nil {
+			return errEmit
+		}
+	}
+	return nil
+}
 
 // ContinuationBinding contains a Router-resolved provider continuation that remains bound to one exact target scope.
 // ContinuationBinding 包含 Router 解析的供应商续接状态，并始终绑定到一个精确 Target 作用域。
@@ -128,6 +184,12 @@ type ExecutionRequest struct {
 	// PreparedWorkflow contains one Router-resolved provider handle only for an explicit multi-step operation.
 	// PreparedWorkflow 仅为显式多步骤操作包含一个由 Router 解析的供应商句柄。
 	PreparedWorkflow *PreparedWorkflowBinding
+	// EventSink receives validated semantic events immediately for explicitly streaming requests.
+	// EventSink 为显式流式请求立即接收经过校验的语义事件。
+	EventSink ExecutionEventSink
+	// ResourceSink receives native generated-resource byte progress for explicitly streaming requests.
+	// ResourceSink 为显式流式请求接收原生生成资源字节进度。
+	ResourceSink ExecutionResourceSink
 }
 
 // PreparedWorkflowBinding contains one private target-bound provider preparation handle.
@@ -412,6 +474,9 @@ type ExecutionResult struct {
 	// UpstreamResponseID is a provider response identifier for Router-owned continuation persistence.
 	// UpstreamResponseID 是供 Router 所有续接持久化使用的供应商响应标识。
 	UpstreamResponseID string
+	// ContinuationUpstreamResponseID is present only when this exact driver can consume the identifier on a later bound request.
+	// ContinuationUpstreamResponseID 仅在此精确 Driver 可于后续绑定请求中消费该标识时存在。
+	ContinuationUpstreamResponseID string
 	// Embeddings contains ordered typed vector results for embedding actions.
 	// Embeddings 包含 Embedding 动作的有序类型化向量结果。
 	Embeddings []vcp.EmbeddingItem
@@ -484,6 +549,25 @@ type ExecutionDriver interface {
 	// Execute projects and sends one request without changing its target scope.
 	// Execute 在不改变 Target 作用域的前提下投影并发送一条请求。
 	Execute(context.Context, ExecutionRequest) (ExecutionResult, error)
+}
+
+// UsagePreflightResult contains provider-owned side-effect-free input accounting.
+// UsagePreflightResult 包含供应商拥有的无副作用输入计量。
+type UsagePreflightResult struct {
+	// Usage contains only values returned by the provider counting endpoint.
+	// Usage 仅包含供应商计量接口返回的数值。
+	Usage vcp.UsageObservation
+	// Accuracy states whether the provider reported an exact value.
+	// Accuracy 声明供应商是否报告了精确值。
+	Accuracy vcp.PreflightAccuracy
+}
+
+// UsagePreflightDriver counts one request without creating model output or changing target scope.
+// UsagePreflightDriver 在不创建模型输出或改变 Target 作用域的情况下计量请求。
+type UsagePreflightDriver interface {
+	// PreflightUsage returns provider-native input accounting for the exact immutable target.
+	// PreflightUsage 返回精确不可变 Target 的供应商原生输入计量。
+	PreflightUsage(context.Context, ExecutionRequest) (UsagePreflightResult, error)
 }
 
 // ActionExecutionDriver executes one exact definition-owned action binding.
@@ -752,6 +836,33 @@ func (r *ExecutionRegistry) Execute(ctx context.Context, request ExecutionReques
 		return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	}
 	return driver.Execute(ctx, request)
+}
+
+// PreflightUsage dispatches only to an explicitly registered provider-native counter.
+// PreflightUsage 仅分派到显式注册的供应商原生计量器。
+func (r *ExecutionRegistry) PreflightUsage(ctx context.Context, request ExecutionRequest) (UsagePreflightResult, error) {
+	if r == nil {
+		return UsagePreflightResult{}, ErrExecutionDriverNotFound
+	}
+	if request.Binding.Target.ActionBindingID == "" {
+		return UsagePreflightResult{}, fmt.Errorf("%w: usage preflight requires an action-bound target", ErrExecutionBinding)
+	}
+	action, errValidate := request.ValidateForAction(request.Binding.Target.ActionBindingID)
+	if errValidate != nil {
+		return UsagePreflightResult{}, errValidate
+	}
+	key := executionDriverKey(request.Binding.Target.ProviderDefinitionID, action.ID)
+	r.mu.RLock()
+	driver, exists := r.actionDrivers[key]
+	r.mu.RUnlock()
+	if !exists {
+		return UsagePreflightResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, action.ID)
+	}
+	counter, supported := driver.(UsagePreflightDriver)
+	if !supported {
+		return UsagePreflightResult{}, fmt.Errorf("%w: provider action has no native usage preflight", ErrExecutionDriverNotFound)
+	}
+	return counter.PreflightUsage(ctx, request)
 }
 
 // ClassifyExecutionError converts safe transport failures into closed same-provider retry semantics.

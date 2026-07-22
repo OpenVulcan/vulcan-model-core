@@ -17,6 +17,49 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
+// TestExecutionStoreProtectsProviderContinuation verifies only the Router identifier and safe affinity summary are publicly serializable.
+// TestExecutionStoreProtectsProviderContinuation 验证仅 Router 标识与安全亲和摘要可公开序列化。
+func TestExecutionStoreProtectsProviderContinuation(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "continuation.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer func() { _ = database.Close() }()
+	secrets := secret.NewMemoryStore()
+	store, errStore := NewExecutionStore(database, secrets)
+	if errStore != nil {
+		t.Fatalf("NewExecutionStore() error = %v", errStore)
+	}
+	now := time.Date(2026, time.July, 21, 14, 0, 0, 0, time.UTC)
+	record := sqliteExecutionRecord(now)
+	record.Status = execution.StatusSucceeded
+	record.Result = &execution.Result{Conversation: &vcp.Response{ResponseID: "response-public", Status: vcp.ResponseCompleted}, Continuation: &vcp.Continuation{ContinuationID: record.ID, LogicalResponseID: "response-public", AffinitySummary: "provider=definition_test", ExpiresAt: record.ExpiresAt}}
+	record.ProviderContinuation = &execution.ProviderContinuationSnapshot{ContinuationID: record.ID, UpstreamResponseID: "upstream-private-response", Target: record.Target, LogicalResponseID: "response-public", CreatedAt: record.UpdatedAt, LastUsedAt: record.UpdatedAt, ExpiresAt: record.ExpiresAt, InvalidatedAt: record.UpdatedAt, InvalidationReason: execution.ContinuationInvalidatedProviderRejected}
+	if _, _, errCreate := store.Create(ctx, record, sqliteLifecycleEvent(record.ID, 1, now, execution.EventExecutionAccepted, execution.StatusAccepted)); errCreate != nil {
+		t.Fatalf("Create() error = %v", errCreate)
+	}
+	reopened, errGet := store.Get(ctx, record.OwnerAPIKeyID, record.ID)
+	if errGet != nil || reopened.ProviderContinuation == nil || reopened.ProviderContinuation.UpstreamResponseID != "upstream-private-response" || !reopened.ProviderContinuation.LastUsedAt.Equal(now) || reopened.ProviderContinuation.InvalidationReason != execution.ContinuationInvalidatedProviderRejected || reopened.Result == nil || reopened.Result.Continuation == nil || reopened.Result.Continuation.ContinuationID != record.ID {
+		t.Fatalf("reopened continuation=%+v result=%+v error=%v", reopened.ProviderContinuation, reopened.Result, errGet)
+	}
+	publicJSON, errJSON := json.Marshal(reopened)
+	if errJSON != nil {
+		t.Fatalf("json.Marshal() error = %v", errJSON)
+	}
+	if strings.Contains(string(publicJSON), "upstream-private-response") || strings.Contains(string(publicJSON), record.Target.CredentialID) {
+		t.Fatalf("public execution leaked private continuation: %s", publicJSON)
+	}
+	var persistedPayload []byte
+	var protectedReference string
+	if errQuery := database.sql.QueryRowContext(ctx, `SELECT provider_continuation_payload, provider_continuation_secret_ref FROM executions WHERE id = ?`, record.ID).Scan(&persistedPayload, &protectedReference); errQuery != nil {
+		t.Fatalf("read continuation columns: %v", errQuery)
+	}
+	if strings.Contains(string(persistedPayload), "upstream-private-response") || protectedReference == "" || secrets.Count() != 1 {
+		t.Fatalf("continuation was not protected: payload=%s reference=%q secrets=%d", persistedPayload, protectedReference, secrets.Count())
+	}
+}
+
 // TestExecutionStorePersistsPrivateMusicPreparationWithoutPublicDisclosure verifies durable two-step cover state.
 // TestExecutionStorePersistsPrivateMusicPreparationWithoutPublicDisclosure 验证持久化两阶段翻唱状态不会公开泄露。
 func TestExecutionStorePersistsPrivateMusicPreparationWithoutPublicDisclosure(t *testing.T) {
@@ -118,19 +161,27 @@ func TestExecutionStorePersistsIdempotencyEventsAndPrivateTaskAffinity(t *testin
 	queued.UpdatedAt = now.Add(time.Second)
 	queued.Revision = 2
 	queued.Attempts = []execution.Attempt{{Sequence: 1, Target: record.Target, StartedAt: now, EndedAt: now.Add(time.Second), Succeeded: true, SemanticOutput: true}}
+	// cancellationRequestedAt freezes the durable intent timestamp verified after decoding.
+	// cancellationRequestedAt 冻结解码后要验证的持久化意图时间戳。
+	cancellationRequestedAt := now.Add(500 * time.Millisecond)
 	queued.ProviderTask = &execution.ProviderTaskSnapshot{
 		ProviderTaskID: "upstream-secret-task", Target: record.Target,
 		Definition: providerconfig.ProviderDefinition{ID: record.Target.ProviderDefinitionID},
 		Endpoint:   providerconfig.Endpoint{ID: record.Target.EndpointID, ProviderInstanceID: record.Target.ProviderInstanceID},
 		Credential: providerconfig.Credential{ID: record.Target.CredentialID, ProviderInstanceID: record.Target.ProviderInstanceID},
 		PollAfter:  now.Add(time.Minute), PollAttempts: 2,
+		CancellationRequestedAt: &cancellationRequestedAt,
+		CancellationAfter:       now.Add(3 * time.Second), CancellationAttempts: 1,
 	}
 	if errSave := store.Save(ctx, queued, 1, []execution.Event{sqliteLifecycleEvent(record.ID, 2, queued.UpdatedAt, execution.EventExecutionQueued, execution.StatusQueued)}); errSave != nil {
 		t.Fatalf("save queued task: %v", errSave)
 	}
 	reopened, errGet := store.Get(ctx, record.OwnerAPIKeyID, record.ID)
-	if errGet != nil || reopened.ProviderTask == nil || reopened.ProviderTask.ProviderTaskID != "upstream-secret-task" || reopened.ProviderTask.Target.CredentialID != record.Target.CredentialID || len(reopened.Attempts) != 1 || !reopened.Attempts[0].Succeeded {
+	if errGet != nil || reopened.ProviderTask == nil || reopened.ProviderTask.ProviderTaskID != "upstream-secret-task" || reopened.ProviderTask.Target.CredentialID != record.Target.CredentialID || reopened.ProviderTask.CancellationRequestedAt == nil || *reopened.ProviderTask.CancellationRequestedAt != now.Add(500*time.Millisecond) || reopened.ProviderTask.CancellationAfter != now.Add(3*time.Second) || reopened.ProviderTask.CancellationAttempts != 1 || len(reopened.Attempts) != 1 || !reopened.Attempts[0].Succeeded {
 		t.Fatalf("reopened task=%+v error=%v", reopened.ProviderTask, errGet)
+	}
+	if reopened.Result != nil {
+		t.Fatalf("queued execution decoded a spurious result: %+v", reopened.Result)
 	}
 	publicJSON, errJSON := json.Marshal(reopened)
 	if errJSON != nil {
@@ -157,7 +208,8 @@ func TestExecutionStorePersistsIdempotencyEventsAndPrivateTaskAffinity(t *testin
 	}
 	failed := reopened
 	failed.Status = execution.StatusFailed
-	failed.Failure = &execution.Failure{Code: "provider_failed", Retryable: false}
+	failed.Failure = &execution.Failure{Code: "provider_failed", Retryable: false, RouterRequestID: failed.Request.RequestID, TargetSummary: "instance=" + failed.Target.ProviderInstanceID}
+	failed.Result = nil
 	failed.ProviderTask = nil
 	failed.UpdatedAt = now.Add(2 * time.Minute)
 	failed.Revision = 3
@@ -170,6 +222,93 @@ func TestExecutionStorePersistsIdempotencyEventsAndPrivateTaskAffinity(t *testin
 	}
 	if secrets.Count() != 0 {
 		t.Fatalf("terminal task retained %d protected handles", secrets.Count())
+	}
+}
+
+// TestExecutionStoreLeaseEnforcesOwnerAndExpiry verifies exclusive ownership, renewal, and crash takeover.
+// TestExecutionStoreLeaseEnforcesOwnerAndExpiry 验证排他所有权、续约与崩溃接管。
+func TestExecutionStoreLeaseEnforcesOwnerAndExpiry(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "lease.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	store, errStore := NewExecutionStore(database, secret.NewMemoryStore())
+	if errStore != nil {
+		t.Fatalf("NewExecutionStore() error = %v", errStore)
+	}
+	now := time.Date(2026, 7, 21, 20, 0, 0, 0, time.UTC)
+	record := sqliteExecutionRecord(now)
+	accepted := sqliteLifecycleEvent(record.ID, 1, now, execution.EventExecutionAccepted, execution.StatusAccepted)
+	if _, _, errCreate := store.Create(ctx, record, accepted); errCreate != nil {
+		t.Fatalf("Create() error = %v", errCreate)
+	}
+	acquired, errAcquire := store.AcquireLease(ctx, record.ID, "worker_a", now, now.Add(30*time.Second))
+	if errAcquire != nil || !acquired {
+		t.Fatalf("first acquire=%t error=%v", acquired, errAcquire)
+	}
+	blocked, errBlocked := store.AcquireLease(ctx, record.ID, "worker_b", now.Add(time.Second), now.Add(31*time.Second))
+	if errBlocked != nil || blocked {
+		t.Fatalf("competing acquire=%t error=%v", blocked, errBlocked)
+	}
+	renewed, errRenew := store.RenewLease(ctx, record.ID, "worker_a", now.Add(2*time.Second), now.Add(40*time.Second))
+	if errRenew != nil || !renewed {
+		t.Fatalf("renew=%t error=%v", renewed, errRenew)
+	}
+	taken, errTakeover := store.AcquireLease(ctx, record.ID, "worker_b", now.Add(41*time.Second), now.Add(71*time.Second))
+	if errTakeover != nil || !taken {
+		t.Fatalf("takeover=%t error=%v", taken, errTakeover)
+	}
+	if errRelease := store.ReleaseLease(ctx, record.ID, "worker_a"); errRelease != nil {
+		t.Fatalf("non-owner release error=%v", errRelease)
+	}
+	stillOwned, errStillOwned := store.RenewLease(ctx, record.ID, "worker_b", now.Add(42*time.Second), now.Add(72*time.Second))
+	if errStillOwned != nil || !stillOwned {
+		t.Fatalf("owner lease disappeared=%t error=%v", stillOwned, errStillOwned)
+	}
+}
+
+// TestExecutionStorePersistsAttemptAndResultUsage verifies both private attempt accounting and public logical accounting survive restart reads.
+// TestExecutionStorePersistsAttemptAndResultUsage 验证私有尝试计量和公共逻辑计量均可在重启读取后保留。
+func TestExecutionStorePersistsAttemptAndResultUsage(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "usage.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	store, errStore := NewExecutionStore(database, secret.NewMemoryStore())
+	if errStore != nil {
+		t.Fatalf("NewExecutionStore() error = %v", errStore)
+	}
+	now := time.Date(2026, 7, 21, 23, 15, 0, 0, time.UTC)
+	record := sqliteExecutionRecord(now)
+	if _, _, errCreate := store.Create(ctx, record, sqliteLifecycleEvent(record.ID, 1, now, execution.EventExecutionAccepted, execution.StatusAccepted)); errCreate != nil {
+		t.Fatalf("Create() error = %v", errCreate)
+	}
+	running := record
+	running.Status = execution.StatusRunning
+	running.UpdatedAt = now.Add(time.Second)
+	running.Revision = 2
+	if errSave := store.Save(ctx, running, 1, []execution.Event{sqliteLifecycleEvent(record.ID, 2, running.UpdatedAt, execution.EventExecutionRunning, execution.StatusRunning)}); errSave != nil {
+		t.Fatalf("save running: %v", errSave)
+	}
+	inputTokens := int64(12)
+	outputTokens := int64(4)
+	usage := &vcp.UsageObservation{InputTokens: &inputTokens, OutputTokens: &outputTokens, Source: "provider_reported", Aggregation: "snapshot", Phase: "terminal", AccountingBasis: "provider_usage", Final: true}
+	succeeded := running
+	succeeded.Status = execution.StatusSucceeded
+	succeeded.UpdatedAt = now.Add(2 * time.Second)
+	succeeded.Revision = 3
+	succeeded.Attempts = []execution.Attempt{{Sequence: 1, Target: record.Target, StartedAt: running.UpdatedAt, EndedAt: succeeded.UpdatedAt, Succeeded: true, SemanticOutput: true, Usage: usage}}
+	succeeded.Result = &execution.Result{Conversation: &vcp.Response{ResponseID: "response_usage", Status: vcp.ResponseCompleted}, Usage: usage}
+	if errSave := store.Save(ctx, succeeded, 2, []execution.Event{sqliteLifecycleEvent(record.ID, 3, succeeded.UpdatedAt, execution.EventExecutionSucceeded, execution.StatusSucceeded)}); errSave != nil {
+		t.Fatalf("save succeeded usage: %v", errSave)
+	}
+	reopened, errGet := store.Get(ctx, record.OwnerAPIKeyID, record.ID)
+	if errGet != nil || len(reopened.Attempts) != 1 || reopened.Attempts[0].Usage == nil || reopened.Result == nil || reopened.Result.Usage == nil || *reopened.Attempts[0].Usage.InputTokens != 12 || *reopened.Result.Usage.OutputTokens != 4 {
+		t.Fatalf("reopened usage attempt=%#v result=%#v error=%v", reopened.Attempts, reopened.Result, errGet)
 	}
 }
 

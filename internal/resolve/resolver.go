@@ -337,8 +337,8 @@ func credentialBoundToModelEndpoint(credentialID string, offering catalog.ModelO
 		if !binding.Enabled || binding.CredentialID != credentialID || binding.ChannelID != offering.ChannelID || !allowsModel(binding.AllowedModelIDs, modelID) {
 			continue
 		}
-		endpoint, exists := endpoints[binding.EndpointID]
-		if exists && endpoint.ChannelID == offering.ChannelID {
+		_, exists := endpoints[binding.EndpointID]
+		if exists {
 			return true
 		}
 	}
@@ -403,7 +403,7 @@ func credentialBoundToReadyModelEndpoint(credentialID string, offering catalog.M
 			continue
 		}
 		endpoint, exists := endpoints[binding.EndpointID]
-		if exists && endpoint.Status == providerconfig.EndpointReady && endpoint.ChannelID == offering.ChannelID {
+		if exists && endpoint.Status == providerconfig.EndpointReady {
 			return true
 		}
 	}
@@ -418,7 +418,7 @@ func credentialBoundToReadyServiceEndpoint(credentialID string, offering catalog
 			continue
 		}
 		endpoint, exists := endpoints[binding.EndpointID]
-		if exists && endpoint.Status == providerconfig.EndpointReady && endpoint.ChannelID == offering.ChannelID {
+		if exists && endpoint.Status == providerconfig.EndpointReady {
 			return true
 		}
 	}
@@ -433,7 +433,7 @@ func (r *Resolver) modelPoolPathEligible(ctx context.Context, instanceID string,
 			continue
 		}
 		endpoint, exists := endpoints[binding.EndpointID]
-		if !exists || endpoint.Status != providerconfig.EndpointReady || endpoint.ChannelID != offering.ChannelID {
+		if !exists || endpoint.Status != providerconfig.EndpointReady {
 			continue
 		}
 		eligible, errEligible := r.runtimePathEligible(ctx, instanceID, credential, endpoint.ID, now)
@@ -455,7 +455,7 @@ func (r *Resolver) servicePoolPathEligible(ctx context.Context, instanceID strin
 			continue
 		}
 		endpoint, exists := endpoints[binding.EndpointID]
-		if !exists || endpoint.Status != providerconfig.EndpointReady || endpoint.ChannelID != offering.ChannelID {
+		if !exists || endpoint.Status != providerconfig.EndpointReady {
 			continue
 		}
 		eligible, errEligible := r.runtimePathEligible(ctx, instanceID, credential, endpoint.ID, now)
@@ -556,10 +556,16 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		}
 		endpoint, endpointExists := endpointByID[binding.EndpointID]
 		credential, credentialExists := credentialByID[binding.CredentialID]
-		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID || (len(actionAuthMethodIDs) > 0 && !containsString(actionAuthMethodIDs, credential.AuthMethodID)) {
+		if !endpointExists || !credentialExists || (len(actionAuthMethodIDs) > 0 && !containsString(actionAuthMethodIDs, credential.AuthMethodID)) {
 			continue
 		}
 		if request.RequiredCredentialID != "" && credential.ID != request.RequiredCredentialID {
+			continue
+		}
+		if request.RequiredEndpointID != "" && endpoint.ID != request.RequiredEndpointID {
+			continue
+		}
+		if request.RequiredRegion != "" && endpoint.Region != request.RequiredRegion {
 			continue
 		}
 		if containsString(request.ExcludedCredentialIDs, credential.ID) {
@@ -716,10 +722,16 @@ func (r *Resolver) resolveService(ctx context.Context, request Request) (Target,
 		}
 		endpoint, endpointExists := endpointByID[binding.EndpointID]
 		credential, credentialExists := credentialByID[binding.CredentialID]
-		if !endpointExists || !credentialExists || endpoint.ChannelID != offering.ChannelID || (len(action.AuthMethodIDs) > 0 && !containsString(action.AuthMethodIDs, credential.AuthMethodID)) {
+		if !endpointExists || !credentialExists || (len(action.AuthMethodIDs) > 0 && !containsString(action.AuthMethodIDs, credential.AuthMethodID)) {
 			continue
 		}
 		if request.RequiredCredentialID != "" && credential.ID != request.RequiredCredentialID {
+			continue
+		}
+		if request.RequiredEndpointID != "" && endpoint.ID != request.RequiredEndpointID {
+			continue
+		}
+		if request.RequiredRegion != "" && endpoint.Region != request.RequiredRegion {
 			continue
 		}
 		if containsString(request.ExcludedCredentialIDs, credential.ID) {
@@ -1107,6 +1119,11 @@ func capabilitiesSatisfy(capabilities catalog.ModelCapabilities, required []stri
 	for _, capability := range required {
 		var level catalog.CapabilityLevel
 		switch capability {
+		case "streaming":
+			if capabilities.Delivery.Streaming {
+				continue
+			}
+			return false
 		case "tool_calling":
 			level = capabilities.ToolCalling
 		case "parallel_tool_calls":
@@ -1117,6 +1134,14 @@ func capabilitiesSatisfy(capabilities catalog.ModelCapabilities, required []stri
 			level = capabilities.StrictJSONSchema
 		case "reasoning":
 			level = capabilities.Reasoning
+		case "image_input":
+			level = mediaInputLevel(capabilities.MediaInputs, vcp.MediaImage)
+		case "audio_input":
+			level = mediaInputLevel(capabilities.MediaInputs, vcp.MediaAudio)
+		case "video_input":
+			level = mediaInputLevel(capabilities.MediaInputs, vcp.MediaVideo)
+		case "file_input":
+			level = mediaInputLevel(capabilities.MediaInputs, vcp.MediaFile)
 		default:
 			return false
 		}
@@ -1125,6 +1150,17 @@ func capabilitiesSatisfy(capabilities catalog.ModelCapabilities, required []stri
 		}
 	}
 	return true
+}
+
+// mediaInputLevel returns the declared callable level for one exact media family.
+// mediaInputLevel 返回一个精确媒体类别声明的可调用级别。
+func mediaInputLevel(inputs []catalog.MediaInputCapability, kind vcp.MediaKind) catalog.CapabilityLevel {
+	for _, input := range inputs {
+		if input.Kind == kind {
+			return input.Level
+		}
+	}
+	return catalog.CapabilityUnsupported
 }
 
 // blockedByAllowance returns mandatory exhausted resource shapes applicable to one candidate.

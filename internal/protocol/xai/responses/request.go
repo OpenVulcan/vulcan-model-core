@@ -343,7 +343,7 @@ func canMergeXAIReasoningSummary(previous InputItem, current InputItem) bool {
 // isPureXAIReasoningSummary verifies an item has no hidden state, tool relation, or message payload that would make merging non-equivalent.
 // isPureXAIReasoningSummary 验证项目不含会使合并不等价的隐藏状态、工具关联或消息载荷。
 func isPureXAIReasoningSummary(item InputItem) bool {
-	return item.Type == "reasoning" && len(item.Summary) > 0 && item.Role == "" && len(item.Content) == 0 && item.CallID == "" && item.Name == "" && item.Arguments == "" && item.Input == "" && item.Output == ""
+	return item.Type == "reasoning" && len(item.Summary) > 0 && item.Role == "" && len(item.Content) == 0 && item.CallID == "" && item.Name == "" && item.Arguments == "" && item.Input == "" && item.Output == nil
 }
 
 // customToolCallArguments converts a custom freeform value into the xAI function-call JSON argument contract.

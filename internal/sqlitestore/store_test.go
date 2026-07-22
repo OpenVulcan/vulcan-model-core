@@ -386,4 +386,21 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	if len(restoredSnapshot.Offerings) != 1 || !restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Known || restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Value != 8192 {
 		t.Fatalf("restored token recommendations = %#v", restoredSnapshot.Offerings)
 	}
+	firstChanges, errFirstChanges := reopenedCatalogs.ListChanges(ctx, 0, 10)
+	if errFirstChanges != nil || firstChanges.CurrentRevision != 1 || len(firstChanges.Changes) != 1 || firstChanges.Changes[0].ProviderInstanceID != instance.ID || firstChanges.Changes[0].Type != catalog.ChangeSnapshotUpsert {
+		t.Fatalf("first catalog changes = %+v error=%v", firstChanges, errFirstChanges)
+	}
+	updatedSnapshot := restoredSnapshot
+	updatedSnapshot.Revision = 2
+	updatedSnapshot.ObservedAt = restoredSnapshot.ObservedAt.Add(time.Minute)
+	if errSave := reopenedCatalogs.Save(ctx, updatedSnapshot); errSave != nil {
+		t.Fatalf("save updated catalog snapshot: %v", errSave)
+	}
+	if errDelete := reopenedCatalogs.Delete(ctx, instance.ID); errDelete != nil {
+		t.Fatalf("delete catalog snapshot: %v", errDelete)
+	}
+	incremental, errIncremental := reopenedCatalogs.ListChanges(ctx, 1, 10)
+	if errIncremental != nil || incremental.CurrentRevision != 3 || len(incremental.Changes) != 2 || incremental.Changes[0].Type != catalog.ChangeSnapshotUpsert || incremental.Changes[1].Type != catalog.ChangeSnapshotDelete {
+		t.Fatalf("incremental catalog changes = %+v error=%v", incremental, errIncremental)
+	}
 }

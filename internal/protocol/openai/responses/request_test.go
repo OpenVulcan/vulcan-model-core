@@ -81,7 +81,7 @@ func TestProjectRequestUsesUpstreamToolCallID(t *testing.T) {
 	if call := projected.Upstream.Input[1]; call.Type != "function_call" || call.CallID != "upstream-call" {
 		t.Fatalf("function call = %#v", call)
 	}
-	if output := projected.Upstream.Input[2]; output.Type != "function_call_output" || output.CallID != "upstream-call" || output.Output != "Sunny" {
+	if output := projected.Upstream.Input[2]; output.Type != "function_call_output" || output.CallID != "upstream-call" || output.Output == nil || output.Output.Text == nil || *output.Output.Text != "Sunny" || output.Output.ComputerScreenshot != nil {
 		t.Fatalf("function output = %#v", output)
 	}
 }
@@ -166,6 +166,115 @@ func TestProjectRequestBlocksUnavailableNativeWebSearch(t *testing.T) {
 	capabilities.NativeWebSearch = false
 	_, errProject := ProjectRequest(request, responsesTarget(), capabilities, "lineage-1", "", responsesNow())
 	if !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
+		t.Fatalf("ProjectRequest() error = %v, want ErrCapabilityUnavailable", errProject)
+	}
+}
+
+// TestProjectRequestProjectsProviderHostedTools verifies each closed VCP hosted-tool configuration reaches its exact Responses wire shape.
+// TestProjectRequestProjectsProviderHostedTools 验证每个封闭 VCP 托管工具配置都到达其精确 Responses Wire 形态。
+func TestProjectRequestProjectsProviderHostedTools(t *testing.T) {
+	// maxResults is the explicit provider retrieval bound used by the fixture.
+	// maxResults 是夹具使用的明确供应商检索上限。
+	maxResults := 7
+	request := responsesTestRequest()
+	request.Tools = []vcp.ToolDefinition{
+		{Kind: vcp.ToolProviderFileSearch, Name: "file_search", FileSearch: &vcp.ProviderFileSearchTool{StoreIDs: []string{"vs_1", "vs_2"}, MaxResults: &maxResults}},
+		{Kind: vcp.ToolProviderCodeInterpreter, Name: "code_interpreter", CodeInterpreter: &vcp.ProviderCodeInterpreterTool{MemoryLimit: "4g"}},
+		{Kind: vcp.ToolProviderComputerUse, Name: "computer_use_ga", ComputerUse: &vcp.ProviderComputerUseTool{Mode: vcp.ProviderComputerUseGA}},
+		{Kind: vcp.ToolProviderComputerUse, Name: "computer_use_preview", ComputerUse: &vcp.ProviderComputerUseTool{Mode: vcp.ProviderComputerUsePreview, Environment: "browser", DisplayWidth: 1280, DisplayHeight: 720}},
+	}
+	capabilities := responsesCapabilities()
+	capabilities.ProviderFileSearch = true
+	capabilities.ProviderCodeInterpreter = true
+	capabilities.ProviderComputerUseGA = true
+	capabilities.ProviderComputerUsePreview = true
+	projected, errProject := ProjectRequest(request, responsesTarget(), capabilities, "lineage-hosted-tools", "", responsesNow())
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if len(projected.Upstream.Tools) != 4 {
+		t.Fatalf("tool count = %d, want 4", len(projected.Upstream.Tools))
+	}
+	fileSearch := projected.Upstream.Tools[0]
+	if fileSearch.Type != "file_search" || len(fileSearch.VectorStoreIDs) != 2 || fileSearch.VectorStoreIDs[1] != "vs_2" || fileSearch.MaxNumResults == nil || *fileSearch.MaxNumResults != 7 {
+		t.Fatalf("file search tool = %#v", fileSearch)
+	}
+	codeInterpreter := projected.Upstream.Tools[1]
+	encodedContainer, errMarshal := json.Marshal(codeInterpreter.Container)
+	if errMarshal != nil || string(encodedContainer) != `{"type":"auto","memory_limit":"4g"}` {
+		t.Fatalf("code interpreter container = %s, error = %v", encodedContainer, errMarshal)
+	}
+	computerGA := projected.Upstream.Tools[2]
+	if computerGA.Type != "computer" || computerGA.Environment != "" || computerGA.DisplayWidth != 0 || computerGA.DisplayHeight != 0 {
+		t.Fatalf("computer GA tool = %#v", computerGA)
+	}
+	computerPreview := projected.Upstream.Tools[3]
+	if computerPreview.Type != "computer_use_preview" || computerPreview.Environment != "browser" || computerPreview.DisplayWidth != 1280 || computerPreview.DisplayHeight != 720 {
+		t.Fatalf("computer preview tool = %#v", computerPreview)
+	}
+}
+
+// TestProjectRequestProjectsComputerScreenshotContinuation verifies the caller loop sends only a continued screenshot result.
+// TestProjectRequestProjectsComputerScreenshotContinuation 验证调用方循环仅发送续接截图结果。
+func TestProjectRequestProjectsComputerScreenshotContinuation(t *testing.T) {
+	request := responsesTestRequest()
+	request.Tools = []vcp.ToolDefinition{{Kind: vcp.ToolProviderComputerUse, Name: "computer", ComputerUse: &vcp.ProviderComputerUseTool{Mode: vcp.ProviderComputerUseGA}}}
+	request.ReasoningPolicy.ContinuationID = "continuation-router"
+	request.Context = []vcp.ContextItem{
+		vcp.ContextItem{
+			ItemID: "computer-call", Sequence: 2, Kind: vcp.ContextToolCall, Authority: vcp.AuthorityAssistant, Actor: vcp.ActorProvider,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			ToolCall: &vcp.ToolCallItem{ToolCallID: "call-vcp", UpstreamID: "call-upstream", Name: "computer_use", Status: vcp.ToolCallCompleted, ComputerActions: []vcp.ComputerAction{{Type: vcp.ComputerActionScreenshot}}},
+		},
+		vcp.ContextItem{
+			ItemID: "computer-result", Sequence: 3, Kind: vcp.ContextToolResult, Authority: vcp.AuthorityTool, Actor: vcp.ActorTool,
+			Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel,
+			ToolResult: &vcp.ToolResultItem{ToolCallID: "call-vcp", ComputerScreenshot: &vcp.ComputerScreenshotResult{ResourceRef: "resource-screenshot", Detail: "original"}},
+		},
+	}
+	capabilities := responsesCapabilities()
+	capabilities.ProviderComputerUseGA = true
+	inputs := []resource.MaterializedInput{{InputID: "screenshot", ResourceID: "resource-screenshot", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "cG5n"}}
+	projected, errProject := ProjectRequestWithInputs(request, responsesTarget(), capabilities, "lineage-computer-result", "response-upstream", responsesNow(), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	if projected.Upstream.PreviousResponseID != "response-upstream" || len(projected.Upstream.Input) != 1 {
+		t.Fatalf("upstream request = %#v", projected.Upstream)
+	}
+	result := projected.Upstream.Input[0]
+	if result.Type != "computer_call_output" || result.CallID != "call-upstream" || result.Output == nil || result.Output.ComputerScreenshot == nil || result.Output.Text != nil {
+		t.Fatalf("computer result = %#v", result)
+	}
+	encoded, errEncode := json.Marshal(result)
+	if errEncode != nil || string(encoded) != `{"type":"computer_call_output","call_id":"call-upstream","output":{"type":"computer_screenshot","image_url":"data:image/png;base64,cG5n","detail":"original"}}` {
+		t.Fatalf("encoded computer result = %s, error = %v", encoded, errEncode)
+	}
+}
+
+// TestProjectRequestProjectsExplicitCodeInterpreterContainer verifies an authorized provider container remains a string union arm.
+// TestProjectRequestProjectsExplicitCodeInterpreterContainer 验证已授权供应商容器保持为字符串联合分支。
+func TestProjectRequestProjectsExplicitCodeInterpreterContainer(t *testing.T) {
+	request := responsesTestRequest()
+	request.Tools = []vcp.ToolDefinition{{Kind: vcp.ToolProviderCodeInterpreter, Name: "code_interpreter", CodeInterpreter: &vcp.ProviderCodeInterpreterTool{ContainerID: "cntr_123"}}}
+	capabilities := responsesCapabilities()
+	capabilities.ProviderCodeInterpreter = true
+	projected, errProject := ProjectRequest(request, responsesTarget(), capabilities, "lineage-explicit-container", "", responsesNow())
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	encodedContainer, errMarshal := json.Marshal(projected.Upstream.Tools[0].Container)
+	if errMarshal != nil || string(encodedContainer) != `"cntr_123"` {
+		t.Fatalf("code interpreter container = %s, error = %v", encodedContainer, errMarshal)
+	}
+}
+
+// TestProjectRequestBlocksUnavailableProviderHostedTool verifies transport capability evidence is mandatory even for a valid VCP declaration.
+// TestProjectRequestBlocksUnavailableProviderHostedTool 验证即使 VCP 声明有效也必须具有传输能力证据。
+func TestProjectRequestBlocksUnavailableProviderHostedTool(t *testing.T) {
+	request := responsesTestRequest()
+	request.Tools = []vcp.ToolDefinition{{Kind: vcp.ToolProviderFileSearch, Name: "file_search", FileSearch: &vcp.ProviderFileSearchTool{StoreIDs: []string{"vs_1"}}}}
+	if _, errProject := ProjectRequest(request, responsesTarget(), responsesCapabilities(), "lineage-unavailable-hosted-tool", "", responsesNow()); !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
 		t.Fatalf("ProjectRequest() error = %v, want ErrCapabilityUnavailable", errProject)
 	}
 }

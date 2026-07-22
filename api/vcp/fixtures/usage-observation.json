@@ -1,0 +1,10 @@
+{
+  "input_tokens": 120,
+  "output_tokens": 48,
+  "total_tokens": 168,
+  "source": "provider_reported",
+  "aggregation": "cumulative",
+  "phase": "terminal",
+  "accounting_basis": "provider_native",
+  "final": true
+}

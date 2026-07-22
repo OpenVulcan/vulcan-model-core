@@ -363,7 +363,7 @@ func mapAnthropicSearchResponse(operation vcp.WebSearchOperation, response anthr
 	totalTokens := response.Usage.InputTokens + response.Usage.OutputTokens
 	inputTokens := response.Usage.InputTokens
 	outputTokens := response.Usage.OutputTokens
-	search.Usage = &vcp.UsageObservation{InputTokens: &inputTokens, OutputTokens: &outputTokens, TotalTokens: &totalTokens}
+	search.Usage = &vcp.UsageObservation{InputTokens: &inputTokens, OutputTokens: &outputTokens, TotalTokens: &totalTokens, Source: "provider_reported", Aggregation: "snapshot", Phase: "terminal", AccountingBasis: "anthropic_messages_web_search", Final: true}
 	if response.Usage.ServerToolUse.WebSearchRequests > 0 {
 		units := float64(response.Usage.ServerToolUse.WebSearchRequests)
 		search.Usage.ServiceUnits = &units

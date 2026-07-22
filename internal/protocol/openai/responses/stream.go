@@ -85,6 +85,9 @@ type streamSource struct {
 	// search holds the single native web-search semantic item.
 	// search 保存唯一的原生网页搜索语义项目。
 	search *streamSemanticItem
+	// computer holds the single completed provider computer-call semantic item.
+	// computer 保存唯一已完成的供应商计算机调用语义项目。
+	computer *streamSemanticItem
 	// reasoningSummaries maps each provider visible reasoning-summary index to its VCP semantic item.
 	// reasoningSummaries 将每个 Provider 可见推理摘要索引映射到其 VCP 语义项目。
 	reasoningSummaries map[int]*streamSemanticItem
@@ -323,6 +326,14 @@ func (d *StreamDecoder) Push(event StreamEvent) ([]vcp.Event, error) {
 	case "response.web_search_call.in_progress", "response.web_search_call.searching", "response.web_search_call.completed":
 		// The authoritative action payload is emitted from output_item.added/done; lifecycle-only frames add no facts.
 		// 权威动作载荷由 output_item.added/done 发出；仅生命周期帧不增加事实。
+	case "response.file_search_call.in_progress", "response.file_search_call.searching", "response.file_search_call.completed":
+		if errWarning := d.emitProviderHostedTraceWarning("openai_responses.file_search_trace_omitted", &newEvents); errWarning != nil {
+			return nil, errWarning
+		}
+	case "response.code_interpreter_call.in_progress", "response.code_interpreter_call.interpreting", "response.code_interpreter_call.completed", "response.code_interpreter_call_code.delta", "response.code_interpreter_call_code.done":
+		if errWarning := d.emitProviderHostedTraceWarning("openai_responses.code_interpreter_trace_omitted", &newEvents); errWarning != nil {
+			return nil, errWarning
+		}
 	case "response.completed":
 		if errTerminal := d.terminate(event.Response, vcp.EventResponseCompleted, &newEvents); errTerminal != nil {
 			return nil, errTerminal
@@ -583,6 +594,11 @@ func (d *StreamDecoder) observeOutputItemAdded(item OutputItem, outputIndex *int
 	case "web_search_call":
 		_, errSearch := d.ensureSearch(source, item, output)
 		return errSearch
+	case "file_search_call", "code_interpreter_call":
+		code, _ := providerHostedTraceWarning(item.Type)
+		return d.emitProviderHostedTraceWarning(code, output)
+	case "computer_call":
+		return nil
 	case "message":
 		return nil
 	default:
@@ -775,6 +791,15 @@ func (d *StreamDecoder) emitOutputItem(item OutputItem, outputIndex *int, output
 		}
 		if errComplete := d.completeSearch(semantic, item, output); errComplete != nil {
 			return errComplete
+		}
+	case "file_search_call", "code_interpreter_call":
+		code, _ := providerHostedTraceWarning(item.Type)
+		if errWarning := d.emitProviderHostedTraceWarning(code, output); errWarning != nil {
+			return errWarning
+		}
+	case "computer_call":
+		if _, errComputer := d.completeComputer(source, item, output); errComputer != nil {
+			return errComputer
 		}
 	default:
 		return fmt.Errorf("%w: unsupported output item type %q", ErrInvalidUpstreamResponse, item.Type)
@@ -1028,6 +1053,11 @@ func (d *StreamDecoder) completeSource(source *streamSource, output *[]vcp.Event
 			return errComplete
 		}
 	}
+	if source.computer != nil {
+		if errComplete := d.completeSemantic(source.computer, output); errComplete != nil {
+			return errComplete
+		}
+	}
 	for _, reasoningIndex := range sortedSemanticIndexes(source.reasoningSummaries) {
 		semantic := source.reasoningSummaries[reasoningIndex]
 		if errComplete := d.completeSemantic(semantic, output); errComplete != nil {
@@ -1265,6 +1295,80 @@ func (d *StreamDecoder) ensureSearch(source *streamSource, item OutputItem, outp
 	return semantic, nil
 }
 
+// completeComputer emits one complete provider computer call with a closed ordered action batch.
+// completeComputer 发出一个带封闭有序动作批次的完整供应商计算机调用。
+func (d *StreamDecoder) completeComputer(source *streamSource, item OutputItem, output *[]vcp.Event) (*streamSemanticItem, error) {
+	if source == nil || source.itemType != "computer_call" || item.Status != "completed" || strings.TrimSpace(item.CallID) == "" {
+		return nil, fmt.Errorf("%w: completed computer call with call_id is required", ErrInvalidUpstreamResponse)
+	}
+	if source.computer != nil {
+		if source.computer.upstreamToolCallID != item.CallID {
+			return nil, fmt.Errorf("%w: computer call identifier changed", ErrInvalidUpstreamResponse)
+		}
+		return source.computer, nil
+	}
+	if item.Action != nil && len(item.Actions) > 0 {
+		return nil, fmt.Errorf("%w: computer call cannot mix preview action and GA actions", ErrInvalidUpstreamResponse)
+	}
+	wireActions := item.Actions
+	if item.Action != nil {
+		wireActions = []OutputAction{*item.Action}
+	}
+	if len(wireActions) == 0 {
+		return nil, fmt.Errorf("%w: computer call requires at least one action", ErrInvalidUpstreamResponse)
+	}
+	actions := make([]vcp.ComputerAction, len(wireActions))
+	for index := range wireActions {
+		actions[index] = projectComputerAction(wireActions[index])
+	}
+	semantic := &streamSemanticItem{
+		itemID:             d.semanticItemID(source, vcp.ContextToolCall, 0),
+		kind:               vcp.ContextToolCall,
+		contentIndex:       0,
+		toolCallID:         item.CallID,
+		upstreamToolCallID: item.CallID,
+		toolName:           "computer_use",
+	}
+	started := d.emitter.itemEvent(vcp.EventItemStarted, semantic.itemID)
+	started.Item = &vcp.OutputItem{
+		ItemID: semantic.itemID,
+		Kind:   vcp.ContextToolCall,
+		Status: vcp.OutputItemInProgress,
+		ToolCall: &vcp.ToolCallItem{
+			ToolCallID:      item.CallID,
+			UpstreamID:      item.CallID,
+			Name:            "computer_use",
+			Status:          vcp.ToolCallCompleted,
+			ComputerActions: actions,
+		},
+	}
+	if errEmit := d.emit(started, output); errEmit != nil {
+		return nil, errEmit
+	}
+	source.computer = semantic
+	return semantic, nil
+}
+
+// projectComputerAction copies one exact Responses computer action into the canonical VCP union.
+// projectComputerAction 将一个精确 Responses 计算机动作复制到规范 VCP 联合。
+func projectComputerAction(action OutputAction) vcp.ComputerAction {
+	path := make([]vcp.ComputerPoint, len(action.Path))
+	for index := range action.Path {
+		path[index] = vcp.ComputerPoint{X: action.Path[index].X, Y: action.Path[index].Y}
+	}
+	return vcp.ComputerAction{
+		Type:    vcp.ComputerActionType(action.Type),
+		X:       cloneInt(action.X),
+		Y:       cloneInt(action.Y),
+		Button:  action.Button,
+		ScrollX: cloneInt(action.ScrollX),
+		ScrollY: cloneInt(action.ScrollY),
+		Text:    action.Text,
+		Keys:    append([]string(nil), action.Keys...),
+		Path:    path,
+	}
+}
+
 // completeSearch hydrates one completed provider search action without fabricating ranked results.
 // completeSearch 水合一个已完成的供应商搜索动作且不虚构排序结果。
 func (d *StreamDecoder) completeSearch(semantic *streamSemanticItem, item OutputItem, output *[]vcp.Event) error {
@@ -1477,6 +1581,30 @@ func (d *StreamDecoder) emitWarning(code string, output *[]vcp.Event) error {
 	return d.emit(warning, output)
 }
 
+// emitProviderHostedTraceWarning records one omission warning while allowing the provider-owned tool to complete internally.
+// emitProviderHostedTraceWarning 记录一次省略警告，同时允许供应商拥有的工具在内部完成。
+func (d *StreamDecoder) emitProviderHostedTraceWarning(code string, output *[]vcp.Event) error {
+	for _, existing := range d.report.ConversionSummary {
+		if existing == code {
+			return nil
+		}
+	}
+	return d.emitWarning(code, output)
+}
+
+// providerHostedTraceWarning maps one known provider-owned output item to a stable content-free warning.
+// providerHostedTraceWarning 将一个已知供应商拥有输出项目映射为稳定且不含内容的警告。
+func providerHostedTraceWarning(itemType string) (string, bool) {
+	switch itemType {
+	case "file_search_call":
+		return "openai_responses.file_search_trace_omitted", true
+	case "code_interpreter_call":
+		return "openai_responses.code_interpreter_trace_omitted", true
+	default:
+		return "", false
+	}
+}
+
 // emit validates, stores, and optionally returns one semantic event.
 // emit 校验、存储并可选返回一个语义事件。
 func (d *StreamDecoder) emit(event vcp.Event, output *[]vcp.Event) error {
@@ -1526,7 +1654,7 @@ func sourceTypeForKind(kind vcp.ContextKind) string {
 // usageObservation converts typed Responses usage without replacing unknown values by zero.
 // usageObservation 转换类型化 Responses 用量，且不使用零替换未知值。
 func usageObservation(usage *Usage, phase string, final bool) vcp.UsageObservation {
-	observation := vcp.UsageObservation{Source: "provider", Aggregation: "snapshot", Phase: phase, AccountingBasis: "provider_reported", Final: final}
+	observation := vcp.UsageObservation{Source: "provider_reported", Aggregation: "snapshot", Phase: phase, AccountingBasis: "openai_responses_usage", Final: final}
 	if usage == nil {
 		return observation
 	}
@@ -1583,6 +1711,7 @@ func cloneEvent(source vcp.Event) vcp.Event {
 		}
 		if source.Item.ToolCall != nil {
 			toolCall := *source.Item.ToolCall
+			toolCall.ComputerActions = cloneComputerActions(source.Item.ToolCall.ComputerActions)
 			item.ToolCall = &toolCall
 		}
 		cloned.Item = &item
@@ -1591,6 +1720,22 @@ func cloneEvent(source vcp.Event) vcp.Event {
 	if source.FinalArguments != nil {
 		arguments := *source.FinalArguments
 		cloned.FinalArguments = &arguments
+	}
+	return cloned
+}
+
+// cloneComputerActions returns an isolated copy of VCP computer actions for replay safety.
+// cloneComputerActions 为回放安全返回 VCP 计算机动作的隔离副本。
+func cloneComputerActions(source []vcp.ComputerAction) []vcp.ComputerAction {
+	cloned := make([]vcp.ComputerAction, len(source))
+	for index := range source {
+		cloned[index] = source[index]
+		cloned[index].X = cloneInt(source[index].X)
+		cloned[index].Y = cloneInt(source[index].Y)
+		cloned[index].ScrollX = cloneInt(source[index].ScrollX)
+		cloned[index].ScrollY = cloneInt(source[index].ScrollY)
+		cloned[index].Keys = append([]string(nil), source[index].Keys...)
+		cloned[index].Path = append([]vcp.ComputerPoint(nil), source[index].Path...)
 	}
 	return cloned
 }
@@ -1619,6 +1764,16 @@ func cloneInt64(source *int64) *int64 {
 	}
 	cloned := *source
 	return &cloned
+}
+
+// cloneInt returns an independent integer pointer.
+// cloneInt 返回独立的整数指针。
+func cloneInt(source *int) *int {
+	if source == nil {
+		return nil
+	}
+	value := *source
+	return &value
 }
 
 // ReadSSE parses an SSE byte stream into complete envelopes without interpreting provider JSON.
