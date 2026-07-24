@@ -39,7 +39,7 @@ func TestFunASRTaskLifecyclePreservesTypedTranscript(t *testing.T) {
 			}
 			_, _ = io.WriteString(writer, `{"request_id":"request-start","output":{"task_id":"task-123","task_status":"PENDING"}}`)
 		case request.Method == http.MethodGet && request.URL.Path == "/api/v1/tasks/task-123":
-			_, _ = io.WriteString(writer, `{"request_id":"request-poll","output":{"task_id":"task-123","task_status":"SUCCEEDED","results":[{"subtask_status":"SUCCEEDED","transcription_url":"https://results.example/task-123.json"}]}}`)
+			_, _ = io.WriteString(writer, `{"request_id":"request-poll","output":{"task_id":"task-123","task_status":"SUCCEEDED","results":[{"file_url":"https://media.example/source.mp4","subtask_status":"SUCCEEDED","transcription_url":"https://results.example/task-123.json"}]}}`)
 		default:
 			t.Errorf("unexpected request = %s %s", request.Method, request.URL.Path)
 			http.Error(writer, "unexpected", http.StatusNotFound)
@@ -61,8 +61,57 @@ func TestFunASRTaskLifecyclePreservesTypedTranscript(t *testing.T) {
 		t.Fatalf("fetcher = %#v, transcript = %#v", fetcher, transcript)
 	}
 	segment := transcript.Candidates[0].Segments[0]
-	if segment.SegmentID != "segment-7" || segment.Speaker != "2" || len(segment.Words) != 2 || segment.Words[0].Text != "Hello," || segment.Words[1].Text != "Vulcan." {
+	if transcript.Candidates[0].ChannelID == nil || *transcript.Candidates[0].ChannelID != 0 || segment.SegmentID != "channel-0-segment-7" || segment.Speaker != "2" || len(segment.Words) != 2 || segment.Words[0].Text != "Hello," || segment.Words[1].Text != "Vulcan." {
 		t.Fatalf("segment = %#v", segment)
+	}
+}
+
+// TestFunASRBatchPreservesInputOwnershipChannelsAndPartialFailure verifies exact request order and typed per-source results.
+// TestFunASRBatchPreservesInputOwnershipChannelsAndPartialFailure 验证精确请求顺序及类型化逐来源结果。
+func TestFunASRBatchPreservesInputOwnershipChannelsAndPartialFailure(t *testing.T) {
+	fetcher := &recordingPublicDocumentFetcher{content: []byte(`{"properties":{"original_duration_in_milliseconds":1800},"transcripts":[{"channel_id":0,"text":"left","sentences":[]},{"channel_id":1,"text":"right","sentences":[]}]}`)}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		switch {
+		case request.Method == http.MethodPost && request.URL.Path == dashScopeTranscriptionPath:
+			var upstream funASRRequest
+			if errDecode := json.NewDecoder(request.Body).Decode(&upstream); errDecode != nil {
+				t.Errorf("decode start request: %v", errDecode)
+			}
+			if len(upstream.Input.FileURLs) != 2 || upstream.Input.FileURLs[0] != "https://media.example/first.wav" || upstream.Input.FileURLs[1] != "oss://dashscope-temp/second.wav" || len(upstream.Parameters.ChannelID) != 2 || upstream.Parameters.ChannelID[0] != 0 || upstream.Parameters.ChannelID[1] != 1 || upstream.Parameters.SpeakerCount != 2 || upstream.Parameters.VocabularyID != "vocabulary-1" {
+				t.Errorf("start request = %#v", upstream)
+			}
+			_, _ = io.WriteString(writer, `{"request_id":"request-start","output":{"task_id":"task-batch","task_status":"PENDING"}}`)
+		case request.Method == http.MethodGet && request.URL.Path == "/api/v1/tasks/task-batch":
+			_, _ = io.WriteString(writer, `{"request_id":"request-poll","output":{"task_id":"task-batch","task_status":"SUCCEEDED","results":[{"file_url":"oss://dashscope-temp/second.wav","subtask_status":"FAILED","code":"provider-private-code"},{"file_url":"https://media.example/first.wav","subtask_status":"SUCCEEDED","transcription_url":"https://results.example/first.json"}]}}`)
+		default:
+			t.Errorf("unexpected request = %s %s", request.Method, request.URL.Path)
+			http.Error(writer, "unexpected", http.StatusNotFound)
+		}
+	}))
+	defer server.Close()
+	driver, execution := newAlibabaSpeechTaskExecution(t, server.URL, fetcher)
+	execution.Execution.Payload.SpeechTranscribe = &vcp.SpeechTranscribeOperation{
+		Sources: []vcp.MediaInput{
+			{ID: "first", Kind: vcp.MediaAudio, Role: vcp.MediaRoleTranscriptionSource, Resource: vcp.ResourceReference{ResourceID: "resource-first"}},
+			{ID: "second", Kind: vcp.MediaAudio, Role: vcp.MediaRoleTranscriptionSource, Resource: vcp.ResourceReference{ResourceID: "resource-second"}},
+		},
+		Diarization: true, ChannelIDs: []int{0, 1}, SpeakerCount: 2, VocabularyID: "vocabulary-1",
+	}
+	execution.MaterializedInputs = []resource.MaterializedInput{
+		{InputID: "first", ResourceID: "resource-first", Kind: vcp.MediaAudio, Role: vcp.MediaRoleTranscriptionSource, MIMEType: "audio/wav", Mode: catalog.MaterializationDirectRemoteURL, RemoteURL: "https://media.example/first.wav"},
+		{InputID: "second", ResourceID: "resource-second", Kind: vcp.MediaAudio, Role: vcp.MediaRoleTranscriptionSource, MIMEType: "audio/wav", Mode: catalog.MaterializationProviderObjectURI, ProviderHandle: "oss://dashscope-temp/second.wav", ProviderAssetKind: resource.ProviderAssetObject},
+	}
+	started, errStart := driver.Start(context.Background(), execution)
+	if errStart != nil {
+		t.Fatalf("Start() error = %v", errStart)
+	}
+	polled, errPoll := driver.Poll(context.Background(), execution, started.ProviderTaskID)
+	if errPoll != nil || polled.State != provider.TaskPartiallySucceeded || polled.Result == nil || len(polled.Result.Transcriptions) != 2 {
+		t.Fatalf("Poll() = %#v, error = %v", polled, errPoll)
+	}
+	first, second := polled.Result.Transcriptions[0], polled.Result.Transcriptions[1]
+	if first.InputID != "first" || first.ResourceID != "resource-first" || first.Transcript == nil || len(first.Transcript.Candidates) != 2 || first.Transcript.Candidates[1].ChannelID == nil || *first.Transcript.Candidates[1].ChannelID != 1 || second.InputID != "second" || second.ResourceID != "resource-second" || second.ErrorCode != "transcription_failed" || second.Transcript != nil {
+		t.Fatalf("batch results = %#v", polled.Result.Transcriptions)
 	}
 }
 
@@ -75,6 +124,11 @@ func TestFunASRTaskRejectsUnrepresentableInput(t *testing.T) {
 		t.Fatalf("Start() hotword error = %v", errStart)
 	}
 	execution.Execution.Payload.SpeechTranscribe.Hotwords = nil
+	execution.Execution.Payload.SpeechTranscribe.WordTimestamps = true
+	if _, errStart := driver.Start(context.Background(), execution); errStart == nil || !strings.Contains(errStart.Error(), "timestamp switches") {
+		t.Fatalf("Start() timestamp error = %v", errStart)
+	}
+	execution.Execution.Payload.SpeechTranscribe.WordTimestamps = false
 	execution.MaterializedInputs[0].Mode = catalog.MaterializationInlineBase64
 	execution.MaterializedInputs[0].InlineBase64 = "YXVkaW8="
 	execution.MaterializedInputs[0].RemoteURL = ""
@@ -86,9 +140,18 @@ func TestFunASRTaskRejectsUnrepresentableInput(t *testing.T) {
 // TestDecodeFunASRPollUsesStableFailureClassification verifies provider-controlled error text never becomes the public failure code.
 // TestDecodeFunASRPollUsesStableFailureClassification 验证供应商控制的错误文本绝不会成为公开失败码。
 func TestDecodeFunASRPollUsesStableFailureClassification(t *testing.T) {
-	result, _, errDecode := decodeFunASRPoll(strings.NewReader(`{"output":{"task_id":"task-123","task_status":"SUCCEEDED","results":[{"subtask_status":"FAILED","code":"provider-controlled-secret"}]}}`), "task-123", time.Now())
-	if errDecode != nil || result.State != provider.TaskFailed || result.ErrorCode != "alibaba_transcription_failed" {
-		t.Fatalf("decodeFunASRPoll() = %#v, error = %v", result, errDecode)
+	files, observation, errDecode := decodeFunASRPoll(strings.NewReader(`{"output":{"task_id":"task-123","task_status":"SUCCEEDED","results":[{"file_url":"https://media.example/source.wav","subtask_status":"FAILED","code":"provider-controlled-secret"}]}}`), "task-123", time.Now(), []string{"https://media.example/source.wav"})
+	if errDecode != nil || observation.State != provider.TaskSucceeded || len(files) != 1 || !files[0].Failed {
+		t.Fatalf("decodeFunASRPoll() files = %#v, observation = %#v, error = %v", files, observation, errDecode)
+	}
+}
+
+// TestDecodeFunASRPollRejectsUnknownSource verifies provider result locators cannot be rebound to an unrelated Router input.
+// TestDecodeFunASRPollRejectsUnknownSource 验证供应商结果定位符不能重新绑定到无关 Router 输入。
+func TestDecodeFunASRPollRejectsUnknownSource(t *testing.T) {
+	_, _, errDecode := decodeFunASRPoll(strings.NewReader(`{"output":{"task_id":"task-123","task_status":"SUCCEEDED","results":[{"file_url":"https://media.example/unrelated.wav","subtask_status":"FAILED"}]}}`), "task-123", time.Now(), []string{"https://media.example/source.wav"})
+	if errDecode == nil || !strings.Contains(errDecode.Error(), "unknown source locator") {
+		t.Fatalf("decodeFunASRPoll() error = %v", errDecode)
 	}
 }
 
@@ -134,7 +197,7 @@ func newAlibabaSpeechTaskExecution(t *testing.T, baseURL string, fetcher resourc
 	action := providerconfig.ProviderActionBinding{ID: SpeechTranscribeAsyncActionBindingID, Operation: vcp.OperationSpeechTranscribe, DriverID: "alibaba", DriverVersion: "1", ProtocolProfileID: SpeechTranscribeAsyncProtocolProfileID, EndpointProfileID: "alibaba_speech", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Asynchronous: true, Polling: true}, ResourceMaterialization: []providerconfig.ResourceMaterializationMode{providerconfig.ResourceMaterializationDirectURL}, Revision: 1}
 	definition := providerconfig.ProviderDefinition{ID: "definition-alibaba", Kind: providerconfig.DefinitionKindSystem, ProtocolProfileID: EmbeddingProtocolProfileID, AuthMethodIDs: []string{"api_key"}, RuntimeReady: true, AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "api_key", Type: providerconfig.AuthMethodAPIKey}}, ActionBindings: []providerconfig.ProviderActionBinding{action}, Revision: 1}
 	target := resolve.Target{SubjectKind: resolve.ExecutionSubjectModel, ProviderDefinitionID: definition.ID, ProviderInstanceID: "instance-alibaba", ChannelID: EmbeddingProtocolProfileID, EndpointID: "endpoint-alibaba", CredentialID: "credential-alibaba", ProviderModelID: "model-fun-asr", OfferingID: "offering-fun-asr", ExecutionProfileID: "profile-fun-asr", UpstreamModelID: "fun-asr", Operation: vcp.OperationSpeechTranscribe, ActionBindingID: SpeechTranscribeAsyncActionBindingID, CatalogRevision: 1}
-	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request-fun-asr", IdempotencyKey: "idempotency-fun-asr", Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationSpeechTranscribe, Payload: vcp.OperationPayload{SpeechTranscribe: &vcp.SpeechTranscribeOperation{Source: vcp.MediaInput{ID: "video-source", Kind: vcp.MediaVideo, Role: vcp.MediaRoleTranscriptionSource, Resource: vcp.ResourceReference{ResourceID: "resource-video"}}, Language: "en", Diarization: true, SegmentTimestamps: true, WordTimestamps: true, CandidateCount: 1}}}
+	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request-fun-asr", IdempotencyKey: "idempotency-fun-asr", Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationSpeechTranscribe, Payload: vcp.OperationPayload{SpeechTranscribe: &vcp.SpeechTranscribeOperation{Source: vcp.MediaInput{ID: "video-source", Kind: vcp.MediaVideo, Role: vcp.MediaRoleTranscriptionSource, Resource: vcp.ResourceReference{ResourceID: "resource-video"}}, Language: "en", Diarization: true, CandidateCount: 1}}}
 	execution := provider.ExecutionRequest{Binding: transport.Binding{Target: target, Endpoint: providerconfig.Endpoint{ID: target.EndpointID, ProviderInstanceID: target.ProviderInstanceID, ChannelID: target.ChannelID, BaseURL: baseURL, Status: providerconfig.EndpointReady}, Credential: providerconfig.Credential{ID: target.CredentialID, ProviderInstanceID: target.ProviderInstanceID, AuthMethodID: "api_key", SecretRef: secretReference, Status: providerconfig.CredentialActive}}, Definition: definition, Execution: &request, MaterializedInputs: []resource.MaterializedInput{{InputID: "video-source", ResourceID: "resource-video", Kind: vcp.MediaVideo, Role: vcp.MediaRoleTranscriptionSource, MIMEType: "video/mp4", Mode: catalog.MaterializationDirectRemoteURL, RemoteURL: "https://media.example/source.mp4"}}, LineageID: "lineage-fun-asr", Now: time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)}
 	return driver, execution
 }

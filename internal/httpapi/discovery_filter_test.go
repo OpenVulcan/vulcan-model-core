@@ -9,6 +9,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -18,6 +19,9 @@ type selectiveTargetAvailability struct {
 	// profiles contains the exact currently executable profile set.
 	// profiles 包含当前精确可执行规格集合。
 	profiles map[string]struct{}
+	// offerings optionally fixes the exact offering owned by each admitted profile.
+	// offerings 可选地固定每个已允许规格所属的精确产品。
+	offerings map[string]string
 }
 
 // Resolve returns a target only for an admitted exact profile.
@@ -33,27 +37,98 @@ func (a selectiveTargetAvailability) Resolve(ctx context.Context, request resolv
 	if _, exists := a.profiles[request.ExecutionProfileID]; !exists {
 		return resolve.Target{}, resolve.Diagnostics{}, resolve.ErrNoEligibleTarget
 	}
+	if offeringID, constrained := a.offerings[request.ExecutionProfileID]; constrained && request.OfferingID != offeringID {
+		return resolve.Target{}, resolve.Diagnostics{}, resolve.ErrNoEligibleTarget
+	}
 	return resolve.Target{ExecutionProfileID: request.ExecutionProfileID}, resolve.Diagnostics{ReadyCandidates: 1}, nil
 }
 
-// TestExecutableModelViewRemovesUnavailableProfiles verifies discovery never publishes a profile that exact resolution rejects.
-// TestExecutableModelViewRemovesUnavailableProfiles 验证发现接口绝不发布精确解析拒绝的规格。
-func TestExecutableModelViewRemovesUnavailableProfiles(t *testing.T) {
-	server := &Server{control: &ControlPlane{Targets: selectiveTargetAvailability{profiles: map[string]struct{}{"profile_ready": {}}}}}
-	model := management.ModelView{ID: "model_test", Offerings: []management.OfferingView{
-		{ID: "offer_ready", Profiles: []management.ExecutionProfileView{{ID: "profile_ready", Operation: vcp.OperationImageGenerate}, {ID: "profile_blocked", Operation: vcp.OperationImageEdit}}},
-		{ID: "offer_blocked", Profiles: []management.ExecutionProfileView{{ID: "profile_other", Operation: vcp.OperationVideoGenerate}}},
-	}}
+// TestCallModelToolViewsRetainsStaticSupportWithoutReadyCredential verifies static facts remain visible while readiness is false.
+// TestCallModelToolViewsRetainsStaticSupportWithoutReadyCredential 验证没有就绪凭据时仍公开静态事实且就绪状态为假。
+func TestCallModelToolViewsRetainsStaticSupportWithoutReadyCredential(t *testing.T) {
+	server := &Server{control: &ControlPlane{Targets: selectiveTargetAvailability{profiles: map[string]struct{}{}}}}
+	model := management.ModelView{
+		ID: "model_static",
+		Offerings: []management.OfferingView{{
+			ID: "offering_static",
+			Profiles: []management.ExecutionProfileView{{
+				ID:        "profile_static",
+				Operation: vcp.OperationConversationRespond,
+				Capabilities: management.CapabilityView{
+					StandardTools: []catalog.StandardModelToolCapability{{
+						Kind:              vcp.StandardModelToolWebSearch,
+						Native:            true,
+						AllowsCallerTools: true,
+					}},
+					ExtraTools: []catalog.ModelExtraToolCapability{{
+						ID:                "code_interpreter",
+						DisplayName:       "Code Interpreter",
+						Description:       "Provider-managed code execution.",
+						AllowsCallerTools: true,
+					}},
+				},
+			}},
+		}},
+	}
+	views, errViews := server.callModelToolViews(context.Background(), "pvi_static", model, time.Now())
+	if errViews != nil {
+		t.Fatalf("callModelToolViews() error = %v", errViews)
+	}
+	if len(views) != 1 ||
+		len(views[0].Standard) != 2 ||
+		!views[0].Standard[0].NativeSupported ||
+		views[0].Standard[0].NativeReady ||
+		views[0].Standard[0].NativeUnavailableReason != callModelToolUnavailableReasonParentTargetUnavailable ||
+		views[0].Standard[0].RouterToolUnavailableReason != callModelToolUnavailableReason(routertool.AvailabilityReasonBindingMissing) ||
+		len(views[0].Extra) != 1 ||
+		views[0].Extra[0].Ready ||
+		views[0].Extra[0].UnavailableReason != callModelToolUnavailableReasonParentTargetUnavailable {
+		t.Fatalf("static model-tool view = %#v", views)
+	}
+}
 
-	filtered, executable, errFilter := server.executableModelView(context.Background(), "pvi_test", model, time.Now())
-	if errFilter != nil {
-		t.Fatalf("executableModelView() error = %v", errFilter)
+// TestEffectiveRouterToolAvailabilityRequiresExecutableParent verifies a ready binding cannot make an unavailable parent executable.
+// TestEffectiveRouterToolAvailabilityRequiresExecutableParent 验证就绪绑定不能让不可用的父模型变为可执行。
+func TestEffectiveRouterToolAvailabilityRequiresExecutableParent(t *testing.T) {
+	ready, reason := effectiveRouterToolAvailability(false, routertool.Availability{Supported: true, Ready: true})
+	if ready || reason != callModelToolUnavailableReasonParentTargetUnavailable {
+		t.Fatalf("effectiveRouterToolAvailability(false, ready) = (%t, %q)", ready, reason)
 	}
-	if !executable || len(filtered.Offerings) != 1 || len(filtered.Offerings[0].Profiles) != 1 || filtered.Offerings[0].Profiles[0].ID != "profile_ready" {
-		t.Fatalf("executableModelView() = %#v, executable=%t", filtered, executable)
+	ready, reason = effectiveRouterToolAvailability(true, routertool.Availability{
+		Supported:         true,
+		Ready:             false,
+		UnavailableReason: routertool.AvailabilityReasonBindingUnavailable,
+	})
+	if ready || reason != callModelToolUnavailableReason(routertool.AvailabilityReasonBindingUnavailable) {
+		t.Fatalf("effectiveRouterToolAvailability(true, unavailable) = (%t, %q)", ready, reason)
 	}
-	if len(model.Offerings[0].Profiles) != 2 {
-		t.Fatal("executableModelView() mutated the management model view")
+}
+
+// TestCallModelToolViewsResolvesExactOffering verifies readiness never drops the product identity selected by the view.
+// TestCallModelToolViewsResolvesExactOffering 验证就绪度计算绝不丢失视图选定的产品身份。
+func TestCallModelToolViewsResolvesExactOffering(t *testing.T) {
+	server := &Server{control: &ControlPlane{Targets: selectiveTargetAvailability{
+		profiles:  map[string]struct{}{"profile_exact": {}},
+		offerings: map[string]string{"profile_exact": "offering_exact"},
+	}}}
+	model := management.ModelView{ID: "model_exact", Offerings: []management.OfferingView{{
+		ID: "offering_exact",
+		Profiles: []management.ExecutionProfileView{{
+			ID:        "profile_exact",
+			Operation: vcp.OperationConversationRespond,
+			Capabilities: management.CapabilityView{StandardTools: []catalog.StandardModelToolCapability{{
+				Kind:              vcp.StandardModelToolWebSearch,
+				Native:            true,
+				AllowsCallerTools: true,
+			}}},
+		}},
+	}}}
+	views, errViews := server.callModelToolViews(context.Background(), "pvi_exact", model, time.Now())
+	if errViews != nil {
+		t.Fatalf("callModelToolViews() error = %v", errViews)
+	}
+	if len(views) != 1 || !views[0].Standard[0].NativeReady {
+		t.Fatalf("exact offering model-tool view = %#v", views)
 	}
 }
 
@@ -83,8 +158,8 @@ func TestExecutableServiceViewRemovesUnavailableProfiles(t *testing.T) {
 func TestExecutableDiscoveryPropagatesOperationalFailure(t *testing.T) {
 	server := &Server{control: &ControlPlane{Targets: failingTargetAvailability{err: context.Canceled}}}
 	model := management.ModelView{ID: "model_test", Offerings: []management.OfferingView{{ID: "offer_test", Profiles: []management.ExecutionProfileView{{ID: "profile_test", Operation: vcp.OperationImageGenerate}}}}}
-	if _, _, errFilter := server.executableModelView(context.Background(), "pvi_test", model, time.Now()); !errors.Is(errFilter, context.Canceled) {
-		t.Fatalf("executableModelView() error = %v, want context.Canceled", errFilter)
+	if _, errViews := server.callModelToolViews(context.Background(), "pvi_test", model, time.Now()); !errors.Is(errViews, context.Canceled) {
+		t.Fatalf("callModelToolViews() error = %v, want context.Canceled", errViews)
 	}
 }
 

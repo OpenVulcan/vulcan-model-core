@@ -6,7 +6,7 @@
   "operation": "conversation.respond",
   "stream": true,
   "dispatch_mode": "deferred",
-  "payload": {"conversation": {}},
+  "payload": {"conversation": {"model_tools": {"standard": [{"kind": "web_search", "mode": "disabled"}], "extra": [], "router_extensions": []}}},
   "projection_policy": {},
   "budget": {"max_execution_milliseconds": 60000},
   "retry_policy": {"backoff": "exponential", "initial_delay_milliseconds": 5000, "maximum_delay_milliseconds": 1800000, "multiplier": 2, "max_attempts": 20}

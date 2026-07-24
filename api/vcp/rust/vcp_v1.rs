@@ -142,12 +142,119 @@ pub enum OperationKind {
     RerankDocuments,
     #[serde(rename = "search.web")]
     SearchWeb,
+    #[serde(rename = "web.extract")]
+    WebExtract,
     #[serde(rename = "music.generate")]
     MusicGenerate,
     #[serde(rename = "music.cover.prepare")]
     MusicCoverPrepare,
     #[serde(rename = "music.cover")]
     MusicCover,
+}
+
+/// Closed standard model tool understood by every VCP client.
+/// 每个 VCP 客户端都能理解的封闭标准模型工具。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum StandardModelToolKind {
+    WebSearch,
+    WebExtractor,
+}
+
+/// Explicit execution source selected for one standard model tool.
+/// 为一个标准模型工具显式选择的执行来源。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelToolMode {
+    Disabled,
+    Native,
+    RouterTool,
+}
+
+/// Closed operation-backed Router enhancement identifier.
+/// 封闭且由操作支持的 Router 增强能力标识。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouterExtensionKind {
+    ImageUnderstanding,
+    AudioUnderstanding,
+    VideoUnderstanding,
+    ImageGeneration,
+    VideoGeneration,
+    SpeechGeneration,
+    SpeechTranscription,
+}
+
+/// One explicit standard model-tool selection.
+/// 一项显式标准模型工具选择。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct StandardModelToolSelection {
+    pub kind: StandardModelToolKind,
+    pub mode: ModelToolMode,
+}
+
+/// Complete model-tool selection carried by a conversation operation.
+/// 会话操作携带的完整模型工具选择。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelToolSelection {
+    pub standard: Option<Vec<StandardModelToolSelection>>,
+    pub extra: Option<Vec<String>>,
+    pub router_extensions: Option<Vec<RouterExtensionKind>>,
+}
+
+/// One frozen standard model-tool execution decision.
+/// 一项冻结的标准模型工具执行决策。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelToolPlanEntry {
+    pub kind: StandardModelToolKind,
+    pub mode: ModelToolMode,
+    pub router_binding_id: Option<String>,
+    pub router_binding_revision: Option<u64>,
+}
+
+/// One frozen operation-backed Router enhancement decision.
+/// 一项冻结且由操作支持的 Router 增强决策。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RouterExtensionPlanEntry {
+    pub id: RouterExtensionKind,
+    pub router_binding_id: String,
+    pub router_binding_revision: u64,
+}
+
+/// One safe compatibility or planning diagnostic attached to a frozen model-tool plan.
+/// 一个附加到冻结模型工具计划的安全兼容或规划诊断。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelToolDiagnostic {
+    pub code: ModelToolDiagnosticCode,
+}
+
+/// Closed model-tool diagnostic codes.
+/// 封闭的模型工具诊断代码。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub enum ModelToolDiagnosticCode {
+    #[serde(rename = "legacy_native_web_search_migrated")]
+    LegacyNativeWebSearchMigrated,
+}
+
+/// Public immutable model-tool plan accepted with one durable execution.
+/// 随一个持久执行接收的公开不可变模型工具计划。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelToolPlan {
+    pub catalog_revision: u64,
+    pub standard: Option<Vec<ModelToolPlanEntry>>,
+    pub extra: Option<Vec<String>>,
+    pub router_extensions: Option<Vec<RouterExtensionPlanEntry>>,
+    pub diagnostics: Option<Vec<ModelToolDiagnostic>>,
+}
+
+/// Public parent relationship for one Router-created child execution.
+/// 一个 Router 创建子执行的公开父级关系。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct RouterToolLineage {
+    pub parent_execution_id: String,
+    pub parent_tool_call_id: String,
+    pub parent_round: u32,
+    pub binding_id: String,
 }
 
 /// Exact operation payload member selected by the JSON Schema discriminator.
@@ -167,6 +274,7 @@ pub enum OperationPayload<
     TEmbeddingCreate,
     TRerankDocuments,
     TSearchWeb,
+    TWebExtract,
     TMusicGenerate,
     TMusicCoverPrepare,
     TMusicCover,
@@ -183,6 +291,7 @@ pub enum OperationPayload<
     EmbeddingCreate(TEmbeddingCreate),
     RerankDocuments(TRerankDocuments),
     SearchWeb(TSearchWeb),
+    WebExtract(TWebExtract),
     MusicGenerate(TMusicGenerate),
     MusicCoverPrepare(TMusicCoverPrepare),
     MusicCover(TMusicCover),
@@ -359,6 +468,8 @@ pub struct ExecutionRecord<TResult> {
     pub id: String,
     pub status: ExecutionStatus,
     pub operation: OperationKind,
+    pub model_tool_plan: ModelToolPlan,
+    pub router_tool_lineage: Option<RouterToolLineage>,
     pub result: Option<TResult>,
     pub failure: Option<ExecutionFailure>,
     pub retry: Option<RetryState>,
@@ -401,6 +512,33 @@ pub struct RetryEvent {
     pub attempt: u32,
     pub next_retry_at: Option<String>,
     pub category: Option<String>,
+}
+
+/// Closed parent-visible lifecycle stage for one enabled model tool.
+/// 一个已启用模型工具在父执行中可见的封闭生命周期阶段。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ModelToolEventStage {
+    Enabled,
+    ModeFrozen,
+    RouterCallStarted,
+    ChildCreated,
+    ChildCompleted,
+    ChildFailed,
+    ResultInjected,
+    ParentResumed,
+}
+
+/// Safe parent model-tool transition without arguments, credentials, or provider-private errors.
+/// 不含参数、凭据或供应商私有错误的安全父执行模型工具转换。
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ModelToolEvent {
+    pub tool_id: String,
+    pub stage: ModelToolEventStage,
+    pub mode: ModelToolMode,
+    pub tool_call_id: Option<String>,
+    pub child_execution_id: Option<String>,
+    pub round: Option<u32>,
 }
 
 /// Provider-reported progress without fabricated percentages.
@@ -531,6 +669,12 @@ pub enum ExecutionEvent<TProviderEvent, TTranscript, TEmbedding, TRerank, TSearc
         #[serde(flatten)]
         identity: ExecutionEventIdentity,
         provider_event: TProviderEvent,
+    },
+    #[serde(rename = "model_tool.lifecycle")]
+    ModelToolLifecycle {
+        #[serde(flatten)]
+        identity: ExecutionEventIdentity,
+        model_tool: ModelToolEvent,
     },
     #[serde(rename = "progress.updated")]
     ProgressUpdated {
@@ -683,6 +827,7 @@ pub struct UsagePreflightResponse<TTarget> {
     pub protocol_version: String,
     pub request_id: String,
     pub target: TTarget,
+    pub model_tool_plan: ModelToolPlan,
     pub usage: UsageObservation,
     pub metrics: Vec<PreflightMetric>,
 }
@@ -796,6 +941,9 @@ pub struct Resource {
 pub struct VcpError {
     pub error: String,
     pub code: String,
+    pub tool_id: Option<String>,
+    pub phase: Option<String>,
+    pub retryable: Option<bool>,
     pub protocol_minimum: String,
     pub protocol_maximum: String,
 }

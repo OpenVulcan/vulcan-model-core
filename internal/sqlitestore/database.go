@@ -18,7 +18,7 @@ import (
 const (
 	// currentSchemaVersion is the latest schema migration understood by this binary.
 	// currentSchemaVersion 是当前程序理解的最新 Schema 迁移版本。
-	currentSchemaVersion = 13
+	currentSchemaVersion = 16
 )
 
 var (
@@ -371,6 +371,78 @@ func applyMigration(ctx context.Context, transaction *sql.Tx, version int) error
 				tombstones_payload BLOB NOT NULL
 			)`,
 			`CREATE INDEX catalog_changes_provider_idx ON catalog_changes(provider_instance_id, global_revision)`,
+		}
+	case 14:
+		statements = []string{
+			`CREATE TABLE provider_management_authorizations (
+				id TEXT PRIMARY KEY,
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
+				method_id TEXT NOT NULL,
+				fingerprint TEXT NOT NULL,
+				status TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				link_revision INTEGER NOT NULL CHECK (link_revision > 0),
+				payload BLOB NOT NULL,
+				UNIQUE(provider_instance_id, fingerprint)
+			)`,
+			`CREATE INDEX provider_management_authorizations_instance_idx ON provider_management_authorizations(provider_instance_id, status, id)`,
+			`CREATE TABLE provider_management_authorization_links (
+				id TEXT PRIMARY KEY,
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
+				authorization_id TEXT NOT NULL REFERENCES provider_management_authorizations(id) ON DELETE CASCADE,
+				credential_id TEXT NOT NULL REFERENCES provider_credentials(id) ON DELETE CASCADE,
+				scope_kind TEXT NOT NULL,
+				scope_id TEXT NOT NULL,
+				evidence TEXT NOT NULL,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				payload BLOB NOT NULL,
+				UNIQUE(authorization_id, credential_id, scope_kind, scope_id)
+			)`,
+			`CREATE INDEX provider_management_authorization_links_authorization_idx ON provider_management_authorization_links(authorization_id, id)`,
+			`CREATE TABLE provider_management_snapshots (
+				authorization_id TEXT PRIMARY KEY REFERENCES provider_management_authorizations(id) ON DELETE CASCADE,
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE RESTRICT,
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				observed_at TEXT NOT NULL,
+				expires_at TEXT NOT NULL,
+				refresh_status TEXT NOT NULL,
+				payload BLOB NOT NULL
+			)`,
+			`CREATE INDEX provider_management_snapshots_instance_idx ON provider_management_snapshots(provider_instance_id, refresh_status, authorization_id)`,
+		}
+	case 15:
+		statements = []string{
+			`CREATE TABLE router_tool_bindings (
+				id TEXT PRIMARY KEY,
+				kind TEXT NOT NULL CHECK (kind IN ('web_search', 'web_extractor')),
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE CASCADE,
+				priority INTEGER NOT NULL CHECK (priority >= 0),
+				enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				payload BLOB NOT NULL
+			)`,
+			`CREATE INDEX router_tool_bindings_selection_idx ON router_tool_bindings(kind, enabled, priority, id)`,
+			`CREATE INDEX router_tool_bindings_instance_idx ON router_tool_bindings(provider_instance_id, id)`,
+		}
+	case 16:
+		statements = []string{
+			`ALTER TABLE router_tool_bindings RENAME TO router_tool_bindings_v15`,
+			`DROP INDEX router_tool_bindings_selection_idx`,
+			`DROP INDEX router_tool_bindings_instance_idx`,
+			`CREATE TABLE router_tool_bindings (
+				id TEXT PRIMARY KEY,
+				kind TEXT NOT NULL CHECK (kind IN ('web_search', 'web_extractor', 'image_understanding', 'audio_understanding', 'video_understanding', 'image_generation', 'video_generation', 'speech_generation', 'speech_transcription')),
+				provider_instance_id TEXT NOT NULL REFERENCES provider_instances(id) ON DELETE CASCADE,
+				priority INTEGER NOT NULL CHECK (priority >= 0),
+				enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+				revision INTEGER NOT NULL CHECK (revision > 0),
+				payload BLOB NOT NULL
+			)`,
+			`INSERT INTO router_tool_bindings(id, kind, provider_instance_id, priority, enabled, revision, payload)
+			 SELECT id, kind, provider_instance_id, priority, enabled, revision, payload FROM router_tool_bindings_v15`,
+			`DROP TABLE router_tool_bindings_v15`,
+			`CREATE INDEX router_tool_bindings_selection_idx ON router_tool_bindings(kind, enabled, priority, id)`,
+			`CREATE INDEX router_tool_bindings_instance_idx ON router_tool_bindings(provider_instance_id, id)`,
 		}
 	default:
 		return fmt.Errorf("unknown sqlite migration version %d", version)

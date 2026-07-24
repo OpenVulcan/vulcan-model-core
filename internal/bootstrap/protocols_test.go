@@ -2,6 +2,7 @@ package bootstrap
 
 import (
 	"errors"
+	"sort"
 	"testing"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
@@ -35,21 +36,20 @@ func TestRegisterProtocolProfilesRegistersOnlySupportedCustomProfiles(t *testing
 	// profiles records the stable sorted registration snapshot.
 	// profiles 记录稳定排序后的注册快照。
 	profiles := registry.List()
-	if len(profiles) != 55 {
-		t.Fatalf("registered profile count = %d, want 55", len(profiles))
+	if len(profiles) != 61 {
+		t.Fatalf("registered profile count = %d, want 61", len(profiles))
 	}
 	// expectedIDs preserves the public management identifiers without exposing upstream compatibility endpoints.
 	// expectedIDs 保留公开管理标识而不暴露上游兼容端点。
-	expectedIDs := []string{provideralibaba.SpeechTranscribeAsyncProtocolProfileID, provideralibaba.EmbeddingProtocolProfileID, provideralibaba.ImageEditProtocolProfileID, provideralibaba.ImageGenerateProtocolProfileID, provideralibaba.SpeechTranscribeProtocolProfileID, provideralibaba.SpeechSynthesizeProtocolProfileID, provideralibaba.WanImageEditProtocolProfileID, provideralibaba.WanImageGenerateProtocolProfileID, provideralibaba.WanVideoGenerateProtocolProfileID, messages.ProfileID, provideranthropic.SearchProtocolProfileID, aistudio.ProfileID, providergoogle.EmbeddingProtocolProfileID, providergoogle.MediaAnalyzeProtocolProfileID, antigravity.ProfileID, interactions.ProfileID, providergoogle.SearchProtocolProfileID, providergoogle.ImageEditProtocolProfileID, providergoogle.ImageGenerateProtocolProfileID, providergoogle.SpeechSynthesizeProtocolProfileID, providergoogle.VideoExtendProtocolProfileID, providergoogle.VideoGenerateProtocolProfileID, providerminimax.SearchWebProtocolProfileID, providerminimax.MediaAnalyzeProtocolProfileID, providerminimax.ImageGenerateProtocolProfileID, providerminimax.MusicCoverPrepareProtocolProfileID, providerminimax.MusicCoverProtocolProfileID, providerminimax.MusicGenerateProtocolProfileID, providerminimax.SpeechSynthesizeProtocolProfileID, providerminimax.SpeechSynthesizeAsyncProtocolProfileID, providerminimax.VideoGenerateProtocolProfileID, provideropenai.SpeechSynthesizeProtocolProfileID, provideropenai.SpeechTranscribeProtocolProfileID, chat.ProfileID, codex.ProfileID, provideropenai.EmbeddingProtocolProfileID, provideropenai.ImageEditProtocolProfileID, provideropenai.ImageGenerateProtocolProfileID, openairesponses.ProfileID, provideropenai.SearchProtocolProfileID, provideropenrouter.SpeechSynthesizeProtocolProfileID, provideropenrouter.SpeechTranscribeProtocolProfileID, provideropenrouter.EmbeddingProtocolProfileID, provideropenrouter.ImageGenerateProtocolProfileID, provideropenrouter.RerankProtocolProfileID, provideropenrouter.VideoGenerateProtocolProfileID, providertavily.ExtractProtocolProfileID, providertavily.ProtocolProfileID, providerxai.ImageEditProtocolProfileID, providerxai.ImageGenerateProtocolProfileID, xairesponses.ProfileID, providerxai.SearchProtocolProfileID, providerxai.VideoEditProtocolProfileID, providerxai.VideoExtendProtocolProfileID, providerxai.VideoGenerateProtocolProfileID}
+	expectedIDs := []string{provideralibaba.MediaAnalyzeProtocolProfileID, provideralibaba.SpeechTranscribeAsyncProtocolProfileID, provideralibaba.EmbeddingProtocolProfileID, provideralibaba.ImageEditProtocolProfileID, provideralibaba.ImageGenerateProtocolProfileID, provideralibaba.SpeechTranscribeProtocolProfileID, provideralibaba.RerankProtocolProfileID, provideralibaba.SpeechSynthesizeProtocolProfileID, provideralibaba.WanImageEditProtocolProfileID, provideralibaba.WanImageGenerateProtocolProfileID, provideralibaba.WanVideoGenerateProtocolProfileID, provideralibaba.SearchWebProtocolProfileID, messages.ProfileID, provideranthropic.SearchProtocolProfileID, aistudio.ProfileID, providergoogle.EmbeddingProtocolProfileID, providergoogle.MediaAnalyzeProtocolProfileID, antigravity.ProfileID, interactions.ProfileID, providergoogle.SearchProtocolProfileID, providergoogle.ImageEditProtocolProfileID, providergoogle.ImageGenerateProtocolProfileID, providergoogle.SpeechSynthesizeProtocolProfileID, providergoogle.VideoExtendProtocolProfileID, providergoogle.VideoGenerateProtocolProfileID, providerminimax.SearchWebProtocolProfileID, providerminimax.MediaAnalyzeProtocolProfileID, providerminimax.ImageGenerateProtocolProfileID, providerminimax.MusicCoverPrepareProtocolProfileID, providerminimax.MusicCoverProtocolProfileID, providerminimax.MusicGenerateProtocolProfileID, providerminimax.SpeechSynthesizeProtocolProfileID, providerminimax.SpeechSynthesizeAsyncProtocolProfileID, providerminimax.VideoGenerateProtocolProfileID, provideropenai.SpeechSynthesizeProtocolProfileID, provideropenai.SpeechTranscribeProtocolProfileID, chat.ProfileID, codex.ProfileID, provideropenai.EmbeddingProtocolProfileID, provideropenai.ImageEditProtocolProfileID, provideropenai.ImageGenerateProtocolProfileID, openairesponses.ProfileID, provideropenai.SearchProtocolProfileID, provideropenrouter.SpeechSynthesizeProtocolProfileID, provideropenrouter.SpeechTranscribeProtocolProfileID, provideropenrouter.EmbeddingProtocolProfileID, provideropenrouter.ImageGenerateProtocolProfileID, provideropenrouter.RerankProtocolProfileID, provideropenrouter.VideoGenerateProtocolProfileID, providertavily.ExtractProtocolProfileID, providertavily.ProtocolProfileID, providerxai.ImageEditProtocolProfileID, providerxai.ImageGenerateProtocolProfileID, xairesponses.ProfileID, providerxai.SearchProtocolProfileID, providerxai.VideoEditProtocolProfileID, providerxai.VideoExtendProtocolProfileID, providerxai.VideoGenerateProtocolProfileID}
+	expectedIDs = append(expectedIDs, provideralibaba.CosyVoiceSynthesizeProtocolProfileID, provideralibaba.HappyHorseVideoEditProtocolProfileID, provideralibaba.HappyHorseVideoGenerateProtocolProfileID)
+	sort.Strings(expectedIDs)
 	for index, expectedID := range expectedIDs {
 		if profiles[index].ID != expectedID {
 			t.Fatalf("profile[%d].ID = %q, want %q", index, profiles[index].ID, expectedID)
 		}
 		if !profiles[index].RuntimeReady {
 			t.Fatalf("profile[%d] must be runtime ready: %#v", index, profiles[index])
-		}
-		if profiles[index].ModelDiscovery != providerconfig.SupportUnsupported {
-			t.Fatalf("profile[%d].ModelDiscovery = %q, want unsupported", index, profiles[index].ModelDiscovery)
 		}
 	}
 	// customProfiles is the exact new-provider selection set exposed by management.

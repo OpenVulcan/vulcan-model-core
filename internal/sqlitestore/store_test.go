@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"testing"
@@ -79,6 +80,61 @@ func TestDatabaseMigratesVersionSixToRoutingAndAttemptState(t *testing.T) {
 	}
 }
 
+// TestDatabaseMigratesVersionThirteenToManagementAuthorizationSchema verifies Schema 14 survives every later additive migration.
+// TestDatabaseMigratesVersionThirteenToManagementAuthorizationSchema 校验 Schema 14 可安全通过全部后续追加迁移。
+func TestDatabaseMigratesVersionThirteenToManagementAuthorizationSchema(t *testing.T) {
+	ctx := context.Background()
+	databasePath := filepath.Join(t.TempDir(), "version-thirteen.db")
+	absolutePath, errAbsolute := filepath.Abs(databasePath)
+	if errAbsolute != nil {
+		t.Fatalf("filepath.Abs() error = %v", errAbsolute)
+	}
+	rawDatabase, errOpen := sql.Open("sqlite", sqliteDSN(absolutePath))
+	if errOpen != nil {
+		t.Fatalf("sql.Open() error = %v", errOpen)
+	}
+	if _, errSchema := rawDatabase.ExecContext(ctx, `CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL)`); errSchema != nil {
+		t.Fatalf("create schema migrations: %v", errSchema)
+	}
+	transaction, errBegin := rawDatabase.BeginTx(ctx, nil)
+	if errBegin != nil {
+		t.Fatalf("BeginTx() error = %v", errBegin)
+	}
+	for version := 1; version <= 13; version++ {
+		if errMigration := applyMigration(ctx, transaction, version); errMigration != nil {
+			t.Fatalf("apply migration %d: %v", version, errMigration)
+		}
+		if _, errRecord := transaction.ExecContext(ctx, `INSERT INTO schema_migrations(version, applied_at) VALUES (?, CURRENT_TIMESTAMP)`, version); errRecord != nil {
+			t.Fatalf("record migration %d: %v", version, errRecord)
+		}
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		t.Fatalf("commit version-thirteen fixture: %v", errCommit)
+	}
+	if errClose := rawDatabase.Close(); errClose != nil {
+		t.Fatalf("close version-thirteen fixture: %v", errClose)
+	}
+	database, errDatabase := Open(ctx, databasePath)
+	if errDatabase != nil {
+		t.Fatalf("Open() migrated database error = %v", errDatabase)
+	}
+	defer database.Close()
+	version, errVersion := database.SchemaVersion(ctx)
+	if errVersion != nil || version != currentSchemaVersion {
+		t.Fatalf("schema version = %d, error = %v", version, errVersion)
+	}
+	for _, table := range []string{
+		"provider_management_authorizations",
+		"provider_management_authorization_links",
+		"provider_management_snapshots",
+	} {
+		var tableCount int
+		if errTable := database.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = ?`, table).Scan(&tableCount); errTable != nil || tableCount != 1 {
+			t.Fatalf("table %s count = %d, error = %v", table, tableCount, errTable)
+		}
+	}
+}
+
 // sqliteTestRegistries returns executable protocol metadata and one system definition.
 // sqliteTestRegistries 返回可执行协议元数据与一个系统定义。
 func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *providerconfig.SystemRegistry) {
@@ -91,7 +147,6 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 		UserConfigurable:           true,
 		CustomDefinitionCompatible: true,
 		RuntimeReady:               true,
-		ModelDiscovery:             providerconfig.SupportUnsupported,
 		AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
@@ -117,7 +172,6 @@ func sqliteTestRegistries(t *testing.T) (*providerconfig.ProtocolRegistry, *prov
 			MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery:    providerconfig.SupportUnsupported,
 			PlanReader:        providerconfig.SupportUnsupported,
 			EntitlementReader: providerconfig.SupportUnsupported,
 			AllowanceReader:   providerconfig.SupportUnsupported,
@@ -148,6 +202,7 @@ func sqliteTestCapabilities() catalog.ModelCapabilities {
 		Reasoning:              catalog.CapabilityNative,
 		InputModalities:        []string{"text"},
 		OutputModalities:       []string{"text"},
+		Delivery:               catalog.DeliveryCapabilities{Synchronous: true},
 		Embedding: &catalog.EmbeddingCapabilities{
 			InputTasks: []vcp.EmbeddingInputTask{vcp.EmbeddingTaskDocument}, OutputKinds: []vcp.EmbeddingVectorKind{vcp.EmbeddingVectorDense}, Encodings: []vcp.EmbeddingEncoding{vcp.EmbeddingEncodingFloat},
 			Dimensions: []int{1024}, DefaultDimensions: catalog.OptionalLimit{Known: true, Value: dimensionsDefault}, MaxBatchItems: catalog.OptionalLimit{Known: true, Value: 32},
@@ -166,6 +221,12 @@ func sqliteTestSnapshot(observedAt time.Time) catalog.Snapshot {
 	// remaining preserves an exact fractional credit amount without floating-point conversion.
 	// remaining 在不经过浮点转换的情况下保留精确小数 Credit 数量。
 	remaining := "125.5"
+	// usageLimit fixes one provider-reported token ceiling for persistence coverage.
+	// usageLimit 固定一个供应商报告的 Token 上限以覆盖持久化。
+	usageLimit := int64(1_000_000)
+	// usagePeriod fixes the provider-reported usage window paired with usageLimit.
+	// usagePeriod 固定与 usageLimit 配对的供应商用量窗口。
+	usagePeriod := int64(60)
 	return catalog.Snapshot{
 		ProviderInstanceID: "pvi_sqlite",
 		Models: []catalog.ProviderModel{{
@@ -191,12 +252,26 @@ func sqliteTestSnapshot(observedAt time.Time) catalog.Snapshot {
 			ID:                 "profile_sqlite_default",
 			ProviderInstanceID: "pvi_sqlite",
 			OfferingID:         "offer_sqlite",
+			Operation:          vcp.OperationEmbeddingCreate,
+			ActionBindingID:    "action_sqlite_embedding",
 			DisplayName:        "Default",
 			Default:            true,
 			Capabilities:       sqliteTestCapabilities(),
 			SwitchPolicy:       catalog.ProfileSwitchSeamless,
 			PoolPolicy:         catalog.PoolStrictProfile,
 			CapabilityRevision: 1,
+			Revision:           1,
+		}},
+		ModelOperationPolicies: []catalog.ModelOperationPolicy{{
+			ID:                 "policy_sqlite_embedding",
+			ProviderInstanceID: "pvi_sqlite",
+			ProviderModelID:    "model_sqlite",
+			OfferingID:         "offer_sqlite",
+			Operation:          vcp.OperationEmbeddingCreate,
+			Status:             catalog.ModelOperationSupported,
+			Reason:             catalog.SupportReasonRuntimeVerified,
+			Source:             catalog.ModelSourceRuntimeEvidence,
+			EvidenceRevision:   1,
 			Revision:           1,
 		}},
 		Plans: []catalog.PlanSnapshot{{
@@ -232,8 +307,95 @@ func sqliteTestSnapshot(observedAt time.Time) catalog.Snapshot {
 			ExpiresAt:  observedAt.Add(5 * time.Minute),
 			Revision:   1,
 		}},
+		RateLimits: []catalog.RateLimitSnapshot{{
+			ID:                 "rate_sqlite_chat",
+			ProviderInstanceID: "pvi_sqlite",
+			Scope:              catalog.RateLimitScopeOffering,
+			ScopeID:            "offer_sqlite",
+			TierID:             "default",
+			CountLimit:         120,
+			CountPeriodSeconds: 60,
+			UsageLimit:         &usageLimit,
+			UsagePeriodSeconds: &usagePeriod,
+			UsageField:         "tokens",
+			Source:             catalog.ModelSourceProviderAPI,
+			ObservedAt:         observedAt,
+			ExpiresAt:          observedAt.Add(time.Hour),
+			Revision:           1,
+		}},
 		Revision:   1,
 		ObservedAt: observedAt,
+	}
+}
+
+// TestCatalogStoreReadsLegacySnapshotWithoutPoliciesOrRateLimits verifies additive catalog fields preserve historical payload compatibility.
+// TestCatalogStoreReadsLegacySnapshotWithoutPoliciesOrRateLimits 验证目录新增字段保持历史载荷兼容性。
+func TestCatalogStoreReadsLegacySnapshotWithoutPoliciesOrRateLimits(t *testing.T) {
+	// ctx owns the isolated SQLite operations performed by this compatibility test.
+	// ctx 管理此兼容性测试执行的隔离 SQLite 操作。
+	ctx := context.Background()
+	// database stores one raw historical snapshot that predates both additive fields.
+	// database 保存一个早于两个新增字段的原始历史快照。
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "legacy-catalog.db"))
+	if errDatabase != nil {
+		t.Fatalf("open legacy catalog database: %v", errDatabase)
+	}
+	defer func() {
+		if errClose := database.Close(); errClose != nil {
+			t.Errorf("close legacy catalog database: %v", errClose)
+		}
+	}()
+	store, errStore := NewCatalogStore(database)
+	if errStore != nil {
+		t.Fatalf("create legacy catalog store: %v", errStore)
+	}
+	// protocols and systems provide the immutable definition required by the catalog owner foreign key.
+	// protocols 和 systems 提供目录所有者外键所需的不可变定义。
+	protocols, systems := sqliteTestRegistries(t)
+	configurationStore, errConfigurationStore := NewConfigurationStore(database, protocols, systems)
+	if errConfigurationStore != nil {
+		t.Fatalf("create legacy configuration store: %v", errConfigurationStore)
+	}
+	managementService, errManagementService := management.NewService(configurationStore, secret.NewMemoryStore(), store)
+	if errManagementService != nil {
+		t.Fatalf("create legacy management service: %v", errManagementService)
+	}
+	if _, errInstance := managementService.CreateInstance(ctx, management.CreateInstanceInput{ID: "pvi_sqlite", DefinitionID: "system_sqlite_test", Handle: "legacy-sqlite", DisplayName: "Legacy SQLite"}); errInstance != nil {
+		t.Fatalf("create legacy catalog owner: %v", errInstance)
+	}
+	// observedAt fixes the persisted SQL metadata and JSON evidence timestamp.
+	// observedAt 固定持久化 SQL 元数据与 JSON 证据时间戳。
+	observedAt := time.Date(2026, 7, 17, 14, 0, 0, 0, time.UTC)
+	// legacySnapshot starts from a valid snapshot before removing additive fields from the encoded object.
+	// legacySnapshot 从有效快照开始，再从编码对象删除新增字段。
+	legacySnapshot := sqliteTestSnapshot(observedAt)
+	legacySnapshot.ModelOperationPolicies = nil
+	legacySnapshot.RateLimits = nil
+	encodedSnapshot, errEncode := json.Marshal(legacySnapshot)
+	if errEncode != nil {
+		t.Fatalf("encode legacy catalog fixture: %v", errEncode)
+	}
+	// legacyObject permits exact removal of fields that did not exist in the historical payload schema.
+	// legacyObject 允许精确删除历史载荷 Schema 中不存在的字段。
+	legacyObject := make(map[string]json.RawMessage)
+	if errDecode := json.Unmarshal(encodedSnapshot, &legacyObject); errDecode != nil {
+		t.Fatalf("decode legacy catalog fixture object: %v", errDecode)
+	}
+	delete(legacyObject, "ModelOperationPolicies")
+	delete(legacyObject, "RateLimits")
+	legacyPayload, errLegacyPayload := json.Marshal(legacyObject)
+	if errLegacyPayload != nil {
+		t.Fatalf("encode field-omitted legacy catalog fixture: %v", errLegacyPayload)
+	}
+	if _, errInsert := database.sql.ExecContext(ctx, `INSERT INTO catalog_snapshots(provider_instance_id, revision, observed_at, payload) VALUES (?, ?, ?, ?)`, legacySnapshot.ProviderInstanceID, int64(legacySnapshot.Revision), observedAt.Format(time.RFC3339Nano), legacyPayload); errInsert != nil {
+		t.Fatalf("insert legacy catalog fixture: %v", errInsert)
+	}
+	restored, errRestore := store.Get(ctx, legacySnapshot.ProviderInstanceID)
+	if errRestore != nil {
+		t.Fatalf("restore field-omitted legacy catalog: %v", errRestore)
+	}
+	if len(restored.ModelOperationPolicies) != 0 || len(restored.RateLimits) != 0 {
+		t.Fatalf("legacy additive fields policies=%#v rate_limits=%#v", restored.ModelOperationPolicies, restored.RateLimits)
 	}
 }
 
@@ -385,6 +547,12 @@ func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {
 	}
 	if len(restoredSnapshot.Offerings) != 1 || !restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Known || restoredSnapshot.Offerings[0].Capabilities.Recommendations.OutputTokens.Value != 8192 {
 		t.Fatalf("restored token recommendations = %#v", restoredSnapshot.Offerings)
+	}
+	if len(restoredSnapshot.ModelOperationPolicies) != 1 || restoredSnapshot.ModelOperationPolicies[0].Status != catalog.ModelOperationSupported || restoredSnapshot.ModelOperationPolicies[0].Reason != catalog.SupportReasonRuntimeVerified {
+		t.Fatalf("restored operation policies = %#v", restoredSnapshot.ModelOperationPolicies)
+	}
+	if len(restoredSnapshot.RateLimits) != 1 || restoredSnapshot.RateLimits[0].UsageLimit == nil || *restoredSnapshot.RateLimits[0].UsageLimit != 1_000_000 || restoredSnapshot.RateLimits[0].UsagePeriodSeconds == nil || *restoredSnapshot.RateLimits[0].UsagePeriodSeconds != 60 {
+		t.Fatalf("restored rate limits = %#v", restoredSnapshot.RateLimits)
 	}
 	firstChanges, errFirstChanges := reopenedCatalogs.ListChanges(ctx, 0, 10)
 	if errFirstChanges != nil || firstChanges.CurrentRevision != 1 || len(firstChanges.Changes) != 1 || firstChanges.Changes[0].ProviderInstanceID != instance.ID || firstChanges.Changes[0].Type != catalog.ChangeSnapshotUpsert {

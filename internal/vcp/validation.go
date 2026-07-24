@@ -40,6 +40,20 @@ func (r VulcanRequest) Validate() error {
 	if r.ReasoningPolicy.SummaryMode != strings.TrimSpace(r.ReasoningPolicy.SummaryMode) {
 		return fmt.Errorf("%w: reasoning summary_mode cannot contain surrounding whitespace", ErrInvalidRequest)
 	}
+	if r.ReasoningPolicy.BudgetTokens != nil && *r.ReasoningPolicy.BudgetTokens <= 0 {
+		return fmt.Errorf("%w: reasoning budget_tokens must be positive", ErrInvalidRequest)
+	}
+	if r.ReasoningPolicy.Enabled != nil && !*r.ReasoningPolicy.Enabled {
+		if r.ReasoningPolicy.BudgetTokens != nil || r.ReasoningPolicy.RequestedSummaryMode() != "" || r.ReasoningPolicy.ContinuationID != "" || r.ReasoningPolicy.Effort != "" && r.ReasoningPolicy.Effort != "none" {
+			return fmt.Errorf("%w: disabled reasoning conflicts with enabled reasoning controls", ErrInvalidRequest)
+		}
+	}
+	if r.ReasoningPolicy.Enabled != nil && *r.ReasoningPolicy.Enabled && r.ReasoningPolicy.Effort == "none" {
+		return fmt.Errorf("%w: enabled reasoning conflicts with effort none", ErrInvalidRequest)
+	}
+	if r.ReasoningPolicy.BudgetTokens != nil && r.ReasoningPolicy.Effort == "none" {
+		return fmt.Errorf("%w: reasoning budget_tokens conflicts with effort none", ErrInvalidRequest)
+	}
 	switch r.ReasoningPolicy.SummaryMode {
 	case "", "auto", "concise", "detailed":
 	default:
@@ -64,7 +78,10 @@ func (r VulcanRequest) Validate() error {
 			return fmt.Errorf("%w: tool %d: %v", ErrInvalidRequest, index, errTool)
 		}
 	}
-	if len(r.Tools) == 0 && (r.ToolPolicy.Parallel || r.ToolPolicy.StreamArguments || r.ToolPolicy.Choice == ToolChoiceNamed || r.ToolPolicy.Choice == ToolChoiceRequired) {
+	if errModelTools := r.ModelTools.Validate(); errModelTools != nil {
+		return errModelTools
+	}
+	if len(r.Tools) == 0 && !r.ModelTools.Enabled() && (r.ToolPolicy.Parallel || r.ToolPolicy.StreamArguments || r.ToolPolicy.Choice == ToolChoiceNamed || r.ToolPolicy.Choice == ToolChoiceRequired) {
 		return fmt.Errorf("%w: tool policy requires non-empty tools", ErrInvalidRequest)
 	}
 	if !validToolChoice(r.ToolPolicy.Choice) {
@@ -74,15 +91,15 @@ func (r VulcanRequest) Validate() error {
 		return fmt.Errorf("%w: named tool choice requires named_tool", ErrInvalidRequest)
 	}
 	if r.ToolPolicy.Choice == ToolChoiceNamed {
-		matched := false
+		matches := 0
 		for _, tool := range r.Tools {
 			if tool.Name == r.ToolPolicy.NamedTool {
-				matched = true
-				break
+				matches++
 			}
 		}
-		if !matched {
-			return fmt.Errorf("%w: named tool choice does not reference a declared tool", ErrInvalidRequest)
+		matches += r.ModelTools.EnabledNameCount(r.ToolPolicy.NamedTool)
+		if matches != 1 {
+			return fmt.Errorf("%w: named tool choice must reference exactly one declared tool", ErrInvalidRequest)
 		}
 	}
 	if r.GenerationPolicy.Temperature != nil && (*r.GenerationPolicy.Temperature < 0 || *r.GenerationPolicy.Temperature > 2) {
@@ -96,6 +113,15 @@ func (r VulcanRequest) Validate() error {
 	}
 	if len(r.GenerationPolicy.StrictJSONSchema) > 0 && !validJSONObject(r.GenerationPolicy.StrictJSONSchema) {
 		return fmt.Errorf("%w: strict_json_schema must be a JSON object", ErrInvalidRequest)
+	}
+	if errOutputs := validateSelectionModalities("conversation output modality", r.GenerationPolicy.OutputModalities); errOutputs != nil {
+		return errOutputs
+	}
+	if errAudioOutput := validateConversationAudioOutput(r.GenerationPolicy, r.Stream, r.ReasoningPolicy); errAudioOutput != nil {
+		return errAudioOutput
+	}
+	if errBudget := r.Budget.validate(); errBudget != nil {
+		return errBudget
 	}
 	if !validCachePolicy(r.CachePolicy) {
 		return fmt.Errorf("%w: invalid cache policy", ErrInvalidRequest)
@@ -113,6 +139,43 @@ func (r VulcanRequest) Validate() error {
 		if errDemand := validateExplicitCapabilityDemand(r.CapabilityPolicy.ExplicitDemands[index]); errDemand != nil {
 			return fmt.Errorf("%w: explicit capability demand %d: %v", ErrInvalidRequest, index, errDemand)
 		}
+	}
+	return nil
+}
+
+// validateConversationAudioOutput enforces the closed non-realtime text-plus-audio request shape.
+// validateConversationAudioOutput 强制执行封闭的非实时文本加音频请求形态。
+func validateConversationAudioOutput(policy GenerationPolicy, stream bool, reasoning ReasoningPolicy) error {
+	hasText := false
+	hasAudio := false
+	for _, modality := range policy.OutputModalities {
+		switch modality {
+		case "text":
+			hasText = true
+		case "audio":
+			hasAudio = true
+		}
+	}
+	if policy.AudioOutput == nil {
+		if hasAudio {
+			return fmt.Errorf("%w: audio output modality requires audio_output", ErrInvalidRequest)
+		}
+		return nil
+	}
+	if !hasText || !hasAudio || len(policy.OutputModalities) != 2 {
+		return fmt.Errorf("%w: audio_output requires exactly text and audio output modalities", ErrInvalidRequest)
+	}
+	if !stream {
+		return fmt.Errorf("%w: conversational audio output requires streaming", ErrInvalidRequest)
+	}
+	if strings.TrimSpace(policy.AudioOutput.VoiceID) == "" || policy.AudioOutput.VoiceID != strings.TrimSpace(policy.AudioOutput.VoiceID) {
+		return fmt.Errorf("%w: audio_output voice_id must be normalized and non-empty", ErrInvalidRequest)
+	}
+	if policy.AudioOutput.OutputFormat != "wav" {
+		return fmt.Errorf("%w: conversational audio output currently requires wav", ErrInvalidRequest)
+	}
+	if reasoning.Enabled != nil && *reasoning.Enabled || reasoning.BudgetTokens != nil || strings.TrimSpace(reasoning.Effort) != "" && strings.TrimSpace(reasoning.Effort) != "none" || reasoning.RequestedSummaryMode() != "" {
+		return fmt.Errorf("%w: conversational audio output cannot be combined with reasoning", ErrInvalidRequest)
 	}
 	return nil
 }

@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
@@ -23,6 +24,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -75,6 +77,14 @@ type ChatRequestAdapter interface {
 	Adapt(context.Context, provider.ExecutionRequest, *chatprofile.Request) ([]transport.Header, error)
 }
 
+// ChatErrorClassifier maps one safe structured Chat transport failure into provider-specific routing semantics.
+// ChatErrorClassifier 将一个安全的结构化 Chat 传输故障映射为供应商专属路由语义。
+type ChatErrorClassifier interface {
+	// ClassifyChatError returns one closed classification only for provider-proven error identities.
+	// ClassifyChatError 仅为供应商已验证的错误身份返回一个封闭分类。
+	ClassifyChatError(transport.StatusError, resolve.Target, time.Time) (provider.ClassifiedError, bool)
+}
+
 // NewChatDriver creates a driver permanently bound to one provider definition, registered Chat profile, and transport client.
 // NewChatDriver 创建一个永久绑定到一个 Provider Definition、已注册 Chat Profile 与传输客户端的 Driver。
 func NewChatDriver(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities) (*ChatDriver, error) {
@@ -96,6 +106,21 @@ func NewBearerChatDriverWithRequestAdapter(definitionID string, profileID string
 	return newBearerChatDriver(definitionID, profileID, client, capabilities, allowedAuthMethods, openAIChatEndpointPath, requestAdapter)
 }
 
+// NewBearerChatDriverAtPath creates a Bearer Chat driver for one explicit provider-owned compatible endpoint path.
+// NewBearerChatDriverAtPath 为一个显式供应商拥有的兼容入口路径创建 Bearer Chat Driver。
+func NewBearerChatDriverAtPath(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, endpointPath string) (*ChatDriver, error) {
+	return newBearerChatDriver(definitionID, profileID, client, capabilities, allowedAuthMethods, endpointPath, nil)
+}
+
+// NewBearerChatDriverAtPathWithRequestAdapter creates a path-bound Bearer Chat driver with one required provider wire adapter.
+// NewBearerChatDriverAtPathWithRequestAdapter 创建一个绑定路径且带必需供应商 wire 适配器的 Bearer Chat Driver。
+func NewBearerChatDriverAtPathWithRequestAdapter(definitionID string, profileID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, endpointPath string, requestAdapter ChatRequestAdapter) (*ChatDriver, error) {
+	if dependency.IsNil(requestAdapter) {
+		return nil, ErrInvalidChatDriver
+	}
+	return newBearerChatDriver(definitionID, profileID, client, capabilities, allowedAuthMethods, endpointPath, requestAdapter)
+}
+
 // NewOpenAICompatibilityDriver creates CLIProxyAPI's exact OpenAICompatibility Chat driver with Bearer authentication.
 // NewOpenAICompatibilityDriver 使用 Bearer 认证创建 CLIProxyAPI 的精确 OpenAICompatibility Chat Driver。
 func NewOpenAICompatibilityDriver(definitionID string, client *transport.Client, capabilities chatprofile.ProfileCapabilities) (*ChatDriver, error) {
@@ -108,7 +133,10 @@ func newBearerChatDriver(definitionID string, profileID string, client *transpor
 	if strings.TrimSpace(definitionID) == "" || strings.TrimSpace(profileID) == "" || client == nil {
 		return nil, ErrInvalidChatDriver
 	}
-	if endpointPath != openAIChatEndpointPath && endpointPath != openAICompatibilityEndpointPath {
+	if (capabilities.ProviderReasoningSwitchAdapter || capabilities.ProviderReasoningBudgetAdapter) && dependency.IsNil(requestAdapter) {
+		return nil, fmt.Errorf("%w: provider reasoning adapter capability requires a request adapter", ErrInvalidChatDriver)
+	}
+	if !validChatEndpointPath(endpointPath) {
 		return nil, ErrInvalidChatDriver
 	}
 	if len(allowedAuthMethods) == 0 {
@@ -123,7 +151,17 @@ func newBearerChatDriver(definitionID string, profileID string, client *transpor
 	}
 	capabilities.MediaInputKinds = append([]vcp.MediaKind(nil), capabilities.MediaInputKinds...)
 	capabilities.MediaMaterializations = append([]catalog.UpstreamMaterializationMode(nil), capabilities.MediaMaterializations...)
+	capabilities.InputAudioFormats = append([]string(nil), capabilities.InputAudioFormats...)
 	return &ChatDriver{definitionID: definitionID, profileID: profileID, client: client, capabilities: capabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...), endpointPath: endpointPath, requestAdapter: requestAdapter}, nil
+}
+
+// validChatEndpointPath reports whether one immutable compatibility path is normalized and ends at Chat Completions.
+// validChatEndpointPath 返回一个不可变兼容路径是否规范化并终止于 Chat Completions。
+func validChatEndpointPath(endpointPath string) bool {
+	return strings.HasPrefix(endpointPath, "/") &&
+		!strings.ContainsAny(endpointPath, "?#\\") &&
+		path.Clean(endpointPath) == endpointPath &&
+		strings.HasSuffix(endpointPath, "/chat/completions")
 }
 
 // ProviderDefinitionID returns the exact definition that owns this Chat driver.
@@ -197,7 +235,7 @@ func (d *ChatDriver) Execute(ctx context.Context, execution provider.ExecutionRe
 func (d *ChatDriver) executeResponse(ctx context.Context, outbound transport.Request, projected chatprofile.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
 	upstreamResponse, errRequest := d.client.Do(ctx, outbound)
 	if errRequest != nil {
-		return provider.ExecutionResult{}, errRequest
+		return provider.ExecutionResult{}, d.classifyChatError(outbound.Binding.Target, errRequest, now)
 	}
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
@@ -226,14 +264,29 @@ func (d *ChatDriver) executeResponse(ctx context.Context, outbound transport.Req
 func (d *ChatDriver) executeStream(ctx context.Context, execution provider.ExecutionRequest, outbound transport.Request, projected chatprofile.ProjectedRequest, now time.Time) (provider.ExecutionResult, error) {
 	upstreamResponse, errRequest := d.client.DoStream(ctx, outbound)
 	if errRequest != nil {
-		return provider.ExecutionResult{}, errRequest
+		return provider.ExecutionResult{}, d.classifyChatError(outbound.Binding.Target, errRequest, now)
 	}
 	defer func() {
 		_ = transport.DrainAndClose(upstreamResponse)
 	}()
-	decoder, errNew := chatprofile.NewStreamDecoder(projected.Report.ResponseID, now)
+	var decoder *chatprofile.StreamDecoder
+	var errNew error
+	var audioAccumulator *chatAudioAccumulator
+	if projected.Upstream.Audio != nil {
+		decoder, errNew = chatprofile.NewAudioStreamDecoder(projected.Report.ResponseID, now)
+		if errNew == nil {
+			audioAccumulator, errNew = newChatAudioAccumulator(execution.Request.Budget.MaxOutputBytes, execution.ResourceSink)
+		}
+	} else {
+		decoder, errNew = chatprofile.NewStreamDecoder(projected.Report.ResponseID, now)
+	}
 	if errNew != nil {
 		return provider.ExecutionResult{}, errNew
+	}
+	// The decoder creates response.started before reading upstream bytes, so persist that initial causal boundary before any chunk-derived event.
+	// 解码器会在读取上游字节前创建 response.started，因此必须在任何分片事件前持久化该初始因果边界。
+	if errEmit := provider.EmitExecutionEvents(ctx, execution.EventSink, decoder.Events()); errEmit != nil {
+		return provider.ExecutionResult{}, errEmit
 	}
 	errRead := chatprofile.ReadSSE(upstreamResponse.Body, func(envelope chatprofile.SSEEnvelope) error {
 		if bytes.Equal(bytes.TrimSpace(envelope.Data), []byte("[DONE]")) {
@@ -247,12 +300,25 @@ func (d *ChatDriver) executeStream(ctx context.Context, execution provider.Execu
 		if errPush != nil {
 			return errPush
 		}
+		if errAudio := pushChatChoiceAudio(ctx, audioAccumulator, chunk.Choices); errAudio != nil {
+			return errAudio
+		}
 		return provider.EmitExecutionEvents(ctx, execution.EventSink, events)
 	})
 	if errRead != nil {
 		closingEvents, _ := decoder.Close(errRead)
 		_ = provider.EmitExecutionEvents(context.WithoutCancel(ctx), execution.EventSink, closingEvents)
 		return provider.ExecutionResult{}, errRead
+	}
+	generatedResources := make([]provider.GeneratedResource, 0, 1)
+	if audioAccumulator != nil {
+		audio, errAudio := audioAccumulator.Finalize(ctx)
+		if errAudio != nil {
+			closingEvents, _ := decoder.Close(errAudio)
+			_ = provider.EmitExecutionEvents(context.WithoutCancel(ctx), execution.EventSink, closingEvents)
+			return provider.ExecutionResult{}, errAudio
+		}
+		generatedResources = append(generatedResources, audio)
 	}
 	closingEvents, errClose := decoder.Close(nil)
 	if errClose != nil {
@@ -261,7 +327,25 @@ func (d *ChatDriver) executeStream(ctx context.Context, execution provider.Execu
 	if errEmit := provider.EmitExecutionEvents(ctx, execution.EventSink, closingEvents); errEmit != nil {
 		return provider.ExecutionResult{}, errEmit
 	}
-	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID()}, nil
+	return provider.ExecutionResult{Response: decoder.Response(), Events: decoder.Events(), Report: mergeReports(projected.Report, decoder.Report()), UpstreamResponseID: decoder.UpstreamResponseID(), GeneratedResources: generatedResources}, nil
+}
+
+// classifyChatError delegates only safe structured status evidence to the explicitly registered provider adapter.
+// classifyChatError 仅将安全的结构化状态证据委托给显式注册的供应商适配器。
+func (d *ChatDriver) classifyChatError(target resolve.Target, executionError error, now time.Time) error {
+	classifier, supportsClassification := d.requestAdapter.(ChatErrorClassifier)
+	if !supportsClassification {
+		return executionError
+	}
+	var statusError transport.StatusError
+	if !errors.As(executionError, &statusError) {
+		return executionError
+	}
+	classification, classified := classifier.ClassifyChatError(statusError, target, now)
+	if !classified {
+		return executionError
+	}
+	return provider.WrapClassifiedExecutionError(classification, executionError)
 }
 
 // rejectTrailingChatJSON rejects a second JSON value so the typed response decoder never silently accepts an ambiguous payload.

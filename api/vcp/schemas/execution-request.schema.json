@@ -23,7 +23,7 @@
         {"required": ["service"], "not": {"required": ["model"]}}
       ]
     },
-    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "music.generate", "music.cover.prepare", "music.cover"]},
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "web.extract", "music.generate", "music.cover.prepare", "music.cover"]},
     "stream": {"type": "boolean"},
     "dispatch_mode": {"enum": ["inline", "deferred"]},
     "payload": {"$ref": "./operation-payload.schema.json"},
@@ -44,6 +44,7 @@
     {"properties": {"operation": {"const": "embedding.create"}, "payload": {"type": "object", "required": ["embedding_create"]}}},
     {"properties": {"operation": {"const": "rerank.documents"}, "payload": {"type": "object", "required": ["rerank_documents"]}}},
     {"properties": {"operation": {"const": "search.web"}, "payload": {"type": "object", "required": ["search_web"]}}},
+    {"properties": {"operation": {"const": "web.extract"}, "payload": {"type": "object", "required": ["web_extract"]}}},
     {"properties": {"operation": {"const": "music.generate"}, "payload": {"type": "object", "required": ["music_generate"]}}},
     {"properties": {"operation": {"const": "music.cover.prepare"}, "payload": {"type": "object", "required": ["music_cover_prepare"]}}},
     {"properties": {"operation": {"const": "music.cover"}, "payload": {"type": "object", "required": ["music_cover"]}}}

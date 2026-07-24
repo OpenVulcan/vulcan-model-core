@@ -77,8 +77,8 @@ func (d *SpeechTaskDriver) ActionBindingID() string {
 	return SpeechTranscribeAsyncActionBindingID
 }
 
-// Start submits one exact public audio or video URL to Fun-ASR.
-// Start 将一个精确公网音频或视频 URL 提交给 Fun-ASR。
+// Start submits one ordered public audio or video batch to Fun-ASR.
+// Start 将一个有序公网音频或视频批次提交给 Fun-ASR。
 func (d *SpeechTaskDriver) Start(ctx context.Context, execution provider.ExecutionRequest) (provider.TaskResult, error) {
 	if errValidate := d.validateExecution(execution); errValidate != nil {
 		return provider.TaskResult{}, errValidate
@@ -118,20 +118,48 @@ func (d *SpeechTaskDriver) Poll(ctx context.Context, execution provider.Executio
 	if errBound != nil {
 		return provider.TaskResult{}, fmt.Errorf("%w: bound poll response: %v", ErrInvalidSpeechResponse, errBound)
 	}
-	observation, transcriptionURL, errDecode := decodeFunASRPoll(bounded, providerTaskID, execution.Now)
+	operation := execution.Execution.Payload.SpeechTranscribe
+	expectedURLs, errSources := funASRSourceURLs(operation.OrderedSources(), execution.MaterializedInputs)
+	if errSources != nil {
+		return provider.TaskResult{}, errSources
+	}
+	files, observation, errDecode := decodeFunASRPoll(bounded, providerTaskID, execution.Now, expectedURLs)
 	if errDecode != nil || observation.State != provider.TaskSucceeded {
 		return observation, errDecode
 	}
-	content, errFetch := d.resultFetcher.FetchPublicDocument(ctx, transcriptionURL, maximumFunASRResultBytes)
-	if errFetch != nil {
-		return provider.TaskResult{}, fmt.Errorf("%w: acquire transcription sidecar: %v", ErrInvalidSpeechResponse, errFetch)
+	sources := operation.OrderedSources()
+	results := make([]vcp.TranscriptionResult, len(sources))
+	successCount := 0
+	for index := range files {
+		results[index] = vcp.TranscriptionResult{InputID: sources[index].ID, ResourceID: sources[index].Resource.ResourceID}
+		if files[index].Failed {
+			results[index].ErrorCode = "transcription_failed"
+			continue
+		}
+		content, errFetch := d.resultFetcher.FetchPublicDocument(ctx, files[index].TranscriptionURL, maximumFunASRResultBytes)
+		if errFetch != nil {
+			return provider.TaskResult{}, fmt.Errorf("%w: acquire transcription sidecar %d: %v", ErrInvalidSpeechResponse, index, errFetch)
+		}
+		transcript, errTranscript := decodeFunASRTranscript(bytes.NewReader(content), effectiveFunASRChannels(operation.ChannelIDs))
+		if errTranscript != nil {
+			return provider.TaskResult{}, errTranscript
+		}
+		results[index].Transcript = &transcript
+		successCount++
 	}
-	transcript, errTranscript := decodeFunASRTranscript(bytes.NewReader(content))
-	if errTranscript != nil {
-		return provider.TaskResult{}, errTranscript
+	if successCount == 0 {
+		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskFailed, ErrorCode: "alibaba_transcription_failed"}, nil
 	}
-	result := provider.ExecutionResult{Transcript: &transcript}
+	result := provider.ExecutionResult{}
+	if len(results) == 1 {
+		result.Transcript = results[0].Transcript
+	} else {
+		result.Transcriptions = results
+	}
 	observation.Result = &result
+	if successCount != len(results) {
+		observation.State = provider.TaskPartiallySucceeded
+	}
 	return observation, nil
 }
 
@@ -157,27 +185,27 @@ type funASRRequest struct {
 	// Model is fixed by the resolved offering.
 	// Model 由已解析 Offering 固定。
 	Model string `json:"model"`
-	// Input contains exactly one public file URL.
-	// Input 包含恰好一个公网文件 URL。
+	// Input contains one ordered public file URL batch.
+	// Input 包含一个有序公网文件 URL 批次。
 	Input funASRInput `json:"input"`
 	// Parameters contains only VCP-representable documented controls.
 	// Parameters 仅包含 VCP 可表示且文档明确的控制项。
 	Parameters funASRParameters `json:"parameters"`
 }
 
-// funASRInput contains the documented one-element URL array.
-// funASRInput 包含文档规定的单元素 URL 数组。
+// funASRInput contains the documented ordered URL batch.
+// funASRInput 包含文档规定的有序 URL 批次。
 type funASRInput struct {
-	// FileURLs contains exactly one public HTTP or HTTPS URL.
-	// FileURLs 包含恰好一个公网 HTTP 或 HTTPS URL。
+	// FileURLs contains one through one hundred public or temporary OSS URLs.
+	// FileURLs 包含一至一百个公网或临时 OSS URL。
 	FileURLs []string `json:"file_urls"`
 }
 
 // funASRParameters contains documented offline recognition controls.
 // funASRParameters 包含文档规定的离线识别控制项。
 type funASRParameters struct {
-	// ChannelID fixes recognition to the first channel to preserve one VCP candidate.
-	// ChannelID 固定识别第一声道以保留一个 VCP Candidate。
+	// ChannelID selects the ordered source channels to recognize.
+	// ChannelID 选择要识别的有序源声道。
 	ChannelID []int `json:"channel_id"`
 	// LanguageHints contains at most one source language because the provider ignores extras.
 	// LanguageHints 最多包含一种源语言，因为供应商会忽略额外值。
@@ -185,42 +213,96 @@ type funASRParameters struct {
 	// DiarizationEnabled requests provider speaker labels.
 	// DiarizationEnabled 请求供应商说话人标签。
 	DiarizationEnabled bool `json:"diarization_enabled,omitempty"`
+	// SpeakerCount supplies the expected count only with diarization.
+	// SpeakerCount 仅在说话人分离时提供预期人数。
+	SpeakerCount int `json:"speaker_count,omitempty"`
+	// VocabularyID selects one provider-managed vocabulary instead of literal hotwords.
+	// VocabularyID 选择一个供应商管理词表而不是字面热词。
+	VocabularyID string `json:"vocabulary_id,omitempty"`
 }
 
 // projectFunASRStartRequest maps one closed VCP transcription request to the official task endpoint.
 // projectFunASRStartRequest 将一个封闭 VCP 转写请求映射到官方任务端点。
 func projectFunASRStartRequest(execution provider.ExecutionRequest) (transport.Request, error) {
 	operation := execution.Execution.Payload.SpeechTranscribe
-	if operation == nil || operation.Source.Resource.ResourceID == "" || operation.Source.Role != vcp.MediaRoleTranscriptionSource || (operation.Source.Kind != vcp.MediaAudio && operation.Source.Kind != vcp.MediaVideo) {
-		return transport.Request{}, fmt.Errorf("%w: Fun-ASR requires one audio or video transcription source", ErrInvalidSpeechDriver)
+	if operation == nil {
+		return transport.Request{}, fmt.Errorf("%w: Fun-ASR requires transcription input", ErrInvalidSpeechDriver)
 	}
-	if operation.TranslationTarget != "" || operation.Prompt != "" || len(operation.Hotwords) != 0 || operation.CandidateCount > 1 {
-		return transport.Request{}, fmt.Errorf("%w: translation, prompt, literal hotwords, and alternatives have no Fun-ASR carrier", ErrInvalidSpeechDriver)
+	sources := operation.OrderedSources()
+	if len(sources) == 0 || len(sources) > 100 {
+		return transport.Request{}, fmt.Errorf("%w: Fun-ASR requires one through 100 transcription sources", ErrInvalidSpeechDriver)
+	}
+	if operation.TranslationTarget != "" || operation.Prompt != "" || len(operation.Hotwords) != 0 || operation.SegmentTimestamps || operation.WordTimestamps || operation.CandidateCount > 1 {
+		return transport.Request{}, fmt.Errorf("%w: translation, prompt, literal hotwords, timestamp switches, and alternatives have no Fun-ASR request carrier", ErrInvalidSpeechDriver)
 	}
 	if !supportedFunASRLanguage(operation.Language) {
 		return transport.Request{}, fmt.Errorf("%w: unsupported Fun-ASR language", ErrInvalidSpeechDriver)
 	}
-	if len(execution.MaterializedInputs) != 1 {
-		return transport.Request{}, fmt.Errorf("%w: Fun-ASR requires one exact materialized input", ErrInvalidSpeechDriver)
-	}
-	input := execution.MaterializedInputs[0]
-	if input.InputID != operation.Source.ID || input.ResourceID != operation.Source.Resource.ResourceID || input.Kind != operation.Source.Kind || input.Role != vcp.MediaRoleTranscriptionSource || input.Mode != catalog.MaterializationDirectRemoteURL {
-		return transport.Request{}, fmt.Errorf("%w: Fun-ASR requires the exact direct remote URL materialization", ErrInvalidSpeechDriver)
-	}
-	parsed, errParse := url.ParseRequestURI(input.RemoteURL)
-	if errParse != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
-		return transport.Request{}, fmt.Errorf("%w: Fun-ASR source URL is invalid", ErrInvalidSpeechDriver)
+	sourceURLs, errSources := funASRSourceURLs(sources, execution.MaterializedInputs)
+	if errSources != nil {
+		return transport.Request{}, errSources
 	}
 	languages := []string(nil)
 	if operation.Language != "" {
 		languages = []string{operation.Language}
 	}
-	body := funASRRequest{Model: execution.Binding.Target.UpstreamModelID, Input: funASRInput{FileURLs: []string{input.RemoteURL}}, Parameters: funASRParameters{ChannelID: []int{0}, LanguageHints: languages, DiarizationEnabled: operation.Diarization}}
+	body := funASRRequest{Model: execution.Binding.Target.UpstreamModelID, Input: funASRInput{FileURLs: sourceURLs}, Parameters: funASRParameters{ChannelID: effectiveFunASRChannels(operation.ChannelIDs), LanguageHints: languages, DiarizationEnabled: operation.Diarization, SpeakerCount: operation.SpeakerCount, VocabularyID: operation.VocabularyID}}
 	encoded, errEncode := json.Marshal(body)
 	if errEncode != nil {
 		return transport.Request{}, fmt.Errorf("%w: encode Fun-ASR request: %v", ErrInvalidSpeechDriver, errEncode)
 	}
-	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: dashScopeTranscriptionPath, Body: encoded, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}, {Name: "X-DashScope-Async", Value: "enable"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: dashScopeTranscriptionPath, Body: encoded, Headers: alibabaJSONHeaders(execution.MaterializedInputs, true), Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+}
+
+// funASRSourceURLs validates exact input identities and returns unique provider-visible source locators in request order.
+// funASRSourceURLs 校验精确输入身份，并按请求顺序返回唯一的供应商可见来源定位符。
+func funASRSourceURLs(sources []vcp.MediaInput, materialized []resource.MaterializedInput) ([]string, error) {
+	if len(materialized) != len(sources) {
+		return nil, fmt.Errorf("%w: Fun-ASR materialized input count differs from sources", ErrInvalidSpeechDriver)
+	}
+	sourceURLs := make([]string, len(sources))
+	seenURLs := make(map[string]struct{}, len(sources))
+	for index := range sources {
+		input := materialized[index]
+		if input.InputID != sources[index].ID || input.ResourceID != sources[index].Resource.ResourceID || input.Kind != sources[index].Kind || input.Role != vcp.MediaRoleTranscriptionSource {
+			return nil, fmt.Errorf("%w: Fun-ASR source %d has no exact materialization", ErrInvalidSpeechDriver, index)
+		}
+		resolvedURL, errResolve := funASRMaterialization(input)
+		if errResolve != nil {
+			return nil, errResolve
+		}
+		if _, duplicate := seenURLs[resolvedURL]; duplicate {
+			return nil, fmt.Errorf("%w: Fun-ASR cannot correlate duplicate source locator at index %d", ErrInvalidSpeechDriver, index)
+		}
+		seenURLs[resolvedURL] = struct{}{}
+		sourceURLs[index] = resolvedURL
+	}
+	return sourceURLs, nil
+}
+
+// funASRMaterialization converts one exact planned resource into a documented URL carrier.
+// funASRMaterialization 将一个精确规划资源转换为文档规定的 URL 载体。
+func funASRMaterialization(input resource.MaterializedInput) (string, error) {
+	if input.Mode == catalog.MaterializationProviderObjectURI {
+		return alibabaObjectURI(input, ErrInvalidSpeechDriver)
+	}
+	if input.Mode != catalog.MaterializationDirectRemoteURL {
+		return "", fmt.Errorf("%w: Fun-ASR requires a direct remote URL or Alibaba object URI", ErrInvalidSpeechDriver)
+	}
+	parsed, errParse := url.ParseRequestURI(input.RemoteURL)
+	if errParse != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+		return "", fmt.Errorf("%w: Fun-ASR source URL is invalid", ErrInvalidSpeechDriver)
+	}
+	return input.RemoteURL, nil
+}
+
+// effectiveFunASRChannels applies the provider-documented first-channel default without mutating the request.
+// effectiveFunASRChannels 在不修改请求的情况下应用供应商文档规定的第一声道默认值。
+func effectiveFunASRChannels(channelIDs []int) []int {
+	if len(channelIDs) == 0 {
+		return []int{0}
+	}
+	return append([]int(nil), channelIDs...)
 }
 
 // supportedFunASRLanguage reports the current stable Fun-ASR language hints.
@@ -254,27 +336,47 @@ type funASRTaskOutput struct {
 	// TaskStatus is the documented uppercase state.
 	// TaskStatus 是文档规定的大写状态。
 	TaskStatus string `json:"task_status"`
-	// Results contains exactly one file subtask at success.
-	// Results 在成功时包含恰好一个文件子任务。
+	// Results contains one file subtask for every submitted source at success.
+	// Results 在成功时为每个已提交来源包含一个文件子任务。
 	Results []funASRTaskFile `json:"results"`
 }
 
 // funASRTaskFile contains one exact transcription sidecar locator.
 // funASRTaskFile 包含一个精确转写 Sidecar 定位符。
 type funASRTaskFile struct {
+	// FileURL is the provider-echoed source locator used only to confirm a populated result entry.
+	// FileURL 是供应商回显的来源定位符，仅用于确认结果条目已填充。
+	FileURL string `json:"file_url"`
 	// SubtaskStatus is the file-level terminal state.
 	// SubtaskStatus 是文件级终态。
 	SubtaskStatus string `json:"subtask_status"`
 	// TranscriptionURL is the temporary public JSON sidecar.
 	// TranscriptionURL 是临时公网 JSON Sidecar。
 	TranscriptionURL string `json:"transcription_url"`
+	// Code is the provider file-level code retained only for failure classification.
+	// Code 是仅用于失败分类的供应商文件级代码。
+	Code string `json:"code"`
+}
+
+// funASRResolvedFile contains one ordered safe task-sidecar decision.
+// funASRResolvedFile 包含一个有序且安全的任务 Sidecar 决策。
+type funASRResolvedFile struct {
+	// TranscriptionURL is present only for one successful file.
+	// TranscriptionURL 仅在一个成功文件上存在。
+	TranscriptionURL string
+	// Failed records a provider-confirmed file failure without leaking its message.
+	// Failed 记录供应商确认的文件失败且不泄露其消息。
+	Failed bool
 }
 
 // decodeFunASRStart decodes one successful queued task.
 // decodeFunASRStart 解码一个成功排队的任务。
 func decodeFunASRStart(reader io.Reader, now time.Time) (provider.TaskResult, error) {
 	var response funASRTaskResponse
-	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil || strings.TrimSpace(response.Output.TaskID) == "" || response.Output.TaskStatus != "PENDING" {
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidSpeechResponse); errDecode != nil {
+		return provider.TaskResult{}, errDecode
+	}
+	if strings.TrimSpace(response.Output.TaskID) == "" || strings.TrimSpace(response.Output.TaskID) != response.Output.TaskID || response.Output.TaskStatus != "PENDING" {
 		return provider.TaskResult{}, fmt.Errorf("%w: malformed Fun-ASR task creation", ErrInvalidSpeechResponse)
 	}
 	return provider.TaskResult{ProviderTaskID: response.Output.TaskID, State: provider.TaskQueued, PollAfter: now.UTC().Add(funASRPollInterval)}, nil
@@ -282,25 +384,61 @@ func decodeFunASRStart(reader io.Reader, now time.Time) (provider.TaskResult, er
 
 // decodeFunASRPoll maps one documented provider observation without exposing its result URL.
 // decodeFunASRPoll 映射一个文档规定的供应商观测且不暴露其结果 URL。
-func decodeFunASRPoll(reader io.Reader, providerTaskID string, now time.Time) (provider.TaskResult, string, error) {
+func decodeFunASRPoll(reader io.Reader, providerTaskID string, now time.Time, expectedURLs []string) ([]funASRResolvedFile, provider.TaskResult, error) {
 	var response funASRTaskResponse
-	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil || response.Output.TaskID != providerTaskID {
-		return provider.TaskResult{}, "", fmt.Errorf("%w: malformed Fun-ASR task observation", ErrInvalidSpeechResponse)
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidSpeechResponse); errDecode != nil {
+		return nil, provider.TaskResult{}, errDecode
+	}
+	if response.Output.TaskID != providerTaskID || len(expectedURLs) == 0 {
+		return nil, provider.TaskResult{}, fmt.Errorf("%w: malformed Fun-ASR task observation", ErrInvalidSpeechResponse)
 	}
 	switch response.Output.TaskStatus {
 	case "PENDING":
-		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskQueued, PollAfter: now.UTC().Add(funASRPollInterval)}, "", nil
+		return nil, provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskQueued, PollAfter: now.UTC().Add(funASRPollInterval)}, nil
 	case "RUNNING":
-		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskRunning, PollAfter: now.UTC().Add(funASRPollInterval)}, "", nil
+		return nil, provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskRunning, PollAfter: now.UTC().Add(funASRPollInterval)}, nil
 	case "FAILED", "UNKNOWN":
-		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskFailed, ErrorCode: "alibaba_transcription_failed"}, "", nil
+		return nil, provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskFailed, ErrorCode: "alibaba_transcription_failed"}, nil
 	case "SUCCEEDED":
-		if len(response.Output.Results) != 1 || response.Output.Results[0].SubtaskStatus != "SUCCEEDED" || strings.TrimSpace(response.Output.Results[0].TranscriptionURL) == "" {
-			return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskFailed, ErrorCode: "alibaba_transcription_failed"}, "", nil
+		if len(response.Output.Results) != len(expectedURLs) {
+			return nil, provider.TaskResult{}, fmt.Errorf("%w: Fun-ASR task result count differs from request", ErrInvalidSpeechResponse)
 		}
-		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskSucceeded}, response.Output.Results[0].TranscriptionURL, nil
+		expectedIndex := make(map[string]int, len(expectedURLs))
+		for index, expectedURL := range expectedURLs {
+			if strings.TrimSpace(expectedURL) == "" {
+				return nil, provider.TaskResult{}, fmt.Errorf("%w: Fun-ASR expected source locator is empty", ErrInvalidSpeechResponse)
+			}
+			if _, duplicate := expectedIndex[expectedURL]; duplicate {
+				return nil, provider.TaskResult{}, fmt.Errorf("%w: Fun-ASR expected source locator is ambiguous", ErrInvalidSpeechResponse)
+			}
+			expectedIndex[expectedURL] = index
+		}
+		resolved := make([]funASRResolvedFile, len(response.Output.Results))
+		seenResults := make(map[string]struct{}, len(response.Output.Results))
+		for _, file := range response.Output.Results {
+			index, expected := expectedIndex[file.FileURL]
+			if !expected {
+				return nil, provider.TaskResult{}, fmt.Errorf("%w: Fun-ASR returned an unknown source locator", ErrInvalidSpeechResponse)
+			}
+			if _, duplicate := seenResults[file.FileURL]; duplicate {
+				return nil, provider.TaskResult{}, fmt.Errorf("%w: Fun-ASR returned a duplicate source locator", ErrInvalidSpeechResponse)
+			}
+			seenResults[file.FileURL] = struct{}{}
+			switch file.SubtaskStatus {
+			case "SUCCEEDED":
+				if strings.TrimSpace(file.TranscriptionURL) == "" {
+					return nil, provider.TaskResult{}, fmt.Errorf("%w: successful Fun-ASR file lacks transcription URL", ErrInvalidSpeechResponse)
+				}
+				resolved[index].TranscriptionURL = file.TranscriptionURL
+			case "FAILED":
+				resolved[index].Failed = true
+			default:
+				return nil, provider.TaskResult{}, fmt.Errorf("%w: unknown Fun-ASR file status %q", ErrInvalidSpeechResponse, file.SubtaskStatus)
+			}
+		}
+		return resolved, provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskSucceeded}, nil
 	default:
-		return provider.TaskResult{}, "", fmt.Errorf("%w: unknown Fun-ASR task status %q", ErrInvalidSpeechResponse, response.Output.TaskStatus)
+		return nil, provider.TaskResult{}, fmt.Errorf("%w: unknown Fun-ASR task status %q", ErrInvalidSpeechResponse, response.Output.TaskStatus)
 	}
 }
 
@@ -379,28 +517,39 @@ type funASRWord struct {
 
 // decodeFunASRTranscript converts exact provider segments and words without inferring missing facts.
 // decodeFunASRTranscript 转换精确供应商分段与词元且不推断缺失事实。
-func decodeFunASRTranscript(reader io.Reader) (vcp.Transcript, error) {
+func decodeFunASRTranscript(reader io.Reader, channelIDs []int) (vcp.Transcript, error) {
 	var document funASRTranscriptDocument
-	if errDecode := json.NewDecoder(reader).Decode(&document); errDecode != nil || document.Properties.OriginalDurationMilliseconds < 0 || len(document.Transcripts) != 1 || document.Transcripts[0].ChannelID != 0 {
+	if errDecode := decodeAlibabaJSONResponse(reader, &document, ErrInvalidSpeechResponse); errDecode != nil {
+		return vcp.Transcript{}, errDecode
+	}
+	if document.Properties.OriginalDurationMilliseconds < 0 || len(channelIDs) == 0 || len(document.Transcripts) != len(channelIDs) {
 		return vcp.Transcript{}, fmt.Errorf("%w: malformed Fun-ASR result document", ErrInvalidSpeechResponse)
 	}
-	providerTranscript := document.Transcripts[0]
-	segments := make([]vcp.TranscriptSegment, 0, len(providerTranscript.Sentences))
-	for _, sentence := range providerTranscript.Sentences {
-		start, end := sentence.BeginTime, sentence.EndTime
-		segment := vcp.TranscriptSegment{CandidateID: "candidate-0", SegmentID: "segment-" + strconv.Itoa(sentence.SentenceID), Text: sentence.Text, StartMilliseconds: &start, EndMilliseconds: &end}
-		if sentence.SpeakerID != nil {
-			segment.Speaker = strconv.Itoa(*sentence.SpeakerID)
+	candidates := make([]vcp.TranscriptCandidate, len(document.Transcripts))
+	for transcriptIndex, providerTranscript := range document.Transcripts {
+		if providerTranscript.ChannelID != channelIDs[transcriptIndex] {
+			return vcp.Transcript{}, fmt.Errorf("%w: Fun-ASR result channel order differs from request", ErrInvalidSpeechResponse)
 		}
-		segment.Words = make([]vcp.TranscriptWord, 0, len(sentence.Words))
-		for _, providerWord := range sentence.Words {
-			wordStart, wordEnd := providerWord.BeginTime, providerWord.EndTime
-			segment.Words = append(segment.Words, vcp.TranscriptWord{Text: providerWord.Text + providerWord.Punctuation, StartMilliseconds: &wordStart, EndMilliseconds: &wordEnd, Speaker: segment.Speaker})
+		candidateID := "channel-" + strconv.Itoa(providerTranscript.ChannelID)
+		channelID := providerTranscript.ChannelID
+		segments := make([]vcp.TranscriptSegment, 0, len(providerTranscript.Sentences))
+		for _, sentence := range providerTranscript.Sentences {
+			start, end := sentence.BeginTime, sentence.EndTime
+			segment := vcp.TranscriptSegment{CandidateID: candidateID, SegmentID: candidateID + "-segment-" + strconv.Itoa(sentence.SentenceID), Text: sentence.Text, StartMilliseconds: &start, EndMilliseconds: &end}
+			if sentence.SpeakerID != nil {
+				segment.Speaker = strconv.Itoa(*sentence.SpeakerID)
+			}
+			segment.Words = make([]vcp.TranscriptWord, 0, len(sentence.Words))
+			for _, providerWord := range sentence.Words {
+				wordStart, wordEnd := providerWord.BeginTime, providerWord.EndTime
+				segment.Words = append(segment.Words, vcp.TranscriptWord{Text: providerWord.Text + providerWord.Punctuation, StartMilliseconds: &wordStart, EndMilliseconds: &wordEnd, Speaker: segment.Speaker})
+			}
+			segments = append(segments, segment)
 		}
-		segments = append(segments, segment)
+		candidates[transcriptIndex] = vcp.TranscriptCandidate{CandidateID: candidateID, ChannelID: &channelID, Text: providerTranscript.Text, Segments: segments}
 	}
 	duration := document.Properties.OriginalDurationMilliseconds
-	transcript := vcp.Transcript{DurationMilliseconds: &duration, Candidates: []vcp.TranscriptCandidate{{CandidateID: "candidate-0", Text: providerTranscript.Text, Segments: segments}}}
+	transcript := vcp.Transcript{DurationMilliseconds: &duration, Candidates: candidates}
 	if errValidate := transcript.Validate(); errValidate != nil {
 		return vcp.Transcript{}, fmt.Errorf("%w: %v", ErrInvalidSpeechResponse, errValidate)
 	}

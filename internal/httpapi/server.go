@@ -46,6 +46,9 @@ type ManagementQuery interface {
 	// GetCatalog returns one safe atomic provider model catalog.
 	// GetCatalog 返回一个安全原子供应商模型目录。
 	GetCatalog(context.Context, string) (management.CatalogView, error)
+	// GetCatalogAudit returns complete internal model facts and publication decisions for management review.
+	// GetCatalogAudit 返回供管理审核使用的完整内部模型事实与发布决策。
+	GetCatalogAudit(context.Context, string) (management.CatalogAuditView, error)
 	// GetModelContexts returns exact model context profiles and their concrete authorized accounts.
 	// GetModelContexts 返回精确模型上下文规格及其具体已授权账号。
 	GetModelContexts(context.Context, string, string) (management.ModelContextsView, error)
@@ -94,6 +97,15 @@ type errorResponse struct {
 	// Code repeats the stable code in the formal VCP error field.
 	// Code 在正式 VCP 错误字段中重复稳定代码。
 	Code string `json:"code"`
+	// ToolID identifies the standard, extra, or Router extension tool involved in a typed failure.
+	// ToolID 标识类型化失败涉及的标准、额外或 Router 增强工具。
+	ToolID string `json:"tool_id,omitempty"`
+	// Phase identifies the model-tool failure stage.
+	// Phase 标识模型工具失败阶段。
+	Phase string `json:"phase,omitempty"`
+	// Retryable reports whether the same request may succeed without configuration changes.
+	// Retryable 表示不改变配置时相同请求是否可能成功。
+	Retryable *bool `json:"retryable,omitempty"`
 	// ProtocolMinimum is the oldest wire version accepted by this server.
 	// ProtocolMinimum 是服务器接受的最旧 Wire 版本。
 	ProtocolMinimum string `json:"protocol_minimum"`
@@ -153,11 +165,12 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateInstance)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/enabled", server.requireManagement(http.HandlerFunc(server.handleSetInstanceEnabled)))
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/catalog", server.requireManagement(http.HandlerFunc(server.handleProviderCatalog)))
+		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/catalog/audit", server.requireManagement(http.HandlerFunc(server.handleProviderCatalogAudit)))
+		mux.Handle("GET /vulcan/manage/model-tool-availability", server.requireManagement(http.HandlerFunc(server.handleModelToolAvailability)))
 		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/services/{provider_service_id}/search-test", server.requireManagement(http.HandlerFunc(server.handleSearchServiceTest)))
 		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/services/{provider_service_id}/extract-test", server.requireManagement(http.HandlerFunc(server.handleExtractServiceTest)))
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog", server.requireManagement(http.HandlerFunc(server.handleCustomCatalog)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog", server.requireManagement(http.HandlerFunc(server.handleSaveCustomCatalog)))
-		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/custom-catalog/discover", server.requireManagement(http.HandlerFunc(server.handleDiscoverCustomProviderModels)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/custom-models", server.requireManagement(http.HandlerFunc(server.handleSaveCustomProviderModels)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/additional-parameters", server.requireManagement(http.HandlerFunc(server.handleSaveCustomProviderAdditionalParameters)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/models/{provider_model_id}/enabled", server.requireManagement(http.HandlerFunc(server.handleSetModelEnabled)))
@@ -174,6 +187,15 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 		mux.Handle("GET /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleBindings)))
 		mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/bindings", server.requireManagement(http.HandlerFunc(server.handleCreateBinding)))
 		mux.Handle("PUT /vulcan/manage/provider-instances/{provider_instance_id}/bindings/{binding_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateBinding)))
+		if control.RouterTools != nil {
+			mux.Handle("GET /vulcan/manage/router-tool-bindings", server.requireManagement(http.HandlerFunc(server.handleRouterToolBindings)))
+			mux.Handle("POST /vulcan/manage/router-tool-bindings", server.requireManagement(http.HandlerFunc(server.handleCreateRouterToolBinding)))
+			mux.Handle("PUT /vulcan/manage/router-tool-bindings/{binding_id}", server.requireManagement(http.HandlerFunc(server.handleUpdateRouterToolBinding)))
+			mux.Handle("DELETE /vulcan/manage/router-tool-bindings/{binding_id}", server.requireManagement(http.HandlerFunc(server.handleDeleteRouterToolBinding)))
+			if control.ModelToolAvailability != nil {
+				mux.Handle("POST /vulcan/manage/router-tool-bindings/{binding_id}/test", server.requireManagement(http.HandlerFunc(server.handleProbeRouterToolBinding)))
+			}
+		}
 		if control.KimiDeviceFlows != nil {
 			mux.Handle("POST /vulcan/manage/kimi/device-flows", server.requireManagement(http.HandlerFunc(server.handleStartKimiDeviceFlow)))
 			mux.Handle("POST /vulcan/manage/kimi/device-flows/{flow_id}/onboard", server.requireManagement(http.HandlerFunc(server.handleOnboardKimiDeviceFlow)))
@@ -213,8 +235,8 @@ func newServer(catalog ProviderCatalog, control *ControlPlane) (*Server, error) 
 			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderCredential)))
 		}
 		if control.MetadataRefresh != nil {
-			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/catalog/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderMetadata)))
-			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/catalog/discover", server.requireManagement(http.HandlerFunc(server.handleDiscoverProviderModels)))
+			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/entitlements/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderCredentialEntitlements)))
+			mux.Handle("POST /vulcan/manage/provider-instances/{provider_instance_id}/credentials/{credential_id}/usage/refresh", server.requireManagement(http.HandlerFunc(server.handleRefreshProviderCredentialUsage)))
 		}
 		if control.Routing != nil {
 			mux.Handle("GET /vulcan/manage/settings/routing", server.requireManagement(http.HandlerFunc(server.handleRoutingSettings)))

@@ -211,7 +211,7 @@ func reportResponseMetadata(report *vcp.ExecutionReport, upstream Response) erro
 	}
 	reportUnrepresentedUsageMetadata(report, upstream.Usage)
 	for choiceIndex := range upstream.Choices {
-		if errChoice := reportChoiceMetadata(report, upstream.Choices[choiceIndex]); errChoice != nil {
+		if errChoice := reportChoiceMetadata(report, upstream.Choices[choiceIndex], false); errChoice != nil {
 			return errChoice
 		}
 	}
@@ -220,7 +220,7 @@ func reportResponseMetadata(report *vcp.ExecutionReport, upstream Response) erro
 
 // reportChoiceMetadata validates closed Chat choice payloads and records safe omissions without retaining provider payload contents.
 // reportChoiceMetadata 校验封闭 Chat 候选载荷，并在不保留 Provider 载荷内容的前提下记录安全省略。
-func reportChoiceMetadata(report *vcp.ExecutionReport, choice Choice) error {
+func reportChoiceMetadata(report *vcp.ExecutionReport, choice Choice, allowAudio bool) error {
 	if report == nil {
 		return fmt.Errorf("%w: execution report is required", ErrInvalidUpstreamResponse)
 	}
@@ -231,8 +231,11 @@ func reportChoiceMetadata(report *vcp.ExecutionReport, choice Choice) error {
 		if choice.Message.Role != "" && choice.Message.Role != "assistant" {
 			return fmt.Errorf("%w: unsupported assistant message role %q", ErrInvalidUpstreamResponse, choice.Message.Role)
 		}
-		if choice.Message.Audio != nil {
+		if choice.Message.Audio != nil && !allowAudio {
 			return fmt.Errorf("%w: audio output is outside the first-phase Chat profile", ErrInvalidUpstreamResponse)
+		}
+		if allowAudio {
+			reportAudioMetadata(report, choice.Message.Audio)
 		}
 		if len(choice.Message.Annotations) > 0 {
 			appendChatSummary(report, "openai_chat.message.annotations.omitted")
@@ -248,8 +251,11 @@ func reportChoiceMetadata(report *vcp.ExecutionReport, choice Choice) error {
 		if choice.Delta.Role != "" && choice.Delta.Role != "assistant" {
 			return fmt.Errorf("%w: unsupported assistant delta role %q", ErrInvalidUpstreamResponse, choice.Delta.Role)
 		}
-		if choice.Delta.Audio != nil {
+		if choice.Delta.Audio != nil && !allowAudio {
 			return fmt.Errorf("%w: audio output is outside the first-phase Chat profile", ErrInvalidUpstreamResponse)
+		}
+		if allowAudio {
+			reportAudioMetadata(report, choice.Delta.Audio)
 		}
 		if choice.Delta.FunctionCall != nil {
 			if len(choice.Delta.ToolCalls) > 0 {
@@ -264,6 +270,20 @@ func reportChoiceMetadata(report *vcp.ExecutionReport, choice Choice) error {
 		}
 	}
 	return nil
+}
+
+// reportAudioMetadata records provider audio identity metadata that has no public VCP carrier.
+// reportAudioMetadata 记录没有公开 VCP 承载字段的供应商音频身份元数据。
+func reportAudioMetadata(report *vcp.ExecutionReport, audio *AudioOutputDelta) {
+	if report == nil || audio == nil {
+		return
+	}
+	if audio.ID != "" {
+		appendChatSummary(report, "openai_chat.audio.id.omitted")
+	}
+	if audio.ExpiresAt != nil {
+		appendChatSummary(report, "openai_chat.audio.expires_at.omitted")
+	}
 }
 
 // reportUnrepresentedUsageMetadata records documented Chat usage details that VCP cannot account for without inventing a token category.

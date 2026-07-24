@@ -56,11 +56,10 @@ func (staticProtocolProfiles) List() []providerconfig.ProtocolProfile {
 		{
 			ID: "openai.responses", Version: "1", DisplayName: "OpenAI Responses",
 			UserConfigurable: true, CustomDefinitionCompatible: true, RuntimeReady: true,
-			ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 		},
 		{
 			ID: "google.interactions", Version: "1", DisplayName: "Google Interactions",
-			UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported,
+			UserConfigurable: false, RuntimeReady: true,
 		},
 	}
 }
@@ -149,6 +148,12 @@ func (staticManagementQuery) GetCatalog(context.Context, string) (management.Cat
 	}, nil
 }
 
+// GetCatalogAudit returns an empty deterministic audit view for route construction tests.
+// GetCatalogAudit 为路由构建测试返回空的确定性审核视图。
+func (staticManagementQuery) GetCatalogAudit(context.Context, string) (management.CatalogAuditView, error) {
+	return management.CatalogAuditView{ProviderInstanceID: "pvi_test", Models: []management.CatalogAuditModelView{}, Policies: []management.CatalogAuditPolicyView{}, RateLimits: []management.RateLimitView{}, Revision: 1, ObservedAt: time.Date(2026, 7, 21, 0, 0, 0, 0, time.UTC)}, nil
+}
+
 // GetModelContexts returns two exact context profiles with concrete account membership.
 // GetModelContexts 返回两个具有具体账号成员关系的精确上下文规格。
 func (staticManagementQuery) GetModelContexts(context.Context, string, string) (management.ModelContextsView, error) {
@@ -162,7 +167,7 @@ func (staticManagementQuery) GetModelContexts(context.Context, string, string) (
 // GetModelCredentialUsage 返回一条精确账号作用域用量观测。
 func (staticManagementQuery) GetModelCredentialUsage(context.Context, string, string, string) (management.ModelCredentialUsageView, error) {
 	remaining := "75"
-	return management.ModelCredentialUsageView{ProviderInstanceID: "pvi_test", ProviderModelID: "model_test", CredentialID: "cred_test", CredentialLabel: "Primary", CredentialStatus: providerconfig.CredentialActive, SupportedContextProfileIDs: []string{"profile_test_256k"}, Allowances: []management.ModelUsageAllowanceView{{Usage: management.AllowanceView{Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, Metric: "weekly_usage", Unit: catalog.UnitProviderDefined, Remaining: &remaining, Status: catalog.AllowanceAvailable}, ContextProfileIDs: []string{"profile_test_256k"}}}, CatalogRevision: 1}, nil
+	return management.ModelCredentialUsageView{ProviderInstanceID: "pvi_test", ProviderModelID: "model_test", CredentialID: "cred_test", CredentialLabel: "Primary", CredentialStatus: providerconfig.CredentialActive, SupportedContextProfileIDs: []string{"profile_test_256k"}, Allowances: []management.ModelUsageAllowanceView{{Usage: management.AllowanceView{Kind: catalog.AllowanceWindowQuota, Scope: catalog.ScopeCredential, Metric: "weekly_usage", Unit: catalog.UnitProviderDefined, Remaining: &remaining, Status: catalog.AllowanceAvailable}, ContextProfileIDs: []string{"profile_test_256k"}}}, AllowanceSupport: providerconfig.SupportSupported, CatalogRevision: 1}, nil
 }
 
 // ListEndpoints returns no endpoint details for the focused route fixture.
@@ -193,12 +198,36 @@ type staticMetadataRefresh struct {
 	// providerInstanceID is the last exact refresh target.
 	// providerInstanceID 是最后一次精确刷新目标。
 	providerInstanceID string
+	// credentialID is the last exact account-metadata refresh target.
+	// credentialID 是最后一次精确账号元数据刷新目标。
+	credentialID string
+	// scope is the last explicit refresh boundary.
+	// scope 是最后一次显式刷新边界。
+	scope string
 }
 
 // Refresh records one explicit refresh request and returns a non-sensitive snapshot identity.
 // Refresh 记录一次显式刷新请求并返回不敏感的快照身份。
 func (r *staticMetadataRefresh) Refresh(_ context.Context, providerInstanceID string, observedAt time.Time) (catalog.Snapshot, error) {
 	r.providerInstanceID = providerInstanceID
+	return catalog.Snapshot{ProviderInstanceID: providerInstanceID, Revision: 1, ObservedAt: observedAt}, nil
+}
+
+// RefreshCredentialEntitlements records one exact entitlement refresh target.
+// RefreshCredentialEntitlements 记录一个精确权益刷新目标。
+func (r *staticMetadataRefresh) RefreshCredentialEntitlements(_ context.Context, providerInstanceID string, credentialID string, observedAt time.Time) (catalog.Snapshot, error) {
+	r.providerInstanceID = providerInstanceID
+	r.credentialID = credentialID
+	r.scope = "entitlements"
+	return catalog.Snapshot{ProviderInstanceID: providerInstanceID, Revision: 1, ObservedAt: observedAt}, nil
+}
+
+// RefreshCredentialAllowances records one exact usage refresh target.
+// RefreshCredentialAllowances 记录一个精确用量刷新目标。
+func (r *staticMetadataRefresh) RefreshCredentialAllowances(_ context.Context, providerInstanceID string, credentialID string, observedAt time.Time) (catalog.Snapshot, error) {
+	r.providerInstanceID = providerInstanceID
+	r.credentialID = credentialID
+	r.scope = "usage"
 	return catalog.Snapshot{ProviderInstanceID: providerInstanceID, Revision: 1, ObservedAt: observedAt}, nil
 }
 
@@ -284,12 +313,6 @@ func (staticManagementCommands) ConfigureProvider(context.Context, management.Co
 // DeleteProviderConfiguration 报告静态夹具不执行供应商删除流程。
 func (staticManagementCommands) DeleteProviderConfiguration(context.Context, string) error {
 	return errors.New("static command fixture")
-}
-
-// DiscoverCustomProviderModels reports that the static fixture does not execute custom discovery flows.
-// DiscoverCustomProviderModels 报告静态夹具不执行自定义发现流程。
-func (staticManagementCommands) DiscoverCustomProviderModels(context.Context, string, string) (catalog.Snapshot, error) {
-	return catalog.Snapshot{}, errors.New("static command fixture")
 }
 
 // SaveCustomProviderModels reports that the static fixture does not execute custom model editing flows.
@@ -777,25 +800,29 @@ func TestControlPlaneSeparatesManagementAndCallCredentials(t *testing.T) {
 	if ambiguousManagementRecorder.Code != http.StatusUnauthorized {
 		t.Fatalf("duplicate management authorization status=%d, want %d", ambiguousManagementRecorder.Code, http.StatusUnauthorized)
 	}
-	// unauthenticatedRefresh proves a state-changing metadata read never inherits loopback trust.
-	// unauthenticatedRefresh 证明会触发状态变更的元数据读取绝不继承环回信任。
-	unauthenticatedRefresh := httptest.NewRequest(http.MethodPost, "/vulcan/manage/provider-instances/pvi_test/catalog/refresh", nil)
-	unauthenticatedRefreshRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(unauthenticatedRefreshRecorder, unauthenticatedRefresh)
-	if unauthenticatedRefreshRecorder.Code != http.StatusUnauthorized || metadataRefresh.providerInstanceID != "" {
-		t.Fatalf("unauthenticated metadata refresh status=%d target=%q", unauthenticatedRefreshRecorder.Code, metadataRefresh.providerInstanceID)
+	// removedCatalogRefresh proves static catalogs no longer expose a runtime discovery route.
+	// removedCatalogRefresh 证明静态目录不再暴露运行时模型发现路由。
+	removedCatalogRefresh := httptest.NewRequest(http.MethodPost, "/vulcan/manage/provider-instances/pvi_test/catalog/refresh", nil)
+	removedCatalogRefresh.Header.Set("Authorization", "Bearer manage-key")
+	removedCatalogRefreshRecorder := httptest.NewRecorder()
+	server.Handler().ServeHTTP(removedCatalogRefreshRecorder, removedCatalogRefresh)
+	if removedCatalogRefreshRecorder.Code != http.StatusNotFound || metadataRefresh.providerInstanceID != "" {
+		t.Fatalf("removed catalog refresh status=%d target=%q", removedCatalogRefreshRecorder.Code, metadataRefresh.providerInstanceID)
 	}
-	// authenticatedRefresh exercises the exact protected refresh route and safe catalog projection.
-	// authenticatedRefresh 执行精确受保护刷新路由与安全目录投影。
-	authenticatedRefresh := httptest.NewRequest(http.MethodPost, "/vulcan/manage/provider-instances/pvi_test/catalog/refresh", nil)
-	authenticatedRefresh.Header.Set("Authorization", "Bearer manage-key")
-	authenticatedRefreshRecorder := httptest.NewRecorder()
-	server.Handler().ServeHTTP(authenticatedRefreshRecorder, authenticatedRefresh)
-	if authenticatedRefreshRecorder.Code != http.StatusOK || metadataRefresh.providerInstanceID != "pvi_test" {
-		t.Fatalf("authenticated metadata refresh status=%d target=%q body=%s", authenticatedRefreshRecorder.Code, metadataRefresh.providerInstanceID, authenticatedRefreshRecorder.Body.String())
-	}
-	if !strings.Contains(authenticatedRefreshRecorder.Body.String(), `"time_zone":"Asia/Shanghai"`) || strings.Contains(authenticatedRefreshRecorder.Body.String(), "scope_id") {
-		t.Fatalf("metadata refresh response lost safe window semantics or leaked scope identity: %s", authenticatedRefreshRecorder.Body.String())
+	for _, refreshCase := range []struct {
+		path  string
+		scope string
+	}{
+		{path: "/vulcan/manage/provider-instances/pvi_test/credentials/cred_test/entitlements/refresh", scope: "entitlements"},
+		{path: "/vulcan/manage/provider-instances/pvi_test/credentials/cred_test/usage/refresh", scope: "usage"},
+	} {
+		request := httptest.NewRequest(http.MethodPost, refreshCase.path, nil)
+		request.Header.Set("Authorization", "Bearer manage-key")
+		recorder := httptest.NewRecorder()
+		server.Handler().ServeHTTP(recorder, request)
+		if recorder.Code != http.StatusOK || metadataRefresh.providerInstanceID != "pvi_test" || metadataRefresh.credentialID != "cred_test" || metadataRefresh.scope != refreshCase.scope {
+			t.Fatalf("%s refresh status=%d provider=%q credential=%q scope=%q", refreshCase.scope, recorder.Code, metadataRefresh.providerInstanceID, metadataRefresh.credentialID, metadataRefresh.scope)
+		}
 	}
 	// callRequest proves a management credential cannot authorize the call plane.
 	// callRequest 证明管理凭据不能授权调用面。

@@ -4,5 +4,13 @@
   "type": "object",
   "additionalProperties": false,
   "required": ["error", "code", "protocol_minimum", "protocol_maximum"],
-  "properties": {"error": {"type": "string"}, "code": {"type": "string"}, "protocol_minimum": {"const": "1.0"}, "protocol_maximum": {"const": "1.0"}}
+  "properties": {
+    "error": {"type": "string"},
+    "code": {"type": "string"},
+    "tool_id": {"type": "string", "minLength": 1},
+    "phase": {"enum": ["validation", "planning", "arguments", "execution", "result"]},
+    "retryable": {"type": "boolean"},
+    "protocol_minimum": {"const": "1.0"},
+    "protocol_maximum": {"const": "1.0"}
+  }
 }

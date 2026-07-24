@@ -50,6 +50,39 @@ func TestStreamDecoderRetainsMultipleReasoningSummaryParts(t *testing.T) {
 	}
 }
 
+// TestStreamDecoderIgnoresEmptyReasoningSummaryDelta verifies a provider-empty delta preserves lifecycle without emitting invalid VCP content.
+// TestStreamDecoderIgnoresEmptyReasoningSummaryDelta 验证供应商空增量会保留生命周期且不会发出无效的 VCP 内容。
+func TestStreamDecoderIgnoresEmptyReasoningSummaryDelta(t *testing.T) {
+	decoder, errNew := NewStreamDecoder("response-vcp-empty-reasoning-delta", responsesNow())
+	if errNew != nil {
+		t.Fatalf("NewStreamDecoder() error = %v", errNew)
+	}
+	outputIndex := 0
+	summaryIndex := 0
+	if _, errAdded := decoder.Push(StreamEvent{Type: "response.output_item.added", Item: &OutputItem{ID: "reasoning-empty-delta", Type: "reasoning", Status: "in_progress"}, OutputIndex: &outputIndex}); errAdded != nil {
+		t.Fatalf("Push(added) error = %v", errAdded)
+	}
+	events, errEmpty := decoder.Push(StreamEvent{Type: "response.reasoning_summary_text.delta", ItemID: "reasoning-empty-delta", OutputIndex: &outputIndex, SummaryIndex: &summaryIndex, Delta: ""})
+	if errEmpty != nil {
+		t.Fatalf("Push(empty delta) error = %v", errEmpty)
+	}
+	for _, event := range events {
+		if event.Type == vcp.EventContentDelta {
+			t.Fatalf("empty delta emitted content.delta = %#v", event)
+		}
+	}
+	if _, errDelta := decoder.Push(StreamEvent{Type: "response.reasoning_summary_text.delta", ItemID: "reasoning-empty-delta", OutputIndex: &outputIndex, SummaryIndex: &summaryIndex, Delta: "visible"}); errDelta != nil {
+		t.Fatalf("Push(non-empty delta) error = %v", errDelta)
+	}
+	if _, errDone := decoder.Push(StreamEvent{Type: "response.reasoning_summary_text.done", ItemID: "reasoning-empty-delta", OutputIndex: &outputIndex, SummaryIndex: &summaryIndex, Text: "visible"}); errDone != nil {
+		t.Fatalf("Push(done) error = %v", errDone)
+	}
+	response := decoder.Response()
+	if len(response.Items) != 1 || response.Items[0].Content[0].Text != "visible" {
+		t.Fatalf("response = %#v", response)
+	}
+}
+
 // TestStreamDecoderProjectsReasoningSummaryPartLifecycle verifies official summary-index SSE events remain a visible VCP reasoning item.
 // TestStreamDecoderProjectsReasoningSummaryPartLifecycle 验证官方 summary-index SSE 事件会保持为可见的 VCP 推理项目。
 func TestStreamDecoderProjectsReasoningSummaryPartLifecycle(t *testing.T) {
@@ -267,6 +300,8 @@ func TestStreamDecoderAcceptsProviderHostedToolTraces(t *testing.T) {
 		{name: "file-search-event", event: StreamEvent{Type: "response.file_search_call.in_progress"}},
 		{name: "file-search-output", event: StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "fs_1", Type: "file_search_call", Status: "in_progress"}}},
 		{name: "code-interpreter-output", event: StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "ci_1", Type: "code_interpreter_call", Status: "in_progress"}}},
+		{name: "web-extractor-event", event: StreamEvent{Type: "response.web_extractor_call.extracting"}},
+		{name: "web-extractor-output", event: StreamEvent{Type: "response.output_item.added", OutputIndex: &outputIndex, Item: &OutputItem{ID: "we_1", Type: "web_extractor_call", Status: "in_progress", URLs: []string{"https://example.com"}, Goal: "private", Output: "private"}}},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {

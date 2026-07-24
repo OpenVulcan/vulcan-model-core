@@ -56,6 +56,9 @@ const (
 	// ParameterStringList represents an ordered list of free-text entries with per-entry length bounds.
 	// ParameterStringList 表示具有逐项长度边界的有序自由文本列表。
 	ParameterStringList ParameterKind = "string_list"
+	// ParameterIntegerList represents an ordered list of integers with per-entry bounds.
+	// ParameterIntegerList 表示具有逐项边界的有序整数列表。
+	ParameterIntegerList ParameterKind = "integer_list"
 	// ParameterBoolean represents a boolean switch.
 	// ParameterBoolean 表示布尔开关。
 	ParameterBoolean ParameterKind = "boolean"
@@ -209,6 +212,9 @@ const (
 	// ParameterRuleRequiresWhenEnum requires related parameters for one exact enum value.
 	// ParameterRuleRequiresWhenEnum 在一个精确枚举值下要求相关参数。
 	ParameterRuleRequiresWhenEnum ParameterRuleKind = "requires_when_enum"
+	// ParameterRuleRequiresBooleanValue requires every related boolean parameter to equal one exact value.
+	// ParameterRuleRequiresBooleanValue 要求每个相关布尔参数等于一个精确值。
+	ParameterRuleRequiresBooleanValue ParameterRuleKind = "requires_boolean_value"
 )
 
 // ParameterRule describes one typed relationship between declared parameters.
@@ -226,6 +232,9 @@ type ParameterRule struct {
 	// EnumValue contains the trigger only for requires_when_enum.
 	// EnumValue 仅为 requires_when_enum 包含触发值。
 	EnumValue string `json:"enum_value,omitempty"`
+	// BooleanValue contains the required value only for requires_boolean_value.
+	// BooleanValue 仅为 requires_boolean_value 包含要求值。
+	BooleanValue *bool `json:"boolean_value,omitempty"`
 }
 
 // UsageAccuracy identifies whether provider-reported usage is exact, estimated, or unavailable.
@@ -360,7 +369,15 @@ func (c ModelCapabilities) ValidateOperation(operation vcp.OperationKind) error 
 	if operation != vcp.OperationRerankDocuments && c.Rerank != nil {
 		return fmt.Errorf("%w: operation %q cannot carry rerank capabilities", ErrInvalidCatalog, operation)
 	}
-	producesMedia := operation == vcp.OperationImageGenerate || operation == vcp.OperationImageEdit || operation == vcp.OperationVideoGenerate || operation == vcp.OperationVideoEdit || operation == vcp.OperationVideoExtend || operation == vcp.OperationSpeechSynthesize || operation == vcp.OperationMusicGenerate || operation == vcp.OperationMusicCoverPrepare || operation == vcp.OperationMusicCover
+	conversationProducesAudio := operation == vcp.OperationConversationRespond && len(c.MediaOutputs) > 0
+	if conversationProducesAudio {
+		for _, output := range c.MediaOutputs {
+			if output.Kind != vcp.MediaAudio || !containsOutputModality(c.OutputModalities, "audio") || !output.Delivery.Streaming {
+				return fmt.Errorf("%w: conversation generated resources currently require a declared streaming audio output", ErrInvalidCatalog)
+			}
+		}
+	}
+	producesMedia := conversationProducesAudio || operation == vcp.OperationImageGenerate || operation == vcp.OperationImageEdit || operation == vcp.OperationVideoGenerate || operation == vcp.OperationVideoEdit || operation == vcp.OperationVideoExtend || operation == vcp.OperationSpeechSynthesize || operation == vcp.OperationMusicGenerate || operation == vcp.OperationMusicCoverPrepare || operation == vcp.OperationMusicCover
 	if !producesMedia && len(c.MediaOutputs) != 0 {
 		return fmt.Errorf("%w: operation %q cannot carry generated-media capabilities", ErrInvalidCatalog, operation)
 	}
@@ -408,6 +425,17 @@ func (c ModelCapabilities) ValidateOperation(operation vcp.OperationKind) error 
 	default:
 		return fmt.Errorf("%w: unsupported model operation %q", ErrInvalidCatalog, operation)
 	}
+}
+
+// containsOutputModality reports exact membership in one normalized model output set.
+// containsOutputModality 报告一个规范化模型输出集合中的精确成员关系。
+func containsOutputModality(values []string, expected string) bool {
+	for _, value := range values {
+		if value == expected {
+			return true
+		}
+	}
+	return false
 }
 
 // requireMediaInput verifies at least one callable media input contract exists.
@@ -497,7 +525,7 @@ func (p ParameterDescriptor) Validate() error {
 	if strings.TrimSpace(p.ID) == "" || !validParameterKind(p.Kind) {
 		return fmt.Errorf("%w: parameter id and kind are required", ErrInvalidCatalog)
 	}
-	integerKind := p.Kind == ParameterInteger || p.Kind == ParameterCount
+	integerKind := p.Kind == ParameterInteger || p.Kind == ParameterIntegerList || p.Kind == ParameterCount
 	floatKind := p.Kind == ParameterFloat || p.Kind == ParameterDuration
 	stringKind := p.Kind == ParameterString || p.Kind == ParameterStringList
 	choiceKind := p.Kind == ParameterEnum || p.Kind == ParameterFormat || p.Kind == ParameterSize
@@ -552,7 +580,7 @@ func (d ParameterDefault) validate(parameter ParameterDescriptor) error {
 	if count != 1 {
 		return fmt.Errorf("%w: parameter %q default requires exactly one value", ErrInvalidCatalog, parameter.ID)
 	}
-	if parameter.Kind == ParameterStringList || (parameter.Kind == ParameterBoolean) != (d.Boolean != nil) || ((parameter.Kind == ParameterInteger || parameter.Kind == ParameterCount) != (d.Integer != nil)) || ((parameter.Kind == ParameterFloat || parameter.Kind == ParameterDuration) != (d.Float != nil)) || ((parameter.Kind == ParameterString || parameter.Kind == ParameterEnum || parameter.Kind == ParameterFormat || parameter.Kind == ParameterSize) != (d.String != nil)) || (parameter.Kind == ParameterResourceRole) != (d.ResourceRole != nil) {
+	if parameter.Kind == ParameterStringList || parameter.Kind == ParameterIntegerList || (parameter.Kind == ParameterBoolean) != (d.Boolean != nil) || ((parameter.Kind == ParameterInteger || parameter.Kind == ParameterCount) != (d.Integer != nil)) || ((parameter.Kind == ParameterFloat || parameter.Kind == ParameterDuration) != (d.Float != nil)) || ((parameter.Kind == ParameterString || parameter.Kind == ParameterEnum || parameter.Kind == ParameterFormat || parameter.Kind == ParameterSize) != (d.String != nil)) || (parameter.Kind == ParameterResourceRole) != (d.ResourceRole != nil) {
 		return fmt.Errorf("%w: parameter %q default type mismatch", ErrInvalidCatalog, parameter.ID)
 	}
 	if d.Integer != nil && parameter.IntegerRange != nil && ((parameter.IntegerRange.Minimum != nil && *d.Integer < *parameter.IntegerRange.Minimum) || (parameter.IntegerRange.Maximum != nil && *d.Integer > *parameter.IntegerRange.Maximum)) {
@@ -582,7 +610,7 @@ func (d ParameterDefault) validate(parameter ParameterDescriptor) error {
 // validate verifies one rule references only declared parameters and one valid enum trigger.
 // validate 校验一条规则只引用已声明参数和一个有效枚举触发值。
 func (r ParameterRule) validate(parameters map[string]ParameterDescriptor) error {
-	if r.Kind != ParameterRuleMutuallyExclusive && r.Kind != ParameterRuleRequires && r.Kind != ParameterRuleForbids && r.Kind != ParameterRuleRequiresWhenEnum {
+	if r.Kind != ParameterRuleMutuallyExclusive && r.Kind != ParameterRuleRequires && r.Kind != ParameterRuleForbids && r.Kind != ParameterRuleRequiresWhenEnum && r.Kind != ParameterRuleRequiresBooleanValue {
 		return fmt.Errorf("%w: invalid parameter rule kind %q", ErrInvalidCatalog, r.Kind)
 	}
 	controller, exists := parameters[r.ParameterID]
@@ -603,10 +631,19 @@ func (r ParameterRule) validate(parameters map[string]ParameterDescriptor) error
 		seen[identifier] = struct{}{}
 	}
 	if r.Kind == ParameterRuleRequiresWhenEnum {
-		if controller.Kind != ParameterEnum || strings.TrimSpace(r.EnumValue) == "" || !containsExactString(controller.AllowedValues, r.EnumValue) {
+		if controller.Kind != ParameterEnum || strings.TrimSpace(r.EnumValue) == "" || !containsExactString(controller.AllowedValues, r.EnumValue) || r.BooleanValue != nil {
 			return fmt.Errorf("%w: conditional parameter rule requires a declared enum value", ErrInvalidCatalog)
 		}
-	} else if r.EnumValue != "" {
+	} else if r.Kind == ParameterRuleRequiresBooleanValue {
+		if r.BooleanValue == nil || r.EnumValue != "" {
+			return fmt.Errorf("%w: boolean-value parameter rule requires one declared value", ErrInvalidCatalog)
+		}
+		for _, identifier := range r.RelatedParameterIDs {
+			if parameters[identifier].Kind != ParameterBoolean {
+				return fmt.Errorf("%w: boolean-value parameter rule references non-boolean parameter %q", ErrInvalidCatalog, identifier)
+			}
+		}
+	} else if r.EnumValue != "" || r.BooleanValue != nil {
 		return fmt.Errorf("%w: unconditional parameter rule cannot carry an enum value", ErrInvalidCatalog)
 	}
 	return nil
@@ -615,7 +652,7 @@ func (r ParameterRule) validate(parameters map[string]ParameterDescriptor) error
 // validParameterKind reports whether one parameter kind belongs to the closed contract.
 // validParameterKind 报告一个参数类型是否属于封闭合同。
 func validParameterKind(kind ParameterKind) bool {
-	return kind == ParameterString || kind == ParameterStringList || kind == ParameterBoolean || kind == ParameterInteger || kind == ParameterFloat || kind == ParameterEnum || kind == ParameterSize || kind == ParameterDuration || kind == ParameterFormat || kind == ParameterCount || kind == ParameterResourceRole
+	return kind == ParameterString || kind == ParameterStringList || kind == ParameterIntegerList || kind == ParameterBoolean || kind == ParameterInteger || kind == ParameterFloat || kind == ParameterEnum || kind == ParameterSize || kind == ParameterDuration || kind == ParameterFormat || kind == ParameterCount || kind == ParameterResourceRole
 }
 
 // containsExactString reports whether a list contains one exact declared value.

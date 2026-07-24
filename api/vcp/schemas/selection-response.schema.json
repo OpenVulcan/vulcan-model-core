@@ -47,7 +47,7 @@
         }
       ]
     },
-    "operation": {"type": "string"},
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "web.extract", "music.generate", "music.cover.prepare", "music.cover"]},
     "effective_context_tokens": {"type": "integer", "minimum": 1},
     "capability_revision": {"type": "integer", "minimum": 1},
     "catalog_revision": {"type": "integer", "minimum": 1}

@@ -81,6 +81,9 @@ type ProfileCapabilities struct {
 	// NativeWebSearch reports verified provider-hosted web search support.
 	// NativeWebSearch 表示经过验证的供应商托管网页搜索支持。
 	NativeWebSearch bool
+	// NativeWebExtractor reports verified provider-hosted public-page extraction support.
+	// NativeWebExtractor 表示经过验证的供应商托管公共网页提取支持。
+	NativeWebExtractor bool
 	// ProviderFileSearch reports verified Responses file_search wire support.
 	// ProviderFileSearch 表示经过验证的 Responses file_search Wire 支持。
 	ProviderFileSearch bool
@@ -107,6 +110,9 @@ type Request struct {
 	// Stream requests upstream SSE events.
 	// Stream 请求上游 SSE 事件。
 	Stream bool `json:"stream,omitempty"`
+	// Store explicitly controls provider-side response retention when the exact provider contract requires it.
+	// Store 在精确供应商合同要求时显式控制供应商侧响应留存。
+	Store *bool `json:"store,omitempty"`
 	// Temperature maps the VCP temperature control when supported by the selected profile.
 	// Temperature 在选定 Profile 支持时映射 VCP 温度控制。
 	Temperature *float64 `json:"temperature,omitempty"`
@@ -568,6 +574,15 @@ type OutputItem struct {
 	// Actions contains the ordered current-GA computer action batch.
 	// Actions 包含有序的当前 GA 计算机动作批次。
 	Actions []OutputAction `json:"actions,omitempty"`
+	// URLs contains the exact public pages selected by a provider-hosted extraction call.
+	// URLs 包含供应商托管提取调用选中的精确公共网页。
+	URLs []string `json:"urls,omitempty"`
+	// Goal contains the provider-hosted extraction objective when returned by the upstream.
+	// Goal 包含上游返回的供应商托管提取目标。
+	Goal string `json:"goal,omitempty"`
+	// Output contains the provider-hosted extraction trace body that VCP intentionally does not expose as a model message.
+	// Output 包含 VCP 有意不作为模型消息公开的供应商托管提取轨迹正文。
+	Output string `json:"output,omitempty"`
 }
 
 // OutputAction contains the exact fields owned by a web-search or computer action union arm.

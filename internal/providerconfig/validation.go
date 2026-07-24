@@ -31,9 +31,6 @@ func (p ProtocolProfile) Validate() error {
 	if strings.TrimSpace(p.DisplayName) == "" {
 		return invalid("protocol profile display name is required")
 	}
-	if !validSupportStatus(p.ModelDiscovery) {
-		return invalid("protocol profile model discovery status is invalid")
-	}
 	// capabilities ensures each declarable behavior has one explicit verified status rather than runtime probing.
 	// capabilities 确保每个可声明行为拥有一个显式验证状态，而不是在运行时探测。
 	capabilities := make(map[ProtocolCapability]struct{}, len(p.Capabilities))
@@ -231,6 +228,14 @@ func (d ProviderDefinition) Validate() error {
 	if err := d.Features.Validate(); err != nil {
 		return err
 	}
+	for _, authMethod := range d.AuthMethods {
+		if authMethod.ReaderFeatures == nil {
+			continue
+		}
+		if !readerFeaturesWithinProvider(*authMethod.ReaderFeatures, d.Features) {
+			return invalid("auth method %q reader features exceed provider capabilities", authMethod.ID)
+		}
+	}
 	return nil
 }
 
@@ -252,7 +257,7 @@ func (g ProviderGroup) Validate() error {
 // Validate verifies one optional provider feature set.
 // Validate 校验一组可选供应商能力。
 func (f ProviderFeatureSet) Validate() error {
-	statuses := []SupportStatus{f.ModelDiscovery, f.PlanReader, f.EntitlementReader, f.AllowanceReader}
+	statuses := []SupportStatus{f.PlanReader, f.EntitlementReader, f.AllowanceReader}
 	for _, status := range statuses {
 		if !validSupportStatus(status) {
 			return invalid("provider feature status %q is invalid", status)
@@ -273,7 +278,33 @@ func (a AuthMethodDefinition) Validate() error {
 	if a.PlanAcquisition != "" && !validPlanAcquisitionMode(a.PlanAcquisition) {
 		return invalid("auth method plan acquisition mode %q is invalid", a.PlanAcquisition)
 	}
+	if a.ReaderFeatures != nil {
+		if errFeatures := a.ReaderFeatures.Validate(); errFeatures != nil {
+			return fmt.Errorf("auth method %q reader features: %w", a.ID, errFeatures)
+		}
+	}
 	return nil
+}
+
+// readerFeaturesWithinProvider reports whether auth-method readers only narrow provider-level capabilities.
+// readerFeaturesWithinProvider 返回认证方式 Reader 是否仅收窄供应商级能力。
+func readerFeaturesWithinProvider(reader ProviderFeatureSet, provider ProviderFeatureSet) bool {
+	// readerStatuses enumerates the closed metadata dimensions in declaration order.
+	// readerStatuses 按声明顺序枚举封闭的元数据维度。
+	readerStatuses := []SupportStatus{reader.PlanReader, reader.EntitlementReader, reader.AllowanceReader}
+	// providerStatuses enumerates the matching provider-level maximum dimensions.
+	// providerStatuses 枚举相匹配的供应商级最大能力维度。
+	providerStatuses := []SupportStatus{provider.PlanReader, provider.EntitlementReader, provider.AllowanceReader}
+	for index, readerStatus := range readerStatuses {
+		// providerStatus is the maximum declared state for the same metadata dimension.
+		// providerStatus 是相同元数据维度声明的最大状态。
+		providerStatus := providerStatuses[index]
+		if readerStatus == SupportUnsupported || readerStatus == providerStatus || providerStatus == SupportSupported && readerStatus == SupportTemporarilyUnavailable {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 // Validate verifies one immutable provider plan choice against the owning auth-method set.
@@ -731,10 +762,31 @@ func (d ProviderDefinition) HasAuthMethod(authMethodID string) bool {
 func (d ProviderDefinition) AuthMethod(authMethodID string) (AuthMethodDefinition, bool) {
 	for _, authMethod := range d.AuthMethods {
 		if authMethod.ID == authMethodID {
+			if authMethod.ReaderFeatures != nil {
+				// readerFeatures prevents callers from mutating definition-owned feature overrides.
+				// readerFeatures 防止调用方修改定义拥有的能力覆盖。
+				readerFeatures := *authMethod.ReaderFeatures
+				authMethod.ReaderFeatures = &readerFeatures
+			}
 			return authMethod, true
 		}
 	}
 	return AuthMethodDefinition{}, false
+}
+
+// ReaderFeaturesForAuthMethod returns the effective metadata-reader capabilities for one exact authentication method.
+// ReaderFeaturesForAuthMethod 返回一个精确认证方式的有效元数据 Reader 能力。
+func (d ProviderDefinition) ReaderFeaturesForAuthMethod(authMethodID string) (ProviderFeatureSet, bool) {
+	// authMethod is the immutable definition-owned authentication contract selected by the credential.
+	// authMethod 是凭据选择的不可变定义所有认证合同。
+	authMethod, exists := d.AuthMethod(authMethodID)
+	if !exists {
+		return ProviderFeatureSet{}, false
+	}
+	if authMethod.ReaderFeatures == nil {
+		return d.Features, true
+	}
+	return *authMethod.ReaderFeatures, true
 }
 
 // PlanOption returns one code-owned commercial plan by exact identifier.

@@ -5,8 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 13520 --strictPort",
+    "build": "tsc -b && vite build",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "typecheck": "tsc -b --noEmit"
   },
   "dependencies": {
     "@base-ui/react": "^1.6.0",

@@ -27,21 +27,24 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 // ProjectRequestWithInputs compiles one Chat request with exact accepted resource materializations.
 // ProjectRequestWithInputs 使用精确已接受资源物化结果编译一条 Chat 请求。
 func ProjectRequestWithInputs(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
-	materialized := make(map[string]resource.MaterializedInput, len(inputs))
-	for _, input := range inputs {
-		if _, exists := materialized[input.ResourceID]; exists {
-			return ProjectedRequest{}, fmt.Errorf("%w: duplicate materialized resource %q", ErrUnsupportedContext, input.ResourceID)
-		}
-		materialized[input.ResourceID] = input
+	materialized, errIndex := resource.IndexMaterializedInputs(inputs)
+	if errIndex != nil {
+		return ProjectedRequest{}, fmt.Errorf("%w: %v", ErrUnsupportedContext, errIndex)
 	}
 	return projectRequest(request, target, capabilities, lineageID, now, materialized)
 }
 
 // projectRequest compiles text and optional typed media through one deterministic Chat path.
 // projectRequest 通过一条确定性 Chat 路径编译文本和可选类型化媒体。
-func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, materialized map[string]resource.MaterializedInput) (ProjectedRequest, error) {
+func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, materialized resource.MaterializedInputIndex) (ProjectedRequest, error) {
 	if errRequest := request.Validate(); errRequest != nil {
 		return ProjectedRequest{}, errRequest
+	}
+	if request.ReasoningPolicy.Enabled != nil && !capabilities.ProviderReasoningSwitchAdapter {
+		return ProjectedRequest{}, fmt.Errorf("%w: reasoning enabled requires a registered provider switch adapter", ErrUnsupportedContext)
+	}
+	if request.ReasoningPolicy.BudgetTokens != nil && !capabilities.ProviderReasoningBudgetAdapter {
+		return ProjectedRequest{}, fmt.Errorf("%w: reasoning budget_tokens requires a registered provider budget adapter", ErrUnsupportedContext)
 	}
 	if errTarget := validateTarget(target); errTarget != nil {
 		return ProjectedRequest{}, errTarget
@@ -68,6 +71,13 @@ func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 		Temperature: request.GenerationPolicy.Temperature, TopP: request.GenerationPolicy.TopP,
 		MaxCompletionTokens: request.GenerationPolicy.MaxOutputTokens, Stop: append([]string(nil), request.GenerationPolicy.Stop...),
 	}
+	if request.GenerationPolicy.AudioOutput != nil {
+		if !capabilities.MixedAudioOutput {
+			return ProjectedRequest{}, fmt.Errorf("%w: selected Chat profile does not support mixed audio output", ErrUnsupportedContext)
+		}
+		upstream.Modalities = []string{"text", "audio"}
+		upstream.Audio = &OutputAudioConfiguration{Voice: request.GenerationPolicy.AudioOutput.VoiceID, Format: request.GenerationPolicy.AudioOutput.OutputFormat}
+	}
 	if request.Stream && capabilities.StreamUsage {
 		upstream.StreamOptions = &StreamOptions{IncludeUsage: true}
 	}
@@ -77,8 +87,14 @@ func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 		// wireToolNames 防止两个不同的 VCP 工具身份折叠为同一个 Chat 函数名称。
 		wireToolNames := make(map[string]struct{}, len(request.Tools))
 		for _, tool := range request.Tools {
+			if tool.Kind == vcp.ToolNativeWebSearch {
+				if !capabilities.NativeWebSearch {
+					return ProjectedRequest{}, fmt.Errorf("%w: selected Chat profile does not support native web search", ErrUnsupportedContext)
+				}
+				continue
+			}
 			if tool.Kind != vcp.ToolFunction {
-				return ProjectedRequest{}, fmt.Errorf("%w: tool kind %q is not a Chat function", ErrUnsupportedContext, tool.Kind)
+				return ProjectedRequest{}, fmt.Errorf("%w: tool kind %q is not supported by Chat", ErrUnsupportedContext, tool.Kind)
 			}
 			if tool.Namespace != "" {
 				return ProjectedRequest{}, fmt.Errorf("%w: Chat has no native function namespace carrier for tool %q", ErrUnsupportedContext, tool.Name)
@@ -89,14 +105,18 @@ func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 			wireToolNames[tool.Name] = struct{}{}
 			upstream.Tools = append(upstream.Tools, Tool{Type: "function", Function: FunctionDefinition{Name: tool.Name, Description: tool.Description, Parameters: tool.Parameters, Strict: tool.Strict}})
 		}
-		choice := request.ToolPolicy.Choice
-		if choice == "" {
-			choice = vcp.ToolChoiceAuto
-		}
-		upstream.ToolChoice = &ToolChoice{Mode: choice, FunctionName: request.ToolPolicy.NamedTool}
-		if capabilities.ParallelTools {
-			parallel := request.ToolPolicy.Parallel
-			upstream.ParallelToolCalls = &parallel
+		if len(upstream.Tools) > 0 {
+			choice := request.ToolPolicy.Choice
+			if choice == "" {
+				choice = vcp.ToolChoiceAuto
+			}
+			upstream.ToolChoice = &ToolChoice{Mode: choice, FunctionName: request.ToolPolicy.NamedTool}
+			if capabilities.ParallelTools {
+				parallel := request.ToolPolicy.Parallel
+				upstream.ParallelToolCalls = &parallel
+			}
+		} else if (request.ToolPolicy.Choice != "" && request.ToolPolicy.Choice != vcp.ToolChoiceAuto) || request.ToolPolicy.NamedTool != "" || request.ToolPolicy.Parallel || request.ToolPolicy.StreamArguments {
+			return ProjectedRequest{}, fmt.Errorf("%w: native web search does not accept function tool policy controls", ErrUnsupportedContext)
 		}
 	}
 	if len(request.GenerationPolicy.StrictJSONSchema) > 0 {
@@ -216,7 +236,7 @@ func capabilityAvailability(request vcp.VulcanRequest, capabilities ProfileCapab
 		{Feature: vcp.FeatureReasoningContinuation, Native: false},
 		{Feature: vcp.FeatureExplicitPromptCache, Native: false},
 		{Feature: vcp.FeatureRemoteCompaction, Native: false},
-		{Feature: vcp.FeatureNativeWebSearch, Native: false},
+		{Feature: vcp.FeatureNativeWebSearch, Native: capabilities.NativeWebSearch},
 		{Feature: vcp.FeatureImageInput, Native: capabilities.supportsMediaInput(vcp.MediaImage)}, {Feature: vcp.FeatureAudioInput, Native: capabilities.supportsMediaInput(vcp.MediaAudio)},
 		{Feature: vcp.FeatureVideoInput, Native: capabilities.supportsMediaInput(vcp.MediaVideo)}, {Feature: vcp.FeatureFileInput, Native: capabilities.supportsMediaInput(vcp.MediaFile)},
 	}
@@ -266,7 +286,7 @@ func supportsRequestedReasoning(request vcp.VulcanRequest, capabilities ProfileC
 
 // projectItem maps one canonical item to one exact Chat carrier and ledger decision.
 // projectItem 将一个规范项目映射到一个精确 Chat 载体和账本决策。
-func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, callProjections map[string]string, lineageID string, position int, materialized map[string]resource.MaterializedInput) (Message, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, callProjections map[string]string, lineageID string, position int, materialized resource.MaterializedInputIndex) (Message, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
 	// Client and audit scopes are Router-local, so sending them upstream would violate the VCP visibility boundary.
 	// 客户端和审计作用域仅限 Router 本地，因此将其发送上游会违反 VCP 可见性边界。
 	if item.Visibility != vcp.VisibilityModel {
@@ -357,22 +377,22 @@ func hasResourceContent(blocks []vcp.ContentBlock) bool {
 
 // chatMediaMessage preserves mixed content order using only evidence-closed Chat media carriers.
 // chatMediaMessage 仅使用证据封闭的 Chat 媒体载体保留混合内容顺序。
-func chatMediaMessage(blocks []vcp.ContentBlock, capabilities ProfileCapabilities, materialized map[string]resource.MaterializedInput) (Message, error) {
+func chatMediaMessage(blocks []vcp.ContentBlock, capabilities ProfileCapabilities, materialized resource.MaterializedInputIndex) (Message, error) {
 	content := make([]ContentPart, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Type == vcp.ContentText {
 			content = append(content, ContentPart{Type: "text", Text: vcp.EscapeReservedFrameText(block.Text)})
 			continue
 		}
-		input, exists := materialized[block.ResourceRef]
-		if !exists || block.MediaRole != input.Role {
+		input, exists := materialized.Find(block.ResourceRef, block.MediaRole)
+		if !exists {
 			return Message{}, fmt.Errorf("%w: resource %q has no matching accepted materialization", ErrUnsupportedContext, block.ResourceRef)
 		}
 		kind, matches := chatContentMediaKind(block.Type)
 		if !matches || kind != input.Kind || !capabilities.supportsMediaInput(kind) || !capabilities.supportsMaterialization(input.Mode) {
 			return Message{}, fmt.Errorf("%w: resource %q has no supported Chat media carrier", ErrUnsupportedContext, block.ResourceRef)
 		}
-		projected, errProject := chatMediaContent(input)
+		projected, errProject := chatMediaContent(input, capabilities)
 		if errProject != nil {
 			return Message{}, errProject
 		}
@@ -381,21 +401,55 @@ func chatMediaMessage(blocks []vcp.ContentBlock, capabilities ProfileCapabilitie
 	return Message{Role: "user", ContentParts: content}, nil
 }
 
-// chatMediaContent projects one exact materialization without silently changing its media family.
-// chatMediaContent 投影一个精确物化结果且不静默改变其媒体类别。
-func chatMediaContent(input resource.MaterializedInput) (ContentPart, error) {
+// chatMediaContent projects one exact materialization through a profile-verified carrier without changing its media family.
+// chatMediaContent 通过 Profile 已验证载体投影一个精确物化结果，且不改变其媒体类别。
+func chatMediaContent(input resource.MaterializedInput, capabilities ProfileCapabilities) (ContentPart, error) {
 	switch input.Kind {
 	case vcp.MediaImage:
-		if input.Mode == catalog.MaterializationInlineBase64 && strings.TrimSpace(input.InlineBase64) != "" {
+		switch input.Mode {
+		case catalog.MaterializationInlineBase64:
+			if strings.TrimSpace(input.InlineBase64) == "" {
+				break
+			}
 			return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: "data:" + input.MIMEType + ";base64," + input.InlineBase64}}, nil
+		case catalog.MaterializationDirectRemoteURL:
+			if strings.TrimSpace(input.RemoteURL) != "" {
+				return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: input.RemoteURL}}, nil
+			}
+		case catalog.MaterializationProviderObjectURI:
+			if strings.TrimSpace(input.ProviderHandle) != "" {
+				return ContentPart{Type: "image_url", ImageURL: &ImageURL{URL: input.ProviderHandle}}, nil
+			}
 		}
 	case vcp.MediaAudio:
-		if input.Mode == catalog.MaterializationInlineBase64 && strings.TrimSpace(input.InlineBase64) != "" {
-			format, errFormat := openAIInputAudioFormat(input.MIMEType)
-			if errFormat != nil {
-				return ContentPart{}, errFormat
+		format, errFormat := chatInputAudioFormat(input.MIMEType, capabilities)
+		if errFormat != nil {
+			return ContentPart{}, errFormat
+		}
+		switch input.Mode {
+		case catalog.MaterializationInlineBase64:
+			if strings.TrimSpace(input.InlineBase64) != "" {
+				return ContentPart{Type: "input_audio", InputAudio: &InputAudio{Data: input.InlineBase64, Format: format}}, nil
 			}
-			return ContentPart{Type: "input_audio", InputAudio: &InputAudio{Data: input.InlineBase64, Format: format}}, nil
+		case catalog.MaterializationDirectRemoteURL:
+			if capabilities.InputAudioURICarrier && strings.TrimSpace(input.RemoteURL) != "" {
+				return ContentPart{Type: "input_audio", InputAudio: &InputAudio{Data: input.RemoteURL, Format: format}}, nil
+			}
+		case catalog.MaterializationProviderObjectURI:
+			if capabilities.InputAudioURICarrier && strings.TrimSpace(input.ProviderHandle) != "" {
+				return ContentPart{Type: "input_audio", InputAudio: &InputAudio{Data: input.ProviderHandle, Format: format}}, nil
+			}
+		}
+	case vcp.MediaVideo:
+		switch input.Mode {
+		case catalog.MaterializationDirectRemoteURL:
+			if strings.TrimSpace(input.RemoteURL) != "" {
+				return ContentPart{Type: "video_url", VideoURL: &VideoURL{URL: input.RemoteURL}}, nil
+			}
+		case catalog.MaterializationProviderObjectURI:
+			if strings.TrimSpace(input.ProviderHandle) != "" {
+				return ContentPart{Type: "video_url", VideoURL: &VideoURL{URL: input.ProviderHandle}}, nil
+			}
 		}
 	}
 	return ContentPart{}, fmt.Errorf("%w: media kind %q and materialization %q are not representable", ErrUnsupportedContext, input.Kind, input.Mode)
@@ -418,17 +472,38 @@ func chatContentMediaKind(contentType vcp.ContentType) (vcp.MediaKind, bool) {
 	}
 }
 
-// openAIInputAudioFormat maps only the two documented Chat audio input encodings.
-// openAIInputAudioFormat 仅映射 Chat 已记录的两种音频输入编码。
-func openAIInputAudioFormat(mimeType string) (string, error) {
+// chatInputAudioFormat maps an authoritative MIME type to one exact Profile-supported wire label.
+// chatInputAudioFormat 将权威 MIME 类型映射为精确 Profile 支持的 Wire 标签。
+func chatInputAudioFormat(mimeType string, capabilities ProfileCapabilities) (string, error) {
+	format := ""
 	switch strings.ToLower(strings.TrimSpace(mimeType)) {
 	case "audio/mpeg", "audio/mp3":
-		return "mp3", nil
+		format = "mp3"
 	case "audio/wav", "audio/x-wav":
-		return "wav", nil
+		format = "wav"
+	case "audio/amr":
+		format = "amr"
+	case "audio/aac", "audio/mp4", "audio/x-m4a":
+		format = "aac"
+	case "audio/ogg":
+		format = "ogg"
+	case "audio/3gpp":
+		format = "3gpp"
 	default:
 		return "", fmt.Errorf("%w: audio MIME type %q is not a documented Chat input format", ErrUnsupportedContext, mimeType)
 	}
+	if len(capabilities.InputAudioFormats) == 0 {
+		if format == "mp3" || format == "wav" {
+			return format, nil
+		}
+		return "", fmt.Errorf("%w: audio format %q is not enabled by the selected Chat profile", ErrUnsupportedContext, format)
+	}
+	for _, supported := range capabilities.InputAudioFormats {
+		if supported == format {
+			return format, nil
+		}
+	}
+	return "", fmt.Errorf("%w: audio format %q is not enabled by the selected Chat profile", ErrUnsupportedContext, format)
 }
 
 // projectFrame creates an independent advisory user carrier or an explicit omission.

@@ -30,6 +30,9 @@ var (
 	// ErrProfileNotFound reports an absent or ambiguous execution profile.
 	// ErrProfileNotFound 表示执行规格不存在或存在歧义。
 	ErrProfileNotFound = errors.New("execution profile not found")
+	// ErrProfilePolicyMismatch reports an execution profile that is not backed by an explicit supported publication policy.
+	// ErrProfilePolicyMismatch 表示执行规格没有显式受支持发布策略作为依据。
+	ErrProfilePolicyMismatch = errors.New("execution profile is not supported by publication policy")
 	// ErrNoEligibleTarget reports that no same-provider access target satisfies all constraints.
 	// ErrNoEligibleTarget 表示没有同供应商访问目标满足全部约束。
 	ErrNoEligibleTarget = errors.New("no eligible provider execution target")
@@ -44,6 +47,9 @@ type Request struct {
 	// ProviderModelID identifies one model inside the selected provider instance.
 	// ProviderModelID 标识所选供应商实例内的一个模型。
 	ProviderModelID string
+	// OfferingID optionally fixes one exact model offering inside the selected provider model.
+	// OfferingID 可选地固定所选供应商模型内的一个精确模型产品。
+	OfferingID string
 	// ProviderServiceID identifies one service inside the selected provider instance.
 	// ProviderServiceID 标识所选供应商实例内的一个服务。
 	ProviderServiceID string
@@ -218,6 +224,9 @@ type Target struct {
 	// ActionBindingID identifies the exact code-owned provider action.
 	// ActionBindingID 标识精确代码拥有供应商动作。
 	ActionBindingID string
+	// ProfileDriver reports that this typed conversation target executes through the provider definition's primary profile Driver.
+	// ProfileDriver 表示此类型化会话目标通过供应商定义的主 Profile Driver 执行。
+	ProfileDriver bool
 	// ExecutionProfileID identifies the selected client-visible capability shape.
 	// ExecutionProfileID 标识所选客户端可见能力形态。
 	ExecutionProfileID string

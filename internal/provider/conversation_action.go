@@ -41,33 +41,48 @@ func (d *ConversationActionDriver) ActionBindingID() string {
 // Execute converts the validated action envelope and delegates to the unchanged profile Driver.
 // Execute 转换已校验动作信封并委派给未改变的 Profile Driver。
 func (d *ConversationActionDriver) Execute(ctx context.Context, request ExecutionRequest) (ExecutionResult, error) {
-	if request.Execution == nil {
-		return ExecutionResult{}, fmt.Errorf("%w: conversation action execution request is required", ErrExecutionBinding)
+	projected, errProject := d.projectActionRequest(request)
+	if errProject != nil {
+		return ExecutionResult{}, errProject
 	}
-	conversation, errConversation := request.Execution.ConversationRequest()
-	if errConversation != nil {
-		return ExecutionResult{}, errConversation
-	}
-	request.Request = conversation
-	request.Execution = nil
-	return d.profileDriver.Execute(ctx, request)
+	return d.profileDriver.Execute(ctx, projected)
 }
 
 // PreflightUsage converts the action envelope and delegates only when the proven profile owns a native counter.
 // PreflightUsage 转换动作信封，并且仅在已验证 Profile 拥有原生计量器时委派。
 func (d *ConversationActionDriver) PreflightUsage(ctx context.Context, request ExecutionRequest) (UsagePreflightResult, error) {
-	if request.Execution == nil {
-		return UsagePreflightResult{}, fmt.Errorf("%w: conversation action preflight request is required", ErrExecutionBinding)
-	}
 	counter, supported := d.profileDriver.(UsagePreflightDriver)
 	if !supported {
 		return UsagePreflightResult{}, fmt.Errorf("%w: conversation profile has no native usage preflight", ErrExecutionDriverNotFound)
 	}
+	projected, errProject := d.projectActionRequest(request)
+	if errProject != nil {
+		return UsagePreflightResult{}, errProject
+	}
+	return counter.PreflightUsage(ctx, projected)
+}
+
+// projectActionRequest validates the immutable action before projecting its conversation onto the proven legacy profile boundary.
+// projectActionRequest 在把会话投影到已验证旧版 Profile 边界前校验不可变动作。
+func (d *ConversationActionDriver) projectActionRequest(request ExecutionRequest) (ExecutionRequest, error) {
+	if request.Execution == nil {
+		return ExecutionRequest{}, fmt.Errorf("%w: conversation action execution request is required", ErrExecutionBinding)
+	}
+	action, errAction := request.ValidateForAction(d.actionBindingID)
+	if errAction != nil {
+		return ExecutionRequest{}, errAction
+	}
+	if action.ProtocolProfileID != d.profileDriver.ProtocolProfileID() {
+		return ExecutionRequest{}, fmt.Errorf("%w: conversation action protocol does not match the proven profile driver", ErrExecutionBinding)
+	}
 	conversation, errConversation := request.Execution.ConversationRequest()
 	if errConversation != nil {
-		return UsagePreflightResult{}, errConversation
+		return ExecutionRequest{}, errConversation
 	}
 	request.Request = conversation
 	request.Execution = nil
-	return counter.PreflightUsage(ctx, request)
+	request.Definition.ProtocolProfileID = action.ProtocolProfileID
+	request.Definition.EndpointProfileID = action.EndpointProfileID
+	request.Definition.AuthMethodIDs = append([]string(nil), action.AuthMethodIDs...)
+	return request, nil
 }

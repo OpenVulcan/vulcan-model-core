@@ -60,6 +60,44 @@ var (
 	ErrOutputBudgetExceeded = errors.New("provider output budget exceeded")
 )
 
+// ClassifiedExecutionError carries one provider-specific closed classification while preserving its safe transport cause.
+// ClassifiedExecutionError 携带一个供应商专属封闭分类，同时保留其安全传输原因。
+type ClassifiedExecutionError struct {
+	// Classification is the complete same-provider retry decision.
+	// Classification 是完整的同供应商重试决策。
+	Classification ClassifiedError
+	// Cause is the safe underlying execution error.
+	// Cause 是安全的底层执行错误。
+	Cause error
+}
+
+// Error returns only the already-safe underlying error text.
+// Error 仅返回已经安全的底层错误文本。
+func (e *ClassifiedExecutionError) Error() string {
+	if e == nil || e.Cause == nil {
+		return "classified provider execution failure"
+	}
+	return e.Cause.Error()
+}
+
+// Unwrap exposes the safe transport cause for diagnostics and compatibility.
+// Unwrap 暴露安全传输原因用于诊断与兼容。
+func (e *ClassifiedExecutionError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Cause
+}
+
+// WrapClassifiedExecutionError binds one complete trusted classification to its safe transport cause.
+// WrapClassifiedExecutionError 将一个完整受信任分类绑定到其安全传输原因。
+func WrapClassifiedExecutionError(classification ClassifiedError, cause error) error {
+	if cause == nil || strings.TrimSpace(classification.Category) == "" || classification.Scope == "" || classification.Action == "" || strings.TrimSpace(classification.RuleID) == "" {
+		return cause
+	}
+	return &ClassifiedExecutionError{Classification: classification, Cause: cause}
+}
+
 // ExecutionEventSink durably accepts validated provider semantic events while an upstream stream is still active.
 // ExecutionEventSink 在上游流仍活跃时持久接收经过校验的供应商语义事件。
 type ExecutionEventSink interface {
@@ -492,6 +530,9 @@ type ExecutionResult struct {
 	// Transcript contains one complete typed non-realtime recognition result.
 	// Transcript 包含一个完整的类型化非实时识别结果。
 	Transcript *vcp.Transcript
+	// Transcriptions contains ordered resource-owned results for batch recognition.
+	// Transcriptions 包含批量识别的有序且归属资源的结果。
+	Transcriptions []vcp.TranscriptionResult
 	// MusicCoverPreparation contains one private provider handle and safe editable cover facts.
 	// MusicCoverPreparation 包含一个私有供应商句柄及安全可编辑的翻唱事实。
 	MusicCoverPreparation *MusicCoverPreparationResult
@@ -813,6 +854,11 @@ func (r *ExecutionRegistry) Execute(ctx context.Context, request ExecutionReques
 		}
 		return driver.Execute(ctx, request)
 	}
+	projectedRequest, errProjection := projectProfileDriverExecution(request)
+	if errProjection != nil {
+		return ExecutionResult{}, errProjection
+	}
+	request = projectedRequest
 	if _, errValidate := request.ValidateForProfile(request.Definition.ProtocolProfileID); errValidate != nil {
 		return ExecutionResult{}, errValidate
 	}
@@ -839,6 +885,24 @@ func (r *ExecutionRegistry) Execute(ctx context.Context, request ExecutionReques
 		return ExecutionResult{}, fmt.Errorf("%w: %s / %s", ErrExecutionDriverNotFound, request.Binding.Target.ProviderDefinitionID, request.Definition.ProtocolProfileID)
 	}
 	return driver.Execute(ctx, request)
+}
+
+// projectProfileDriverExecution converts one explicitly marked typed conversation envelope to the proven primary profile request.
+// projectProfileDriverExecution 将一个显式标记的类型化会话信封转换为已验证的主 Profile 请求。
+func projectProfileDriverExecution(request ExecutionRequest) (ExecutionRequest, error) {
+	if !request.Binding.Target.ProfileDriver {
+		return request, nil
+	}
+	if request.Binding.Target.ActionBindingID != "" || request.Binding.Target.Operation != vcp.OperationConversationRespond || request.Execution == nil {
+		return ExecutionRequest{}, fmt.Errorf("%w: profile-driver execution requires one action-free conversation envelope", ErrExecutionBinding)
+	}
+	conversation, errConversation := request.Execution.ConversationRequest()
+	if errConversation != nil {
+		return ExecutionRequest{}, errConversation
+	}
+	request.Request = conversation
+	request.Execution = nil
+	return request, nil
 }
 
 // PreflightUsage dispatches only to an explicitly registered provider-native counter.
@@ -877,6 +941,13 @@ func (r *ExecutionRegistry) ClassifyExecutionError(request ExecutionRequest, exe
 	now := request.Now
 	if now.IsZero() {
 		return ClassifiedError{}, false
+	}
+	var classifiedExecution *ClassifiedExecutionError
+	if errors.As(executionError, &classifiedExecution) && classifiedExecution != nil {
+		classification := classifiedExecution.Classification
+		if strings.TrimSpace(classification.Category) != "" && classification.Scope != "" && classification.Action != "" && strings.TrimSpace(classification.RuleID) != "" {
+			return classification, true
+		}
 	}
 	var statusError transport.StatusError
 	if errors.As(executionError, &statusError) {

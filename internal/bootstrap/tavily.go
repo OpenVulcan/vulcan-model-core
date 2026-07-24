@@ -26,7 +26,7 @@ func registerTavilyProviderCatalog(registry *providerconfig.SystemRegistry) erro
 		return fmt.Errorf("register Tavily provider group: %w", errGroup)
 	}
 	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true}
-	features := providerconfig.ProviderFeatureSet{ModelDiscovery: providerconfig.SupportUnsupported, PlanReader: providerconfig.SupportSupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportSupported}
+	features := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportSupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportSupported}
 	searchAction := providerconfig.ProviderActionBinding{ID: providertavily.ActionBindingID, Operation: vcp.OperationSearchWeb, DriverID: "tavily", DriverVersion: "1", ProtocolProfileID: providertavily.ProtocolProfileID, EndpointProfileID: "tavily_search", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendDirectAPI}, Revision: 1}
 	extractAction := providerconfig.ProviderActionBinding{ID: providertavily.ExtractActionBindingID, Operation: vcp.OperationWebExtract, DriverID: "tavily", DriverVersion: "1", ProtocolProfileID: providertavily.ExtractProtocolProfileID, EndpointProfileID: "tavily_search", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1}
 	definition := providerconfig.ProviderDefinition{

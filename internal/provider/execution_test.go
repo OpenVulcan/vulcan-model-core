@@ -92,6 +92,9 @@ func TestConversationActionDriverPreservesProvenProfileExecution(t *testing.T) {
 	request.Binding.Target.OfferingID = "offering-1"
 	request.Binding.Target.Operation = vcp.OperationConversationRespond
 	request.Binding.Target.ActionBindingID = "action_conversation_respond"
+	request.Definition.ProtocolProfileID = "minimax.image.generate.v1"
+	request.Definition.EndpointProfileID = "minimax_image"
+	request.Definition.AuthMethodIDs = []string{"different-auth"}
 	request.Definition.ActionBindings = []providerconfig.ProviderActionBinding{{
 		ID: "action_conversation_respond", Operation: vcp.OperationConversationRespond, DriverID: "openai", DriverVersion: "1", ProtocolProfileID: "openai.responses", EndpointProfileID: "responses", AuthMethodIDs: []string{"api-key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true, Streaming: true}, Revision: 1,
 	}}
@@ -110,6 +113,9 @@ func TestConversationActionDriverPreservesProvenProfileExecution(t *testing.T) {
 	}
 	if !profileDriver.executed || result.UpstreamResponseID != "res-upstream" {
 		t.Fatalf("profile driver execution = %v, result = %#v", profileDriver.executed, result)
+	}
+	if profileDriver.request.Definition.ProtocolProfileID != "openai.responses" || profileDriver.request.Definition.EndpointProfileID != "responses" || len(profileDriver.request.Definition.AuthMethodIDs) != 1 || profileDriver.request.Definition.AuthMethodIDs[0] != "api-key" {
+		t.Fatalf("projected profile definition = %#v", profileDriver.request.Definition)
 	}
 }
 
@@ -130,6 +136,53 @@ func TestExecutionRegistryBuildsCustomDriverFromImmutableDefinition(t *testing.T
 	}
 	if factory.definition.ID != request.Definition.ID || factory.definition.Revision != 7 || !factory.driver.executed || result.UpstreamResponseID != "res-upstream" {
 		t.Fatalf("factory definition = %#v, driver = %#v, result = %#v", factory.definition, factory.driver, result)
+	}
+}
+
+// TestExecutionRegistryProjectsTypedCustomProfileConversation verifies custom profile Drivers receive the canonical conversation after typed admission.
+// TestExecutionRegistryProjectsTypedCustomProfileConversation 验证自定义 Profile Driver 在类型化接收后获得规范会话。
+func TestExecutionRegistryProjectsTypedCustomProfileConversation(t *testing.T) {
+	registry := NewExecutionRegistry()
+	factory := &recordingCustomDriverFactory{}
+	if errRegister := registry.RegisterCustomFactory(factory); errRegister != nil {
+		t.Fatalf("RegisterCustomFactory() error = %v", errRegister)
+	}
+	request := validExecutionRequest()
+	request.Definition.Kind = providerconfig.DefinitionKindCustom
+	request.Definition.Revision = 7
+	request.Binding.Target.SubjectKind = resolve.ExecutionSubjectModel
+	request.Binding.Target.Operation = vcp.OperationConversationRespond
+	request.Binding.Target.ProfileDriver = true
+	legacy := request.Request
+	request.Request = vcp.VulcanRequest{}
+	request.Execution = &vcp.ExecutionRequest{
+		ProtocolVersion: legacy.ProtocolVersion, RequestID: legacy.RequestID, Target: vcp.TargetSelection{Model: &legacy.ModelSelection}, Operation: vcp.OperationConversationRespond, Stream: legacy.Stream,
+		Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{
+			Context: legacy.Context, Tools: legacy.Tools, ToolPolicy: legacy.ToolPolicy, GenerationPolicy: legacy.GenerationPolicy, ReasoningPolicy: legacy.ReasoningPolicy,
+			CachePolicy: legacy.CachePolicy, ContextManagementPolicy: legacy.ContextManagementPolicy, RemoteCompaction: legacy.RemoteCompaction, CapabilityPolicy: legacy.CapabilityPolicy, RegisteredExtensions: legacy.RegisteredExtensions,
+		}},
+	}
+	result, errExecute := registry.Execute(context.Background(), request)
+	if errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
+	}
+	if !factory.driver.executed || factory.driver.request.Execution != nil || len(factory.driver.request.Request.Context) != 1 || result.UpstreamResponseID != "res-upstream" {
+		t.Fatalf("driver request = %#v result = %#v", factory.driver.request, result)
+	}
+}
+
+// TestExecutionRegistryUsesTrustedProviderClassification verifies an exact provider rule takes precedence over generic HTTP status mapping.
+// TestExecutionRegistryUsesTrustedProviderClassification 验证精确供应商规则优先于通用 HTTP 状态映射。
+func TestExecutionRegistryUsesTrustedProviderClassification(t *testing.T) {
+	registry := NewExecutionRegistry()
+	request := validExecutionRequest()
+	request.Now = time.Date(2026, 7, 24, 5, 0, 0, 0, time.UTC)
+	retryAt := request.Now.Add(30 * time.Minute)
+	trusted := ClassifiedError{Category: "quota_exhausted", Scope: ErrorScopeCredential, Action: RetryOtherCredential, RetryAt: &retryAt, RuleID: "provider_exact_rule"}
+	executionError := WrapClassifiedExecutionError(trusted, transport.StatusError{StatusCode: 403, ProviderType: "access_terminated_error"})
+	classified, matched := registry.ClassifyExecutionError(request, executionError)
+	if !matched || classified.Category != trusted.Category || classified.Scope != trusted.Scope || classified.Action != trusted.Action || classified.RuleID != trusted.RuleID || classified.RetryAt == nil || !classified.RetryAt.Equal(retryAt) {
+		t.Fatalf("trusted classification = %#v matched=%t", classified, matched)
 	}
 }
 
@@ -293,6 +346,9 @@ type recordingExecutionDriver struct {
 	// executed reports whether Execute received a validated request.
 	// executed 表示 Execute 是否收到已校验请求。
 	executed bool
+	// request records the exact projected profile request.
+	// request 记录精确投影后的 Profile 请求。
+	request ExecutionRequest
 }
 
 // recordingActionExecutionDriver records exact action dispatches without network traffic.
@@ -353,8 +409,9 @@ func (d *recordingExecutionDriver) ProtocolProfileID() string {
 
 // Execute records a validated request and returns safe mock continuation data.
 // Execute 记录已校验请求并返回安全的模拟续接数据。
-func (d *recordingExecutionDriver) Execute(_ context.Context, _ ExecutionRequest) (ExecutionResult, error) {
+func (d *recordingExecutionDriver) Execute(_ context.Context, request ExecutionRequest) (ExecutionResult, error) {
 	d.executed = true
+	d.request = request
 	return ExecutionResult{UpstreamResponseID: "res-upstream"}, nil
 }
 

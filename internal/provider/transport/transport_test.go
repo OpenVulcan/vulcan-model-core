@@ -201,6 +201,48 @@ func TestClientDoesNotRetryWithoutIdempotencyKey(t *testing.T) {
 	}
 }
 
+// TestClientExtractsOnlySafeStructuredErrorIdentity verifies provider codes can drive trusted rules without leaking free-form text.
+// TestClientExtractsOnlySafeStructuredErrorIdentity 验证供应商代码可驱动受信任规则且不会泄露自由文本。
+func TestClientExtractsOnlySafeStructuredErrorIdentity(t *testing.T) {
+	secretStore := secret.NewMemoryStore()
+	secretRef, errPut := secretStore.Put(context.Background(), []byte("credential-value"))
+	if errPut != nil {
+		t.Fatalf("Put() error = %v", errPut)
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, _ *http.Request) {
+		writer.Header().Set("Content-Type", "application/json")
+		writer.WriteHeader(http.StatusForbidden)
+		_, _ = writer.Write([]byte(`{"error":{"code":"quota_exhausted","type":"access_terminated_error","message":"private provider detail must not escape"}}`))
+	}))
+	defer server.Close()
+	client, errClient := NewClient(server.Client(), secretStore, RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	_, errDo := client.Do(context.Background(), testRequest(server.URL, secretRef))
+	var statusError StatusError
+	if !errors.As(errDo, &statusError) {
+		t.Fatalf("Do() error = %v, want StatusError", errDo)
+	}
+	if statusError.ProviderCode != "quota_exhausted" || statusError.ProviderType != "access_terminated_error" {
+		t.Fatalf("structured identity = code=%q type=%q", statusError.ProviderCode, statusError.ProviderType)
+	}
+	if strings.Contains(errDo.Error(), "private provider detail") || strings.Contains(errDo.Error(), statusError.ProviderCode) || strings.Contains(errDo.Error(), statusError.ProviderType) {
+		t.Fatalf("safe error leaked provider body identity: %v", errDo)
+	}
+}
+
+// TestStructuredErrorIdentityRejectsFreeFormAndOversizedTokens verifies untrusted text cannot enter classifier fields.
+// TestStructuredErrorIdentityRejectsFreeFormAndOversizedTokens 验证不可信文本不能进入分类器字段。
+func TestStructuredErrorIdentityRejectsFreeFormAndOversizedTokens(t *testing.T) {
+	oversized := strings.Repeat("a", maximumStructuredErrorTokenBytes+1)
+	body := strings.NewReader(`{"code":"contains spaces","type":"` + oversized + `"}`)
+	code, errorType := readStructuredErrorIdentity(body)
+	if code != "" || errorType != "" {
+		t.Fatalf("unsafe structured identity = code=%q type=%q", code, errorType)
+	}
+}
+
 // TestRetryPolicyBoundsProviderDelayAndDefaultCap verifies untrusted Retry-After values cannot exceed configured backoff bounds.
 // TestRetryPolicyBoundsProviderDelayAndDefaultCap 验证不受信任的 Retry-After 值不能超过已配置的退避边界。
 func TestRetryPolicyBoundsProviderDelayAndDefaultCap(t *testing.T) {

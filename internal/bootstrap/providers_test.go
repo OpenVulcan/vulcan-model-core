@@ -15,6 +15,7 @@ import (
 	protocolchat "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	provideralibaba "github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba/catalogdata"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -23,6 +24,30 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestAlibabaParameterMappingsReferenceRegisteredActions verifies reviewed mapping data cannot drift from executable provider definitions.
+// TestAlibabaParameterMappingsReferenceRegisteredActions 验证已审核映射数据不能偏离可执行供应商定义。
+func TestAlibabaParameterMappingsReferenceRegisteredActions(t *testing.T) {
+	actions := make(map[string]vcp.OperationKind)
+	for _, definition := range alibabaProviderDefinitions() {
+		for _, action := range definition.ActionBindings {
+			if existing, exists := actions[action.ID]; exists && existing != action.Operation {
+				t.Fatalf("action %q has operations %q and %q", action.ID, existing, action.Operation)
+			}
+			actions[action.ID] = action.Operation
+		}
+	}
+	mappings, errMappings := catalogdata.LoadParameterMappings()
+	if errMappings != nil {
+		t.Fatal(errMappings)
+	}
+	for _, mapping := range mappings.Entries {
+		operation, exists := actions[mapping.ActionBindingID]
+		if !exists || operation != mapping.Operation {
+			t.Fatalf("mapping %q references action %q operation %q; registered = %q, %v", mapping.ID, mapping.ActionBindingID, mapping.Operation, operation, exists)
+		}
+	}
+}
 
 // TestRegisterSystemProvidersBuildsKimiGroup verifies exact variants, shared catalogs, endpoints, and protocols.
 // TestRegisterSystemProvidersBuildsKimiGroup 验证精确变体、共享目录、端点和协议。
@@ -43,7 +68,7 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 		t.Fatalf("groups = %#v", groups)
 	}
 	definitions := systems.List()
-	if len(definitions) != 26 {
+	if len(definitions) != 25 {
 		t.Fatalf("definition count = %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -53,15 +78,33 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 			}
 			continue
 		}
-		if definition.ID == AlibabaModelStudioWorkspaceGlobalDefinitionID {
-			if len(definition.ActionBindings) != 9 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].ID != provideralibaba.SpeechSynthesizeActionBindingID || definition.ActionBindings[2].ID != provideralibaba.SpeechTranscribeActionBindingID || definition.ActionBindings[3].ID != provideralibaba.SpeechTranscribeAsyncActionBindingID || definition.ActionBindings[4].Operation != vcp.OperationImageGenerate || definition.ActionBindings[5].Operation != vcp.OperationImageEdit || definition.ActionBindings[6].Operation != vcp.OperationImageGenerate || definition.ActionBindings[7].Operation != vcp.OperationImageEdit || definition.ActionBindings[8].Operation != vcp.OperationVideoGenerate {
-				t.Fatalf("definition %q Alibaba workspace Model Studio actions = %#v", definition.ID, definition.ActionBindings)
+		if definition.ID == AlibabaModelStudioCNDefinitionID {
+			if len(definition.ActionBindings) != 13 || definition.ActionBindings[0].Operation != vcp.OperationConversationRespond || definition.ActionBindings[1].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[2].ID != provideralibaba.RerankActionBindingID || definition.ActionBindings[3].ID != provideralibaba.SearchWebActionBindingID || definition.ActionBindings[4].ID != provideralibaba.CosyVoiceSynthesizeActionBindingID || definition.ActionBindings[5].ID != provideralibaba.SpeechSynthesizeActionBindingID || definition.ActionBindings[6].ID != provideralibaba.SpeechTranscribeActionBindingID || definition.ActionBindings[7].ID != provideralibaba.SpeechTranscribeAsyncActionBindingID || definition.ActionBindings[8].Operation != vcp.OperationImageGenerate || definition.ActionBindings[9].Operation != vcp.OperationImageEdit || definition.ActionBindings[10].ID != provideralibaba.MediaAnalyzeActionBindingID || definition.ActionBindings[11].ID != provideralibaba.HappyHorseVideoGenerateActionBindingID || definition.ActionBindings[12].ID != provideralibaba.HappyHorseVideoEditActionBindingID {
+				t.Fatalf("definition %q Alibaba CN Model Studio actions = %#v", definition.ID, definition.ActionBindings)
 			}
 			continue
 		}
-		if definition.ID == AlibabaModelStudioCNDefinitionID || definition.ID == AlibabaModelStudioGlobalDefinitionID {
-			if len(definition.ActionBindings) != 6 || definition.ActionBindings[0].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[1].ID != provideralibaba.SpeechSynthesizeActionBindingID || definition.ActionBindings[2].ID != provideralibaba.SpeechTranscribeActionBindingID || definition.ActionBindings[3].ID != provideralibaba.SpeechTranscribeAsyncActionBindingID || definition.ActionBindings[4].Operation != vcp.OperationImageGenerate || definition.ActionBindings[5].Operation != vcp.OperationImageEdit {
+		if definition.ID == AlibabaModelStudioGlobalDefinitionID {
+			if len(definition.ActionBindings) != 11 || definition.ActionBindings[0].Operation != vcp.OperationConversationRespond || definition.ActionBindings[1].Operation != vcp.OperationEmbeddingCreate || definition.ActionBindings[2].ID != provideralibaba.RerankActionBindingID || definition.ActionBindings[3].ID != provideralibaba.SearchWebActionBindingID || definition.ActionBindings[4].ID != provideralibaba.CosyVoiceSynthesizeActionBindingID || definition.ActionBindings[5].ID != provideralibaba.SpeechSynthesizeActionBindingID || definition.ActionBindings[6].ID != provideralibaba.SpeechTranscribeActionBindingID || definition.ActionBindings[7].ID != provideralibaba.SpeechTranscribeAsyncActionBindingID || definition.ActionBindings[8].Operation != vcp.OperationImageGenerate || definition.ActionBindings[9].Operation != vcp.OperationImageEdit || definition.ActionBindings[10].ID != provideralibaba.MediaAnalyzeActionBindingID {
 				t.Fatalf("definition %q Alibaba Model Studio actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == AlibabaTokenPlanPersonalCNDefinitionID {
+			if len(definition.ActionBindings) != 4 || definition.ActionBindings[0].ID != ConversationActionBindingID || definition.ActionBindings[1].ID != provideralibaba.TokenPlanHarnessConversationActionBindingID || definition.ActionBindings[1].ProtocolProfileID != "openai.responses" || !definition.ActionBindings[1].Delivery.Streaming || definition.ActionBindings[1].Delivery.Synchronous || definition.ActionBindings[2].ID != provideralibaba.WanImageGenerateActionBindingID || definition.ActionBindings[3].ID != provideralibaba.HappyHorseVideoGenerateActionBindingID {
+				t.Fatalf("definition %q Alibaba Personal Token Plan actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == AlibabaTokenPlanTeamCNDefinitionID {
+			if len(definition.ActionBindings) != 5 || definition.ActionBindings[0].ID != ConversationActionBindingID || definition.ActionBindings[1].ID != provideralibaba.TokenPlanHarnessConversationActionBindingID || definition.ActionBindings[2].ID != provideralibaba.ImageGenerateActionBindingID || definition.ActionBindings[3].ID != provideralibaba.WanImageGenerateActionBindingID || definition.ActionBindings[4].ID != provideralibaba.HappyHorseVideoGenerateActionBindingID {
+				t.Fatalf("definition %q Alibaba Team CN Token Plan actions = %#v", definition.ID, definition.ActionBindings)
+			}
+			continue
+		}
+		if definition.ID == AlibabaTokenPlanTeamGlobalDefinitionID {
+			if len(definition.ActionBindings) != 4 || definition.ActionBindings[0].ID != ConversationActionBindingID || definition.ActionBindings[1].ID != provideralibaba.TokenPlanHarnessConversationActionBindingID || definition.ActionBindings[2].ID != provideralibaba.ImageGenerateActionBindingID || definition.ActionBindings[3].ID != provideralibaba.WanImageGenerateActionBindingID {
+				t.Fatalf("definition %q Alibaba Team Global Token Plan actions = %#v", definition.ID, definition.ActionBindings)
 			}
 			continue
 		}
@@ -157,15 +200,15 @@ func TestRegisterSystemProvidersBuildsAlibabaGroup(t *testing.T) {
 		// variantName is the concise management label.
 		// variantName 是简洁的管理标签。
 		variantName string
-		// baseURL is the exact fixed regional Messages base address.
-		// baseURL 是精确固定的区域 Messages 基础地址。
+		// baseURL is the exact fixed regional Chat service origin.
+		// baseURL 是精确固定的区域 Chat 服务源站地址。
 		baseURL string
 	}{
-		{AlibabaCodingPlanCNDefinitionID, "Coding Plan CN", "https://coding.dashscope.aliyuncs.com/apps/anthropic/v1"},
-		{AlibabaCodingPlanGlobalDefinitionID, "Coding Plan Global", "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1"},
-		{AlibabaTokenPlanPersonalCNDefinitionID, "Token Plan Personal CN", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1"},
-		{AlibabaTokenPlanTeamCNDefinitionID, "Token Plan Team CN", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1"},
-		{AlibabaTokenPlanTeamGlobalDefinitionID, "Token Plan Team Global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1"},
+		{AlibabaCodingPlanCNDefinitionID, "Coding Plan CN", "https://coding.dashscope.aliyuncs.com"},
+		{AlibabaCodingPlanGlobalDefinitionID, "Coding Plan Global", "https://coding-intl.dashscope.aliyuncs.com"},
+		{AlibabaTokenPlanPersonalCNDefinitionID, "Token Plan Personal CN", "https://token-plan.cn-beijing.maas.aliyuncs.com"},
+		{AlibabaTokenPlanTeamCNDefinitionID, "Token Plan Team CN", "https://token-plan.cn-beijing.maas.aliyuncs.com"},
+		{AlibabaTokenPlanTeamGlobalDefinitionID, "Token Plan Team Global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com"},
 	}
 	for index, want := range expected {
 		definition, exists := systems.Lookup(want.definitionID)
@@ -176,11 +219,19 @@ func TestRegisterSystemProvidersBuildsAlibabaGroup(t *testing.T) {
 		if definition.GroupID != AlibabaGroupID || definition.SortOrder != (index+1)*10 || definition.VariantName != want.variantName {
 			t.Errorf("definition identity %q = %#v", want.definitionID, definition)
 		}
-		if definition.ProtocolProfileID != "anthropic.messages" || len(definition.EndpointPresets) != 1 || definition.EndpointPresets[0].BaseURL != want.baseURL || definition.EndpointPresets[0].UserEditable {
+		if definition.ProtocolProfileID != protocolchat.ProfileID || definition.EndpointProfileID != "alibaba_chat" || len(definition.EndpointPresets) != 1 || definition.EndpointPresets[0].BaseURL != want.baseURL || definition.EndpointPresets[0].UserEditable {
 			t.Errorf("definition boundary %q = %#v", want.definitionID, definition)
 		}
 		if len(definition.AuthMethods) != 1 || definition.AuthMethods[0].ID != "api_key" || definition.AuthMethods[0].Type != providerconfig.AuthMethodAPIKey || !definition.RuntimeReady {
 			t.Errorf("definition authentication/runtime %q = %#v", want.definitionID, definition)
+		}
+		if want.definitionID == AlibabaTokenPlanPersonalCNDefinitionID {
+			if definition.Features.EntitlementReader != providerconfig.SupportUnsupported {
+				t.Errorf("Personal Token Plan metadata features = %#v", definition.Features)
+			}
+			if definition.AuthMethods[0].ReaderFeatures == nil || definition.AuthMethods[0].ReaderFeatures.EntitlementReader != providerconfig.SupportUnsupported {
+				t.Errorf("Personal Token Plan credential reader features = %#v", definition.AuthMethods[0].ReaderFeatures)
+			}
 		}
 	}
 }
@@ -266,11 +317,10 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		AlibabaCodingPlanCNDefinitionID: {}, AlibabaCodingPlanGlobalDefinitionID: {},
 		AlibabaTokenPlanPersonalCNDefinitionID: {}, AlibabaTokenPlanTeamCNDefinitionID: {}, AlibabaTokenPlanTeamGlobalDefinitionID: {},
 		AlibabaModelStudioCNDefinitionID: {}, AlibabaModelStudioGlobalDefinitionID: {},
-		AlibabaModelStudioWorkspaceGlobalDefinitionID: {},
-		OpenRouterAPIDefinitionID:                     {},
-		MiniMaxGlobalDefinitionID:                     {},
-		MiniMaxCNDefinitionID:                         {},
-		TavilySearchDefinitionID:                      {},
+		OpenRouterAPIDefinitionID: {},
+		MiniMaxGlobalDefinitionID: {},
+		MiniMaxCNDefinitionID:     {},
+		TavilySearchDefinitionID:  {},
 	}
 	definitions := systems.List()
 	if len(definitions) != len(expectedDefinitionIDs) {
@@ -324,8 +374,8 @@ func TestRegisterCLIProxyExecutionDriversIncludesCodexKeyAndAccount(t *testing.T
 	}
 }
 
-// TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions verifies the Alibaba registrar owns every plan and fixed API product.
-// TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions 验证 Alibaba 注册器拥有每个套餐和固定 API 产品。
+// TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions verifies the Alibaba registrar owns only verified executable products.
+// TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions 验证 Alibaba 注册器仅拥有已验证且可执行的产品。
 func TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions(t *testing.T) {
 	secrets := secret.NewMemoryStore()
 	client, errClient := transport.NewClient(http.DefaultClient, secrets, transport.RetryPolicy{})
@@ -336,7 +386,7 @@ func TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions(t *testing.T) 
 	if errRegister := RegisterAlibabaExecutionDrivers(registry, client, bootstrapDocumentFetcher{}); errRegister != nil {
 		t.Fatalf("RegisterAlibabaExecutionDrivers() error = %v", errRegister)
 	}
-	expectedDriverIDs := []string{AlibabaCodingPlanCNDefinitionID, AlibabaCodingPlanGlobalDefinitionID, AlibabaModelStudioCNDefinitionID, AlibabaModelStudioGlobalDefinitionID, AlibabaModelStudioWorkspaceGlobalDefinitionID, AlibabaTokenPlanPersonalCNDefinitionID, AlibabaTokenPlanTeamCNDefinitionID, AlibabaTokenPlanTeamGlobalDefinitionID}
+	expectedDriverIDs := []string{AlibabaCodingPlanCNDefinitionID, AlibabaCodingPlanGlobalDefinitionID, AlibabaModelStudioCNDefinitionID, AlibabaModelStudioGlobalDefinitionID, AlibabaTokenPlanPersonalCNDefinitionID, AlibabaTokenPlanTeamCNDefinitionID, AlibabaTokenPlanTeamGlobalDefinitionID}
 	registeredDriverIDs := registry.ProviderIDs()
 	if len(registeredDriverIDs) != len(expectedDriverIDs) {
 		t.Fatalf("registered Driver IDs = %#v", registeredDriverIDs)
@@ -345,6 +395,116 @@ func TestRegisterAlibabaExecutionDriversOwnsExactSevenDefinitions(t *testing.T) 
 		if registeredDriverIDs[index] != definitionID {
 			t.Fatalf("registered Driver[%d] = %q, want %q", index, registeredDriverIDs[index], definitionID)
 		}
+	}
+}
+
+// TestAlibabaExecutionDriversUseExactProductPaths verifies every Alibaba product sends Chat traffic to its documented path.
+// TestAlibabaExecutionDriversUseExactProductPaths 验证每个阿里产品都将 Chat 流量发送至其文档化路径。
+func TestAlibabaExecutionDriversUseExactProductPaths(t *testing.T) {
+	// expectedPath records the exact product path required by the active isolated case.
+	// expectedPath 记录当前隔离用例要求的精确产品路径。
+	expectedPath := ""
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		if request.URL.Path != expectedPath {
+			t.Errorf("request path = %q, want %q", request.URL.Path, expectedPath)
+		}
+		if authorization := request.Header.Get("Authorization"); authorization != "Bearer alibaba-test-key" {
+			t.Errorf("Authorization = %q", authorization)
+		}
+		// payload captures the only provider-facing field required to prove this path-bound execution.
+		// payload 仅捕获证明此路径绑定执行所需的供应商侧字段。
+		payload := struct {
+			// Model is the exact upstream model identifier.
+			// Model 是精确的上游模型标识。
+			Model string `json:"model"`
+		}{}
+		if errDecode := json.NewDecoder(request.Body).Decode(&payload); errDecode != nil {
+			t.Errorf("decode request body: %v", errDecode)
+		} else if payload.Model != "qwen3.5-plus" {
+			t.Errorf("model = %q, want qwen3.5-plus", payload.Model)
+		}
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = io.WriteString(writer, `{"id":"chat_alibaba","choices":[{"index":0,"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}]}`)
+	}))
+	defer server.Close()
+
+	secretStore := secret.NewMemoryStore()
+	secretReference, errSecret := secretStore.Put(context.Background(), []byte("alibaba-test-key"))
+	if errSecret != nil {
+		t.Fatalf("Put() error = %v", errSecret)
+	}
+	client, errClient := transport.NewClient(server.Client(), secretStore, transport.RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	registry := provider.NewExecutionRegistry()
+	if errRegister := RegisterAlibabaExecutionDrivers(registry, client, bootstrapDocumentFetcher{}); errRegister != nil {
+		t.Fatalf("RegisterAlibabaExecutionDrivers() error = %v", errRegister)
+	}
+	// testCases freeze the complete product-to-path partition so future refactors cannot collapse the two Alibaba contracts.
+	// testCases 冻结完整的产品到路径分区，防止后续重构混合两类阿里合同。
+	testCases := []struct {
+		// definitionID selects one immutable Alibaba product or regional boundary.
+		// definitionID 选择一个不可变阿里产品或区域边界。
+		definitionID string
+		// path is the exact Chat Completions path owned by that product.
+		// path 是该产品拥有的精确 Chat Completions 路径。
+		path string
+	}{
+		{definitionID: AlibabaCodingPlanCNDefinitionID, path: alibabaStandardChatPath},
+		{definitionID: AlibabaCodingPlanGlobalDefinitionID, path: alibabaStandardChatPath},
+		{definitionID: AlibabaTokenPlanPersonalCNDefinitionID, path: alibabaCompatibleChatPath},
+		{definitionID: AlibabaTokenPlanTeamCNDefinitionID, path: alibabaCompatibleChatPath},
+		{definitionID: AlibabaTokenPlanTeamGlobalDefinitionID, path: alibabaCompatibleChatPath},
+		{definitionID: AlibabaModelStudioCNDefinitionID, path: alibabaCompatibleChatPath},
+		{definitionID: AlibabaModelStudioGlobalDefinitionID, path: alibabaCompatibleChatPath},
+	}
+	definitions := make(map[string]providerconfig.ProviderDefinition)
+	for _, definition := range alibabaProviderDefinitions() {
+		definitions[definition.ID] = definition
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.definitionID, func(t *testing.T) {
+			expectedPath = testCase.path
+			definition, exists := definitions[testCase.definitionID]
+			if !exists {
+				t.Fatalf("definition %q is missing", testCase.definitionID)
+			}
+			result, errExecute := registry.Execute(context.Background(), alibabaExecutionRequest(definition, server.URL, secretReference))
+			if errExecute != nil {
+				t.Fatalf("Execute() error = %v", errExecute)
+			}
+			if result.Response.Status != vcp.ResponseCompleted || len(result.Response.Items) == 0 || len(result.Response.Items[0].Content) == 0 || result.Response.Items[0].Content[0].Text != "ok" {
+				t.Fatalf("result = %#v", result)
+			}
+		})
+	}
+}
+
+// alibabaExecutionRequest builds one exact-target Chat execution for an immutable Alibaba definition.
+// alibabaExecutionRequest 为一个不可变阿里 Definition 构建一条精确目标 Chat 执行。
+func alibabaExecutionRequest(definition providerconfig.ProviderDefinition, baseURL string, secretReference string) provider.ExecutionRequest {
+	// instanceID uniquely scopes the test endpoint and credential to the active product.
+	// instanceID 将测试端点与凭据唯一限定到当前产品。
+	instanceID := "instance-" + definition.ID
+	return provider.ExecutionRequest{
+		Binding: transport.Binding{
+			Target:     resolve.Target{ProviderDefinitionID: definition.ID, ProviderInstanceID: instanceID, ChannelID: protocolchat.ProfileID, EndpointID: "endpoint-alibaba", CredentialID: "credential-alibaba", ProviderModelID: "model-alibaba", OfferingID: "offering-alibaba", ExecutionProfileID: protocolchat.ProfileID, UpstreamModelID: "qwen3.5-plus", CatalogRevision: 1},
+			Endpoint:   providerconfig.Endpoint{ID: "endpoint-alibaba", ProviderInstanceID: instanceID, ChannelID: protocolchat.ProfileID, BaseURL: baseURL, Status: providerconfig.EndpointReady},
+			Credential: providerconfig.Credential{ID: "credential-alibaba", ProviderInstanceID: instanceID, AuthMethodID: "api_key", SecretRef: secretReference, Status: providerconfig.CredentialActive},
+		},
+		Definition: definition,
+		Request: vcp.VulcanRequest{
+			ProtocolVersion:         vcp.ProtocolVersion,
+			RequestID:               "request-alibaba-" + definition.ID,
+			ModelSelection:          vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: instanceID, ProviderModelID: "model-alibaba", ExecutionProfileID: protocolchat.ProfileID},
+			Context:                 []vcp.ContextItem{{ItemID: "user-alibaba", Sequence: 1, Kind: vcp.ContextMessage, Authority: vcp.AuthorityUser, Actor: vcp.ActorEndUser, Placement: vcp.PlacementTranscript, Activation: vcp.Activation{Mode: vcp.ActivationRequestStart}, Visibility: vcp.VisibilityModel, Content: []vcp.ContentBlock{{Type: vcp.ContentText, Text: "Hello"}}, Message: &vcp.MessageItem{}}},
+			CachePolicy:             vcp.CachePolicy{Strategy: vcp.CacheRegular, OnUnsupported: vcp.CacheUnsupportedReject},
+			ContextManagementPolicy: vcp.ContextManagementPolicy{Mode: vcp.ContextManagementRegular},
+			CapabilityPolicy:        vcp.CapabilityPolicy{ExecutionMode: vcp.CapabilityMaximize, OptionalOnUnsupported: vcp.OptionalOmit},
+		},
+		LineageID: "lineage-alibaba",
+		Now:       time.Date(2026, time.July, 23, 0, 0, 0, 0, time.UTC),
 	}
 }
 

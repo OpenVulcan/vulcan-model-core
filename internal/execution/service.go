@@ -21,6 +21,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -28,6 +29,9 @@ const (
 	// maxSameProviderExecutionAttempts bounds credential and endpoint failover for one logical execution.
 	// maxSameProviderExecutionAttempts 限制一次逻辑执行中的凭据与入口故障切换次数。
 	maxSameProviderExecutionAttempts = 8
+	// maximumRouterParentExecutionDuration is the non-overridable wall-clock ceiling for one Router tool parent.
+	// maximumRouterParentExecutionDuration 是一次 Router 工具父执行不可覆盖的墙钟上限。
+	maximumRouterParentExecutionDuration = 15 * time.Minute
 )
 
 // TargetResolver resolves one exact provider-scoped destination.
@@ -36,6 +40,17 @@ type TargetResolver interface {
 	// Resolve returns one immutable target or an explicit eligibility error.
 	// Resolve 返回一个不可变 Target 或明确资格错误。
 	Resolve(context.Context, resolve.Request) (resolve.Target, resolve.Diagnostics, error)
+}
+
+// ModelToolResolver resolves one explicit Router standard-tool backend for a parent model.
+// ModelToolResolver 为父模型解析一个显式 Router 标准工具后端。
+type ModelToolResolver interface {
+	// Resolve returns one immutable binding and independently resolved child target.
+	// Resolve 返回一个不可变绑定及独立解析的子 Target。
+	Resolve(context.Context, resolve.Target, vcp.StandardModelToolKind, time.Time) (routertool.ResolvedBinding, error)
+	// ResolveExtension returns one immutable binding for a closed operation-backed Router enhancement.
+	// ResolveExtension 为封闭且由操作支持的 Router 增强能力返回一个不可变绑定。
+	ResolveExtension(context.Context, resolve.Target, vcp.RouterExtensionKind, time.Time) (routertool.ResolvedBinding, error)
 }
 
 // ConfigurationReader loads exact immutable provider snapshots selected by a target.
@@ -58,6 +73,14 @@ type InputPlanReader interface {
 	// Revalidate returns the unchanged live plan or capability_changed.
 	// Revalidate 返回未变化有效方案或 capability_changed。
 	Revalidate(context.Context, string, string) (inputplan.Plan, error)
+}
+
+// InputPlanCreator creates one immutable conditional-media plan for a Router child execution.
+// InputPlanCreator 为 Router 子执行创建一个不可变条件媒体方案。
+type InputPlanCreator interface {
+	// CreateInputPlan validates and persists one exact model-scoped media decision.
+	// CreateInputPlan 校验并持久化一个精确的模型作用域媒体决策。
+	CreateInputPlan(context.Context, inputplan.Request) (inputplan.Plan, error)
 }
 
 // InputMaterializer realizes only the representations frozen by an accepted input plan.
@@ -150,6 +173,9 @@ type ServiceOptions struct {
 	// EventDistributor waits for events through a shared-store-safe or deployment-specific distribution mechanism.
 	// EventDistributor 通过共享存储安全或部署特定的分发机制等待事件。
 	EventDistributor EventDistributor
+	// ModelTools resolves administrator-configured Router standard-tool backends.
+	// ModelTools 解析管理员配置的 Router 标准工具后端。
+	ModelTools ModelToolResolver
 }
 
 // Service orchestrates durable admission, exact target execution, replay, and cancellation.
@@ -249,12 +275,23 @@ func NewService(store Store, resolver TargetResolver, configurations Configurati
 // Create durably admits and executes one validated VCP request or returns an exact idempotent replay.
 // Create 持久接收并执行一个已校验 VCP 请求或返回精确幂等重放。
 func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.ExecutionRequest) (Record, bool, error) {
+	return s.create(ctx, ownerAPIKeyID, request, nil, nil)
+}
+
+// create admits a public execution or one Router-owned child with explicit lineage and an optional frozen target.
+// create 接收一个公开执行或一个具有显式谱系及可选冻结 Target 的 Router 所有子执行。
+func (s *Service) create(ctx context.Context, ownerAPIKeyID string, request vcp.ExecutionRequest, lineage *RouterToolLineage, frozenTarget *resolve.Target) (Record, bool, error) {
 	if strings.TrimSpace(ownerAPIKeyID) == "" {
 		return Record{}, false, fmt.Errorf("%w: owner API key identifier is required", ErrInvalidExecution)
 	}
 	if errRequest := request.Validate(); errRequest != nil {
 		return Record{}, false, errRequest
 	}
+	canonicalRequest, compatibilityDiagnostics, errCompatibility := canonicalizeLegacyModelTools(request)
+	if errCompatibility != nil {
+		return Record{}, false, errCompatibility
+	}
+	request = canonicalRequest
 	requestHash, errHash := canonicalRequestHash(request)
 	if errHash != nil {
 		return Record{}, false, errHash
@@ -272,14 +309,22 @@ func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.
 	if errContinuation != nil {
 		return Record{}, false, errContinuation
 	}
-	target, errTarget := s.resolveTarget(ctx, request, now, continuation)
-	if errTarget != nil {
-		if continuation != nil && continuationTargetPermanentlyUnavailable(errTarget) {
-			if errInvalidate := s.updateContinuationState(ctx, ownerAPIKeyID, continuation.ContinuationID, now, false, ContinuationInvalidatedTargetUnavailable); errInvalidate != nil {
-				return Record{}, false, errors.Join(errTarget, fmt.Errorf("invalidate unavailable continuation: %w", errInvalidate))
+	// target remains the immutable execution destination selected at admission.
+	// target 保持为接收阶段选定的不可变执行目标。
+	var target resolve.Target
+	if frozenTarget != nil {
+		target = *frozenTarget
+	} else {
+		resolvedTarget, errTarget := s.resolveTarget(ctx, request, now, continuation)
+		if errTarget != nil {
+			if continuation != nil && continuationTargetPermanentlyUnavailable(errTarget) {
+				if errInvalidate := s.updateContinuationState(ctx, ownerAPIKeyID, continuation.ContinuationID, now, false, ContinuationInvalidatedTargetUnavailable); errInvalidate != nil {
+					return Record{}, false, errors.Join(errTarget, fmt.Errorf("invalidate unavailable continuation: %w", errInvalidate))
+				}
 			}
+			return Record{}, false, errTarget
 		}
-		return Record{}, false, errTarget
+		target = resolvedTarget
 	}
 	if continuation != nil {
 		if errAffinity := continuation.Validate(target); errAffinity != nil {
@@ -295,6 +340,11 @@ func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.
 	if errCapabilities := validateRequestAgainstTarget(request, target); errCapabilities != nil {
 		return Record{}, false, errCapabilities
 	}
+	modelToolPlan, errModelTools := s.resolveModelToolPlan(ctx, request, target, now)
+	if errModelTools != nil {
+		return Record{}, false, errModelTools
+	}
+	modelToolPlan.Diagnostics = compatibilityDiagnostics
 	executionID, errID := s.options.NewID()
 	if errID != nil {
 		return Record{}, false, fmt.Errorf("create execution identifier: %w", errID)
@@ -304,16 +354,164 @@ func (s *Service) Create(ctx context.Context, ownerAPIKeyID string, request vcp.
 		s.registerActiveExecution(executionID)
 		defer s.unregisterActiveExecution(executionID)
 	}
-	record := Record{ID: executionID, OwnerAPIKeyID: ownerAPIKeyID, RequestHash: requestHash, IdempotencyKey: request.IdempotencyKey, Request: request, Target: target, Status: StatusAccepted, Operation: request.Operation, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.options.Retention), Revision: 1}
+	record := Record{ID: executionID, OwnerAPIKeyID: ownerAPIKeyID, RequestHash: requestHash, IdempotencyKey: request.IdempotencyKey, Request: request, Target: target, ModelToolPlan: modelToolPlan, RouterToolLineage: lineage, Status: StatusAccepted, Operation: request.Operation, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(s.options.Retention), Revision: 1}
 	accepted := lifecycleEvent(record.ID, 1, now, EventExecutionAccepted, StatusAccepted, nil)
 	created, replayed, errCreate := s.store.Create(ctx, record, accepted)
 	if errCreate != nil || replayed {
 		return created, replayed, errCreate
 	}
+	initialToolEvents := modelToolAdmissionEvents(created.ModelToolPlan)
+	if len(initialToolEvents) > 0 {
+		created, errCreate = s.appendModelToolEvents(ctx, created, initialToolEvents)
+		if errCreate != nil {
+			return Record{}, false, errCreate
+		}
+	}
 	if !immediate {
 		return created, false, nil
 	}
 	return s.executeAdmitted(ctx, created)
+}
+
+// canonicalizeLegacyModelTools converts the sole required VCP 1.0 hosted-search compatibility declaration into the authoritative model-tool contract.
+// canonicalizeLegacyModelTools 将唯一要求兼容的 VCP 1.0 托管搜索声明转换为权威模型工具合同。
+// Parameters: request is an already validated execution request that remains caller-owned.
+// 参数：request 是已经校验且仍由调用方拥有的执行请求。
+// Returns: a mutation-isolated canonical request, safe diagnostics, and an explicit conflict error.
+// 返回：与调用方修改隔离的规范请求、安全诊断以及明确的冲突错误。
+func canonicalizeLegacyModelTools(request vcp.ExecutionRequest) (vcp.ExecutionRequest, []vcp.ModelToolDiagnostic, error) {
+	if request.Operation != vcp.OperationConversationRespond || request.Payload.Conversation == nil {
+		return request, nil, nil
+	}
+	operation := *request.Payload.Conversation
+	operation.Tools = append([]vcp.ToolDefinition(nil), operation.Tools...)
+	operation.ModelTools.Standard = append([]vcp.StandardModelToolSelection(nil), operation.ModelTools.Standard...)
+	operation.ModelTools.Extra = append([]string(nil), operation.ModelTools.Extra...)
+	operation.ModelTools.RouterExtensions = append([]vcp.RouterExtensionKind(nil), operation.ModelTools.RouterExtensions...)
+	legacySearch := false
+	filteredTools := make([]vcp.ToolDefinition, 0, len(operation.Tools))
+	for _, tool := range operation.Tools {
+		if tool.Kind == vcp.ToolNativeWebSearch {
+			legacySearch = true
+			continue
+		}
+		filteredTools = append(filteredTools, tool)
+	}
+	if !legacySearch {
+		request.Payload.Conversation = &operation
+		return request, nil, nil
+	}
+	selectionFound := false
+	for _, selection := range operation.ModelTools.Standard {
+		if selection.Kind != vcp.StandardModelToolWebSearch {
+			continue
+		}
+		selectionFound = true
+		if selection.Mode != vcp.ModelToolNative {
+			return vcp.ExecutionRequest{}, nil, vcp.NewModelToolError(vcp.ModelToolModeNotSupported, string(vcp.StandardModelToolWebSearch), "compatibility", false)
+		}
+	}
+	if !selectionFound {
+		operation.ModelTools.Standard = append(operation.ModelTools.Standard, vcp.StandardModelToolSelection{Kind: vcp.StandardModelToolWebSearch, Mode: vcp.ModelToolNative})
+	}
+	operation.Tools = filteredTools
+	request.Payload.Conversation = &operation
+	if errValidate := request.Validate(); errValidate != nil {
+		return vcp.ExecutionRequest{}, nil, errValidate
+	}
+	diagnostics := []vcp.ModelToolDiagnostic{{Code: vcp.ModelToolDiagnosticLegacyNativeWebSearchMigrated}}
+	return request, diagnostics, nil
+}
+
+// resolveModelToolPlan freezes request modes, parent catalog evidence, and exact Router child targets.
+// resolveModelToolPlan 冻结请求模式、父目录证据与精确 Router 子 Target。
+func (s *Service) resolveModelToolPlan(ctx context.Context, request vcp.ExecutionRequest, target resolve.Target, now time.Time) (ModelToolPlan, error) {
+	plan := ModelToolPlan{CatalogRevision: target.CatalogRevision}
+	if request.Operation != vcp.OperationConversationRespond || request.Payload.Conversation == nil {
+		return plan, nil
+	}
+	operation := request.Payload.Conversation
+	if hasReservedRouterToolCollision(operation.Tools) || hasReservedRouterContextCollision(operation.Context) {
+		return ModelToolPlan{}, vcp.NewModelToolError(vcp.ModelToolConflictsWithCallerTools, routerToolNamespace, "planning", false)
+	}
+	if operation.ToolPolicy.Choice == vcp.ToolChoiceNamed {
+		for _, selection := range operation.ModelTools.Standard {
+			if string(selection.Kind) == operation.ToolPolicy.NamedTool && selection.Mode != vcp.ModelToolRouter {
+				return ModelToolPlan{}, vcp.NewModelToolError(vcp.ModelToolModeNotSupported, string(selection.Kind), "planning", false)
+			}
+		}
+		for _, extraToolID := range operation.ModelTools.Extra {
+			if extraToolID == operation.ToolPolicy.NamedTool {
+				return ModelToolPlan{}, vcp.NewModelToolError(vcp.ModelToolModeNotSupported, extraToolID, "planning", false)
+			}
+		}
+	}
+	if operation.ToolPolicy.Choice == vcp.ToolChoiceRequired && !hasProviderForceableTool(*operation) {
+		return ModelToolPlan{}, vcp.NewModelToolError(vcp.ModelToolModeNotSupported, "tool_policy.required", "planning", false)
+	}
+	plan.Standard = make([]ModelToolPlanEntry, 0, len(operation.ModelTools.Standard))
+	for _, selection := range operation.ModelTools.Standard {
+		entry := ModelToolPlanEntry{Kind: selection.Kind, Mode: selection.Mode}
+		if selection.Mode == vcp.ModelToolRouter {
+			if s.options.ModelTools == nil {
+				return ModelToolPlan{}, vcp.NewModelToolError(vcp.RouterToolBindingMissing, string(selection.Kind), "planning", false)
+			}
+			resolved, errResolve := s.options.ModelTools.Resolve(ctx, target, selection.Kind, now)
+			if errResolve != nil {
+				return ModelToolPlan{}, errors.Join(vcp.NewModelToolError(routerBindingErrorCode(errResolve), string(selection.Kind), "planning", false), errResolve)
+			}
+			entry.RouterBinding = &resolved
+			entry.RouterBindingID = resolved.Binding.ID
+			entry.RouterBindingRevision = resolved.Binding.Revision
+		}
+		plan.Standard = append(plan.Standard, entry)
+	}
+	plan.Extra = append([]string(nil), operation.ModelTools.Extra...)
+	plan.RouterExtensions = make([]RouterExtensionPlanEntry, 0, len(operation.ModelTools.RouterExtensions))
+	for _, extension := range operation.ModelTools.RouterExtensions {
+		if s.options.ModelTools == nil {
+			return ModelToolPlan{}, vcp.NewModelToolError(vcp.RouterToolBindingMissing, string(extension), "planning", false)
+		}
+		resolved, errResolve := s.options.ModelTools.ResolveExtension(ctx, target, extension, now)
+		if errResolve != nil {
+			return ModelToolPlan{}, errors.Join(vcp.NewModelToolError(routerBindingErrorCode(errResolve), string(extension), "planning", false), errResolve)
+		}
+		plan.RouterExtensions = append(plan.RouterExtensions, RouterExtensionPlanEntry{
+			ID:                    extension,
+			RouterBindingID:       resolved.Binding.ID,
+			RouterBindingRevision: resolved.Binding.Revision,
+			RouterBinding:         &resolved,
+		})
+	}
+	return plan, nil
+}
+
+// hasProviderForceableTool reports whether required choice can be represented by at least one caller or Router function.
+// hasProviderForceableTool 报告 required 选择是否能够由至少一个调用方或 Router 函数真实表达。
+func hasProviderForceableTool(operation vcp.ConversationOperation) bool {
+	for _, tool := range operation.Tools {
+		if tool.Kind == vcp.ToolFunction || tool.Kind == vcp.ToolCustom {
+			return true
+		}
+	}
+	if len(operation.ModelTools.RouterExtensions) > 0 {
+		return true
+	}
+	for _, selection := range operation.ModelTools.Standard {
+		if selection.Mode == vcp.ModelToolRouter {
+			return true
+		}
+	}
+	return false
+}
+
+// routerBindingErrorCode preserves the stable distinction between absent policy and temporarily unavailable execution state.
+// routerBindingErrorCode 保留策略缺失与执行状态暂时不可用之间的稳定区别。
+func routerBindingErrorCode(errResolve error) vcp.ModelToolErrorCode {
+	if errors.Is(errResolve, routertool.ErrBindingNotFound) {
+		return vcp.RouterToolBindingMissing
+	}
+	return vcp.RouterToolBindingUnavailable
 }
 
 // executeAdmitted owns one immediate execution under a distinct durable lease so recovery cannot replay its provider side effect.
@@ -537,13 +735,23 @@ func (s *Service) unregisterActiveCancellation(executionID string) {
 func (s *Service) executeSynchronous(ctx context.Context, record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, preparedWorkflow *provider.PreparedWorkflowBinding, continuation *provider.ContinuationBinding) (Record, bool, error) {
 	excludedCredentials := make([]string, 0, maxSameProviderExecutionAttempts)
 	excludedEndpoints := make([]string, 0, maxSameProviderExecutionAttempts)
-	cycleAttempts := maximumCycleAttempts(record)
+	cycleAttempts := maximumSynchronousCycleAttempts(record)
+	routerCallsByBinding, seenRouterToolCalls, errHistory := routerToolHistory(record)
+	if errHistory != nil {
+		failed, errFail := s.fail(ctx, record, string(vcp.RouterToolResultInvalid), false)
+		return failed, false, errFail
+	}
+	if cycleAttempts <= 0 {
+		failed, errFail := s.fail(ctx, record, "same_provider_attempt_limit_reached", false)
+		return failed, false, errFail
+	}
+	routerRound := record.CompletedRouterToolRounds
 	for attemptIndex := 0; attemptIndex < cycleAttempts; attemptIndex++ {
 		providerRequest := providerRequestForRecord(record, binding, definition, materialized, preparedWorkflow, continuation)
 		// eventSink is present only for an explicitly streaming request and commits each decoded event before the Driver reads another frame.
 		// eventSink 仅用于显式流式请求，并在 Driver 读取下一帧前提交每个已解码事件。
 		var eventSink *durableProviderEventSink
-		if record.Request.Stream {
+		if record.Request.Stream && !hasRouterToolPlan(record.ModelToolPlan) {
 			eventSink = newDurableProviderEventSink(s, record)
 			providerRequest.EventSink = eventSink
 			providerRequest.ResourceSink = eventSink
@@ -557,7 +765,6 @@ func (s *Service) executeSynchronous(ctx context.Context, record Record, binding
 				return Record{}, false, errRefresh
 			}
 			record = refreshed
-			providerResult.Events = eventSink.filterPending(providerResult.Events)
 		}
 		semanticOutput := providerResultHasSemanticOutput(providerResult) || eventSink != nil && eventSink.emittedCount() > 0
 		attempt := Attempt{Sequence: uint32(len(record.Attempts) + 1), Target: record.Target, StartedAt: startedAt, EndedAt: endedAt, SemanticOutput: semanticOutput}
@@ -620,6 +827,118 @@ func (s *Service) executeSynchronous(ctx context.Context, record Record, binding
 			}
 			return failed, false, nil
 		}
+		routerCalls, errRouterCalls := routerToolCalls(providerResult, record.ModelToolPlan)
+		if errRouterCalls != nil {
+			attempt.FailureCategory = "invalid_provider_result"
+			updated, errPersist := s.persistAttempt(ctx, record, attempt, nil)
+			if errPersist != nil {
+				return Record{}, false, errPersist
+			}
+			failed, errFail := s.fail(ctx, updated, stableFailureCode(errRouterCalls), false)
+			return failed, false, errFail
+		}
+		if len(routerCalls) > 0 {
+			if len(providerResult.GeneratedResources) > 0 {
+				attempt.FailureCategory = "invalid_provider_result"
+				updated, errPersist := s.persistAttempt(ctx, record, attempt, nil)
+				if errPersist != nil {
+					return Record{}, false, errPersist
+				}
+				failed, errFail := s.fail(ctx, updated, "router_tool_round_returned_generated_resources", false)
+				return failed, false, errFail
+			}
+			attempt.Succeeded = true
+			attempt.Usage, _ = usageObservationForResult(providerResult)
+			record.Attempts = append(record.Attempts, attempt)
+			s.recordSuccessfulRequest(ctx, providerRequest)
+			routerRound++
+			for _, routerCall := range routerCalls {
+				toolCallID := routerCall.Output.ToolCall.ToolCallID
+				if _, exists := seenRouterToolCalls[toolCallID]; exists {
+					failed, errFail := s.fail(ctx, record, "duplicate_router_tool_call", false)
+					return failed, false, errFail
+				}
+				seenRouterToolCalls[toolCallID] = struct{}{}
+				bindingID := routerCall.Plan.RouterBinding.Binding.ID
+				routerCallsByBinding[bindingID]++
+				if routerCallsByBinding[bindingID] > routerCall.Plan.RouterBinding.Binding.MaximumCalls {
+					failed, errFail := s.fail(ctx, record, string(vcp.RouterToolRoundLimitExceeded), false)
+					return failed, false, errFail
+				}
+			}
+			startedEvents := make([]ModelToolEvent, 0, len(routerCalls))
+			for _, routerCall := range routerCalls {
+				startedEvents = append(startedEvents, ModelToolEvent{
+					ToolID:     routerCall.Plan.ToolID(),
+					Stage:      ModelToolStageRouterCallStarted,
+					Mode:       vcp.ModelToolRouter,
+					ToolCallID: routerCall.Output.ToolCall.ToolCallID,
+					Round:      routerRound,
+				})
+			}
+			record, errRouterCalls = s.appendModelToolEvents(ctx, record, startedEvents)
+			if errRouterCalls != nil {
+				return Record{}, false, errRouterCalls
+			}
+			routerResults := s.executeRouterToolCalls(ctx, record, routerCalls, routerRound, record.Request.Payload.Conversation.ToolPolicy.Parallel)
+			// candidate isolates all parent-context injections until every parallel child result is valid.
+			// candidate 隔离全部父上下文注入，直到每个并行子执行结果均有效。
+			candidate := record
+			completedEvents := make([]ModelToolEvent, 0, len(routerResults)*2)
+			resumedEvents := make([]ModelToolEvent, 0, len(routerResults)*2)
+			for index, routerResult := range routerResults {
+				routerCall := routerCalls[index]
+				if routerResult.Err != nil {
+					if routerResult.ChildExecutionID != "" {
+						completedEvents = append(completedEvents, ModelToolEvent{
+							ToolID:           routerCall.Plan.ToolID(),
+							Stage:            ModelToolStageChildCreated,
+							Mode:             vcp.ModelToolRouter,
+							ToolCallID:       routerCall.Output.ToolCall.ToolCallID,
+							ChildExecutionID: routerResult.ChildExecutionID,
+							Round:            routerRound,
+						})
+					}
+					completedEvents = append(completedEvents, ModelToolEvent{
+						ToolID:           routerCall.Plan.ToolID(),
+						Stage:            ModelToolStageChildFailed,
+						Mode:             vcp.ModelToolRouter,
+						ToolCallID:       routerCall.Output.ToolCall.ToolCallID,
+						ChildExecutionID: routerResult.ChildExecutionID,
+						Round:            routerRound,
+					})
+					record, errRouterCalls = s.appendModelToolEvents(ctx, record, completedEvents)
+					if errRouterCalls != nil {
+						return Record{}, false, errRouterCalls
+					}
+					failed, errFail := s.fail(ctx, record, stableFailureCode(routerResult.Err), retryableFailure(routerResult.Err))
+					return failed, false, errFail
+				}
+				completedEvents = append(completedEvents,
+					ModelToolEvent{ToolID: routerCall.Plan.ToolID(), Stage: ModelToolStageChildCreated, Mode: vcp.ModelToolRouter, ToolCallID: routerCall.Output.ToolCall.ToolCallID, ChildExecutionID: routerResult.ChildExecutionID, Round: routerRound},
+					ModelToolEvent{ToolID: routerCall.Plan.ToolID(), Stage: ModelToolStageChildCompleted, Mode: vcp.ModelToolRouter, ToolCallID: routerCall.Output.ToolCall.ToolCallID, ChildExecutionID: routerResult.ChildExecutionID, Round: routerRound},
+				)
+				if errAppend := appendRouterToolResult(&candidate, routerCall, routerResult.ModelResult, routerResult.ChildExecutionID, routerRound); errAppend != nil {
+					record, errRouterCalls = s.appendModelToolEvents(ctx, record, completedEvents)
+					if errRouterCalls != nil {
+						return Record{}, false, errRouterCalls
+					}
+					errResult := errors.Join(vcp.NewModelToolError(vcp.RouterToolResultInvalid, routerCall.Plan.ToolID(), "result", false), errAppend)
+					failed, errFail := s.fail(ctx, record, stableFailureCode(errResult), false)
+					return failed, false, errFail
+				}
+				resumedEvents = append(resumedEvents,
+					ModelToolEvent{ToolID: routerCall.Plan.ToolID(), Stage: ModelToolStageResultInjected, Mode: vcp.ModelToolRouter, ToolCallID: routerCall.Output.ToolCall.ToolCallID, ChildExecutionID: routerResult.ChildExecutionID, Round: routerRound},
+					ModelToolEvent{ToolID: routerCall.Plan.ToolID(), Stage: ModelToolStageParentResumed, Mode: vcp.ModelToolRouter, ToolCallID: routerCall.Output.ToolCall.ToolCallID, ChildExecutionID: routerResult.ChildExecutionID, Round: routerRound},
+				)
+			}
+			record = candidate
+			completedEvents = append(completedEvents, resumedEvents...)
+			if errPersist := s.persistRouterToolRound(ctx, &record, completedEvents); errPersist != nil {
+				return Record{}, false, errPersist
+			}
+			continue
+		}
 		attempt.Succeeded = true
 		attempt.Usage, _ = usageObservationForResult(providerResult)
 		record.Attempts = append(record.Attempts, attempt)
@@ -638,6 +957,11 @@ func (s *Service) executeSynchronous(ctx context.Context, record Record, binding
 			if errRetrySucceeded != nil {
 				return Record{}, false, errRetrySucceeded
 			}
+		}
+		if eventSink != nil {
+			// Only persistence receives the uncommitted suffix; validation above always proves the complete provider event history.
+			// 仅持久化阶段接收尚未提交的后缀；上方校验始终证明完整的供应商事件历史。
+			providerResult.Events = eventSink.filterPending(providerResult.Events)
 		}
 		return s.succeed(ctx, record, providerResult, generatedResources)
 	}
@@ -740,21 +1064,37 @@ func validateMaterializedInputBudget(budget vcp.OperationBudget, inputs []resour
 // executionContextForBudget creates a deadline tied to durable admission rather than retry start time.
 // executionContextForBudget 创建绑定持久接收时间而非重试开始时间的截止 Context。
 func executionContextForBudget(ctx context.Context, record Record) (context.Context, context.CancelFunc) {
-	if record.Request.Budget.MaxExecutionMilliseconds == nil {
+	deadline, bounded := executionDeadline(record)
+	if !bounded {
 		return context.WithCancel(ctx)
 	}
-	deadline := record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
 	return context.WithDeadline(ctx, deadline)
 }
 
 // executionBudgetExpired reports whether the caller's durable wall-clock ceiling has elapsed.
 // executionBudgetExpired 表示调用方的持久墙钟上限是否已经届满。
 func executionBudgetExpired(record Record, now time.Time) bool {
-	if record.Request.Budget.MaxExecutionMilliseconds == nil {
+	deadline, bounded := executionDeadline(record)
+	if !bounded {
 		return false
 	}
-	deadline := record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
 	return !deadline.After(now)
+}
+
+// executionDeadline returns the earliest caller budget or hard Router-parent ceiling tied to durable admission.
+// executionDeadline 返回绑定持久接收时间的调用方预算或 Router 父执行硬上限中的最早值。
+func executionDeadline(record Record) (time.Time, bool) {
+	var deadline time.Time
+	if record.Request.Budget.MaxExecutionMilliseconds != nil {
+		deadline = record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
+	}
+	if hasRouterToolPlan(record.ModelToolPlan) {
+		routerDeadline := record.CreatedAt.Add(maximumRouterParentExecutionDuration)
+		if deadline.IsZero() || routerDeadline.Before(deadline) {
+			deadline = routerDeadline
+		}
+	}
+	return deadline, !deadline.IsZero()
 }
 
 // generatedResourceProvenance derives safe immutable origin facts from the accepted execution snapshot.
@@ -769,6 +1109,9 @@ func validateRequestAgainstTarget(request vcp.ExecutionRequest, target resolve.T
 	if request.Stream && !target.ModelCapabilities.Delivery.Streaming && target.SubjectKind == resolve.ExecutionSubjectModel {
 		return fmt.Errorf("%w: selected profile does not support streaming", vcp.ErrInvalidRequest)
 	}
+	if !request.Stream && !target.ModelCapabilities.Delivery.Synchronous && !target.ModelCapabilities.Delivery.Asynchronous && target.SubjectKind == resolve.ExecutionSubjectModel {
+		return fmt.Errorf("%w: selected profile requires streaming or asynchronous execution", vcp.ErrInvalidRequest)
+	}
 	if target.SubjectKind != resolve.ExecutionSubjectModel {
 		return nil
 	}
@@ -777,10 +1120,28 @@ func validateRequestAgainstTarget(request vcp.ExecutionRequest, target resolve.T
 	}
 	switch request.Operation {
 	case vcp.OperationConversationRespond:
+		if errTokens := validateConversationTokenRequest(*request.Payload.Conversation, target); errTokens != nil {
+			return errTokens
+		}
+		requestedOutputs := request.Payload.Conversation.GenerationPolicy.OutputModalities
+		if len(requestedOutputs) == 0 {
+			requestedOutputs = []string{"text"}
+		}
+		for _, modality := range requestedOutputs {
+			if !containsExecutionString(target.ModelCapabilities.OutputModalities, modality) {
+				return fmt.Errorf("%w: selected profile does not support output modality %s", vcp.ErrInvalidRequest, modality)
+			}
+		}
+		if audio := request.Payload.Conversation.GenerationPolicy.AudioOutput; audio != nil && !supportsConversationAudioOutput(target.ModelCapabilities.MediaOutputs, audio.OutputFormat) {
+			return fmt.Errorf("%w: selected profile does not support conversational audio format %s", vcp.ErrInvalidRequest, audio.OutputFormat)
+		}
 		for _, tool := range request.Payload.Conversation.Tools {
-			if isProviderHostedTool(tool.Kind) && !containsHostedTool(target.ModelCapabilities.HostedTools, tool.Kind) {
+			if isProviderHostedTool(tool.Kind) && !containsHostedTool(target.ModelCapabilities, tool.Kind) {
 				return fmt.Errorf("%w: selected profile does not support hosted tool %s", vcp.ErrInvalidRequest, tool.Kind)
 			}
+		}
+		if errModelTools := validateModelToolSelectionAgainstTarget(*request.Payload.Conversation, target.ModelCapabilities, request.Stream); errModelTools != nil {
+			return errModelTools
 		}
 		return validateConversationMediaRequest(request, target.ModelCapabilities.MediaInputs)
 	case vcp.OperationMediaAnalyze:
@@ -794,15 +1155,25 @@ func validateRequestAgainstTarget(request vcp.ExecutionRequest, target resolve.T
 	}
 }
 
-// isProviderHostedTool reports tool kinds executed by an upstream provider rather than Vulcan Code.
-// isProviderHostedTool 表示由上游供应商而非 Vulcan Code 执行的工具类型。
-func isProviderHostedTool(kind vcp.ToolKind) bool {
-	return kind == vcp.ToolNativeWebSearch || kind == vcp.ToolProviderFileSearch || kind == vcp.ToolProviderCodeInterpreter || kind == vcp.ToolProviderComputerUse
+// validateConversationTokenRequest enforces known output ceilings under the fixed shared-context semantic.
+// validateConversationTokenRequest 按固定共享上下文语义强制执行已知输出上限。
+func validateConversationTokenRequest(operation vcp.ConversationOperation, target resolve.Target) error {
+	if operation.GenerationPolicy.MaxOutputTokens == nil {
+		return nil
+	}
+	requested := int64(*operation.GenerationPolicy.MaxOutputTokens)
+	if target.TokenLimits.MaxOutputTokens.Known && requested > target.TokenLimits.MaxOutputTokens.Value {
+		return fmt.Errorf("%w: requested max_output_tokens exceeds the selected profile output ceiling", vcp.ErrInvalidRequest)
+	}
+	if target.EffectiveContextWindow.Known && requested > target.EffectiveContextWindow.Value {
+		return fmt.Errorf("%w: requested max_output_tokens exceeds the selected account shared context window", vcp.ErrInvalidRequest)
+	}
+	return nil
 }
 
-// containsHostedTool reports exact membership in a profile's provider-hosted tools.
-// containsHostedTool 报告规格供应商托管工具中的精确成员关系。
-func containsHostedTool(values []vcp.ToolKind, target vcp.ToolKind) bool {
+// containsExecutionString reports exact membership in one target-owned normalized string set.
+// containsExecutionString 报告一个 Target 所有规范化字符串集合中的精确成员关系。
+func containsExecutionString(values []string, target string) bool {
 	for _, value := range values {
 		if value == target {
 			return true
@@ -811,13 +1182,147 @@ func containsHostedTool(values []vcp.ToolKind, target vcp.ToolKind) bool {
 	return false
 }
 
+// supportsConversationAudioOutput verifies one callable streaming audio contract and exact file format.
+// supportsConversationAudioOutput 校验一个可调用的流式音频合同及精确文件格式。
+func supportsConversationAudioOutput(outputs []catalog.MediaOutputCapability, format string) bool {
+	for _, output := range outputs {
+		if output.Kind != vcp.MediaAudio || output.Level != catalog.CapabilityNative || !output.Delivery.Streaming {
+			continue
+		}
+		if containsExecutionString(output.Formats, format) {
+			return true
+		}
+	}
+	return false
+}
+
+// isProviderHostedTool reports tool kinds executed by an upstream provider rather than Vulcan Code.
+// isProviderHostedTool 表示由上游供应商而非 Vulcan Code 执行的工具类型。
+func isProviderHostedTool(kind vcp.ToolKind) bool {
+	return kind == vcp.ToolNativeWebSearch || kind == vcp.ToolProviderFileSearch || kind == vcp.ToolProviderCodeInterpreter || kind == vcp.ToolProviderComputerUse
+}
+
+// containsHostedTool reports exact legacy membership and the closed standard replacement during migration.
+// containsHostedTool 在迁移期间报告精确旧成员关系及其封闭标准替代。
+func containsHostedTool(capabilities catalog.ModelCapabilities, target vcp.ToolKind) bool {
+	for _, value := range capabilities.HostedTools {
+		if value == target {
+			return true
+		}
+	}
+	if target == vcp.ToolNativeWebSearch {
+		return capabilities.SupportsNativeStandardTool(vcp.StandardModelToolWebSearch)
+	}
+	return false
+}
+
+// validateModelToolSelectionAgainstTarget verifies exact profile support and provider constraints before dispatch.
+// validateModelToolSelectionAgainstTarget 在调度前校验精确规格支持与供应商约束。
+func validateModelToolSelectionAgainstTarget(operation vcp.ConversationOperation, capabilities catalog.ModelCapabilities, stream bool) error {
+	// standardByKind prevents request-time inference from unrelated model capabilities.
+	// standardByKind 防止在请求时从无关模型能力推断工具支持。
+	standardByKind := make(map[vcp.StandardModelToolKind]catalog.StandardModelToolCapability, len(capabilities.StandardTools))
+	for _, capability := range capabilities.StandardTools {
+		standardByKind[capability.Kind] = capability
+	}
+	// enabledStandard records exact dependency satisfaction.
+	// enabledStandard 记录精确依赖满足情况。
+	enabledStandard := make(map[vcp.StandardModelToolKind]vcp.ModelToolMode, len(operation.ModelTools.Standard))
+	for _, selection := range operation.ModelTools.Standard {
+		if selection.Mode != vcp.ModelToolDisabled {
+			enabledStandard[selection.Kind] = selection.Mode
+		}
+	}
+	for _, selection := range operation.ModelTools.Standard {
+		if selection.Mode == vcp.ModelToolDisabled {
+			continue
+		}
+		if selection.Mode == vcp.ModelToolRouter {
+			if !callableCapabilityLevel(capabilities.ToolCalling) {
+				return vcp.NewModelToolError(vcp.ModelToolModeNotSupported, string(selection.Kind), "validation", false)
+			}
+			if operation.ToolPolicy.Parallel && !callableCapabilityLevel(capabilities.ParallelToolCalls) {
+				return vcp.NewModelToolError(vcp.ModelToolConflictsWithCallerTools, string(selection.Kind), "validation", false)
+			}
+			continue
+		}
+		capability, exists := standardByKind[selection.Kind]
+		if !exists || !capability.Native {
+			return vcp.NewModelToolError(vcp.ModelToolNotSupported, string(selection.Kind), "validation", false)
+		}
+		for _, requirement := range capability.Requires {
+			if enabledStandard[requirement] == vcp.ModelToolDisabled || enabledStandard[requirement] == "" {
+				return vcp.NewModelToolError(vcp.ModelToolDependencyMissing, string(selection.Kind), "validation", false)
+			}
+		}
+		if capability.RequiresStreaming && !stream {
+			return vcp.NewModelToolError(vcp.ModelToolStreamingRequired, string(selection.Kind), "validation", false)
+		}
+		if capability.RequiresReasoning && !reasoningEnabled(operation.ReasoningPolicy) {
+			return vcp.NewModelToolError(vcp.ModelToolReasoningRequired, string(selection.Kind), "validation", false)
+		}
+		if !capability.AllowsCallerTools && len(operation.Tools) > 0 {
+			return vcp.NewModelToolError(vcp.ModelToolConflictsWithCallerTools, string(selection.Kind), "validation", false)
+		}
+	}
+	// enabledExtra supports exact same-profile dependency validation.
+	// enabledExtra 支持精确的同规格依赖校验。
+	enabledExtra := make(map[string]struct{}, len(operation.ModelTools.Extra))
+	for _, id := range operation.ModelTools.Extra {
+		enabledExtra[id] = struct{}{}
+	}
+	for _, id := range operation.ModelTools.Extra {
+		capability, exists := capabilities.ExtraTool(id)
+		if !exists {
+			return vcp.NewModelToolError(vcp.ModelExtraToolNotSupported, id, "validation", false)
+		}
+		for _, requirement := range capability.RequiresStandard {
+			if enabledStandard[requirement] == vcp.ModelToolDisabled || enabledStandard[requirement] == "" {
+				return vcp.NewModelToolError(vcp.ModelToolDependencyMissing, id, "validation", false)
+			}
+		}
+		for _, requirement := range capability.RequiresExtra {
+			if _, exists := enabledExtra[requirement]; !exists {
+				return vcp.NewModelToolError(vcp.ModelToolDependencyMissing, id, "validation", false)
+			}
+		}
+		if capability.RequiresStreaming && !stream {
+			return vcp.NewModelToolError(vcp.ModelToolStreamingRequired, id, "validation", false)
+		}
+		if capability.RequiresReasoning && !reasoningEnabled(operation.ReasoningPolicy) {
+			return vcp.NewModelToolError(vcp.ModelToolReasoningRequired, id, "validation", false)
+		}
+		if !capability.AllowsCallerTools && len(operation.Tools) > 0 {
+			return vcp.NewModelToolError(vcp.ModelToolConflictsWithCallerTools, id, "validation", false)
+		}
+	}
+	for _, extension := range operation.ModelTools.RouterExtensions {
+		if !callableCapabilityLevel(capabilities.ToolCalling) {
+			return vcp.NewModelToolError(vcp.ModelToolModeNotSupported, string(extension), "validation", false)
+		}
+		if operation.ToolPolicy.Parallel && !callableCapabilityLevel(capabilities.ParallelToolCalls) {
+			return vcp.NewModelToolError(vcp.ModelToolConflictsWithCallerTools, string(extension), "validation", false)
+		}
+	}
+	return nil
+}
+
+// reasoningEnabled reports explicit reasoning intent without inferring provider defaults.
+// reasoningEnabled 报告显式思考意图且不推断供应商默认值。
+func reasoningEnabled(policy vcp.ReasoningPolicy) bool {
+	if policy.Enabled != nil {
+		return *policy.Enabled
+	}
+	return policy.Effort != "" && policy.Effort != "none" || policy.BudgetTokens != nil || policy.RequestedSummaryMode() != ""
+}
+
 // validateConversationMediaRequest enforces role, placement, interaction mode, and feature-combination declarations for media blocks.
 // validateConversationMediaRequest 对媒体块强制执行角色、位置、交互模式与功能组合声明。
 func validateConversationMediaRequest(request vcp.ExecutionRequest, capabilities []catalog.MediaInputCapability) error {
 	operation := *request.Payload.Conversation
 	for _, item := range operation.Context {
 		hasText := false
-		hasMedia := false
+		hasNativeMedia := false
 		for _, block := range item.Content {
 			if block.Type == vcp.ContentText && strings.TrimSpace(block.Text) != "" {
 				hasText = true
@@ -826,7 +1331,13 @@ func validateConversationMediaRequest(request vcp.ExecutionRequest, capabilities
 			if !media {
 				continue
 			}
-			hasMedia = true
+			if routerExtensionClaimsMedia(operation.ModelTools.RouterExtensions, kind) {
+				if item.Kind != vcp.ContextMessage {
+					return fmt.Errorf("%w: Router-managed %s input must belong to a message", vcp.ErrInvalidRequest, kind)
+				}
+				continue
+			}
+			hasNativeMedia = true
 			capability, exists := mediaCapabilityForKind(capabilities, kind)
 			if !exists || !callableCapabilityLevel(capability.Level) {
 				return fmt.Errorf("%w: selected profile does not support %s input", vcp.ErrInvalidRequest, kind)
@@ -838,7 +1349,7 @@ func validateConversationMediaRequest(request vcp.ExecutionRequest, capabilities
 				return errCombination
 			}
 		}
-		if !hasMedia {
+		if !hasNativeMedia {
 			continue
 		}
 		interaction := catalog.MediaInteractionMixedConversation
@@ -848,6 +1359,9 @@ func validateConversationMediaRequest(request vcp.ExecutionRequest, capabilities
 		for _, block := range item.Content {
 			kind, media := mediaKindForContentType(block.Type)
 			if !media {
+				continue
+			}
+			if routerExtensionClaimsMedia(operation.ModelTools.RouterExtensions, kind) {
 				continue
 			}
 			capability, _ := mediaCapabilityForKind(capabilities, kind)
@@ -860,6 +1374,17 @@ func validateConversationMediaRequest(request vcp.ExecutionRequest, capabilities
 		}
 	}
 	return nil
+}
+
+// routerExtensionClaimsMedia reports whether the request explicitly delegates one media family away from the parent model.
+// routerExtensionClaimsMedia 报告请求是否显式将一种媒体类别委托给父模型之外的 Router 增强能力。
+func routerExtensionClaimsMedia(extensions []vcp.RouterExtensionKind, kind vcp.MediaKind) bool {
+	for _, extension := range extensions {
+		if extensionAcceptsMediaKind(extension, kind) {
+			return true
+		}
+	}
+	return false
 }
 
 // validateMediaAnalyzeRequest enforces the dedicated analysis interaction and declared semantic input roles.
@@ -883,7 +1408,10 @@ func validateMediaFeatureCombination(operation vcp.ConversationOperation, stream
 	if stream && !callableCapabilityLevel(capability.Compatibility.Streaming) {
 		return fmt.Errorf("%w: streaming is not compatible with selected media input", vcp.ErrInvalidRequest)
 	}
-	if (strings.TrimSpace(operation.ReasoningPolicy.Effort) != "" || operation.ReasoningPolicy.RequestedSummaryMode() != "" || strings.TrimSpace(operation.ReasoningPolicy.ContinuationID) != "") && !callableCapabilityLevel(capability.Compatibility.Reasoning) {
+	// explicitReasoning excludes a pure disable request because disabling cannot invoke a media-incompatible reasoning path.
+	// explicitReasoning 排除纯关闭请求，因为关闭推理不会触发与媒体不兼容的推理路径。
+	explicitReasoning := operation.ReasoningPolicy.Enabled != nil && *operation.ReasoningPolicy.Enabled || operation.ReasoningPolicy.BudgetTokens != nil || strings.TrimSpace(operation.ReasoningPolicy.Effort) != "" && strings.TrimSpace(operation.ReasoningPolicy.Effort) != "none" || operation.ReasoningPolicy.RequestedSummaryMode() != "" || strings.TrimSpace(operation.ReasoningPolicy.ContinuationID) != ""
+	if explicitReasoning && !callableCapabilityLevel(capability.Compatibility.Reasoning) {
 		return fmt.Errorf("%w: reasoning is not compatible with selected media input", vcp.ErrInvalidRequest)
 	}
 	if len(operation.GenerationPolicy.StrictJSONSchema) > 0 && !callableCapabilityLevel(capability.Compatibility.StructuredOutput) {
@@ -1023,8 +1551,21 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 	if _, errUsage := usageObservationForResult(result); errUsage != nil {
 		return errUsage
 	}
+	hasCanonicalResponse := strings.TrimSpace(result.Response.ResponseID) != "" ||
+		result.Response.Status != "" ||
+		len(result.Response.Items) != 0 ||
+		len(result.Response.Citations) != 0 ||
+		result.Response.Usage != nil ||
+		strings.TrimSpace(result.Response.FinishReason) != "" ||
+		strings.TrimSpace(result.Response.ErrorCode) != "" ||
+		len(result.Response.Warnings) != 0 ||
+		len(result.Events) != 0
+	if request.Operation != vcp.OperationConversationRespond && request.Operation != vcp.OperationMediaAnalyze && hasCanonicalResponse {
+		return fmt.Errorf("%w: operation returned a foreign canonical response or event history", ErrInvalidProviderResult)
+	}
 	hasGenerated := len(result.GeneratedResources) > 0
 	hasTranscript := result.Transcript != nil
+	hasTranscriptions := len(result.Transcriptions) != 0
 	hasMusicPreparation := result.MusicCoverPreparation != nil
 	hasExtract := result.Extract != nil
 	switch request.Operation {
@@ -1032,7 +1573,7 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		operation := *request.Payload.EmbeddingCreate
 		if (complete && len(result.Embeddings) != len(operation.Inputs)) ||
 			(!complete && (len(result.Embeddings) == 0 || len(result.Embeddings) > len(operation.Inputs))) ||
-			len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
+			len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasTranscriptions || hasMusicPreparation {
 			return fmt.Errorf("%w: embedding result union or batch count is invalid", ErrInvalidProviderResult)
 		}
 		for index, item := range result.Embeddings {
@@ -1048,7 +1589,7 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationRerankDocuments:
-		if len(result.Embeddings) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasTranscriptions || hasMusicPreparation {
 			return fmt.Errorf("%w: rerank result union is invalid", ErrInvalidProviderResult)
 		}
 		if errValidate := request.Payload.RerankDocuments.ValidateResults(result.Rerank); errValidate != nil {
@@ -1056,22 +1597,22 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationSearchWeb:
-		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search == nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search == nil || hasExtract || hasGenerated || hasTranscript || hasTranscriptions || hasMusicPreparation {
 			return fmt.Errorf("%w: search result union is invalid", ErrInvalidProviderResult)
 		}
-		return nil
+		return validateWebSearchResponse(*request.Payload.SearchWeb, *result.Search)
 	case vcp.OperationWebExtract:
-		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || !hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || !hasExtract || hasGenerated || hasTranscript || hasTranscriptions || hasMusicPreparation {
 			return fmt.Errorf("%w: web extraction result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateWebExtractResponse(*result.Extract)
 	case vcp.OperationImageGenerate, vcp.OperationImageEdit:
-		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaImage) || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasMusicPreparation {
+		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaImage) || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasTranscriptions || hasMusicPreparation {
 			return fmt.Errorf("%w: image result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationVideoGenerate, vcp.OperationVideoEdit, vcp.OperationVideoExtend:
-		if hasTranscript || hasMusicPreparation || hasExtract {
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasTranscript || hasTranscriptions || hasMusicPreparation || hasExtract {
 			return fmt.Errorf("%w: video result union is invalid", ErrInvalidProviderResult)
 		}
 		if complete && (!hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaVideo)) {
@@ -1082,18 +1623,18 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationSpeechSynthesize:
-		if !hasGenerated || !generatedSpeechKindsAre(result.GeneratedResources) || hasTranscript || hasMusicPreparation || hasExtract {
+		if !hasGenerated || !generatedSpeechKindsAre(result.GeneratedResources) || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasTranscript || hasTranscriptions || hasMusicPreparation || hasExtract {
 			return fmt.Errorf("%w: speech result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationMusicGenerate, vcp.OperationMusicCover:
-		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaAudio) || hasTranscript || hasMusicPreparation || hasExtract {
+		if !hasGenerated || !generatedKindsAre(result.GeneratedResources, vcp.MediaAudio) || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasTranscript || hasTranscriptions || hasMusicPreparation || hasExtract {
 			return fmt.Errorf("%w: audio result union is invalid", ErrInvalidProviderResult)
 		}
 		return validateGeneratedResources(result.GeneratedResources)
 	case vcp.OperationMusicCoverPrepare:
 		preparation := result.MusicCoverPreparation
-		if hasGenerated || hasTranscript || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || preparation == nil || strings.TrimSpace(preparation.ProviderHandle) == "" || strings.TrimSpace(preparation.FormattedLyrics) == "" || preparation.AudioDurationSeconds <= 0 || preparation.ExpiresAt.IsZero() || len(preparation.Structure) == 0 {
+		if hasGenerated || hasTranscript || hasTranscriptions || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || preparation == nil || strings.TrimSpace(preparation.ProviderHandle) == "" || strings.TrimSpace(preparation.FormattedLyrics) == "" || preparation.AudioDurationSeconds <= 0 || preparation.ExpiresAt.IsZero() || len(preparation.Structure) == 0 {
 			return fmt.Errorf("%w: music cover preparation result union is invalid", ErrInvalidProviderResult)
 		}
 		for _, segment := range preparation.Structure {
@@ -1103,27 +1644,247 @@ func validateProviderResult(request vcp.ExecutionRequest, result provider.Execut
 		}
 		return nil
 	case vcp.OperationSpeechTranscribe:
-		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || !hasTranscript || hasMusicPreparation {
+		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasMusicPreparation {
 			return fmt.Errorf("%w: speech transcription result union is invalid", ErrInvalidProviderResult)
 		}
-		if errTranscript := result.Transcript.Validate(); errTranscript != nil {
-			return fmt.Errorf("%w: %v", ErrInvalidProviderResult, errTranscript)
-		}
-		if requested := request.Payload.SpeechTranscribe.CandidateCount; requested > 0 && len(result.Transcript.Candidates) > requested {
-			return fmt.Errorf("%w: speech transcription returned more candidates than requested", ErrInvalidProviderResult)
-		}
-		return nil
-	case vcp.OperationConversationRespond, vcp.OperationMediaAnalyze:
-		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasMusicPreparation {
+		return validateTranscriptionResults(*request.Payload.SpeechTranscribe, result)
+	case vcp.OperationConversationRespond:
+		audioRequested := request.Payload.Conversation.GenerationPolicy.AudioOutput != nil
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasTranscriptions || hasMusicPreparation || audioRequested != hasGenerated {
 			return fmt.Errorf("%w: operation returned a mismatched typed result", ErrInvalidProviderResult)
 		}
+		if errResponse := validateCanonicalProviderResponse(result.Response, result.Events); errResponse != nil {
+			return errResponse
+		}
+		if hasGenerated {
+			if !generatedKindsAre(result.GeneratedResources, vcp.MediaAudio) {
+				return fmt.Errorf("%w: conversation audio result union is invalid", ErrInvalidProviderResult)
+			}
+			return validateGeneratedResources(result.GeneratedResources)
+		}
 		return nil
+	case vcp.OperationMediaAnalyze:
+		if hasGenerated || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasTranscript || hasTranscriptions || hasMusicPreparation {
+			return fmt.Errorf("%w: operation returned a mismatched typed result", ErrInvalidProviderResult)
+		}
+		if errResponse := validateCanonicalProviderResponse(result.Response, result.Events); errResponse != nil {
+			return errResponse
+		}
+		return validateMediaAnalysisResponse(result.Response)
 	default:
-		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasMusicPreparation {
+		if len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || hasExtract || hasGenerated || hasTranscript || hasTranscriptions || hasMusicPreparation {
 			return fmt.Errorf("%w: operation returned a mismatched typed result", ErrInvalidProviderResult)
 		}
 		return nil
 	}
+}
+
+// validateCanonicalProviderResponse proves that the published response is the exact deterministic reduction of its semantic events.
+// validateCanonicalProviderResponse 证明公开响应正是其语义事件的精确定义性归并结果。
+func validateCanonicalProviderResponse(response vcp.Response, events []vcp.Event) error {
+	if strings.TrimSpace(response.ResponseID) == "" || len(events) == 0 {
+		return fmt.Errorf("%w: canonical response identity or event history is missing", ErrInvalidProviderResult)
+	}
+	reducer := vcp.NewReducer(response.ResponseID)
+	// seenEventIDs rejects replay duplicates inside one provider result while the reducer remains replay-tolerant for external consumers.
+	// seenEventIDs 拒绝单次供应商结果内部的重放重复项，同时保留 Reducer 面向外部消费者的重放容错能力。
+	seenEventIDs := make(map[string]struct{}, len(events))
+	// terminalSeen ensures no semantic fact can appear after the aggregate's successful terminal.
+	// terminalSeen 确保聚合结果的成功终态之后不会再出现任何语义事实。
+	terminalSeen := false
+	for _, event := range events {
+		if terminalSeen {
+			return fmt.Errorf("%w: canonical response contains an event after its terminal", ErrInvalidProviderResult)
+		}
+		if _, duplicate := seenEventIDs[event.EventID]; duplicate {
+			return fmt.Errorf("%w: canonical response contains a duplicate event identifier", ErrInvalidProviderResult)
+		}
+		seenEventIDs[event.EventID] = struct{}{}
+		if errApply := reducer.Apply(event); errApply != nil {
+			return fmt.Errorf("%w: canonical response event history is invalid", ErrInvalidProviderResult)
+		}
+		terminalSeen = event.Type == vcp.EventResponseCompleted || event.Type == vcp.EventResponseIncomplete
+	}
+	reduced := reducer.Snapshot()
+	if !terminalSeen || reduced.Status != vcp.ResponseCompleted && reduced.Status != vcp.ResponseIncomplete {
+		return fmt.Errorf("%w: canonical response is not a successful terminal", ErrInvalidProviderResult)
+	}
+	reducedJSON, errReduced := json.Marshal(reduced)
+	if errReduced != nil {
+		return fmt.Errorf("%w: canonical reduced response cannot be encoded", ErrInvalidProviderResult)
+	}
+	responseJSON, errResponse := json.Marshal(response)
+	if errResponse != nil {
+		return fmt.Errorf("%w: canonical provider response cannot be encoded", ErrInvalidProviderResult)
+	}
+	if !bytes.Equal(reducedJSON, responseJSON) {
+		return fmt.Errorf("%w: canonical response differs from its semantic event history", ErrInvalidProviderResult)
+	}
+	return nil
+}
+
+// validateWebSearchResponse verifies closed evidence semantics, result identity, ordering, URLs, and request-owned limits.
+// validateWebSearchResponse 校验封闭证据语义、结果身份、顺序、URL 与请求方拥有的限制。
+func validateWebSearchResponse(operation vcp.WebSearchOperation, response vcp.WebSearchResponse) error {
+	if strings.TrimSpace(response.Query) == "" {
+		return fmt.Errorf("%w: web search response query is required", ErrInvalidProviderResult)
+	}
+	if operation.MaxResults != nil && len(response.Results) > *operation.MaxResults {
+		return fmt.Errorf("%w: web search returned more results than requested", ErrInvalidProviderResult)
+	}
+	validKinds := map[vcp.SearchEvidenceKind]struct{}{
+		vcp.SearchEvidenceProviderEvent:    {},
+		vcp.SearchEvidenceStructuredResult: {},
+		vcp.SearchEvidenceCitation:         {},
+		vcp.SearchEvidenceProviderContract: {},
+	}
+	observedKinds := make(map[vcp.SearchEvidenceKind]struct{}, len(response.Evidence.Kinds))
+	for _, kind := range response.Evidence.Kinds {
+		if _, supported := validKinds[kind]; !supported {
+			return fmt.Errorf("%w: web search evidence kind is outside the closed vocabulary", ErrInvalidProviderResult)
+		}
+		if _, duplicate := observedKinds[kind]; duplicate {
+			return fmt.Errorf("%w: web search evidence kinds contain a duplicate", ErrInvalidProviderResult)
+		}
+		observedKinds[kind] = struct{}{}
+	}
+	switch response.Evidence.Status {
+	case vcp.SearchExecutionConfirmed:
+		if len(observedKinds) == 0 {
+			return fmt.Errorf("%w: confirmed web search response has no evidence kind", ErrInvalidProviderResult)
+		}
+	case vcp.SearchExecutionRequestedUnverified, vcp.SearchExecutionNotPerformed:
+		if len(observedKinds) != 0 || len(response.Results) != 0 || len(response.Citations) != 0 || len(response.Sources) != 0 {
+			return fmt.Errorf("%w: unconfirmed web search response contains observed evidence", ErrInvalidProviderResult)
+		}
+	default:
+		return fmt.Errorf("%w: web search evidence status is outside the closed vocabulary", ErrInvalidProviderResult)
+	}
+	if operation.EvidenceRequirement == vcp.SearchEvidenceVerified && response.Evidence.Status != vcp.SearchExecutionConfirmed {
+		return fmt.Errorf("%w: verified web search request has no confirmed evidence", ErrInvalidProviderResult)
+	}
+	if len(response.Results) > 0 {
+		if _, declared := observedKinds[vcp.SearchEvidenceStructuredResult]; !declared {
+			return fmt.Errorf("%w: structured web search results have no matching evidence kind", ErrInvalidProviderResult)
+		}
+	}
+	if len(response.Citations) > 0 || len(response.Sources) > 0 {
+		if _, declared := observedKinds[vcp.SearchEvidenceCitation]; !declared {
+			return fmt.Errorf("%w: web search citations or sources have no matching evidence kind", ErrInvalidProviderResult)
+		}
+	}
+	for _, query := range response.Queries {
+		if strings.TrimSpace(query) == "" {
+			return fmt.Errorf("%w: web search response contains an empty observed query", ErrInvalidProviderResult)
+		}
+	}
+	resultIDs := make(map[string]struct{}, len(response.Results))
+	for index, result := range response.Results {
+		identifier := strings.TrimSpace(result.ID)
+		if identifier == "" || result.Rank != index+1 {
+			return fmt.Errorf("%w: web search result identity or order is invalid", ErrInvalidProviderResult)
+		}
+		if _, duplicate := resultIDs[identifier]; duplicate {
+			return fmt.Errorf("%w: duplicate web search result identifier", ErrInvalidProviderResult)
+		}
+		resultIDs[identifier] = struct{}{}
+		if _, errURL := transport.ValidateAbsoluteHTTPURL(result.URL); errURL != nil {
+			return fmt.Errorf("%w: web search result URL is invalid", ErrInvalidProviderResult)
+		}
+		if result.ProviderScore != nil && (math.IsNaN(*result.ProviderScore) || math.IsInf(*result.ProviderScore, 0)) {
+			return fmt.Errorf("%w: web search provider score is not finite", ErrInvalidProviderResult)
+		}
+	}
+	citationIDs := make(map[string]struct{}, len(response.Citations))
+	for _, citation := range response.Citations {
+		identifier := strings.TrimSpace(citation.ID)
+		if identifier == "" {
+			return fmt.Errorf("%w: web search citation identifier is required", ErrInvalidProviderResult)
+		}
+		if _, duplicate := citationIDs[identifier]; duplicate {
+			return fmt.Errorf("%w: duplicate web search citation identifier", ErrInvalidProviderResult)
+		}
+		citationIDs[identifier] = struct{}{}
+		if _, errURL := transport.ValidateAbsoluteHTTPURL(citation.URL); errURL != nil {
+			return fmt.Errorf("%w: web search citation URL is invalid", ErrInvalidProviderResult)
+		}
+		if citation.ResultID != "" {
+			if _, exists := resultIDs[citation.ResultID]; !exists {
+				return fmt.Errorf("%w: web search citation references an unknown result", ErrInvalidProviderResult)
+			}
+		}
+		hasStart := citation.Location.Start != nil
+		hasEnd := citation.Location.End != nil
+		if hasStart != hasEnd || (hasStart && (*citation.Location.Start < 0 || *citation.Location.End < *citation.Location.Start)) {
+			return fmt.Errorf("%w: web search citation location is invalid", ErrInvalidProviderResult)
+		}
+	}
+	for _, source := range response.Sources {
+		if strings.TrimSpace(source.Type) == "" {
+			return fmt.Errorf("%w: web search source type is required", ErrInvalidProviderResult)
+		}
+		if _, errURL := transport.ValidateAbsoluteHTTPURL(source.URL); errURL != nil {
+			return fmt.Errorf("%w: web search source URL is invalid", ErrInvalidProviderResult)
+		}
+	}
+	return nil
+}
+
+// validateMediaAnalysisResponse verifies that a completed analysis contains model-visible text rather than an empty default response.
+// validateMediaAnalysisResponse 校验已完成分析包含模型可见文本而不是空默认响应。
+// Parameters: response is the canonical provider conversation reduction used as the analysis result.
+// 参数：response 是作为分析结果使用的规范供应商会话归并。
+// Returns: nil only for one completed non-empty analysis response.
+// 返回：仅对一个已完成且非空的分析响应返回 nil。
+func validateMediaAnalysisResponse(response vcp.Response) error {
+	if strings.TrimSpace(response.ResponseID) == "" || response.Status != vcp.ResponseCompleted || strings.TrimSpace(response.ErrorCode) != "" || len(response.Items) == 0 {
+		return fmt.Errorf("%w: media analysis response is incomplete", ErrInvalidProviderResult)
+	}
+	for _, item := range response.Items {
+		if strings.TrimSpace(item.ItemID) == "" || item.Status != vcp.OutputItemCompleted {
+			return fmt.Errorf("%w: media analysis output item is incomplete", ErrInvalidProviderResult)
+		}
+		for _, block := range item.Content {
+			if block.Type == vcp.ContentText && strings.TrimSpace(block.Text) != "" {
+				return nil
+			}
+		}
+	}
+	return fmt.Errorf("%w: media analysis response contains no text result", ErrInvalidProviderResult)
+}
+
+// validateTranscriptionResults enforces the explicit single-result or ordered batch-result contract.
+// validateTranscriptionResults 强制执行显式单结果或有序批量结果合同。
+func validateTranscriptionResults(operation vcp.SpeechTranscribeOperation, result provider.ExecutionResult) error {
+	sources := operation.OrderedSources()
+	if len(sources) == 1 {
+		if result.Transcript == nil || len(result.Transcriptions) != 0 {
+			return fmt.Errorf("%w: single-source transcription requires one transcript", ErrInvalidProviderResult)
+		}
+		if errTranscript := result.Transcript.Validate(); errTranscript != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidProviderResult, errTranscript)
+		}
+		if operation.CandidateCount > 0 && len(operation.ChannelIDs) <= 1 && len(result.Transcript.Candidates) > operation.CandidateCount {
+			return fmt.Errorf("%w: speech transcription returned more candidates than requested", ErrInvalidProviderResult)
+		}
+		return nil
+	}
+	if result.Transcript != nil || len(result.Transcriptions) != len(sources) {
+		return fmt.Errorf("%w: batch transcription result count differs from the request", ErrInvalidProviderResult)
+	}
+	for index := range result.Transcriptions {
+		item := result.Transcriptions[index]
+		if item.InputID != sources[index].ID || item.ResourceID != sources[index].Resource.ResourceID {
+			return fmt.Errorf("%w: batch transcription result order or ownership differs from the request", ErrInvalidProviderResult)
+		}
+		if errValidate := item.Validate(); errValidate != nil {
+			return fmt.Errorf("%w: %v", ErrInvalidProviderResult, errValidate)
+		}
+		if operation.CandidateCount > 0 && len(operation.ChannelIDs) <= 1 && item.Transcript != nil && len(item.Transcript.Candidates) > operation.CandidateCount {
+			return fmt.Errorf("%w: batch transcription returned more candidates than requested", ErrInvalidProviderResult)
+		}
+	}
+	return nil
 }
 
 // validateWebExtractResponse verifies provider URLs and complete per-item extraction facts.
@@ -1705,9 +2466,81 @@ func taskExecutionRequest(record Record) provider.ExecutionRequest {
 // Returns: a provider request whose private execution copy never forwards the caller's idempotency key upstream.
 // 返回：一个使用私有执行副本且绝不向上游转发调用方幂等键的供应商请求。
 func providerRequestForRecord(record Record, binding transport.Binding, definition providerconfig.ProviderDefinition, materialized []resource.MaterializedInput, workflow *provider.PreparedWorkflowBinding, continuation *provider.ContinuationBinding) provider.ExecutionRequest {
-	request := record.Request
-	request.IdempotencyKey = record.ID
-	return provider.ExecutionRequest{Binding: binding, Definition: definition, Execution: &request, MaterializedInputs: materialized, LineageID: record.ID, Now: record.UpdatedAt, PreparedWorkflow: workflow, Continuation: continuation}
+	request := providerFacingExecutionRequest(record.Request)
+	request.IdempotencyKey = providerDispatchIdempotencyKey(record)
+	applyNativeModelToolDefinitions(&request)
+	applyRouterToolDefinitions(&request, record.ModelToolPlan)
+	applyProviderToolChoice(&request)
+	providerInputs := withholdRouterManagedMedia(&request, record.ModelToolPlan, materialized)
+	return provider.ExecutionRequest{Binding: binding, Definition: definition, Execution: &request, MaterializedInputs: providerInputs, LineageID: record.ID, Now: record.UpdatedAt, PreparedWorkflow: workflow, Continuation: continuation}
+}
+
+// providerDispatchIdempotencyKey returns one replay-stable identity for the current semantic parent round.
+// providerDispatchIdempotencyKey 为当前语义父轮次返回一个重放稳定身份。
+func providerDispatchIdempotencyKey(record Record) string {
+	if record.CompletedRouterToolRounds == 0 {
+		return record.ID
+	}
+	return routerChildIdentifier("parent_round", record.ID, "", record.CompletedRouterToolRounds)
+}
+
+// applyProviderToolChoice removes every provider-visible tool when the caller explicitly disables tool use.
+// applyProviderToolChoice 在调用方显式关闭工具使用时移除每个供应商可见工具。
+func applyProviderToolChoice(request *vcp.ExecutionRequest) {
+	if request == nil || request.Payload.Conversation == nil || request.Payload.Conversation.ToolPolicy.Choice != vcp.ToolChoiceNone {
+		return
+	}
+	request.Payload.Conversation.Tools = nil
+	request.Payload.Conversation.ModelTools = vcp.ModelToolSelection{}
+}
+
+// applyNativeModelToolDefinitions projects authoritative standard-tool selections into the existing provider adapter contract.
+// applyNativeModelToolDefinitions 将权威标准工具选择投影到现有供应商适配器合同。
+func applyNativeModelToolDefinitions(request *vcp.ExecutionRequest) {
+	if request == nil || request.Operation != vcp.OperationConversationRespond || request.Payload.Conversation == nil {
+		return
+	}
+	operation := request.Payload.Conversation
+	// webSearchSelection is present only when the new model_tools contract explicitly owns the legacy search projection.
+	// webSearchSelection 仅在新的 model_tools 合同明确拥有旧搜索投影时存在。
+	var webSearchSelection *vcp.StandardModelToolSelection
+	for index := range operation.ModelTools.Standard {
+		if operation.ModelTools.Standard[index].Kind == vcp.StandardModelToolWebSearch {
+			webSearchSelection = &operation.ModelTools.Standard[index]
+			break
+		}
+	}
+	if webSearchSelection == nil {
+		return
+	}
+	filtered := make([]vcp.ToolDefinition, 0, len(operation.Tools)+1)
+	for _, tool := range operation.Tools {
+		if tool.Kind != vcp.ToolNativeWebSearch {
+			filtered = append(filtered, tool)
+		}
+	}
+	if webSearchSelection.Mode == vcp.ModelToolNative {
+		filtered = append(filtered, vcp.ToolDefinition{Kind: vcp.ToolNativeWebSearch, Name: "web_search"})
+	}
+	operation.Tools = filtered
+}
+
+// providerFacingExecutionRequest isolates every conversation field mutated only for provider dispatch.
+// providerFacingExecutionRequest 隔离仅为供应商分派而修改的全部会话字段。
+func providerFacingExecutionRequest(source vcp.ExecutionRequest) vcp.ExecutionRequest {
+	cloned := source
+	if source.Payload.Conversation == nil {
+		return cloned
+	}
+	conversation := *source.Payload.Conversation
+	conversation.Tools = append([]vcp.ToolDefinition(nil), source.Payload.Conversation.Tools...)
+	conversation.Context = make([]vcp.ContextItem, len(source.Payload.Conversation.Context))
+	for index, item := range source.Payload.Conversation.Context {
+		conversation.Context[index] = item
+		conversation.Context[index].Content = append([]vcp.ContentBlock(nil), item.Content...)
+	}
+	cloned.Payload.Conversation = &conversation
+	return cloned
 }
 
 // requiresProviderTask reports an async-only model execution contract.
@@ -1963,18 +2796,29 @@ func executionRetryPolicy(request vcp.ExecutionRequest) normalizedRetryPolicy {
 func maximumCycleAttempts(record Record) int {
 	maximum := maxSameProviderExecutionAttempts
 	policy := executionRetryPolicy(record.Request)
-	if policy.maxAttempts == nil {
-		return maximum
+	if policy.maxAttempts != nil && int(*policy.maxAttempts) < maximum {
+		maximum = int(*policy.maxAttempts)
 	}
-	completed := uint32(len(record.Attempts))
-	if completed >= *policy.maxAttempts {
+	completed := len(record.Attempts)
+	if completed >= maximum {
 		return 0
 	}
-	remaining := int(*policy.maxAttempts - completed)
-	if remaining < maximum {
-		return remaining
+	return maximum - completed
+}
+
+// maximumSynchronousCycleAttempts bounds all remaining parent dispatches across process recovery and Router rounds.
+// maximumSynchronousCycleAttempts 跨进程恢复与 Router 轮次限制全部剩余父分派次数。
+func maximumSynchronousCycleAttempts(record Record) int {
+	maximum := maxSameProviderExecutionAttempts
+	policy := executionRetryPolicy(record.Request)
+	if policy.maxAttempts != nil && int(*policy.maxAttempts) < maximum {
+		maximum = int(*policy.maxAttempts)
 	}
-	return maximum
+	maximum += maximumRouterToolCalls(record.ModelToolPlan)
+	if len(record.Attempts) >= maximum {
+		return 0
+	}
+	return maximum - len(record.Attempts)
 }
 
 // scheduleRetry persists one future retry only for deferred, classified, pre-semantic transient failures.
@@ -2015,8 +2859,7 @@ func (s *Service) scheduleRetry(ctx context.Context, record Record, classified p
 	if !nextRetryAt.Before(record.ExpiresAt) {
 		return record, false, nil
 	}
-	if record.Request.Budget.MaxExecutionMilliseconds != nil {
-		deadline := record.CreatedAt.Add(time.Duration(*record.Request.Budget.MaxExecutionMilliseconds) * time.Millisecond)
+	if deadline, bounded := executionDeadline(record); bounded {
 		if !nextRetryAt.Before(deadline) {
 			return record, false, nil
 		}
@@ -2083,7 +2926,7 @@ func classifiedRetryable(classified provider.ClassifiedError, classifiedOK bool)
 // providerResultHasSemanticOutput reports whether an errored dispatch already returned any provider-accepted state or client-visible result.
 // providerResultHasSemanticOutput 表示失败分派是否已经返回任何供应商接收状态或客户端可见结果。
 func providerResultHasSemanticOutput(result provider.ExecutionResult) bool {
-	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || result.ContinuationUpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Extract != nil || result.Transcript != nil || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
+	return result.Response.ResponseID != "" || result.Response.Status != "" || len(result.Response.Items) != 0 || len(result.Response.Citations) != 0 || result.Response.Usage != nil || result.Response.FinishReason != "" || result.Response.ErrorCode != "" || len(result.Response.Warnings) != 0 || len(result.Events) != 0 || result.UpstreamResponseID != "" || result.ContinuationUpstreamResponseID != "" || len(result.Embeddings) != 0 || len(result.Rerank) != 0 || result.Search != nil || result.Extract != nil || result.Transcript != nil || len(result.Transcriptions) != 0 || result.MusicCoverPreparation != nil || len(result.GeneratedResources) != 0 || result.Report.ResponseID != "" || result.Report.ExecutionID != "" || result.Report.Usage != nil
 }
 
 // appendUniqueString appends one exact identifier only when it has not already been recorded.
@@ -2207,7 +3050,7 @@ func (s *Service) succeedWithStatus(ctx context.Context, record Record, provider
 	if errUsage != nil {
 		return Record{}, false, errUsage
 	}
-	result := Result{Embeddings: append([]vcp.EmbeddingItem(nil), providerResult.Embeddings...), Rerank: append([]vcp.RerankResult(nil), providerResult.Rerank...), Search: providerResult.Search, Extract: providerResult.Extract, Transcript: providerResult.Transcript, Resources: append([]resource.Resource(nil), resources...), Usage: usage}
+	result := Result{Embeddings: append([]vcp.EmbeddingItem(nil), providerResult.Embeddings...), Rerank: append([]vcp.RerankResult(nil), providerResult.Rerank...), Search: providerResult.Search, Extract: providerResult.Extract, Transcript: providerResult.Transcript, Transcriptions: append([]vcp.TranscriptionResult(nil), providerResult.Transcriptions...), Resources: append([]resource.Resource(nil), resources...), Usage: usage}
 	if providerResult.MusicCoverPreparation != nil {
 		preparation := providerResult.MusicCoverPreparation
 		publicPreparation := vcp.MusicCoverPreparation{PreparationID: record.ID, FormattedLyrics: preparation.FormattedLyrics, Structure: append([]vcp.MusicStructureSegment(nil), preparation.Structure...), AudioDurationSeconds: preparation.AudioDurationSeconds, ExpiresAt: preparation.ExpiresAt}
@@ -2274,6 +3117,66 @@ func (s *Service) nextEventSequence(ctx context.Context, record Record) (uint64,
 		return 0, fmt.Errorf("%w: execution event log is empty", ErrInvalidExecution)
 	}
 	return events[len(events)-1].Sequence + 1, nil
+}
+
+// modelToolAdmissionEvents returns safe enabled and frozen-mode facts in canonical plan order.
+// modelToolAdmissionEvents 按规范计划顺序返回安全的已启用及方式冻结事实。
+// Parameters: plan is the immutable accepted model-tool plan.
+// 参数：plan 是不可变的已接收模型工具计划。
+// Returns: ordered parent execution events without backend or credential details.
+// 返回：不含后端或凭据详情的有序父执行事件。
+func modelToolAdmissionEvents(plan ModelToolPlan) []ModelToolEvent {
+	events := make([]ModelToolEvent, 0, len(plan.Standard)*2+len(plan.Extra)*2+len(plan.RouterExtensions)*2)
+	appendAdmission := func(toolID string, mode vcp.ModelToolMode) {
+		if mode != vcp.ModelToolDisabled {
+			events = append(events, ModelToolEvent{ToolID: toolID, Stage: ModelToolStageEnabled, Mode: mode})
+		}
+		events = append(events, ModelToolEvent{ToolID: toolID, Stage: ModelToolStageModeFrozen, Mode: mode})
+	}
+	for _, entry := range plan.Standard {
+		appendAdmission(string(entry.Kind), entry.Mode)
+	}
+	for _, toolID := range plan.Extra {
+		appendAdmission(toolID, vcp.ModelToolNative)
+	}
+	for _, entry := range plan.RouterExtensions {
+		appendAdmission(string(entry.ID), vcp.ModelToolRouter)
+	}
+	return events
+}
+
+// appendModelToolEvents durably appends safe parent model-tool transitions without changing execution status.
+// appendModelToolEvents 持久追加安全父执行模型工具转换且不改变执行状态。
+// Parameters: ctx controls persistence, record is the exact current revision, and payloads are ordered closed events.
+// 参数：ctx 控制持久化，record 是精确当前修订，payloads 是有序封闭事件。
+// Returns: the revision advanced durable record or an explicit storage error.
+// 返回：修订已递增的持久记录或明确存储错误。
+func (s *Service) appendModelToolEvents(ctx context.Context, record Record, payloads []ModelToolEvent) (Record, error) {
+	if len(payloads) == 0 {
+		return record, nil
+	}
+	sequence, errSequence := s.nextEventSequence(ctx, record)
+	if errSequence != nil {
+		return Record{}, errSequence
+	}
+	now := s.options.Now().UTC()
+	events := make([]Event, 0, len(payloads))
+	for index := range payloads {
+		payload := payloads[index]
+		event := Event{ExecutionID: record.ID, EventID: fmt.Sprintf("evt_%s_%d", record.ID[4:], sequence), Sequence: sequence, Time: now, Type: EventModelToolLifecycle, ModelTool: &payload}
+		if errValidate := event.Validate(); errValidate != nil {
+			return Record{}, errValidate
+		}
+		events = append(events, event)
+		sequence++
+	}
+	expectedRevision := record.Revision
+	record.UpdatedAt = now
+	record.Revision++
+	if errSave := s.store.Save(ctx, record, expectedRevision, events); errSave != nil {
+		return Record{}, errSave
+	}
+	return record, nil
 }
 
 // usageObservationForResult returns the sole consistent terminal usage observation carried by a provider result.
@@ -2394,6 +3297,18 @@ func typedResultEvents(executionID string, firstSequence uint64, at time.Time, r
 	}
 	if result.Transcript != nil {
 		for _, candidate := range result.Transcript.Candidates {
+			for _, transcriptSegment := range candidate.Segments {
+				value := transcriptSegment
+				events = append(events, Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventTranscriptSegment, Transcript: &value})
+				sequence++
+			}
+		}
+	}
+	for _, transcription := range result.Transcriptions {
+		if transcription.Transcript == nil {
+			continue
+		}
+		for _, candidate := range transcription.Transcript.Candidates {
 			for _, transcriptSegment := range candidate.Segments {
 				value := transcriptSegment
 				events = append(events, Event{ExecutionID: executionID, EventID: fmt.Sprintf("evt_%s_%d", executionID[4:], sequence), Sequence: sequence, Time: at, Type: EventTranscriptSegment, Transcript: &value})
@@ -2598,7 +3513,10 @@ func sameExecutionSubject(first resolve.Target, second resolve.Target) bool {
 // stableFailureCode maps internal errors to content-safe machine codes.
 // stableFailureCode 将内部错误映射为内容安全机器码。
 func stableFailureCode(errValue error) string {
+	var modelToolError *vcp.ModelToolError
 	switch {
+	case errors.As(errValue, &modelToolError):
+		return string(modelToolError.Code)
 	case errors.Is(errValue, inputplan.ErrCapabilityChanged):
 		return "capability_changed"
 	case errors.Is(errValue, context.Canceled):
@@ -2619,5 +3537,9 @@ func stableFailureCode(errValue error) string {
 // retryableFailure reports only known transient context deadlines; unknown provider errors remain non-retryable.
 // retryableFailure 仅将已知瞬态 Context 超时标记为可重试；未知供应商错误保持不可重试。
 func retryableFailure(errValue error) bool {
+	var modelToolError *vcp.ModelToolError
+	if errors.As(errValue, &modelToolError) {
+		return modelToolError.Retryable
+	}
 	return errors.Is(errValue, context.DeadlineExceeded)
 }

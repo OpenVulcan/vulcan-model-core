@@ -76,6 +76,7 @@ import {
   fetchProviderBindings,
   fetchCustomProtocolProfiles,
   fetchProviderCatalog,
+  fetchProviderCatalogAudit,
   fetchProviderDefinitions,
   fetchProviderEndpoints,
   fetchProviderFiles,
@@ -92,7 +93,8 @@ import {
   onboardVertexServiceAccount,
   providerCatalogHasModels,
   refreshProviderCredential,
-  refreshProviderMetadata,
+  refreshProviderCredentialEntitlements,
+  refreshProviderCredentialUsage,
   rotateProviderCredentialSecret,
   startAntigravityOAuthFlow,
   startClaudeOAuthFlow,
@@ -118,6 +120,7 @@ import {
   type ProviderFileDiagnostic,
   type ProviderAllowance,
   type ProviderAllowanceWindow,
+  type ProviderCatalogAudit,
   type ProviderCatalogMetadata,
   type ProviderGroup,
   ProviderCredentialRefreshError,
@@ -261,16 +264,21 @@ export function ProviderManagementPage({
   const [providerMetadata, setProviderMetadata] = useState<
     Record<string, ProviderCatalogMetadata>
   >({});
-  // refreshingMetadataIDs identifies instances with an active provider-native metadata request.
-  // refreshingMetadataIDs 标识正在执行供应商原生元数据请求的实例。
-  const [refreshingMetadataIDs, setRefreshingMetadataIDs] = useState<
-    Set<string>
-  >(new Set());
-  // metadataErrors stores the exact safe failure category from each instance's latest explicit refresh.
-  // metadataErrors 存储每个实例最近一次显式刷新的精确安全失败分类。
-  const [metadataErrors, setMetadataErrors] = useState<Record<string, string>>(
-    {},
-  );
+  // refreshingEntitlementCredentialIDs identifies credentials with an active plan or authorization evidence read.
+  // refreshingEntitlementCredentialIDs 标识正在读取套餐或授权证据的凭据。
+  const [
+    refreshingEntitlementCredentialIDs,
+    setRefreshingEntitlementCredentialIDs,
+  ] = useState<Set<string>>(new Set());
+  // refreshingUsageCredentialIDs identifies credentials with an active allowance read.
+  // refreshingUsageCredentialIDs 标识正在读取额度的凭据。
+  const [refreshingUsageCredentialIDs, setRefreshingUsageCredentialIDs] =
+    useState<Set<string>>(new Set());
+  // credentialMetadataErrors stores one safe scoped metadata failure per credential.
+  // credentialMetadataErrors 按凭据保存一个安全的作用域元数据失败分类。
+  const [credentialMetadataErrors, setCredentialMetadataErrors] = useState<
+    Record<string, string>
+  >({});
   // refreshingCredentialIDs identifies account credentials with an active explicit token refresh.
   // refreshingCredentialIDs 标识正在执行显式 Token 刷新的账号凭据。
   const [refreshingCredentialIDs, setRefreshingCredentialIDs] = useState<
@@ -454,6 +462,21 @@ export function ProviderManagementPage({
       .flatMap((group) => group.provider_definitions)
       .find((definition) => definition.id === selectedDefinitionID) ??
     definitions.find((definition) => definition.id === selectedDefinitionID);
+  // replacementAuthMethod is the immutable method that owns the selected existing credential.
+  // replacementAuthMethod 是拥有所选既有凭据的不可变认证方式。
+  const replacementAuthMethod = reauthorizationTarget
+    ? selectedDefinition?.auth_methods.find(
+        (method) =>
+          method.id === reauthorizationTarget.credential.auth_method_id,
+      )
+    : undefined;
+  // replacesSecretDirectly distinguishes editable secret input from provider-owned authorization flows.
+  // replacesSecretDirectly 区分可编辑密钥输入与供应商拥有的授权流程。
+  const replacesSecretDirectly =
+    replacementAuthMethod?.type === "api_key" ||
+    replacementAuthMethod?.type === "bearer" ||
+    replacementAuthMethod?.type === "header_api_key" ||
+    replacementAuthMethod?.type === "service_account";
   // selectedCredentialCategory is the top-level native family or custom provider selected in the directory.
   // selectedCredentialCategory 是目录中选中的顶层原生系列或自定义供应商。
   const selectedCredentialCategory = credentialCategories.find(
@@ -639,21 +662,25 @@ export function ProviderManagementPage({
     setRefreshRevision((revision) => revision + 1);
   }
 
-  // refreshAccountMetadata reads provider-native plan and allowance data without exposing account secrets.
-  // refreshAccountMetadata 读取供应商原生套餐与额度数据，且不暴露账号秘密。
-  async function refreshAccountMetadata(providerInstanceID: string) {
-    setRefreshingMetadataIDs((current) =>
-      new Set(current).add(providerInstanceID),
+  // refreshCredentialEntitlements reads only one credential's plan and model authorization evidence.
+  // refreshCredentialEntitlements 仅读取一个凭据的套餐与模型授权证据。
+  async function refreshCredentialEntitlements(
+    providerInstanceID: string,
+    credentialID: string,
+  ) {
+    setRefreshingEntitlementCredentialIDs((current) =>
+      new Set(current).add(credentialID),
     );
-    setMetadataErrors((current) => {
+    setCredentialMetadataErrors((current) => {
       const next = { ...current };
-      delete next[providerInstanceID];
+      delete next[credentialID];
       return next;
     });
     try {
-      const metadata = await refreshProviderMetadata(
+      const metadata = await refreshProviderCredentialEntitlements(
         managementAuthToken,
         providerInstanceID,
+        credentialID,
       );
       setProviderMetadata((current) => ({
         ...current,
@@ -664,14 +691,56 @@ export function ProviderManagementPage({
         error instanceof ProviderMetadataRefreshError
           ? error.code
           : "provider_metadata_network_failed";
-      setMetadataErrors((current) => ({
+      setCredentialMetadataErrors((current) => ({
         ...current,
-        [providerInstanceID]: errorCode,
+        [credentialID]: errorCode,
       }));
     } finally {
-      setRefreshingMetadataIDs((current) => {
+      setRefreshingEntitlementCredentialIDs((current) => {
         const next = new Set(current);
-        next.delete(providerInstanceID);
+        next.delete(credentialID);
+        return next;
+      });
+    }
+  }
+
+  // refreshCredentialUsage reads only one credential's provider-supported allowance observations.
+  // refreshCredentialUsage 仅读取一个凭据由供应商支持的额度观测。
+  async function refreshCredentialUsage(
+    providerInstanceID: string,
+    credentialID: string,
+  ) {
+    setRefreshingUsageCredentialIDs((current) =>
+      new Set(current).add(credentialID),
+    );
+    setCredentialMetadataErrors((current) => {
+      const next = { ...current };
+      delete next[credentialID];
+      return next;
+    });
+    try {
+      const metadata = await refreshProviderCredentialUsage(
+        managementAuthToken,
+        providerInstanceID,
+        credentialID,
+      );
+      setProviderMetadata((current) => ({
+        ...current,
+        [providerInstanceID]: metadata,
+      }));
+    } catch (error) {
+      const errorCode =
+        error instanceof ProviderMetadataRefreshError
+          ? error.code
+          : "provider_metadata_network_failed";
+      setCredentialMetadataErrors((current) => ({
+        ...current,
+        [credentialID]: errorCode,
+      }));
+    } finally {
+      setRefreshingUsageCredentialIDs((current) => {
+        const next = new Set(current);
+        next.delete(credentialID);
         return next;
       });
     }
@@ -783,12 +852,10 @@ export function ProviderManagementPage({
     return (
       <AuthorizedProviderCard
         key={provider.instance.id}
+        managementAuthToken={managementAuthToken}
         provider={provider}
         definition={definition}
         metadata={providerMetadata[provider.instance.id]}
-        refreshingMetadata={refreshingMetadataIDs.has(provider.instance.id)}
-        metadataErrorCode={metadataErrors[provider.instance.id]}
-        onRefreshMetadata={refreshAccountMetadata}
         refreshingCredentialIDs={refreshingCredentialIDs}
         credentialRefreshErrors={credentialRefreshErrors}
         onRefreshCredential={refreshAccountCredential}
@@ -922,12 +989,16 @@ export function ProviderManagementPage({
                     groups={groups}
                     metadataByProviderID={providerMetadata}
                     managementAuthToken={managementAuthToken}
-                    refreshingMetadataIDs={refreshingMetadataIDs}
-                    metadataErrors={metadataErrors}
+                    refreshingEntitlementCredentialIDs={
+                      refreshingEntitlementCredentialIDs
+                    }
+                    refreshingUsageCredentialIDs={refreshingUsageCredentialIDs}
+                    credentialMetadataErrors={credentialMetadataErrors}
                     refreshingCredentialIDs={refreshingCredentialIDs}
                     credentialRefreshErrors={credentialRefreshErrors}
                     deletingCredentialIDs={deletingCredentialIDs}
-                    onRefreshMetadata={refreshAccountMetadata}
+                    onRefreshEntitlements={refreshCredentialEntitlements}
+                    onRefreshUsage={refreshCredentialUsage}
                     onRefreshCredential={refreshAccountCredential}
                     onChangeCredentialPriority={changeCredentialPriority}
                     onChangeCredentialPlan={changeCredentialPlan}
@@ -992,12 +1063,14 @@ export function ProviderManagementPage({
         }}
       >
         {!catalogFailed ? (
-          <DialogContent
-            className={
-              credentialMode
-                ? "max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
-                : "h-[min(80vh,600px)] max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
-            }
+           <DialogContent
+             className={
+              reauthorizationTarget
+                ? "max-h-[min(80vh,600px)] grid-rows-[auto_auto] overflow-y-auto"
+                : credentialMode
+                 ? "max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
+                 : "h-[min(80vh,600px)] max-h-[min(80vh,600px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden"
+             }
           >
             <DialogHeader>
               {(credentialCreationCategory && selectedDefinition) ||
@@ -1022,7 +1095,11 @@ export function ProviderManagementPage({
               <div className="min-w-0 flex-1">
                 <DialogTitle>
                   {reauthorizationTarget
-                    ? t("providers.reauthorizeCredential")
+                    ? t(
+                        replacesSecretDirectly
+                          ? "providers.replaceCredential"
+                          : "providers.reauthorizeCredential",
+                      )
                     : attachmentTarget ||
                         credentialIntent ||
                         credentialCreationCategory
@@ -1107,7 +1184,13 @@ export function ProviderManagementPage({
                 </div>
               </div>
             ) : (
-              <div className="min-h-0 overflow-y-auto pr-1">
+              <div
+                className={
+                  reauthorizationTarget
+                    ? "overflow-visible pr-1"
+                    : "min-h-0 overflow-y-auto pr-1"
+                }
+              >
                 {configuringCustom ? (
                   <CustomProviderOnboardingPanel
                     managementAuthToken={managementAuthToken}
@@ -1428,12 +1511,15 @@ interface CredentialManagementTableProps {
   // managementAuthToken authorizes protected resource metadata reads without retaining it in dialog state.
   // managementAuthToken 授权受保护资源元数据读取，且不会将其保留在对话框状态中。
   managementAuthToken: string;
-  // refreshingMetadataIDs identifies instances with an active provider-native metadata refresh.
-  // refreshingMetadataIDs 标识正在执行供应商原生元数据刷新的实例。
-  refreshingMetadataIDs: ReadonlySet<string>;
-  // metadataErrors contains safe per-instance metadata refresh failures.
-  // metadataErrors 包含安全的按实例划分的元数据刷新失败。
-  metadataErrors: Readonly<Record<string, string>>;
+  // refreshingEntitlementCredentialIDs identifies credentials reading plan or authorization evidence.
+  // refreshingEntitlementCredentialIDs 标识正在读取套餐或授权证据的凭据。
+  refreshingEntitlementCredentialIDs: ReadonlySet<string>;
+  // refreshingUsageCredentialIDs identifies credentials reading allowance observations.
+  // refreshingUsageCredentialIDs 标识正在读取额度观测的凭据。
+  refreshingUsageCredentialIDs: ReadonlySet<string>;
+  // credentialMetadataErrors contains safe scoped reader failures by credential identifier.
+  // credentialMetadataErrors 按凭据标识包含安全的作用域读取失败。
+  credentialMetadataErrors: Readonly<Record<string, string>>;
   // refreshingCredentialIDs identifies credentials with an active refresh request.
   // refreshingCredentialIDs 标识正在执行刷新请求的凭据。
   refreshingCredentialIDs: ReadonlySet<string>;
@@ -1443,9 +1529,18 @@ interface CredentialManagementTableProps {
   // deletingCredentialIDs identifies credentials pending confirmed deletion.
   // deletingCredentialIDs 标识正在等待确认删除完成的凭据。
   deletingCredentialIDs: ReadonlySet<string>;
-  // onRefreshMetadata refreshes one exact provider-native catalog snapshot.
-  // onRefreshMetadata 刷新一个精确供应商原生目录快照。
-  onRefreshMetadata: (providerInstanceID: string) => Promise<void>;
+  // onRefreshEntitlements refreshes only one credential's plan and authorization evidence.
+  // onRefreshEntitlements 仅刷新一个凭据的套餐与授权证据。
+  onRefreshEntitlements: (
+    providerInstanceID: string,
+    credentialID: string,
+  ) => Promise<void>;
+  // onRefreshUsage refreshes only one credential's supported allowance observations.
+  // onRefreshUsage 仅刷新一个凭据受支持的额度观测。
+  onRefreshUsage: (
+    providerInstanceID: string,
+    credentialID: string,
+  ) => Promise<void>;
   // onRefreshCredential refreshes one exact local provider credential.
   // onRefreshCredential 刷新一个精确的本地供应商凭据。
   onRefreshCredential: (
@@ -1509,6 +1604,17 @@ interface CredentialResourceDialogTarget {
   credential: ProviderCredential;
 }
 
+// CredentialModelDialogTarget binds model discovery and display to one immutable provider credential.
+// CredentialModelDialogTarget 将模型发现与展示绑定到一个不可变供应商凭据。
+interface CredentialModelDialogTarget {
+  // providerInstanceID owns the selected credential and catalog snapshot.
+  // providerInstanceID 拥有所选凭据与目录快照。
+  providerInstanceID: string;
+  // credentialID identifies the only account allowed to perform this discovery.
+  // credentialID 标识唯一允许执行此次发现的账号。
+  credentialID: string;
+}
+
 // ProviderResourceFileGroup keeps provider files separate by their exact configured endpoint.
 // ProviderResourceFileGroup 按其精确配置端点分离供应商文件。
 interface ProviderResourceFileGroup {
@@ -1528,12 +1634,14 @@ function CredentialManagementTable({
   groups,
   metadataByProviderID,
   managementAuthToken,
-  refreshingMetadataIDs,
-  metadataErrors,
+  refreshingEntitlementCredentialIDs,
+  refreshingUsageCredentialIDs,
+  credentialMetadataErrors,
   refreshingCredentialIDs,
   credentialRefreshErrors,
   deletingCredentialIDs,
-  onRefreshMetadata,
+  onRefreshEntitlements,
+  onRefreshUsage,
   onRefreshCredential,
   onChangeCredentialPriority,
   onChangeCredentialPlan,
@@ -1542,9 +1650,10 @@ function CredentialManagementTable({
   onAddCredential,
 }: CredentialManagementTableProps) {
   const { t } = useI18n();
-  // modelProviderInstanceID opens one provider-scoped supported-model dialog without duplicating model details in the table.
-  // modelProviderInstanceID 打开一个供应商作用域的支持模型对话框，而不在表格中重复模型详情。
-  const [modelProviderInstanceID, setModelProviderInstanceID] = useState("");
+  // modelDialogTarget opens one exact credential-scoped supported-model dialog without duplicating model details in the table.
+  // modelDialogTarget 打开一个精确凭据作用域的支持模型对话框，而不在表格中重复模型详情。
+  const [modelDialogTarget, setModelDialogTarget] =
+    useState<CredentialModelDialogTarget | null>(null);
   // serviceTestTarget opens one provider-scoped selector for every typed diagnostic supported by that provider.
   // serviceTestTarget 打开一个供应商作用域选择器，包含该供应商支持的全部类型化诊断。
   const [serviceTestTarget, setServiceTestTarget] =
@@ -1582,17 +1691,14 @@ function CredentialManagementTable({
   // modelProvider resolves the live row target after inventory reloads while its dialog remains open.
   // modelProvider 在目录重载后解析仍处于打开状态的实时行目标。
   const modelProvider = providers.find(
-    (provider) => provider.instance.id === modelProviderInstanceID,
+    (provider) =>
+      provider.instance.id === modelDialogTarget?.providerInstanceID,
   );
-  // modelDefinition supplies the exact provider capability contract for the selected model dialog.
-  // modelDefinition 为已选模型对话框提供精确的供应商能力契约。
-  const modelDefinition = modelProvider
-    ? findProviderDefinition(
-        definitions,
-        groups,
-        modelProvider.instance.definition_id,
-      )
-    : undefined;
+  // modelCredential resolves the live account target after inventory reloads while its dialog remains open.
+  // modelCredential 在目录重载后解析仍处于打开状态的实时账号目标。
+  const modelCredential = modelProvider?.credentials.find(
+    (credential) => credential.id === modelDialogTarget?.credentialID,
+  );
   // modelMetadata always follows the latest parent-owned snapshot instead of keeping a stale dialog copy.
   // modelMetadata 始终跟随最新的父级快照，而不保留过期的对话框副本。
   const modelMetadata = modelProvider
@@ -1688,29 +1794,26 @@ function CredentialManagementTable({
     return () => controller.abort();
   }, [managementAuthToken, resourceTarget, resourceUsesProviderFiles]);
 
-  // openModelCatalog starts one explicit account refresh and opens the compact model-only detail dialog.
-  // openModelCatalog 启动一次显式账号刷新，并打开紧凑的仅模型详情对话框。
+  // openModelCatalog opens the code-owned static model catalog for one credential context.
+  // openModelCatalog 为一个凭据上下文打开代码拥有的静态模型目录。
   function openModelCatalog(
     provider: AuthorizedProvider,
-    definition: ProviderDefinitionIdentity | undefined,
+    credential: ProviderCredential,
   ): void {
-    setModelProviderInstanceID(provider.instance.id);
-    if (providerSupportsAccountMetadata(definition)) {
-      void onRefreshMetadata(provider.instance.id);
-    }
+    setModelDialogTarget({
+      providerInstanceID: provider.instance.id,
+      credentialID: credential.id,
+    });
   }
 
-  // openResourceCatalog starts any supported metadata refresh before showing credential-scoped resources.
-  // openResourceCatalog 在展示凭据作用域资源前启动任何受支持的元数据刷新。
+  // openResourceCatalog opens credential-scoped resources without mutating unrelated model or account metadata.
+  // openResourceCatalog 打开凭据作用域资源，且不变更无关模型或账号元数据。
   function openResourceCatalog(
     provider: AuthorizedProvider,
     definition: ProviderDefinitionIdentity | undefined,
     credential: ProviderCredential,
   ): void {
     setResourceTarget({ provider, definition, credential });
-    if (providerSupportsAccountMetadata(definition)) {
-      void onRefreshMetadata(provider.instance.id);
-    }
   }
 
   // openPriorityEditor copies the current persisted priority into an explicit confirmation dialog.
@@ -1803,38 +1906,39 @@ function CredentialManagementTable({
               // metadata is the latest local catalog snapshot shared by the provider's credential rows.
               // metadata 是由该供应商凭据行共享的最新本地目录快照。
               const metadata = metadataByProviderID[provider.instance.id];
-              const supportsMetadata =
-                providerSupportsAccountMetadata(definition);
               // searchAction exists only when the catalog declares one typed search.web service profile.
               // searchAction 仅在目录声明一个类型化 search.web 服务规格时存在。
               const searchAction = providerSearchTestAction(provider, metadata);
               // extractAction exists only when the catalog declares one typed web.extract service profile.
               // extractAction 仅在目录声明一个类型化 web.extract 服务规格时存在。
-              const extractAction = providerExtractTestAction(provider, metadata);
+              const extractAction = providerExtractTestAction(
+                provider,
+                metadata,
+              );
               // hasModelCatalog prevents search-only providers from displaying a model discovery action.
               // hasModelCatalog 防止仅搜索供应商显示模型发现操作。
               const hasModelCatalog = providerCatalogHasModels(metadata);
               if (provider.credentials.length === 0) {
-                  return [
-                    <TableRow key={provider.instance.id}>
-                      <TableCell className="whitespace-normal py-3 align-top">
-                        <div className="flex items-center gap-3">
-                          <ProviderIcon
-                            definitionID={provider.instance.definition_id}
-                            groupID={definition?.group_id}
-                            className="size-[26px]"
-                          />
-                          <div className="min-w-0">
-                            <p className="font-medium">
-                              {provider.instance.display_name}
-                            </p>
-                            <p className="text-muted-foreground mt-1 text-xs">
-                              {definition?.display_name ??
-                                provider.instance.definition_id}
-                            </p>
-                          </div>
+                return [
+                  <TableRow key={provider.instance.id}>
+                    <TableCell className="whitespace-normal py-3 align-top">
+                      <div className="flex items-center gap-3">
+                        <ProviderIcon
+                          definitionID={provider.instance.definition_id}
+                          groupID={definition?.group_id}
+                          className="size-[26px]"
+                        />
+                        <div className="min-w-0">
+                          <p className="font-medium">
+                            {provider.instance.display_name}
+                          </p>
+                          <p className="text-muted-foreground mt-1 text-xs">
+                            {definition?.display_name ??
+                              provider.instance.definition_id}
+                          </p>
                         </div>
-                      </TableCell>
+                      </div>
+                    </TableCell>
                     <TableCell
                       colSpan={6}
                       className="whitespace-normal py-3 align-middle"
@@ -1864,6 +1968,18 @@ function CredentialManagementTable({
                 const authMethod = definition?.auth_methods.find(
                   (method) => method.id === credential.auth_method_id,
                 );
+                // supportsEntitlementRefresh follows this credential's exact authentication-method reader boundary.
+                // supportsEntitlementRefresh 遵循此凭据精确认证方式的读取边界。
+                const supportsEntitlementRefresh =
+                  credential.reader_features.plan_reader === "supported" ||
+                  credential.reader_features.entitlement_reader === "supported";
+                // supportsUsageRefresh prevents API-only credentials from presenting a misleading quota action.
+                // supportsUsageRefresh 防止仅 API 凭据显示误导性的额度操作。
+                const supportsUsageRefresh =
+                  credential.reader_features.allowance_reader === "supported";
+                // canOpenModelCatalog requires the persisted code-owned model snapshot.
+                // canOpenModelCatalog 要求存在已持久化的代码拥有模型快照。
+                const canOpenModelCatalog = hasModelCatalog;
                 const canListResources = supportsCredentialResourceList(
                   definition?.id,
                   metadata,
@@ -1930,20 +2046,23 @@ function CredentialManagementTable({
                         />
                       ) : (
                         <span className="text-muted-foreground text-sm">
-                          {credentialPlanLabel(
-                            definition,
-                            credential,
-                          ) ?? "—"}
+                          {credentialPlanLabel(definition, credential) ?? "—"}
                         </span>
                       )}
                     </TableCell>
                     <TableCell className="whitespace-normal py-3 align-top">
-                      <CompactAllowanceSummary
-                        allowances={metadata?.allowances ?? []}
-                        credentialID={credential.id}
-                        includeSharedAllowances={credentialIndex === 0}
-                        t={t}
-                      />
+                      {supportsUsageRefresh ? (
+                        <CompactAllowanceSummary
+                          allowances={metadata?.allowances ?? []}
+                          credentialID={credential.id}
+                          includeSharedAllowances={credentialIndex === 0}
+                          t={t}
+                        />
+                      ) : (
+                        <span className="text-muted-foreground text-xs">
+                          {t("providers.usageUnsupported")}
+                        </span>
+                      )}
                     </TableCell>
                     <TableCell className="py-3 text-center align-middle">
                       <Button
@@ -1965,31 +2084,55 @@ function CredentialManagementTable({
                     </TableCell>
                     <TableCell className="whitespace-normal py-3 text-right align-middle">
                       <div className="flex flex-wrap justify-end gap-2">
-                        {supportsMetadata ? (
+                        {supportsEntitlementRefresh ? (
                           <Button
                             type="button"
                             variant="outline"
-                            size="icon-sm"
-                            aria-label={t("providers.refreshMetadata")}
-                            disabled={refreshingMetadataIDs.has(
-                              provider.instance.id,
+                            size="sm"
+                            disabled={refreshingEntitlementCredentialIDs.has(
+                              credential.id,
                             )}
                             onClick={() =>
-                              void onRefreshMetadata(provider.instance.id)
+                              void onRefreshEntitlements(
+                                provider.instance.id,
+                                credential.id,
+                              )
                             }
                           >
                             <RefreshCwIcon
-                              className={`size-3.5 ${refreshingMetadataIDs.has(provider.instance.id) ? "animate-spin" : ""}`}
+                              className={`size-3.5 ${refreshingEntitlementCredentialIDs.has(credential.id) ? "animate-spin" : ""}`}
                             />
+                            {t("providers.refreshEntitlements")}
                           </Button>
                         ) : null}
-                        {hasModelCatalog ? (
+                        {supportsUsageRefresh ? (
+                          <Button
+                            type="button"
+                            variant="outline"
+                            size="sm"
+                            disabled={refreshingUsageCredentialIDs.has(
+                              credential.id,
+                            )}
+                            onClick={() =>
+                              void onRefreshUsage(
+                                provider.instance.id,
+                                credential.id,
+                              )
+                            }
+                          >
+                            <RefreshCwIcon
+                              className={`size-3.5 ${refreshingUsageCredentialIDs.has(credential.id) ? "animate-spin" : ""}`}
+                            />
+                            {t("providers.refreshUsage")}
+                          </Button>
+                        ) : null}
+                        {canOpenModelCatalog ? (
                           <Button
                             type="button"
                             variant="outline"
                             size="sm"
                             onClick={() =>
-                              openModelCatalog(provider, definition)
+                              openModelCatalog(provider, credential)
                             }
                           >
                             {t("providers.getSupportedModels")}
@@ -2124,14 +2267,14 @@ function CredentialManagementTable({
                           </AlertDialogContent>
                         </AlertDialog>
                       </div>
-                      {metadataErrors[provider.instance.id] ? (
+                      {credentialMetadataErrors[credential.id] ? (
                         <p
                           className="text-destructive mt-2 text-left text-xs"
                           role="status"
                         >
                           {metadataRefreshErrorLabel(
                             t,
-                            metadataErrors[provider.instance.id],
+                            credentialMetadataErrors[credential.id],
                           )}
                         </p>
                       ) : null}
@@ -2156,9 +2299,9 @@ function CredentialManagementTable({
       </div>
 
       <Dialog
-        open={modelProviderInstanceID !== ""}
+        open={modelDialogTarget !== null}
         onOpenChange={(open) => {
-          if (!open) setModelProviderInstanceID("");
+          if (!open) setModelDialogTarget(null);
         }}
       >
         <DialogContent className="grid max-h-[min(80vh,680px)] grid-rows-[auto_minmax(0,1fr)] overflow-hidden">
@@ -2166,8 +2309,9 @@ function CredentialManagementTable({
             <div className="min-w-0 flex-1">
               <DialogTitle>{t("providers.modelCatalogTitle")}</DialogTitle>
               <DialogDescription>
-                {modelProvider?.instance.display_name ??
-                  t("providers.modelCatalogDescription")}
+                {modelProvider && modelCredential
+                  ? `${modelProvider.instance.display_name} · ${modelCredential.label}`
+                  : t("providers.modelCatalogDescription")}
               </DialogDescription>
             </div>
             <DialogClose
@@ -2178,28 +2322,6 @@ function CredentialManagementTable({
             </DialogClose>
           </DialogHeader>
           <div className="min-h-0 overflow-y-auto pr-1">
-            {modelProvider && modelDefinition ? (
-              <div className="mb-3 flex justify-end">
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={refreshingMetadataIDs.has(
-                    modelProvider.instance.id,
-                  )}
-                  onClick={() =>
-                    void onRefreshMetadata(modelProvider.instance.id)
-                  }
-                >
-                  <RefreshCwIcon
-                    className={`size-3.5 ${refreshingMetadataIDs.has(modelProvider.instance.id) ? "animate-spin" : ""}`}
-                  />
-                  {refreshingMetadataIDs.has(modelProvider.instance.id)
-                    ? t("providers.refreshingMetadata")
-                    : t("providers.refreshMetadata")}
-                </Button>
-              </div>
-            ) : null}
             {modelMetadata?.models.length ? (
               <div className="overflow-hidden rounded-lg border">
                 <Table>
@@ -2251,9 +2373,7 @@ function CredentialManagementTable({
               </div>
             ) : (
               <p className="text-muted-foreground text-sm">
-                {refreshingMetadataIDs.has(modelProviderInstanceID)
-                  ? t("providers.refreshingMetadata")
-                  : t("providers.noSupportedModels")}
+                {t("providers.noSupportedModels")}
               </p>
             )}
           </div>
@@ -2558,52 +2678,52 @@ interface ProviderExtractTestAction {
 
 // providerExtractTestAction selects one ready typed extraction profile, or the first declared profile when credentials are unavailable.
 // providerExtractTestAction 选择一个就绪的类型化内容提取规格；凭据不可用时返回首个已声明规格。
-function providerExtractTestAction(provider: AuthorizedProvider, metadata: ProviderCatalogMetadata | undefined): ProviderExtractTestAction | null {
+function providerExtractTestAction(
+  provider: AuthorizedProvider,
+  metadata: ProviderCatalogMetadata | undefined,
+): ProviderExtractTestAction | null {
   const candidates = (metadata?.services ?? []).flatMap((service) => {
     if (service.operation !== "web.extract") return [];
-    return service.offerings.flatMap((offering) => offering.profiles.flatMap((profile) => {
-      const extract = profile.capabilities.web_extract;
-      if (profile.operation !== "web.extract" || !extract || extract.depths.length === 0 || extract.formats.length === 0) return [];
-      return [{
-        target: {
-          providerInstanceID: provider.instance.id,
-          providerName: provider.instance.display_name,
-          providerServiceID: service.id,
-          serviceName: service.display_name,
-          serviceOfferingID: offering.id,
-          executionProfileID: profile.id,
-          maxURLs: extract.max_urls,
-          depths: extract.depths,
-          formats: extract.formats,
-          queryRelevance: extract.query_relevance,
-          minimumChunksPerSource: extract.minimum_chunks_per_source,
-          maximumChunksPerSource: extract.maximum_chunks_per_source,
-          includeImages: extract.include_images,
-          includeFavicon: extract.include_favicon,
-          minimumTimeoutSeconds: extract.minimum_timeout_seconds,
-          maximumTimeoutSeconds: extract.maximum_timeout_seconds,
-        },
-        ready: service.enabled && (profile.pool?.ready_credentials ?? 0) > 0,
-      }];
-    }));
+    return service.offerings.flatMap((offering) =>
+      offering.profiles.flatMap((profile) => {
+        const extract = profile.capabilities.web_extract;
+        if (
+          profile.operation !== "web.extract" ||
+          !extract ||
+          extract.depths.length === 0 ||
+          extract.formats.length === 0
+        )
+          return [];
+        return [
+          {
+            target: {
+              providerInstanceID: provider.instance.id,
+              providerName: provider.instance.display_name,
+              providerServiceID: service.id,
+              serviceName: service.display_name,
+              serviceOfferingID: offering.id,
+              executionProfileID: profile.id,
+              maxURLs: extract.max_urls,
+              depths: extract.depths,
+              formats: extract.formats,
+              queryRelevance: extract.query_relevance,
+              minimumChunksPerSource: extract.minimum_chunks_per_source,
+              maximumChunksPerSource: extract.maximum_chunks_per_source,
+              includeImages: extract.include_images,
+              includeFavicon: extract.include_favicon,
+              minimumTimeoutSeconds: extract.minimum_timeout_seconds,
+              maximumTimeoutSeconds: extract.maximum_timeout_seconds,
+            },
+            ready:
+              service.enabled && (profile.pool?.ready_credentials ?? 0) > 0,
+          },
+        ];
+      }),
+    );
   });
-  return candidates.find((candidate) => candidate.ready) ?? candidates[0] ?? null;
-}
-
-// providerSupportsAccountMetadata follows only the server-authored native reader capability contract.
-// providerSupportsAccountMetadata 仅遵循服务端编写的原生读取器能力契约。
-function providerSupportsAccountMetadata(
-  definition: ProviderDefinitionIdentity | undefined,
-): boolean {
-  // statuses contains every account metadata capability represented by the provider definition.
-  // statuses 包含供应商定义表示的每个账号元数据能力。
-  const statuses = [
-    definition?.features.model_discovery,
-    definition?.features.plan_reader,
-    definition?.features.entitlement_reader,
-    definition?.features.allowance_reader,
-  ];
-  return statuses.includes("supported");
+  return (
+    candidates.find((candidate) => candidate.ready) ?? candidates[0] ?? null
+  );
 }
 
 // supportsMiniMaxProviderFileList follows the exact two MiniMax definitions implemented by the protected file listing endpoint.
@@ -2642,7 +2762,9 @@ export function credentialPlanLabel(
         ?.display_name ?? planOptionID
     );
   }
-  return credential.detected_plan?.plan_name || credential.detected_plan?.plan_code;
+  return (
+    credential.detected_plan?.plan_name || credential.detected_plan?.plan_code
+  );
 }
 
 // CompactAllowanceSummaryProps defines the limited quota visualization placed inside one credential table field.
@@ -3080,9 +3202,550 @@ function formatResourceBytes(sizeBytes: number): string {
   })} ${units[unitIndex]}`;
 }
 
+// CatalogAuditButtonProps defines one provider-scoped full-catalog audit entry.
+// CatalogAuditButtonProps 定义一个供应商作用域的全量目录审核入口。
+interface CatalogAuditButtonProps {
+  // managementAuthToken authorizes the protected audit read.
+  // managementAuthToken 授权受保护的审核读取。
+  managementAuthToken: string;
+  // provider identifies the exact configured catalog owner.
+  // provider 标识精确已配置目录所有者。
+  provider: AuthorizedProvider;
+}
+
+// catalogPolicyStatusLabel localizes one closed publication state without exposing storage enums as UI text.
+// catalogPolicyStatusLabel 本地化一个封闭发布状态，避免把存储枚举直接作为界面文字。
+function catalogPolicyStatusLabel(
+  t: (key: TranslationKey) => string,
+  status: ProviderCatalogAudit["policies"][number]["status"],
+): string {
+  const labels: Record<
+    ProviderCatalogAudit["policies"][number]["status"],
+    TranslationKey
+  > = {
+    supported: "providers.catalogPolicySupported",
+    unsupported: "providers.catalogPolicyUnsupported",
+    pending_review: "providers.catalogPolicyPending",
+  };
+  return t(labels[status]);
+}
+
+// catalogPolicyReasonLabel localizes every backend-validated evidence reason through one exhaustive mapping.
+// catalogPolicyReasonLabel 通过一份穷尽映射本地化后端校验过的每个证据原因。
+function catalogPolicyReasonLabel(
+  t: (key: TranslationKey) => string,
+  reason: ProviderCatalogAudit["policies"][number]["reason"],
+): string {
+  const labels: Record<
+    ProviderCatalogAudit["policies"][number]["reason"],
+    TranslationKey
+  > = {
+    runtime_verified: "providers.catalogPolicyReason.runtimeVerified",
+    provider_contract_verified:
+      "providers.catalogPolicyReason.providerContractVerified",
+    provider_inference_disabled:
+      "providers.catalogPolicyReason.providerInferenceDisabled",
+    operation_not_implemented:
+      "providers.catalogPolicyReason.operationNotImplemented",
+    coding_capability_insufficient:
+      "providers.catalogPolicyReason.codingCapabilityInsufficient",
+    deprecated_or_superseded:
+      "providers.catalogPolicyReason.deprecatedOrSuperseded",
+    out_of_scope_realtime: "providers.catalogPolicyReason.outOfScopeRealtime",
+    out_of_scope_product: "providers.catalogPolicyReason.outOfScopeProduct",
+    missing_protocol_evidence:
+      "providers.catalogPolicyReason.missingProtocolEvidence",
+    missing_parameter_mapping:
+      "providers.catalogPolicyReason.missingParameterMapping",
+    missing_execution_fixture:
+      "providers.catalogPolicyReason.missingExecutionFixture",
+    new_catalog_entry: "providers.catalogPolicyReason.newCatalogEntry",
+  };
+  return t(labels[reason]);
+}
+
+// catalogCapabilityLevelLabel localizes one closed capability support level without collapsing unknown evidence.
+// catalogCapabilityLevelLabel 本地化一个封闭能力支持级别，且不会折叠未知证据。
+function catalogCapabilityLevelLabel(
+  t: (key: TranslationKey) => string,
+  level: ProviderCatalogAudit["offerings"][number]["capabilities"]["tool_calling"],
+): string {
+  const labels: Record<
+    ProviderCatalogAudit["offerings"][number]["capabilities"]["tool_calling"],
+    TranslationKey
+  > = {
+    native: "capabilities.native",
+    emulated: "capabilities.emulated",
+    conditional: "capabilities.conditional",
+    unsupported: "capabilities.unsupported",
+    unknown: "capabilities.unknown",
+  };
+  return t(labels[level]);
+}
+
+// catalogAuditTokenLimitLabel renders one authoritative ceiling or the explicit localized unknown state.
+// catalogAuditTokenLimitLabel 渲染一个权威上限或显式本地化未知状态。
+function catalogAuditTokenLimitLabel(
+  t: (key: TranslationKey) => string,
+  limit: ProviderCatalogAudit["offerings"][number]["capabilities"]["context_window"],
+): string {
+  return limit.known && limit.value !== undefined
+    ? limit.value.toLocaleString()
+    : t("capabilities.unknown");
+}
+
+// catalogAuditValuesLabel renders a closed capability value list with an explicit empty state.
+// catalogAuditValuesLabel 使用显式空状态渲染封闭能力值列表。
+function catalogAuditValuesLabel(
+  t: (key: TranslationKey) => string,
+  values: string[],
+): string {
+  return values.length > 0 ? values.join(", ") : t("capabilities.none");
+}
+
+// CatalogAuditButton loads and renders collected models together with every explicit publication decision.
+// CatalogAuditButton 加载并渲染已采集模型及其全部显式发布决策。
+function CatalogAuditButton({
+  managementAuthToken,
+  provider,
+}: CatalogAuditButtonProps) {
+  const { t } = useI18n();
+  // open controls the audit dialog without retaining data outside this provider card.
+  // open 控制审核对话框，且不会在此供应商卡片外保留数据。
+  const [open, setOpen] = useState(false);
+  // audit is the validated complete catalog projection for this exact provider instance.
+  // audit 是此精确供应商实例经过校验的完整目录投影。
+  const [audit, setAudit] = useState<ProviderCatalogAudit | null>(null);
+  // loading reports the explicit on-demand audit request.
+  // loading 表示显式按需审核请求正在执行。
+  const [loading, setLoading] = useState(false);
+  // failed reports a safe browser-level audit load failure.
+  // failed 表示安全的浏览器级审核加载失败。
+  const [failed, setFailed] = useState(false);
+  // query filters exact model identifiers, channels, operations, and reasons.
+  // query 过滤精确模型标识、通道、操作与原因。
+  const [query, setQuery] = useState("");
+  // statusFilter selects one closed publication decision state.
+  // statusFilter 选择一个封闭发布决策状态。
+  const [statusFilter, setStatusFilter] = useState("all");
+
+  // loadAudit performs one protected read and replaces only this dialog's validated result.
+  // loadAudit 执行一次受保护读取，并仅替换此对话框经过校验的结果。
+  async function loadAudit(): Promise<void> {
+    setLoading(true);
+    setFailed(false);
+    try {
+      setAudit(
+        await fetchProviderCatalogAudit(
+          managementAuthToken,
+          provider.instance.id,
+        ),
+      );
+    } catch {
+      setFailed(true);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // normalizedQuery is the locale-stable audit filter value.
+  // normalizedQuery 是与区域设置无关的审核过滤值。
+  const normalizedQuery = query.trim().toLowerCase();
+  // visibleModels preserves complete model records while applying only explicit operator filters.
+  // visibleModels 在仅应用显式操作员过滤的同时保留完整模型记录。
+  const visibleModels = (audit?.models ?? []).filter((model) => {
+    // policies are exact decisions owned by this model.
+    // policies 是此模型拥有的精确决策。
+    const policies = (audit?.policies ?? []).filter(
+      (policy) => policy.provider_model_id === model.id,
+    );
+    if (
+      statusFilter !== "all" &&
+      !policies.some((policy) => policy.status === statusFilter)
+    ) {
+      return false;
+    }
+    if (normalizedQuery === "") return true;
+    // offerings are exact channel relations owned by this model.
+    // offerings 是此模型拥有的精确通道关系。
+    const offerings = (audit?.offerings ?? []).filter(
+      (offering) => offering.provider_model_id === model.id,
+    );
+    return [
+      model.id,
+      model.upstream_model_id,
+      model.display_name,
+      model.source,
+      ...offerings.flatMap((offering) => [
+        offering.id,
+        offering.channel_id,
+        ...offering.capabilities.input_modalities,
+        ...offering.capabilities.output_modalities,
+        offering.capabilities.tool_calling,
+        offering.capabilities.parallel_tool_calls,
+        offering.capabilities.streaming_tool_arguments,
+        offering.capabilities.strict_json_schema,
+        offering.capabilities.reasoning,
+        ...offering.capabilities.reasoning_efforts,
+        ...offering.capabilities.reasoning_summary_modes,
+      ]),
+      ...policies.flatMap((policy) => [
+        policy.operation,
+        policy.status,
+        policy.reason,
+      ]),
+    ].some((value) => value.toLowerCase().includes(normalizedQuery));
+  });
+  // policyControlled distinguishes explicit policy catalogs from backward-compatible profile-owned publication.
+  // policyControlled 区分显式策略目录与向后兼容的规格拥有发布方式。
+  const policyControlled = (audit?.policies.length ?? 0) > 0;
+
+  return (
+    <>
+      <Button
+        type="button"
+        variant="outline"
+        size="sm"
+        onClick={() => {
+          setOpen(true);
+          if (audit === null && !loading) void loadAudit();
+        }}
+      >
+        {t("providers.catalogAudit")}
+      </Button>
+      <Dialog open={open} onOpenChange={setOpen}>
+        <DialogContent className="grid max-h-[min(88vh,820px)] max-w-[min(96vw,1120px)] grid-rows-[auto_auto_minmax(0,1fr)] overflow-hidden">
+          <DialogHeader>
+            <div className="min-w-0 flex-1">
+              <DialogTitle>{t("providers.catalogAuditTitle")}</DialogTitle>
+              <DialogDescription>
+                {provider.instance.display_name} ·{" "}
+                {t("providers.catalogAuditDescription")}
+              </DialogDescription>
+            </div>
+            <DialogClose
+              aria-label={t("providers.cancel")}
+              render={<Button type="button" variant="ghost" size="icon" />}
+            >
+              <XIcon className="size-4" />
+            </DialogClose>
+          </DialogHeader>
+          <div className="grid gap-2 sm:grid-cols-[minmax(0,1fr)_14rem_auto]">
+            <Input
+              value={query}
+              onChange={(event) => setQuery(event.currentTarget.value)}
+              placeholder={t("providers.catalogAuditFilter")}
+            />
+            <ReadonlyCombobox
+              value={statusFilter}
+              onValueChange={setStatusFilter}
+              options={[
+                { value: "all", label: t("providers.catalogAuditAll") },
+                {
+                  value: "supported",
+                  label: t("providers.catalogPolicySupported"),
+                },
+                {
+                  value: "unsupported",
+                  label: t("providers.catalogPolicyUnsupported"),
+                },
+                {
+                  value: "pending_review",
+                  label: t("providers.catalogPolicyPending"),
+                },
+              ]}
+            />
+            <Button
+              type="button"
+              variant="outline"
+              disabled={loading}
+              onClick={() => void loadAudit()}
+            >
+              <RefreshCwIcon
+                className={`size-3.5 ${loading ? "animate-spin" : ""}`}
+              />
+              {t("providers.refreshCatalogAudit")}
+            </Button>
+          </div>
+          <div className="min-h-0 overflow-y-auto pr-1">
+            {failed ? (
+              <p className="text-destructive text-sm" role="alert">
+                {t("providers.catalogAuditFailed")}
+              </p>
+            ) : null}
+            {audit ? (
+              <div className="space-y-3">
+                <div className="bg-muted/30 grid gap-2 rounded-lg border p-3 text-xs sm:grid-cols-2 lg:grid-cols-4">
+                  <p>
+                    <span className="text-muted-foreground">
+                      {t("providers.catalogProduct")}:{" "}
+                    </span>
+                    {audit.product_name}
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">
+                      {t("providers.catalogRegions")}:{" "}
+                    </span>
+                    {audit.endpoint_regions.join(", ") || "—"}
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">
+                      {t("providers.catalogChannels")}:{" "}
+                    </span>
+                    {audit.channel_ids.join(", ") || "—"}
+                  </p>
+                  <p>
+                    <span className="text-muted-foreground">
+                      {t("providers.catalogRevision")}:{" "}
+                    </span>
+                    {audit.source_revision || audit.revision}
+                    {audit.stale ? (
+                      <Badge variant="destructive" className="ml-2">
+                        {t("providers.catalogStale")}
+                      </Badge>
+                    ) : null}
+                  </p>
+                </div>
+                <div className="overflow-hidden rounded-lg border">
+                  <Table>
+                    <TableHeader className="bg-muted/40">
+                      <TableRow>
+                        <TableHead className="min-w-56">
+                          {t("providers.models")}
+                        </TableHead>
+                        <TableHead className="min-w-[28rem]">
+                          {t("providers.catalogCapabilities")}
+                        </TableHead>
+                        <TableHead className="min-w-[28rem]">
+                          {t("providers.catalogDecisions")}
+                        </TableHead>
+                      </TableRow>
+                    </TableHeader>
+                    <TableBody>
+                      {visibleModels.map((model) => {
+                        // modelOfferings are the complete unfiltered channel relations for this row.
+                        // modelOfferings 是此行完整且未过滤的通道关系。
+                        const modelOfferings = audit.offerings.filter(
+                          (offering) => offering.provider_model_id === model.id,
+                        );
+                        // modelPolicies are the complete explicit publication decisions for this row.
+                        // modelPolicies 是此行完整的显式发布决策。
+                        const modelPolicies = audit.policies.filter(
+                          (policy) => policy.provider_model_id === model.id,
+                        );
+                        return (
+                          <TableRow key={model.id}>
+                            <TableCell className="whitespace-normal align-top">
+                              <p className="font-medium">
+                                {model.display_name}
+                              </p>
+                              <p className="text-muted-foreground font-mono text-xs">
+                                {model.upstream_model_id}
+                              </p>
+                              <p className="text-muted-foreground text-xs">
+                                {model.source}
+                              </p>
+                            </TableCell>
+                            <TableCell className="whitespace-normal align-top">
+                              <div className="space-y-2">
+                                {modelOfferings.map((offering) => (
+                                  <div
+                                    key={offering.id}
+                                    className="bg-muted/20 space-y-1.5 rounded-md border p-2 text-xs"
+                                  >
+                                    <div className="flex flex-wrap items-center justify-between gap-1.5">
+                                      <Badge variant="outline">
+                                        {offering.channel_id}
+                                      </Badge>
+                                      <span className="text-muted-foreground">
+                                        {t(
+                                          "providers.catalogCapabilityRevision",
+                                        )}{" "}
+                                        {offering.capability_revision}
+                                      </span>
+                                    </div>
+                                    <p>
+                                      <span className="text-muted-foreground">
+                                        {t("capabilities.inputModalities")}
+                                        :{" "}
+                                      </span>
+                                      {catalogAuditValuesLabel(
+                                        t,
+                                        offering.capabilities.input_modalities,
+                                      )}
+                                      <span className="text-muted-foreground">
+                                        {" → "}
+                                        {t("capabilities.outputModalities")}
+                                        :{" "}
+                                      </span>
+                                      {catalogAuditValuesLabel(
+                                        t,
+                                        offering.capabilities.output_modalities,
+                                      )}
+                                    </p>
+                                    <div className="grid gap-x-3 gap-y-1 sm:grid-cols-3">
+                                      <p>
+                                        <span className="text-muted-foreground">
+                                          {t("capabilities.contextWindow")}
+                                          :{" "}
+                                        </span>
+                                        {catalogAuditTokenLimitLabel(
+                                          t,
+                                          offering.capabilities.context_window,
+                                        )}
+                                      </p>
+                                      <p>
+                                        <span className="text-muted-foreground">
+                                          {t("capabilities.maxInput")}:{" "}
+                                        </span>
+                                        {catalogAuditTokenLimitLabel(
+                                          t,
+                                          offering.capabilities
+                                            .max_input_tokens,
+                                        )}
+                                      </p>
+                                      <p>
+                                        <span className="text-muted-foreground">
+                                          {t("capabilities.maxOutput")}:{" "}
+                                        </span>
+                                        {catalogAuditTokenLimitLabel(
+                                          t,
+                                          offering.capabilities
+                                            .max_output_tokens,
+                                        )}
+                                      </p>
+                                    </div>
+                                    <div className="flex flex-wrap gap-1">
+                                      {(
+                                        [
+                                          [
+                                            "capabilities.toolCalling",
+                                            offering.capabilities.tool_calling,
+                                          ],
+                                          [
+                                            "capabilities.parallelTools",
+                                            offering.capabilities
+                                              .parallel_tool_calls,
+                                          ],
+                                          [
+                                            "capabilities.streamingToolArguments",
+                                            offering.capabilities
+                                              .streaming_tool_arguments,
+                                          ],
+                                          [
+                                            "capabilities.strictJSON",
+                                            offering.capabilities
+                                              .strict_json_schema,
+                                          ],
+                                          [
+                                            "capabilities.reasoning",
+                                            offering.capabilities.reasoning,
+                                          ],
+                                        ] as const
+                                      ).map(([label, level]) => (
+                                        <Badge key={label} variant="secondary">
+                                          {t(label)}:{" "}
+                                          {catalogCapabilityLevelLabel(
+                                            t,
+                                            level,
+                                          )}
+                                        </Badge>
+                                      ))}
+                                    </div>
+                                    <details>
+                                      <summary className="text-muted-foreground cursor-pointer select-none">
+                                        {t(
+                                          "providers.catalogCapabilityDetails",
+                                        )}
+                                      </summary>
+                                      <pre className="bg-background mt-1 max-h-48 overflow-auto rounded border p-2 font-mono text-[11px] leading-4">
+                                        {JSON.stringify(
+                                          offering.capabilities,
+                                          null,
+                                          2,
+                                        )}
+                                      </pre>
+                                    </details>
+                                  </div>
+                                ))}
+                              </div>
+                            </TableCell>
+                            <TableCell className="whitespace-normal align-top">
+                              {modelPolicies.length > 0 ? (
+                                <div className="space-y-1.5">
+                                  {modelPolicies.map((policy) => (
+                                    <div
+                                      key={policy.id}
+                                      className="flex flex-wrap items-center gap-1.5 text-xs"
+                                    >
+                                      <Badge
+                                        variant={
+                                          policy.status === "supported"
+                                            ? "secondary"
+                                            : policy.status === "unsupported"
+                                              ? "outline"
+                                              : "destructive"
+                                        }
+                                      >
+                                        {catalogPolicyStatusLabel(
+                                          t,
+                                          policy.status,
+                                        )}
+                                      </Badge>
+                                      <span className="font-mono">
+                                        {policy.operation}
+                                      </span>
+                                      <span className="text-muted-foreground">
+                                        {catalogPolicyReasonLabel(
+                                          t,
+                                          policy.reason,
+                                        )}{" "}
+                                        ·{" "}
+                                        {t("providers.catalogEvidenceRevision")}{" "}
+                                        {policy.evidence_revision}
+                                      </span>
+                                    </div>
+                                  ))}
+                                </div>
+                              ) : (
+                                <Badge variant="outline">
+                                  {t(
+                                    policyControlled
+                                      ? "providers.catalogUnclassified"
+                                      : "providers.catalogLegacyPublication",
+                                  )}
+                                </Badge>
+                              )}
+                            </TableCell>
+                          </TableRow>
+                        );
+                      })}
+                    </TableBody>
+                  </Table>
+                </div>
+                <p className="text-muted-foreground text-xs">
+                  {t("providers.catalogAuditCount")}: {visibleModels.length} /{" "}
+                  {audit.models.length}
+                </p>
+              </div>
+            ) : loading ? (
+              <p className="text-muted-foreground text-sm">
+                {t("providers.loading")}
+              </p>
+            ) : null}
+          </div>
+        </DialogContent>
+      </Dialog>
+    </>
+  );
+}
+
 // AuthorizedProviderCardProps defines the data required by one configured-provider card.
 // AuthorizedProviderCardProps 定义一个已配置供应商卡片所需的数据。
 interface AuthorizedProviderCardProps {
+  // managementAuthToken authorizes the on-demand catalog audit without persisting it in component state.
+  // managementAuthToken 授权按需目录审核，且不会将其持久化到组件状态。
+  managementAuthToken: string;
   // provider joins the configured instance with its server-redacted credentials.
   // provider 将已配置实例与服务端脱敏凭据连接起来。
   provider: AuthorizedProvider;
@@ -3092,15 +3755,6 @@ interface AuthorizedProviderCardProps {
   // metadata is the latest explicit provider-native account snapshot.
   // metadata 是最近一次显式获取的供应商原生账号快照。
   metadata?: ProviderCatalogMetadata;
-  // refreshingMetadata reports an active metadata refresh for this exact instance.
-  // refreshingMetadata 表示此精确实例正在刷新元数据。
-  refreshingMetadata: boolean;
-  // metadataErrorCode is the latest server-authored or browser-network failure category.
-  // metadataErrorCode 是最近一次服务端给出或浏览器网络失败的分类。
-  metadataErrorCode?: string;
-  // onRefreshMetadata requests metadata only for the immutable instance identifier.
-  // onRefreshMetadata 仅针对不可变实例标识请求元数据。
-  onRefreshMetadata: (providerInstanceID: string) => void;
   // refreshingCredentialIDs identifies exact credentials currently refreshing.
   // refreshingCredentialIDs 标识当前正在刷新的精确凭据。
   refreshingCredentialIDs: ReadonlySet<string>;
@@ -3157,12 +3811,10 @@ interface AuthorizedProviderCardProps {
 // AuthorizedProviderCard renders one configured provider and its complete redacted authorization list.
 // AuthorizedProviderCard 渲染一个已配置供应商及其完整脱敏授权列表。
 function AuthorizedProviderCard({
+  managementAuthToken,
   provider,
   definition,
   metadata,
-  refreshingMetadata,
-  metadataErrorCode,
-  onRefreshMetadata,
   refreshingCredentialIDs,
   credentialRefreshErrors,
   onRefreshCredential,
@@ -3175,22 +3827,6 @@ function AuthorizedProviderCard({
   onAddCredential,
 }: AuthorizedProviderCardProps) {
   const { t } = useI18n();
-  // accountMetadataStatuses is the complete server-authored capability state set relevant to account refresh.
-  // accountMetadataStatuses 是与账号刷新相关的完整服务端能力状态集合。
-  const accountMetadataStatuses = [
-    definition?.features.model_discovery,
-    definition?.features.plan_reader,
-    definition?.features.entitlement_reader,
-    definition?.features.allowance_reader,
-  ];
-  // supportsAccountMetadata follows only the server-authored feature contract for this definition.
-  // supportsAccountMetadata 仅遵循此定义的服务端编写功能合同。
-  const supportsAccountMetadata = accountMetadataStatuses.includes("supported");
-  // accountMetadataTemporarilyUnavailable distinguishes an implemented but unavailable reader from explicit non-support.
-  // accountMetadataTemporarilyUnavailable 区分已实现但暂不可用的读取器与明确不支持。
-  const accountMetadataTemporarilyUnavailable =
-    !supportsAccountMetadata &&
-    accountMetadataStatuses.includes("temporarily_unavailable");
   const [routingMutationPending, setRoutingMutationPending] = useState(false);
   const [routingMutationFailed, setRoutingMutationFailed] = useState(false);
   return (
@@ -3214,22 +3850,10 @@ function AuthorizedProviderCard({
             <Badge variant="secondary">
               {providerStatusLabel(t, provider.instance.status)}
             </Badge>
-            {supportsAccountMetadata ? (
-              <Button
-                type="button"
-                variant="outline"
-                size="sm"
-                disabled={refreshingMetadata}
-                onClick={() => onRefreshMetadata(provider.instance.id)}
-              >
-                <RefreshCwIcon
-                  className={`size-3.5 ${refreshingMetadata ? "animate-spin" : ""}`}
-                />
-                {refreshingMetadata
-                  ? t("providers.refreshingMetadata")
-                  : t("providers.refreshMetadata")}
-              </Button>
-            ) : null}
+            <CatalogAuditButton
+              managementAuthToken={managementAuthToken}
+              provider={provider}
+            />
             {onAddCredential ? (
               <Button
                 type="button"
@@ -3243,20 +3867,6 @@ function AuthorizedProviderCard({
             ) : null}
           </div>
         </div>
-        {!supportsAccountMetadata ? (
-          <p className="text-muted-foreground text-xs">
-            {t(
-              accountMetadataTemporarilyUnavailable
-                ? "providers.metadataTemporarilyUnavailable"
-                : "providers.metadataUnsupported",
-            )}
-          </p>
-        ) : null}
-        {metadataErrorCode ? (
-          <p className="text-destructive text-sm" role="status">
-            {metadataRefreshErrorLabel(t, metadataErrorCode)}
-          </p>
-        ) : null}
         {metadata?.models.length ? (
           <div>
             <h4 className="mb-2 text-sm font-medium">
@@ -4193,8 +4803,9 @@ function localizedDescription(
     case "providers.kimi.codingDescription":
     case "providers.alibaba.description":
     case "providers.alibaba.modelStudioCNDescription":
-    case "providers.alibaba.modelStudioGlobalDescription":
-    case "providers.alibaba.modelStudioWorkspaceGlobalDescription":
+    case "providers.alibaba.modelStudioSingaporeDescription":
+    case "providers.alibaba.modelStudioUSDescription":
+    case "providers.alibaba.modelStudioWorkspaceSingaporeDescription":
     case "providers.alibaba.codingPlanCNDescription":
     case "providers.alibaba.codingPlanGlobalDescription":
     case "providers.alibaba.tokenPlanPersonalCNDescription":
@@ -4525,6 +5136,11 @@ export function ProviderOnboardingPanel({
     authMethod?.type === "api_key" ||
     authMethod?.type === "bearer" ||
     authMethod?.type === "header_api_key";
+  // isDirectCredentialReplacement keeps a replacement form compact and makes the new secret field explicit.
+  // isDirectCredentialReplacement 保持替换表单紧凑，并明确展示新凭据输入字段。
+  const isDirectCredentialReplacement =
+    Boolean(reauthorizationTarget) &&
+    (isDirectSecretAuth || isVertexServiceAccount);
   const isXAIDeviceFlow = definition.id === "system_xai_oauth";
   const isCodexDeviceFlow =
     isDeviceFlow && definition.id === "system_openai_codex";
@@ -5056,7 +5672,11 @@ export function ProviderOnboardingPanel({
       </CardHeader>
       <CardContent>
         <form
-          className="grid gap-4 md:grid-cols-2"
+          className={
+            isDirectCredentialReplacement
+              ? "grid gap-4"
+              : "grid gap-4 md:grid-cols-2"
+          }
           onSubmit={
             isDeviceFlow || isBrowserOAuth
               ? (event) => event.preventDefault()
@@ -5140,7 +5760,13 @@ export function ProviderOnboardingPanel({
             </>
           ) : !isDeviceFlow && !isBrowserOAuth ? (
             <div className="space-y-2">
-              <Label htmlFor="provider-secret">{t("providers.apiKey")}</Label>
+              <Label htmlFor="provider-secret">
+                {t(
+                  isDirectCredentialReplacement
+                    ? "providers.newAPIKey"
+                    : "providers.apiKey",
+                )}
+              </Label>
               <Input
                 id="provider-secret"
                 type="password"
@@ -5148,7 +5774,18 @@ export function ProviderOnboardingPanel({
                 onChange={(event) => setSecret(event.target.value)}
                 required
                 autoComplete="off"
+                autoFocus={isDirectCredentialReplacement}
+                placeholder={
+                  isDirectCredentialReplacement
+                    ? t("providers.newAPIKeyPlaceholder")
+                    : undefined
+                }
               />
+              {isDirectCredentialReplacement ? (
+                <p className="text-muted-foreground text-xs">
+                  {t("providers.replaceCredentialHelp")}
+                </p>
+              ) : null}
             </div>
           ) : null}
           {authMethod?.type === "api_key" &&

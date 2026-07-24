@@ -9,11 +9,177 @@ import (
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba/catalogdata"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
+
+// TestAlibabaVerifiedFactsAndPoliciesReachTheInternalCatalog verifies publication filtering never drops provider models or classified operation decisions.
+// TestAlibabaVerifiedFactsAndPoliciesReachTheInternalCatalog 验证发布过滤绝不会丢弃供应商模型或已分类操作决策。
+func TestAlibabaVerifiedFactsAndPoliciesReachTheInternalCatalog(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatal(errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatal(errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatal(errProviders)
+	}
+	definitionIDs := []string{bootstrap.AlibabaModelStudioCNDefinitionID, bootstrap.AlibabaModelStudioGlobalDefinitionID, bootstrap.AlibabaTokenPlanPersonalCNDefinitionID}
+	for _, definitionID := range definitionIDs {
+		definition, exists := systems.Lookup(definitionID)
+		if !exists {
+			t.Fatalf("definition %q missing", definitionID)
+		}
+		source, verified, errSource := catalogdata.SnapshotForCatalogID(definition.ModelCatalogID)
+		if errSource != nil || !verified {
+			t.Fatalf("source %q verified=%v error=%v", definition.ModelCatalogID, verified, errSource)
+		}
+		built, errBuild := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: providerconfig.ProviderInstance{ID: "pvi_alibaba_count"}}, definition, time.Date(2026, 7, 23, 5, 0, 0, 0, time.UTC))
+		if errBuild != nil {
+			t.Fatalf("build %q: %v", definitionID, errBuild)
+		}
+		models := make(map[string]string, len(built.Models))
+		for _, model := range built.Models {
+			models[model.UpstreamModelID] = model.ID
+		}
+		policies := make(map[string]int)
+		for _, policy := range built.ModelOperationPolicies {
+			policies[policy.ProviderModelID+"\x00"+string(policy.Operation)]++
+		}
+		for _, fact := range source.Models {
+			modelID, exists := models[fact.ModelID]
+			if !exists {
+				t.Fatalf("catalog %q dropped provider fact %q", definition.ModelCatalogID, fact.ModelID)
+			}
+			for _, operation := range catalogdata.ClassifiedOperations(fact) {
+				if policies[modelID+"\x00"+string(operation)] != 1 {
+					t.Fatalf("catalog %q model %q operation %q policy count = %d", definition.ModelCatalogID, fact.ModelID, operation, policies[modelID+"\x00"+string(operation)])
+				}
+			}
+		}
+	}
+}
+
+// TestAlibabaCatalogSeparatesCompatibleAndNativeEntitlementScopes verifies /models gates only products with a verified listing contract and never removes independently proven native actions.
+// TestAlibabaCatalogSeparatesCompatibleAndNativeEntitlementScopes 验证 /models 仅约束拥有已验证列表合同的产品，绝不会移除独立证明的原生操作。
+func TestAlibabaCatalogSeparatesCompatibleAndNativeEntitlementScopes(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatal(errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatal(errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatal(errProviders)
+	}
+	definitionIDs := []string{
+		bootstrap.AlibabaCodingPlanCNDefinitionID,
+		bootstrap.AlibabaModelStudioCNDefinitionID,
+		bootstrap.AlibabaModelStudioGlobalDefinitionID,
+		bootstrap.AlibabaTokenPlanPersonalCNDefinitionID,
+	}
+	for _, definitionID := range definitionIDs {
+		definition, exists := systems.Lookup(definitionID)
+		if !exists {
+			t.Fatalf("definition %q missing", definitionID)
+		}
+		snapshot, errBuild := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: providerconfig.ProviderInstance{ID: "pvi_alibaba_entitlement_" + definitionID}}, definition, time.Date(2026, 7, 23, 5, 0, 0, 0, time.UTC))
+		if errBuild != nil {
+			t.Fatalf("build %q: %v", definitionID, errBuild)
+		}
+		modelsByID := make(map[string]catalog.ProviderModel, len(snapshot.Models))
+		for _, model := range snapshot.Models {
+			modelsByID[model.ID] = model
+		}
+		offeringsByID := make(map[string]catalog.ModelOffering, len(snapshot.Offerings))
+		for _, offering := range snapshot.Offerings {
+			offeringsByID[offering.ID] = offering
+		}
+		for _, profile := range snapshot.Profiles {
+			if profile.OfferingID == "" {
+				continue
+			}
+			model := modelsByID[offeringsByID[profile.OfferingID].ProviderModelID]
+			if model.EntitlementMode != catalog.EntitlementAllBoundCredentials {
+				t.Fatalf("definition %q executable model %q entitlement = %q", definitionID, model.UpstreamModelID, model.EntitlementMode)
+			}
+			if len(profile.RequiredEntitlementClasses) != 0 {
+				t.Fatalf("definition %q static profile %q unexpectedly requires %v", definitionID, profile.ID, profile.RequiredEntitlementClasses)
+			}
+		}
+	}
+}
+
+// TestAlibabaStaticPlanCatalogUsesContractEvidence verifies static product templates use committed facts without claiming runtime discovery.
+// TestAlibabaStaticPlanCatalogUsesContractEvidence 验证静态产品模板使用已提交事实且不声称运行时发现。
+func TestAlibabaStaticPlanCatalogUsesContractEvidence(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatal(errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatal(errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatal(errProviders)
+	}
+	definition, exists := systems.Lookup(bootstrap.AlibabaCodingPlanCNDefinitionID)
+	if !exists {
+		t.Fatal("Alibaba Coding Plan CN definition is missing")
+	}
+	providerSnapshot, verified, errSource := catalogdata.SnapshotForCatalogID(definition.ModelCatalogID)
+	if errSource != nil || !verified || providerSnapshot.SourceAPI == "/v1/models" || providerSnapshot.SourceAPI == "/compatible-mode/v1/models" {
+		t.Fatalf("Coding Plan static catalog verified=%v source=%q error=%v", verified, providerSnapshot.SourceAPI, errSource)
+	}
+	snapshot, errBuild := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: providerconfig.ProviderInstance{ID: "pvi_alibaba_contract_evidence"}}, definition, time.Date(2026, 7, 23, 5, 0, 0, 0, time.UTC))
+	if errBuild != nil {
+		t.Fatalf("build Coding Plan catalog: %v", errBuild)
+	}
+	if len(snapshot.ModelOperationPolicies) == 0 {
+		t.Fatal("Coding Plan catalog has no publication policies")
+	}
+	for _, policy := range snapshot.ModelOperationPolicies {
+		if policy.Status != catalog.ModelOperationSupported || policy.Reason != catalog.SupportReasonProviderContractVerified {
+			t.Fatalf("Coding Plan policy evidence = %#v", policy)
+		}
+	}
+}
+
+// TestAlibabaUnverifiedBoundariesRemainUnpublished verifies incomplete regional and product evidence cannot create runtime definitions.
+// TestAlibabaUnverifiedBoundariesRemainUnpublished 验证不完整的区域与产品证据不能创建运行时定义。
+func TestAlibabaUnverifiedBoundariesRemainUnpublished(t *testing.T) {
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatal(errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatal(errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatal(errProviders)
+	}
+	for _, definitionID := range []string{bootstrap.AlibabaModelStudioUSDefinitionID, bootstrap.AlibabaModelStudioWorkspaceGlobalDefinitionID, bootstrap.AlibabaTokenPlanPersonalGlobalDefinitionID} {
+		if _, exists := systems.Lookup(definitionID); exists {
+			t.Fatalf("unverified Alibaba definition %q was published", definitionID)
+		}
+	}
+	for _, catalogID := range []string{"alibaba_model_studio_hong_kong", "alibaba_model_studio_tokyo", "alibaba_model_studio_frankfurt", "alibaba_model_studio_us", "alibaba_model_studio_workspace_sg", "alibaba_token_plan_personal_global"} {
+		_, verified, errSource := catalogdata.SnapshotForCatalogID(catalogID)
+		if errSource != nil || verified {
+			t.Fatalf("unverified Alibaba catalog %q verified=%v error=%v", catalogID, verified, errSource)
+		}
+	}
+}
 
 // TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog verifies provider selection never fails after credential acquisition.
 // TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog 验证凭据获取后选择供应商绝不会因目录缺失而失败。
@@ -60,7 +226,7 @@ func TestEveryRuntimeReadySystemDefinitionOwnsAValidInitialCatalog(t *testing.T)
 				continue
 			}
 			offering := offeringsByID[profile.OfferingID]
-			if errAction != nil || profile.ActionBindingID != action.ID || offering.ChannelID != action.ProtocolProfileID || profile.Capabilities.Delivery.Synchronous != action.Delivery.Synchronous || profile.Capabilities.Delivery.Streaming != action.Delivery.Streaming || profile.Capabilities.Delivery.Asynchronous != action.Delivery.Asynchronous {
+			if errAction != nil || profile.ActionBindingID != action.ID || offering.ChannelID != action.ProtocolProfileID || profile.Capabilities.Delivery.Synchronous && !action.Delivery.Synchronous || profile.Capabilities.Delivery.Streaming && !action.Delivery.Streaming || profile.Capabilities.Delivery.Asynchronous && !action.Delivery.Asynchronous {
 				t.Errorf("definition %s profile action contract = %#v", definition.ID, profile)
 			}
 		}

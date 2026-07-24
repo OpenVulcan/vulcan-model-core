@@ -20,8 +20,8 @@ type ExecutionSelectionRequest struct {
 	// Operation identifies the required closed VCP operation.
 	// Operation 标识所需的封闭 VCP 操作。
 	Operation OperationKind `json:"operation"`
-	// RequiredContextTokens is the minimum authoritative context capacity.
-	// RequiredContextTokens 是最小权威上下文容量。
+	// RequiredContextTokens is the minimum shared capacity for input, reasoning, and reserved output.
+	// RequiredContextTokens 是输入、推理和预留输出共同所需的最小共享容量。
 	RequiredContextTokens int64 `json:"required_context_tokens,omitempty"`
 	// RequiredMaxOutputTokens is the minimum independently authoritative output ceiling.
 	// RequiredMaxOutputTokens 是最小独立权威输出上限。
@@ -49,8 +49,11 @@ type ExecutionSelectionRequest struct {
 // Validate verifies the provider-scoped selection contract and normalized unique lists.
 // Validate 校验供应商作用域选择合同与规范化唯一列表。
 func (r ExecutionSelectionRequest) Validate() error {
-	if r.ProtocolVersion != ProtocolVersion || strings.TrimSpace(r.RequestID) == "" || strings.TrimSpace(r.ProviderInstanceID) == "" || !validSelectionOperation(r.Operation) || r.RequiredContextTokens < 0 || r.RequiredMaxOutputTokens < 0 {
+	if r.ProtocolVersion != ProtocolVersion || strings.TrimSpace(r.RequestID) == "" || strings.TrimSpace(r.ProviderInstanceID) == "" || !r.Operation.Valid() || r.RequiredContextTokens < 0 || r.RequiredMaxOutputTokens < 0 {
 		return fmt.Errorf("%w: selection version, identity, provider instance, operation, and context requirement are invalid", ErrInvalidRequest)
+	}
+	if r.RequiredContextTokens > 0 && r.RequiredMaxOutputTokens > r.RequiredContextTokens {
+		return fmt.Errorf("%w: required output ceiling cannot exceed the required shared context capacity", ErrInvalidRequest)
 	}
 	if errInputs := validateSelectionModalities("required input modality", r.RequiredInputModalities); errInputs != nil {
 		return errInputs
@@ -92,17 +95,6 @@ func validateSelectionModalities(label string, values []string) error {
 		seen[value] = struct{}{}
 	}
 	return nil
-}
-
-// validSelectionOperation reports every closed operation that may participate in preselection.
-// validSelectionOperation 报告可参与执行前选择的每个封闭操作。
-func validSelectionOperation(operation OperationKind) bool {
-	switch operation {
-	case OperationConversationRespond, OperationMediaAnalyze, OperationImageGenerate, OperationImageEdit, OperationVideoGenerate, OperationVideoEdit, OperationVideoExtend, OperationSpeechSynthesize, OperationSpeechTranscribe, OperationEmbeddingCreate, OperationRerankDocuments, OperationSearchWeb, OperationWebExtract, OperationMusicGenerate, OperationMusicCoverPrepare, OperationMusicCover:
-		return true
-	default:
-		return false
-	}
 }
 
 // ExecutionSelection contains one safe exact model-or-service target without endpoint or credential identity.

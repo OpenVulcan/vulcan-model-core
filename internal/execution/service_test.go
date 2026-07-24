@@ -97,6 +97,71 @@ type continuationProviderExecutor struct {
 	rejectContinuation bool
 }
 
+// canonicalConversationResult creates a provider result whose aggregate is exactly reproducible from its semantic events.
+// canonicalConversationResult 创建一个可由语义事件精确还原聚合结果的供应商结果。
+func canonicalConversationResult(response vcp.Response, eventTime time.Time) provider.ExecutionResult {
+	events := make([]vcp.Event, 0, len(response.Items)*2+1)
+	sequence := uint64(1)
+	for itemIndex := range response.Items {
+		startedItem := response.Items[itemIndex]
+		startedItem.Status = vcp.OutputItemInProgress
+		itemID := startedItem.ItemID
+		events = append(events,
+			vcp.Event{
+				ResponseID: response.ResponseID,
+				EventID:    fmt.Sprintf("%s_item_%d_started", response.ResponseID, itemIndex+1),
+				Sequence:   sequence,
+				Time:       eventTime,
+				Replayable: true,
+				Type:       vcp.EventItemStarted,
+				ItemID:     itemID,
+				Item:       &startedItem,
+			},
+			vcp.Event{
+				ResponseID: response.ResponseID,
+				EventID:    fmt.Sprintf("%s_item_%d_completed", response.ResponseID, itemIndex+1),
+				Sequence:   sequence + 1,
+				Time:       eventTime,
+				Replayable: true,
+				Type:       vcp.EventItemCompleted,
+				ItemID:     itemID,
+			},
+		)
+		sequence += 2
+	}
+	terminalType := vcp.EventResponseCompleted
+	if response.Status == vcp.ResponseIncomplete {
+		terminalType = vcp.EventResponseIncomplete
+	}
+	events = append(events, vcp.Event{
+		ResponseID:   response.ResponseID,
+		EventID:      response.ResponseID + "_terminal",
+		Sequence:     sequence,
+		Time:         eventTime,
+		Replayable:   true,
+		Type:         terminalType,
+		FinishReason: response.FinishReason,
+	})
+	return provider.ExecutionResult{Response: response, Events: events}
+}
+
+// streamingSuccessProviderExecutor emits every semantic event durably before returning the same complete canonical history.
+// streamingSuccessProviderExecutor 在返回同一份完整规范历史前，先持久发送每个语义事件。
+type streamingSuccessProviderExecutor struct{}
+
+// Execute exercises the real successful streaming sink path without omitting the provider's final event list.
+// Execute 测试真实的成功流式 Sink 路径，且不省略供应商最终事件列表。
+func (streamingSuccessProviderExecutor) Execute(ctx context.Context, request provider.ExecutionRequest) (provider.ExecutionResult, error) {
+	if request.EventSink == nil {
+		return provider.ExecutionResult{}, errors.New("streaming event sink is required")
+	}
+	result := canonicalConversationResult(vcp.Response{ResponseID: "response_stream_success", Status: vcp.ResponseCompleted}, request.Now)
+	if errEmit := provider.EmitExecutionEvents(ctx, request.EventSink, result.Events); errEmit != nil {
+		return provider.ExecutionResult{}, errEmit
+	}
+	return result, nil
+}
+
 // Execute creates provider continuation state on the first call and verifies it is resolved on the second call.
 // Execute 在首次调用创建供应商续接状态，并在第二次调用校验该状态已解析。
 func (e *continuationProviderExecutor) Execute(_ context.Context, request provider.ExecutionRequest) (provider.ExecutionResult, error) {
@@ -113,7 +178,10 @@ func (e *continuationProviderExecutor) Execute(_ context.Context, request provid
 		responseID = "response_continued"
 		upstreamID = "upstream_continued"
 	}
-	return provider.ExecutionResult{Response: vcp.Response{ResponseID: responseID, Status: vcp.ResponseCompleted}, UpstreamResponseID: upstreamID, ContinuationUpstreamResponseID: upstreamID}, nil
+	result := canonicalConversationResult(vcp.Response{ResponseID: responseID, Status: vcp.ResponseCompleted}, request.Now)
+	result.UpstreamResponseID = upstreamID
+	result.ContinuationUpstreamResponseID = upstreamID
+	return result, nil
 }
 
 // blockingStreamingProviderExecutor emits one semantic event before waiting so tests can observe live durability.
@@ -310,7 +378,7 @@ func (e *durableRetryProviderExecutor) Execute(_ context.Context, request provid
 	if len(e.requests) == 1 || e.failAlways {
 		return provider.ExecutionResult{}, errors.New("transient test failure")
 	}
-	return provider.ExecutionResult{Response: vcp.Response{ResponseID: "response_retry", Status: vcp.ResponseCompleted}}, nil
+	return canonicalConversationResult(vcp.Response{ResponseID: "response_retry", Status: vcp.ResponseCompleted}, request.Now), nil
 }
 
 // TestDeferredExecutionEmitsRetryAbortOnClassifiedTerminalFailure verifies classified exhaustion closes retry event history.
@@ -509,7 +577,7 @@ func (e *recordingTaskProviderExecutor) PollTask(_ context.Context, request prov
 	if e.polls <= e.queuedPolls {
 		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskQueued, PollAfter: request.Now}, nil
 	}
-	result := provider.ExecutionResult{Response: vcp.Response{ResponseID: "response_async", Status: vcp.ResponseCompleted}}
+	result := canonicalConversationResult(vcp.Response{ResponseID: "response_async", Status: vcp.ResponseCompleted}, request.Now)
 	return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskSucceeded, Result: &result}, nil
 }
 
@@ -559,12 +627,214 @@ func TestValidateMediaAnalyzeRejectsUndeclaredRole(t *testing.T) {
 	}
 }
 
+// TestValidateProviderResultRejectsEmptyMediaAnalysis verifies a zero-value provider response cannot become a successful direct or Router analysis.
+// TestValidateProviderResultRejectsEmptyMediaAnalysis 校验零值供应商响应不能成为成功的直接或 Router 分析。
+func TestValidateProviderResultRejectsEmptyMediaAnalysis(t *testing.T) {
+	request := vcp.ExecutionRequest{Operation: vcp.OperationMediaAnalyze, Payload: vcp.OperationPayload{MediaAnalyze: &vcp.MediaAnalyzeOperation{}}}
+	if errValidate := validateProviderResult(request, provider.ExecutionResult{}, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+		t.Fatalf("empty media analysis error = %v, want ErrInvalidProviderResult", errValidate)
+	}
+	valid := canonicalConversationResult(vcp.Response{
+		ResponseID: "response_analysis",
+		Status:     vcp.ResponseCompleted,
+		Items: []vcp.OutputItem{{
+			ItemID: "item_analysis",
+			Kind:   vcp.ContextMessage,
+			Status: vcp.OutputItemCompleted,
+			Content: []vcp.ContentBlock{{
+				Type: vcp.ContentText,
+				Text: "visible analysis",
+			}},
+		}},
+	}, time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC))
+	if errValidate := validateProviderResult(request, valid, true); errValidate != nil {
+		t.Fatalf("valid media analysis error = %v", errValidate)
+	}
+}
+
+// TestValidateProviderResultRejectsMalformedWebSearch verifies provider search facts cannot bypass the closed response contract.
+// TestValidateProviderResultRejectsMalformedWebSearch 校验供应商搜索事实不能绕过封闭响应合同。
+func TestValidateProviderResultRejectsMalformedWebSearch(t *testing.T) {
+	maxResults := 1
+	request := vcp.ExecutionRequest{
+		Operation: vcp.OperationSearchWeb,
+		Payload: vcp.OperationPayload{SearchWeb: &vcp.WebSearchOperation{
+			Query:               "Vulcan",
+			MaxResults:          &maxResults,
+			EvidenceRequirement: vcp.SearchEvidenceVerified,
+		}},
+	}
+	valid := provider.ExecutionResult{Search: &vcp.WebSearchResponse{
+		Query:    "Vulcan",
+		Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed, Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}},
+		Results:  []vcp.WebSearchResult{{ID: "result_1", Rank: 1, URL: "https://example.com/result"}},
+	}}
+	if errValidate := validateProviderResult(request, valid, true); errValidate != nil {
+		t.Fatalf("valid web search result error = %v", errValidate)
+	}
+	cases := map[string]vcp.WebSearchResponse{
+		"unknown status": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: "done", Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}},
+		},
+		"confirmed without evidence": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed},
+		},
+		"unverified with results": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionRequestedUnverified},
+			Results:  []vcp.WebSearchResult{{ID: "result_1", Rank: 1, URL: "https://example.com/result"}},
+		},
+		"result without matching evidence": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed, Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceProviderEvent}},
+			Results:  []vcp.WebSearchResult{{ID: "result_1", Rank: 1, URL: "https://example.com/result"}},
+		},
+		"invalid result order": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed, Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}},
+			Results:  []vcp.WebSearchResult{{ID: "result_1", Rank: 2, URL: "https://example.com/result"}},
+		},
+		"credential-bearing result URL": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed, Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}},
+			Results:  []vcp.WebSearchResult{{ID: "result_1", Rank: 1, URL: "https://user:secret@example.com/result"}},
+		},
+		"citation references unknown result": {
+			Query:    "Vulcan",
+			Evidence: vcp.SearchExecutionEvidence{Status: vcp.SearchExecutionConfirmed, Kinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceCitation}},
+			Citations: []vcp.Citation{{
+				ID:       "citation_1",
+				ResultID: "missing",
+				URL:      "https://example.com/result",
+			}},
+		},
+	}
+	for name, response := range cases {
+		t.Run(name, func(t *testing.T) {
+			if errValidate := validateProviderResult(request, provider.ExecutionResult{Search: &response}, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+				t.Fatalf("web search result error = %v, want ErrInvalidProviderResult", errValidate)
+			}
+		})
+	}
+}
+
+// TestValidateProviderResultRejectsForeignFieldsInGeneratedMedia verifies generated-media unions cannot retain results owned by other operations.
+// TestValidateProviderResultRejectsForeignFieldsInGeneratedMedia 验证生成媒体联合体不能保留其他操作拥有的结果。
+func TestValidateProviderResultRejectsForeignFieldsInGeneratedMedia(t *testing.T) {
+	testCases := []struct {
+		name      string
+		operation vcp.OperationKind
+		payload   vcp.OperationPayload
+		resource  provider.GeneratedResource
+	}{
+		{
+			name:      "video",
+			operation: vcp.OperationVideoGenerate,
+			payload:   vcp.OperationPayload{VideoGenerate: &vcp.VideoGenerateOperation{}},
+			resource:  provider.GeneratedResource{OutputID: "video-0", Kind: vcp.MediaVideo, MIMEType: "video/mp4", Data: []byte("video")},
+		},
+		{
+			name:      "speech",
+			operation: vcp.OperationSpeechSynthesize,
+			payload:   vcp.OperationPayload{SpeechSynthesize: &vcp.SpeechSynthesizeOperation{}},
+			resource:  provider.GeneratedResource{OutputID: "audio-0", Kind: vcp.MediaAudio, MIMEType: "audio/wav", Data: []byte("audio")},
+		},
+		{
+			name:      "music",
+			operation: vcp.OperationMusicGenerate,
+			payload:   vcp.OperationPayload{MusicGenerate: &vcp.MusicGenerateOperation{}},
+			resource:  provider.GeneratedResource{OutputID: "music-0", Kind: vcp.MediaAudio, MIMEType: "audio/mpeg", Data: []byte("music")},
+		},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := vcp.ExecutionRequest{Operation: testCase.operation, Payload: testCase.payload}
+			result := provider.ExecutionResult{
+				GeneratedResources: []provider.GeneratedResource{testCase.resource},
+				Embeddings:         []vcp.EmbeddingItem{{InputID: "foreign"}},
+			}
+			if errValidate := validateProviderResult(request, result, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+				t.Fatalf("generated-media result error = %v, want ErrInvalidProviderResult", errValidate)
+			}
+		})
+	}
+}
+
+// TestValidateProviderResultRejectsForeignCanonicalResponse verifies non-conversation operations cannot smuggle a discarded response history.
+// TestValidateProviderResultRejectsForeignCanonicalResponse 验证非会话操作不能夹带会被丢弃的响应历史。
+func TestValidateProviderResultRejectsForeignCanonicalResponse(t *testing.T) {
+	text := "test"
+	request := vcp.ExecutionRequest{
+		Operation: vcp.OperationEmbeddingCreate,
+		Payload: vcp.OperationPayload{EmbeddingCreate: &vcp.EmbeddingOperation{
+			Inputs:     []vcp.EmbeddingInput{{ID: "input_1", Text: &text}},
+			OutputKind: vcp.EmbeddingVectorDense,
+			Encoding:   vcp.EmbeddingEncodingFloat,
+		}},
+	}
+	result := provider.ExecutionResult{
+		Embeddings: []vcp.EmbeddingItem{{InputID: "input_1", Kind: vcp.EmbeddingVectorDense, Encoding: vcp.EmbeddingEncodingFloat, Dense: &vcp.DenseEmbedding{Dimensions: 1, Values: []float64{1}}}},
+		Response:   vcp.Response{ResponseID: "foreign_response", Status: vcp.ResponseCompleted},
+		Events:     []vcp.Event{{ResponseID: "foreign_response", EventID: "foreign_terminal", Sequence: 1, Time: time.Date(2026, 7, 23, 12, 0, 0, 0, time.UTC), Replayable: true, Type: vcp.EventResponseCompleted}},
+	}
+	if errValidate := validateProviderResult(request, result, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+		t.Fatalf("foreign canonical response error = %v, want ErrInvalidProviderResult", errValidate)
+	}
+}
+
+// TestValidateProviderResultRequiresCanonicalConversationEvents verifies a provider cannot publish an unproven or divergent conversation aggregate.
+// TestValidateProviderResultRequiresCanonicalConversationEvents 验证供应商不能公开未经事件证明或与事件分歧的会话聚合结果。
+func TestValidateProviderResultRequiresCanonicalConversationEvents(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	request := vcp.ExecutionRequest{
+		Operation: vcp.OperationConversationRespond,
+		Payload:   vcp.OperationPayload{Conversation: &vcp.ConversationOperation{}},
+	}
+	events := []vcp.Event{
+		{ResponseID: "response_canonical", EventID: "event_started", Sequence: 1, Time: now, Replayable: true, Type: vcp.EventResponseStarted},
+		{ResponseID: "response_canonical", EventID: "event_completed", Sequence: 2, Time: now, Replayable: true, Type: vcp.EventResponseCompleted},
+	}
+	valid := provider.ExecutionResult{
+		Response: vcp.Response{ResponseID: "response_canonical", Status: vcp.ResponseCompleted},
+		Events:   events,
+	}
+	if errValidate := validateProviderResult(request, valid, true); errValidate != nil {
+		t.Fatalf("canonical conversation result error = %v", errValidate)
+	}
+	missingEvents := valid
+	missingEvents.Events = nil
+	if errValidate := validateProviderResult(request, missingEvents, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+		t.Fatalf("missing event history error = %v, want ErrInvalidProviderResult", errValidate)
+	}
+	divergent := valid
+	divergent.Response.FinishReason = "unobserved"
+	if errValidate := validateProviderResult(request, divergent, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+		t.Fatalf("divergent aggregate error = %v, want ErrInvalidProviderResult", errValidate)
+	}
+	postTerminal := valid
+	postTerminal.Events = append(append([]vcp.Event(nil), events...), vcp.Event{ResponseID: "response_canonical", EventID: "event_after_terminal", Sequence: 3, Time: now, Replayable: true, Type: vcp.EventResponseStarted})
+	if errValidate := validateProviderResult(request, postTerminal, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+		t.Fatalf("post-terminal event history error = %v, want ErrInvalidProviderResult", errValidate)
+	}
+	duplicateEvent := valid
+	duplicateEvent.Events = []vcp.Event{
+		events[0],
+		{ResponseID: "response_canonical", EventID: events[0].EventID, Sequence: 2, Time: now, Replayable: true, Type: vcp.EventResponseStarted},
+		{ResponseID: "response_canonical", EventID: "event_completed_after_duplicate", Sequence: 3, Time: now, Replayable: true, Type: vcp.EventResponseCompleted},
+	}
+	if errValidate := validateProviderResult(request, duplicateEvent, true); !errors.Is(errValidate, ErrInvalidProviderResult) {
+		t.Fatalf("duplicate event history error = %v, want ErrInvalidProviderResult", errValidate)
+	}
+}
+
 // mediaValidationTarget returns one valid image-understanding contract for request admission tests.
 // mediaValidationTarget 返回一个用于请求接收测试的有效图片理解合同。
 func mediaValidationTarget(operation vcp.OperationKind) resolve.Target {
 	evidenceTime := time.Date(2026, time.July, 20, 0, 0, 0, 0, time.UTC)
 	capability := catalog.MediaInputCapability{Kind: vcp.MediaImage, Roles: []vcp.MediaInputRole{vcp.MediaRoleUnderstanding}, Level: catalog.CapabilityNative, InteractionModes: []catalog.MediaInteractionMode{catalog.MediaInteractionMixedConversation, catalog.MediaInteractionMediaOnlyConversation, catalog.MediaInteractionAnalysis}, MediaOnlyPolicy: catalog.MediaOnlyRouterInstruction, AllowedAuthorities: []vcp.Authority{vcp.AuthorityUser}, AllowedPlacements: []vcp.Placement{vcp.PlacementTranscript}, ClientWorkflows: []catalog.ClientResourceWorkflow{catalog.ClientWorkflowUploadThenReference}, MaterializationModes: []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64}, Image: &catalog.ImageMediaLimits{}, Compatibility: catalog.MediaCompatibility{ToolCalling: catalog.CapabilityNative, Streaming: catalog.CapabilityNative, Reasoning: catalog.CapabilityNative, StructuredOutput: catalog.CapabilityNative}, Evidence: []catalog.CapabilityEvidence{{Source: catalog.ModelSourceSystem, Reference: "test-media-contract", ObservedAt: evidenceTime, Revision: 1}}, EvidenceRevision: 1}
-	return resolve.Target{SubjectKind: resolve.ExecutionSubjectModel, Operation: operation, ModelCapabilities: catalog.ModelCapabilities{Delivery: catalog.DeliveryCapabilities{Synchronous: true, Streaming: true}, MediaInputs: []catalog.MediaInputCapability{capability}}}
+	return resolve.Target{SubjectKind: resolve.ExecutionSubjectModel, Operation: operation, ModelCapabilities: catalog.ModelCapabilities{OutputModalities: []string{"text"}, Delivery: catalog.DeliveryCapabilities{Synchronous: true, Streaming: true}, MediaInputs: []catalog.MediaInputCapability{capability}}}
 }
 
 // TestServiceExecutesOnceAndReplaysBeforeMutableResolution verifies durable exactly-once admission semantics.
@@ -603,6 +873,43 @@ func TestServiceExecutesOnceAndReplaysBeforeMutableResolution(t *testing.T) {
 	conflicting.RequestID = "different_request"
 	if _, _, errConflict := service.Create(context.Background(), "api_test", conflicting); !errors.Is(errConflict, ErrIdempotencyConflict) {
 		t.Fatalf("conflicting replay error=%v", errConflict)
+	}
+}
+
+// TestServiceValidatesCompleteStreamingHistoryBeforeFilteringCommittedEvents verifies successful streams are validated in full and persisted once.
+// TestServiceValidatesCompleteStreamingHistoryBeforeFilteringCommittedEvents 验证成功流会按完整历史校验且每个事件只持久化一次。
+func TestServiceValidatesCompleteStreamingHistoryBeforeFilteringCommittedEvents(t *testing.T) {
+	now := time.Date(2026, 7, 23, 13, 0, 0, 0, time.UTC)
+	capabilities := conversationTestCapabilities(true, false)
+	capabilities.Delivery.Streaming = true
+	target := resolve.Target{ProviderDefinitionID: "definition_stream_success", ProviderInstanceID: "pvi_stream_success", ChannelID: "openai.chat", EndpointID: "endpoint_stream_success", EndpointRegion: "global", CredentialID: "credential_stream_success", SubjectKind: resolve.ExecutionSubjectModel, ProviderModelID: "model_stream_success", OfferingID: "offering_stream_success", Operation: vcp.OperationConversationRespond, ActionBindingID: "action_stream_success", ExecutionProfileID: "profile_stream_success", UpstreamModelID: "upstream_stream_success", ModelCapabilities: capabilities, CapabilityRevision: 1, ProviderConfigRevision: 1, CatalogRevision: 1}
+	resolver := &staticResolver{target: target}
+	configurations := staticConfigurations{
+		definition: providerconfig.ProviderDefinition{ID: target.ProviderDefinitionID},
+		endpoint:   providerconfig.Endpoint{ID: target.EndpointID, ProviderInstanceID: target.ProviderInstanceID, ChannelID: target.ChannelID, BaseURL: "https://provider.example", Region: target.EndpointRegion, Status: providerconfig.EndpointReady, Revision: 1},
+		credential: providerconfig.Credential{ID: target.CredentialID, ProviderInstanceID: target.ProviderInstanceID, Status: providerconfig.CredentialActive, Revision: 1},
+	}
+	service, errService := NewService(NewMemoryStore(), resolver, configurations, nil, nil, streamingSuccessProviderExecutor{}, ServiceOptions{NewID: func() (string, error) { return "exe_89898989898989898989898989898989", nil }, Now: func() time.Time { return now }, Retention: time.Hour})
+	if errService != nil {
+		t.Fatalf("NewService() error = %v", errService)
+	}
+	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request_stream_success", Stream: true, Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationConversationRespond, Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{}}}
+	record, _, errCreate := service.Create(context.Background(), "owner_stream_success", request)
+	if errCreate != nil || record.Status != StatusSucceeded {
+		t.Fatalf("streaming record = %+v, error = %v", record, errCreate)
+	}
+	events, errEvents := service.Events(context.Background(), "owner_stream_success", record.ID, 0)
+	if errEvents != nil {
+		t.Fatalf("Events() error = %v", errEvents)
+	}
+	providerSemanticCount := 0
+	for _, event := range events {
+		if event.Type == EventProviderSemantic {
+			providerSemanticCount++
+		}
+	}
+	if providerSemanticCount != 1 {
+		t.Fatalf("provider semantic event count = %d, want 1", providerSemanticCount)
 	}
 }
 
@@ -739,6 +1046,49 @@ func TestServiceInvalidatesProviderRejectedContinuation(t *testing.T) {
 	}
 }
 
+// TestValidateRequestAgainstTargetRejectsNonStreamingUseOfStreamingOnlyProfile verifies catalog delivery narrowing is enforced before persistence or transport.
+// TestValidateRequestAgainstTargetRejectsNonStreamingUseOfStreamingOnlyProfile 验证目录交付收窄在持久化或传输前得到强制执行。
+func TestValidateRequestAgainstTargetRejectsNonStreamingUseOfStreamingOnlyProfile(t *testing.T) {
+	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request-streaming-only", Operation: vcp.OperationConversationRespond, Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{}}}
+	target := resolve.Target{SubjectKind: resolve.ExecutionSubjectModel, ModelCapabilities: catalog.ModelCapabilities{Delivery: catalog.DeliveryCapabilities{Streaming: true}}}
+	if errValidate := validateRequestAgainstTarget(request, target); !errors.Is(errValidate, vcp.ErrInvalidRequest) {
+		t.Fatalf("validateRequestAgainstTarget() error = %v, want ErrInvalidRequest", errValidate)
+	}
+}
+
+// TestValidateRequestAgainstTargetEnforcesSharedContextOutputCeilings verifies requested output is bounded by both profile and account totals.
+// TestValidateRequestAgainstTargetEnforcesSharedContextOutputCeilings 验证请求输出同时受到规格上限与账号总窗口约束。
+func TestValidateRequestAgainstTargetEnforcesSharedContextOutputCeilings(t *testing.T) {
+	maxOutputTokens := 65_536
+	request := vcp.ExecutionRequest{
+		ProtocolVersion: vcp.ProtocolVersion,
+		RequestID:       "request-shared-context-output",
+		Operation:       vcp.OperationConversationRespond,
+		Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{
+			GenerationPolicy: vcp.GenerationPolicy{MaxOutputTokens: &maxOutputTokens},
+		}},
+	}
+	target := resolve.Target{
+		SubjectKind:            resolve.ExecutionSubjectModel,
+		EffectiveContextWindow: catalog.OptionalTokenLimit{Known: true, Value: 32_768},
+		TokenLimits:            catalog.TokenLimits{MaxOutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 131_072}},
+		ModelCapabilities:      conversationTestCapabilities(false, false),
+	}
+	target.ModelCapabilities.Delivery.Synchronous = true
+	if errValidate := validateRequestAgainstTarget(request, target); !errors.Is(errValidate, vcp.ErrInvalidRequest) {
+		t.Fatalf("validateRequestAgainstTarget() account window error = %v, want ErrInvalidRequest", errValidate)
+	}
+	target.EffectiveContextWindow.Value = 1_000_000
+	target.TokenLimits.MaxOutputTokens.Value = 32_768
+	if errValidate := validateRequestAgainstTarget(request, target); !errors.Is(errValidate, vcp.ErrInvalidRequest) {
+		t.Fatalf("validateRequestAgainstTarget() profile ceiling error = %v, want ErrInvalidRequest", errValidate)
+	}
+	target.TokenLimits.MaxOutputTokens.Value = 65_536
+	if errValidate := validateRequestAgainstTarget(request, target); errValidate != nil {
+		t.Fatalf("validateRequestAgainstTarget() rejected valid output budget: %v", errValidate)
+	}
+}
+
 // TestServicePersistsProviderEventsBeforeStreamingExecutionReturns verifies SSE followers can observe upstream progress immediately.
 // TestServicePersistsProviderEventsBeforeStreamingExecutionReturns 验证 SSE 跟随者可以立即观察上游进度。
 func TestServicePersistsProviderEventsBeforeStreamingExecutionReturns(t *testing.T) {
@@ -758,6 +1108,8 @@ func TestServicePersistsProviderEventsBeforeStreamingExecutionReturns(t *testing
 		t.Fatalf("create service: %v", errService)
 	}
 	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request_stream", Stream: true, Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationConversationRespond, Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{}}}
+	// createOutcome carries the terminal result from the concurrent Create call.
+	// createOutcome 携带并发 Create 调用的最终结果。
 	type createOutcome struct {
 		// record is the completed execution returned by Create.
 		// record 是 Create 返回的已完成执行。
@@ -813,6 +1165,8 @@ func TestImmediateExecutionLeaseBlocksAnotherServiceRecovery(t *testing.T) {
 		t.Fatalf("create recovery execution service: %v", errRecovery)
 	}
 	request := vcp.ExecutionRequest{ProtocolVersion: vcp.ProtocolVersion, RequestID: "request_leased", Stream: true, Target: vcp.TargetSelection{Model: &vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: target.ProviderInstanceID, ProviderModelID: target.ProviderModelID, ExecutionProfileID: target.ExecutionProfileID}}, Operation: vcp.OperationConversationRespond, Payload: vcp.OperationPayload{Conversation: &vcp.ConversationOperation{}}}
+	// createOutcome carries the terminal result from the leased direct execution.
+	// createOutcome 携带受租约保护的即时执行最终结果。
 	type createOutcome struct {
 		// record is the terminal direct execution.
 		// record 是最终即时执行。

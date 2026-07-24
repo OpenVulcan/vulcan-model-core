@@ -26,7 +26,7 @@ func registerOpenRouterProviderCatalog(registry *providerconfig.SystemRegistry) 
 		return fmt.Errorf("register OpenRouter provider group: %w", errGroup)
 	}
 	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true}
-	features := providerconfig.ProviderFeatureSet{ModelDiscovery: providerconfig.SupportUnsupported, PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportUnsupported}
+	features := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportUnsupported}
 	definition := providerDefinition(OpenRouterAPIDefinitionID, "OpenRouter API", OpenRouterGroupID, "API", "OpenRouter API with typed image, video, non-realtime speech, embedding, and rerank execution.", "providers.openrouter.apiDescription", "openrouter_api", 10, "openrouter", provideropenrouter.EmbeddingProtocolProfileID, "openrouter_embeddings", "https://openrouter.ai/api", true, []providerconfig.AuthMethodDefinition{auth}, features)
 	definition.ActionBindings = []providerconfig.ProviderActionBinding{
 		{ID: provideropenrouter.EmbeddingActionBindingID, Operation: vcp.OperationEmbeddingCreate, DriverID: "openrouter", DriverVersion: "1", ProtocolProfileID: provideropenrouter.EmbeddingProtocolProfileID, EndpointProfileID: "openrouter_embeddings", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1},

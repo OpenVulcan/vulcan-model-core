@@ -3,11 +3,13 @@
   "$id": "https://openvulcan.dev/vcp/1.0/execution-record.schema.json",
   "type": "object",
   "additionalProperties": false,
-  "required": ["id", "status", "operation", "created_at", "updated_at", "expires_at", "revision"],
+  "required": ["id", "status", "operation", "model_tool_plan", "created_at", "updated_at", "expires_at", "revision"],
   "properties": {
     "id": {"type": "string", "pattern": "^exe_[0-9a-f]{32}$"},
     "status": {"enum": ["accepted", "preparing_inputs", "queued", "running", "waiting_retry", "succeeded", "partially_succeeded", "failed", "cancelled", "expired"]},
-    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "music.generate", "music.cover.prepare", "music.cover"]},
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "web.extract", "music.generate", "music.cover.prepare", "music.cover"]},
+    "model_tool_plan": {"$ref": "#/$defs/modelToolPlan"},
+    "router_tool_lineage": {"$ref": "#/$defs/routerToolLineage"},
     "result": {"$ref": "./execution-result.schema.json"},
     "failure": {"$ref": "./failure.schema.json"},
     "retry": {"$ref": "./retry-state.schema.json"},
@@ -16,6 +18,89 @@
     "updated_at": {"type": "string", "format": "date-time"},
     "expires_at": {"type": "string", "format": "date-time"},
     "revision": {"type": "integer", "minimum": 1}
+  },
+  "$defs": {
+    "modelToolPlan": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["catalog_revision"],
+      "properties": {
+        "catalog_revision": {"type": "integer", "minimum": 0},
+        "standard": {
+          "type": "array",
+          "maxItems": 2,
+          "allOf": [
+            {"contains": {"type": "object", "properties": {"kind": {"const": "web_search"}}, "required": ["kind"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"kind": {"const": "web_extractor"}}, "required": ["kind"]}, "minContains": 0, "maxContains": 1}
+          ],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["kind", "mode"],
+            "properties": {
+              "kind": {"enum": ["web_search", "web_extractor"]},
+              "mode": {"enum": ["disabled", "native", "router_tool"]},
+              "router_binding_id": {"type": "string", "minLength": 1},
+              "router_binding_revision": {"type": "integer", "minimum": 1}
+            },
+            "allOf": [
+              {
+                "if": {"properties": {"mode": {"const": "router_tool"}}, "required": ["mode"]},
+                "then": {"required": ["router_binding_id", "router_binding_revision"]},
+                "else": {"not": {"anyOf": [{"required": ["router_binding_id"]}, {"required": ["router_binding_revision"]}]}}
+              }
+            ]
+          }
+        },
+        "extra": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "diagnostics": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["code"],
+            "properties": {
+              "code": {"const": "legacy_native_web_search_migrated"}
+            }
+          }
+        },
+        "router_extensions": {
+          "type": "array",
+          "maxItems": 7,
+          "allOf": [
+            {"contains": {"type": "object", "properties": {"id": {"const": "image_understanding"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"id": {"const": "audio_understanding"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"id": {"const": "video_understanding"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"id": {"const": "image_generation"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"id": {"const": "video_generation"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"id": {"const": "speech_generation"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1},
+            {"contains": {"type": "object", "properties": {"id": {"const": "speech_transcription"}}, "required": ["id"]}, "minContains": 0, "maxContains": 1}
+          ],
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "router_binding_id", "router_binding_revision"],
+            "properties": {
+              "id": {"enum": ["image_understanding", "audio_understanding", "video_understanding", "image_generation", "video_generation", "speech_generation", "speech_transcription"]},
+              "router_binding_id": {"type": "string", "minLength": 1},
+              "router_binding_revision": {"type": "integer", "minimum": 1}
+            }
+          }
+        }
+      }
+    },
+    "routerToolLineage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["parent_execution_id", "parent_tool_call_id", "parent_round", "binding_id"],
+      "properties": {
+        "parent_execution_id": {"type": "string", "pattern": "^exe_[0-9a-f]{32}$"},
+        "parent_tool_call_id": {"type": "string", "minLength": 1},
+        "parent_round": {"type": "integer", "minimum": 1},
+        "binding_id": {"type": "string", "minLength": 1}
+      }
+    }
   },
   "allOf": [
     {

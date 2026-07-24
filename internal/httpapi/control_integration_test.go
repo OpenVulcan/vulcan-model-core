@@ -28,9 +28,11 @@ import (
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/routingstate"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // codexHTTPTestIDToken creates one structurally valid Codex identity token for control-plane integration tests.
@@ -143,6 +145,13 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 	if errTargets != nil {
 		t.Fatalf("create target resolver: %v", errTargets)
 	}
+	// routerToolBindings owns isolated administrator-authored standard-tool policies for this server.
+	// routerToolBindings 为该服务器管理隔离的管理员标准工具策略。
+	routerToolBindings := routertool.NewMemoryStore()
+	routerToolResolver, errRouterToolResolver := routertool.NewResolver(routerToolBindings, targets)
+	if errRouterToolResolver != nil {
+		t.Fatalf("create Router tool resolver: %v", errRouterToolResolver)
+	}
 	queries, errQueries := management.NewQueryService(configurations, catalogs)
 	if errQueries != nil {
 		t.Fatalf("create management query service: %v", errQueries)
@@ -190,6 +199,8 @@ func newControlPlaneIntegrationServerWithProviderFlows(t *testing.T, kimiFlows K
 		Executions:            staticExecutionAccess{},
 		Targets:               targets,
 		Routing:               routingManagement,
+		RouterTools:           routerToolBindings,
+		ModelToolAvailability: routerToolResolver,
 		KimiDeviceFlows:       kimiFlows,
 		XAIDeviceFlows:        xaiFlows,
 		CodexDeviceFlows:      codexDeviceFlows,
@@ -252,6 +263,129 @@ func TestSystemProviderOnboardingHTTPCommitsFixedKimiCatalog(t *testing.T) {
 	}
 }
 
+// TestRouterToolBindingHTTPRoundTripPublishesEffectiveReadiness verifies CRUD and management-safe model discovery end to end.
+// TestRouterToolBindingHTTPRoundTripPublishesEffectiveReadiness 端到端验证绑定增删改查与管理安全模型发现。
+func TestRouterToolBindingHTTPRoundTripPublishesEffectiveReadiness(t *testing.T) {
+	server := newControlPlaneIntegrationServer(t)
+	kimiOnboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_kimi_cn","name":"Kimi CN","auth_method_id":"api_key","secret":"test-kimi-key"}`)
+	if kimiOnboarding.Code != http.StatusCreated {
+		t.Fatalf("Kimi onboarding status=%d body=%s", kimiOnboarding.Code, kimiOnboarding.Body.String())
+	}
+	tavilyOnboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_tavily_search_api","name":"Tavily","auth_method_id":"api_key","secret":"test-tavily-key"}`)
+	if tavilyOnboarding.Code != http.StatusCreated {
+		t.Fatalf("Tavily onboarding status=%d body=%s", tavilyOnboarding.Code, tavilyOnboarding.Body.String())
+	}
+	var tavilyCreated onboardSystemProviderResponse
+	if errDecode := json.Unmarshal(tavilyOnboarding.Body.Bytes(), &tavilyCreated); errDecode != nil {
+		t.Fatalf("decode Tavily onboarding: %v", errDecode)
+	}
+	if tavilyCreated.ProviderInstanceID == "" || tavilyCreated.CredentialID == "" {
+		t.Fatalf("Tavily onboarding response = %#v", tavilyCreated)
+	}
+	createBody := `{"kind":"web_search","provider_instance_id":"` + tavilyCreated.ProviderInstanceID + `","provider_service_id":"service_web_search","service_offering_id":"service_offer_tavily_search","execution_profile_id":"profile_tavily_search","priority":0,"enabled":true,"allowed_provider_instance_ids":[],"allowed_provider_model_ids":[],"allowed_execution_profile_ids":[],"timeout_milliseconds":30000,"maximum_calls":4,"maximum_results":8,"maximum_urls":0,"maximum_result_bytes":65536,"safety_policy":"public_https_only"}`
+	createdResponse := serveControlRequest(server, http.MethodPost, "/vulcan/manage/router-tool-bindings", "admin-control-key", createBody)
+	if createdResponse.Code != http.StatusCreated || strings.Contains(createdResponse.Body.String(), "test-tavily-key") {
+		t.Fatalf("binding creation status=%d body=%s", createdResponse.Code, createdResponse.Body.String())
+	}
+	var created routertool.Binding
+	if errDecode := json.Unmarshal(createdResponse.Body.Bytes(), &created); errDecode != nil {
+		t.Fatalf("decode binding creation: %v", errDecode)
+	}
+	if created.ID == "" || created.Revision != 1 {
+		t.Fatalf("created binding = %#v", created)
+	}
+	mismatchedBody := `{"kind":"web_extractor","provider_instance_id":"` + tavilyCreated.ProviderInstanceID + `","provider_service_id":"service_web_search","service_offering_id":"service_offer_tavily_search","execution_profile_id":"profile_tavily_search","priority":0,"enabled":true,"allowed_provider_instance_ids":[],"allowed_provider_model_ids":[],"allowed_execution_profile_ids":[],"timeout_milliseconds":30000,"maximum_calls":4,"maximum_results":0,"maximum_urls":8,"maximum_result_bytes":65536,"safety_policy":"public_https_only"}`
+	mismatchedResponse := serveControlRequest(server, http.MethodPost, "/vulcan/manage/router-tool-bindings", "admin-control-key", mismatchedBody)
+	if mismatchedResponse.Code != http.StatusBadRequest {
+		t.Fatalf("mismatched standard binding status=%d body=%s", mismatchedResponse.Code, mismatchedResponse.Body.String())
+	}
+	listResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/router-tool-bindings", "admin-control-key", "")
+	if listResponse.Code != http.StatusOK || !strings.Contains(listResponse.Body.String(), created.ID) {
+		t.Fatalf("binding list status=%d body=%s", listResponse.Code, listResponse.Body.String())
+	}
+	probeResponse := serveControlRequest(server, http.MethodPost, "/vulcan/manage/router-tool-bindings/"+created.ID+"/test", "admin-control-key", "")
+	if probeResponse.Code != http.StatusOK || !strings.Contains(probeResponse.Body.String(), `"ready":true`) || !strings.Contains(probeResponse.Body.String(), `"operation":"search.web"`) || strings.Contains(probeResponse.Body.String(), tavilyCreated.CredentialID) {
+		t.Fatalf("binding probe status=%d body=%s", probeResponse.Code, probeResponse.Body.String())
+	}
+	availabilityResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/model-tool-availability", "admin-control-key", "")
+	if availabilityResponse.Code != http.StatusOK || !strings.Contains(availabilityResponse.Body.String(), `"router_tool_ready":true`) || strings.Contains(availabilityResponse.Body.String(), tavilyCreated.CredentialID) {
+		t.Fatalf("availability status=%d body=%s", availabilityResponse.Code, availabilityResponse.Body.String())
+	}
+	updateBody := `{"kind":"web_search","provider_instance_id":"` + tavilyCreated.ProviderInstanceID + `","provider_service_id":"service_web_search","service_offering_id":"service_offer_tavily_search","execution_profile_id":"profile_tavily_search","priority":1,"enabled":false,"allowed_provider_instance_ids":[],"allowed_provider_model_ids":[],"allowed_execution_profile_ids":[],"timeout_milliseconds":30000,"maximum_calls":4,"maximum_results":8,"maximum_urls":0,"maximum_result_bytes":65536,"safety_policy":"public_https_only","revision":1}`
+	updatedResponse := serveControlRequest(server, http.MethodPut, "/vulcan/manage/router-tool-bindings/"+created.ID, "admin-control-key", updateBody)
+	if updatedResponse.Code != http.StatusOK || !strings.Contains(updatedResponse.Body.String(), `"revision":2`) || !strings.Contains(updatedResponse.Body.String(), `"enabled":false`) {
+		t.Fatalf("binding update status=%d body=%s", updatedResponse.Code, updatedResponse.Body.String())
+	}
+	deleteResponse := serveControlRequest(server, http.MethodDelete, "/vulcan/manage/router-tool-bindings/"+created.ID, "admin-control-key", "")
+	if deleteResponse.Code != http.StatusNoContent {
+		t.Fatalf("binding delete status=%d body=%s", deleteResponse.Code, deleteResponse.Body.String())
+	}
+
+	minimaxOnboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_minimax_cn","name":"MiniMax CN","auth_method_id":"api_key","secret":"test-minimax-key"}`)
+	if minimaxOnboarding.Code != http.StatusCreated {
+		t.Fatalf("MiniMax onboarding status=%d body=%s", minimaxOnboarding.Code, minimaxOnboarding.Body.String())
+	}
+	var minimaxCreated onboardSystemProviderResponse
+	if errDecode := json.Unmarshal(minimaxOnboarding.Body.Bytes(), &minimaxCreated); errDecode != nil {
+		t.Fatalf("decode MiniMax onboarding: %v", errDecode)
+	}
+	catalogResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+minimaxCreated.ProviderInstanceID+"/catalog", "admin-control-key", "")
+	if catalogResponse.Code != http.StatusOK {
+		t.Fatalf("MiniMax catalog status=%d body=%s", catalogResponse.Code, catalogResponse.Body.String())
+	}
+	var catalogView management.CatalogView
+	if errDecode := json.Unmarshal(catalogResponse.Body.Bytes(), &catalogView); errDecode != nil {
+		t.Fatalf("decode MiniMax catalog: %v", errDecode)
+	}
+	// extensionModelTarget captures the exact code-owned image-generation profile exposed by the MiniMax catalog.
+	// extensionModelTarget 捕获 MiniMax 目录公开的精确代码拥有图片生成规格。
+	var extensionModelID, extensionOfferingID, extensionProfileID string
+	for _, model := range catalogView.Models {
+		for _, offering := range model.Offerings {
+			for _, profile := range offering.Profiles {
+				if profile.Operation == vcp.OperationImageGenerate {
+					extensionModelID = model.ID
+					extensionOfferingID = offering.ID
+					extensionProfileID = profile.ID
+					break
+				}
+			}
+		}
+	}
+	if extensionModelID == "" || extensionOfferingID == "" || extensionProfileID == "" {
+		t.Fatalf("MiniMax catalog has no image-generation profile: %+v", catalogView.Models)
+	}
+	extensionPayload, errEncode := json.Marshal(map[string]any{
+		"extension":                     vcp.RouterExtensionImageGeneration,
+		"provider_instance_id":          minimaxCreated.ProviderInstanceID,
+		"provider_model_id":             extensionModelID,
+		"offering_id":                   extensionOfferingID,
+		"execution_profile_id":          extensionProfileID,
+		"priority":                      0,
+		"enabled":                       true,
+		"allowed_provider_instance_ids": []string{},
+		"allowed_provider_model_ids":    []string{},
+		"allowed_execution_profile_ids": []string{},
+		"timeout_milliseconds":          30000,
+		"maximum_calls":                 2,
+		"maximum_results":               0,
+		"maximum_urls":                  0,
+		"maximum_result_bytes":          65536,
+		"safety_policy":                 routertool.SafetyPublicHTTPSOnly,
+	})
+	if errEncode != nil {
+		t.Fatalf("encode Router extension binding: %v", errEncode)
+	}
+	extensionResponse := serveControlRequest(server, http.MethodPost, "/vulcan/manage/router-tool-bindings", "admin-control-key", string(extensionPayload))
+	if extensionResponse.Code != http.StatusCreated || !strings.Contains(extensionResponse.Body.String(), `"extension":"image_generation"`) || !strings.Contains(extensionResponse.Body.String(), `"provider_model_id":"`+extensionModelID+`"`) || strings.Contains(extensionResponse.Body.String(), "test-minimax-key") {
+		t.Fatalf("extension binding creation status=%d body=%s", extensionResponse.Code, extensionResponse.Body.String())
+	}
+	extensionAvailability := serveControlRequest(server, http.MethodGet, "/vulcan/manage/model-tool-availability", "admin-control-key", "")
+	if extensionAvailability.Code != http.StatusOK || !strings.Contains(extensionAvailability.Body.String(), `"id":"image_generation"`) || !strings.Contains(extensionAvailability.Body.String(), `"supported":true`) {
+		t.Fatalf("extension availability status=%d body=%s", extensionAvailability.Code, extensionAvailability.Body.String())
+	}
+}
+
 // TestKimiManualPlanAndRoutingHTTPRoundTrip verifies plan selection, account priority, and scheduling settings through authenticated routes.
 // TestKimiManualPlanAndRoutingHTTPRoundTrip 通过认证路由验证套餐选择、账号优先级与调度设置。
 func TestKimiManualPlanAndRoutingHTTPRoundTrip(t *testing.T) {
@@ -307,38 +441,24 @@ func TestAlibabaSystemOnboardingCommitsFixedEndpointAndCatalog(t *testing.T) {
 		t.Fatalf("decode onboarding response: %v", errDecode)
 	}
 	catalogResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/catalog", "admin-control-key", "")
-	if catalogResponse.Code != http.StatusOK || !strings.Contains(catalogResponse.Body.String(), "qwen3.7-max") || !strings.Contains(catalogResponse.Body.String(), "MiniMax-M2.5") || strings.Contains(catalogResponse.Body.String(), "qwen3.8-max-preview") || !strings.Contains(catalogResponse.Body.String(), `"recommended_reasoning_tokens":{"known":true,"value":8192}`) {
+	if catalogResponse.Code != http.StatusOK || !strings.Contains(catalogResponse.Body.String(), "qwen3.7-max") || !strings.Contains(catalogResponse.Body.String(), "MiniMax-M2.5") || strings.Contains(catalogResponse.Body.String(), "qwen3.8-max-preview") || !strings.Contains(catalogResponse.Body.String(), `"recommended_reasoning_tokens":{"known":true,"value":4000}`) {
 		t.Fatalf("catalog status=%d body=%s", catalogResponse.Code, catalogResponse.Body.String())
 	}
 	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
-	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1") || strings.Contains(endpoints.Body.String(), "invalid-test-key") {
+	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://token-plan.ap-southeast-1.maas.aliyuncs.com") || strings.Contains(endpoints.Body.String(), "/apps/anthropic/v1") || strings.Contains(endpoints.Body.String(), "invalid-test-key") {
 		t.Fatalf("endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
 	}
 }
 
-// TestAlibabaWorkspaceOnboardingDerivesExactSingaporeEndpoint verifies declared workspace input is validated, persisted, and exposed without credential material.
-// TestAlibabaWorkspaceOnboardingDerivesExactSingaporeEndpoint 验证声明的工作空间输入会被校验、持久化并在不包含凭据材料的情况下公开。
-func TestAlibabaWorkspaceOnboardingDerivesExactSingaporeEndpoint(t *testing.T) {
+// TestAlibabaUnverifiedProductsCannotBeOnboarded verifies evidence-only boundaries never become configurable runtime products.
+// TestAlibabaUnverifiedProductsCannotBeOnboarded 验证仅有证据边界的产品绝不会变成可配置运行时产品。
+func TestAlibabaUnverifiedProductsCannotBeOnboarded(t *testing.T) {
 	server := newControlPlaneIntegrationServer(t)
-	unsafe := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_alibaba_model_studio_workspace_global","name":"Alibaba Workspace","auth_method_id":"api_key","secret":"private-workspace-key","endpoint_parameters":[{"id":"workspace_id","value":"workspace.attacker"}]}`)
-	if unsafe.Code != http.StatusBadRequest || strings.Contains(unsafe.Body.String(), "private-workspace-key") {
-		t.Fatalf("unsafe workspace status=%d body=%s", unsafe.Code, unsafe.Body.String())
-	}
-	onboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"system_alibaba_model_studio_workspace_global","name":"Alibaba Workspace","auth_method_id":"api_key","secret":"private-workspace-key","endpoint_parameters":[{"id":"workspace_id","value":"llm-example123"}]}`)
-	if onboarding.Code != http.StatusCreated || strings.Contains(onboarding.Body.String(), "private-workspace-key") {
-		t.Fatalf("workspace onboarding status=%d body=%s", onboarding.Code, onboarding.Body.String())
-	}
-	var created onboardSystemProviderResponse
-	if errDecode := json.Unmarshal(onboarding.Body.Bytes(), &created); errDecode != nil {
-		t.Fatalf("decode workspace onboarding response: %v", errDecode)
-	}
-	endpoints := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/endpoints", "admin-control-key", "")
-	if endpoints.Code != http.StatusOK || !strings.Contains(endpoints.Body.String(), "https://llm-example123.ap-southeast-1.maas.aliyuncs.com") || !strings.Contains(endpoints.Body.String(), `"id":"workspace_id","value":"llm-example123"`) || strings.Contains(endpoints.Body.String(), "private-workspace-key") {
-		t.Fatalf("workspace endpoints status=%d body=%s", endpoints.Code, endpoints.Body.String())
-	}
-	groups := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-groups", "admin-control-key", "")
-	if groups.Code != http.StatusOK || !strings.Contains(groups.Body.String(), `"id":"workspace_id","kind":"hostname_label","required":true`) || strings.Contains(groups.Body.String(), "{workspace_id}") {
-		t.Fatalf("workspace definition status=%d body=%s", groups.Code, groups.Body.String())
+	for _, definitionID := range []string{"system_alibaba_model_studio_workspace_global", "system_alibaba_model_studio_us", "system_alibaba_token_plan_personal_global"} {
+		onboarding := serveControlRequest(server, http.MethodPost, "/vulcan/manage/provider-instances/onboard", "admin-control-key", `{"provider_definition_id":"`+definitionID+`","name":"Unverified Alibaba","auth_method_id":"api_key","secret":"private-unverified-key"}`)
+		if onboarding.Code != http.StatusNotFound || strings.Contains(onboarding.Body.String(), "private-unverified-key") {
+			t.Fatalf("unverified onboarding %q status=%d body=%s", definitionID, onboarding.Code, onboarding.Body.String())
+		}
 	}
 }
 
@@ -631,7 +751,9 @@ func TestProviderCredentialRefreshHTTPDispatchesExactCredential(t *testing.T) {
 		t.Fatalf("decode onboarding response: %v", errDecode)
 	}
 	commands := &staticKimiTokenCommands{}
+	recovery := &staticCredentialRefreshRecovery{}
 	server.control.KimiTokens = commands
+	server.control.CredentialRefreshRecovery = recovery
 	refresherServer, errServer := newServer(server.catalog, server.control)
 	if errServer != nil {
 		t.Fatalf("rebuild route table with credential refresh: %v", errServer)
@@ -643,6 +765,9 @@ func TestProviderCredentialRefreshHTTPDispatchesExactCredential(t *testing.T) {
 	}
 	if !commands.calledWith(created.ProviderInstanceID, created.CredentialID) {
 		t.Fatalf("credential refresh dispatched instance=%q credential=%q", commands.instanceID, commands.credentialID)
+	}
+	if !recovery.calledWith(created.ProviderInstanceID, created.CredentialID) {
+		t.Fatalf("credential recovery dispatched instance=%q credential=%q", recovery.instanceID, recovery.credentialID)
 	}
 }
 
@@ -1223,4 +1348,36 @@ func (c *staticKimiTokenCommands) calledWith(instanceID string, credentialID str
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	return c.instanceID == instanceID && c.credentialID == credentialID
+}
+
+// staticCredentialRefreshRecovery records one exact post-refresh runtime recovery dispatch.
+// staticCredentialRefreshRecovery 记录一次精确的刷新后运行时恢复分派。
+type staticCredentialRefreshRecovery struct {
+	// mu protects the observed immutable identifiers.
+	// mu 保护已观察到的不可变标识。
+	mu sync.Mutex
+	// instanceID is the exact provider instance proven by refresh.
+	// instanceID 是由刷新证明的精确供应商实例。
+	instanceID string
+	// credentialID is the exact refreshed credential.
+	// credentialID 是精确的已刷新凭据。
+	credentialID string
+}
+
+// RecordCredentialRefreshSuccess records the exact recovered credential boundary.
+// RecordCredentialRefreshSuccess 记录精确的已恢复凭据边界。
+func (r *staticCredentialRefreshRecovery) RecordCredentialRefreshSuccess(_ context.Context, instanceID string, credentialID string, _ time.Time) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.instanceID = instanceID
+	r.credentialID = credentialID
+	return nil
+}
+
+// calledWith reports whether recovery received the expected immutable pair.
+// calledWith 报告恢复逻辑是否收到预期的不可变组合。
+func (r *staticCredentialRefreshRecovery) calledWith(instanceID string, credentialID string) bool {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.instanceID == instanceID && r.credentialID == credentialID
 }

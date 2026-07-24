@@ -60,6 +60,17 @@ const (
 	OperationMusicCover OperationKind = "music.cover"
 )
 
+// Valid reports whether the operation belongs to the closed VCP operation set.
+// Valid 报告该操作是否属于封闭的 VCP 操作集合。
+func (o OperationKind) Valid() bool {
+	switch o {
+	case OperationConversationRespond, OperationMediaAnalyze, OperationImageGenerate, OperationImageEdit, OperationVideoGenerate, OperationVideoEdit, OperationVideoExtend, OperationSpeechSynthesize, OperationSpeechTranscribe, OperationEmbeddingCreate, OperationRerankDocuments, OperationSearchWeb, OperationWebExtract, OperationMusicGenerate, OperationMusicCoverPrepare, OperationMusicCover:
+		return true
+	default:
+		return false
+	}
+}
+
 // ServiceSelection identifies one exact provider-scoped special service.
 // ServiceSelection 标识一个精确的供应商作用域特殊服务。
 type ServiceSelection struct {
@@ -118,6 +129,9 @@ type ConversationOperation struct {
 	// CapabilityPolicy controls derived demand decisions.
 	// CapabilityPolicy 控制推导需求决策。
 	CapabilityPolicy CapabilityPolicy `json:"capability_policy"`
+	// ModelTools explicitly selects standard, provider-extra, and Router extension tools.
+	// ModelTools 显式选择标准工具、供应商额外工具和 Router 增强工具。
+	ModelTools ModelToolSelection `json:"model_tools,omitempty"`
 	// RegisteredExtensions lists allowed request extension identifiers.
 	// RegisteredExtensions 列出允许的请求扩展标识。
 	RegisteredExtensions []string `json:"registered_extensions,omitempty"`
@@ -607,7 +621,36 @@ func (r ExecutionRequest) ConversationRequest() (VulcanRequest, error) {
 	if r.Operation != OperationConversationRespond || r.Payload.Conversation == nil || r.Target.Model == nil {
 		return VulcanRequest{}, fmt.Errorf("%w: execution is not a model conversation action", ErrInvalidRequest)
 	}
-	return r.Payload.Conversation.vulcanRequest(r), nil
+	request := r.Payload.Conversation.vulcanRequest(r)
+	request.Tools = projectNativeStandardTools(request.Tools, request.ModelTools, request.ToolPolicy)
+	return request, nil
+}
+
+// projectNativeStandardTools bridges the new closed model-tool contract to reviewed provider-native adapters during the VCP 1.0 compatibility window.
+// projectNativeStandardTools 在 VCP 1.0 兼容窗口内把新的封闭模型工具合同桥接到已审核的供应商原生适配器。
+func projectNativeStandardTools(tools []ToolDefinition, selection ModelToolSelection, policy ToolPolicy) []ToolDefinition {
+	if policy.Choice == ToolChoiceNone {
+		return nil
+	}
+	projected := append([]ToolDefinition(nil), tools...)
+	for _, standard := range selection.Standard {
+		if standard.Mode != ModelToolNative || standard.Kind != StandardModelToolWebSearch || containsToolKind(projected, ToolNativeWebSearch) {
+			continue
+		}
+		projected = append(projected, ToolDefinition{Kind: ToolNativeWebSearch, Name: string(StandardModelToolWebSearch)})
+	}
+	return projected
+}
+
+// containsToolKind reports exact membership without inferring aliases from names.
+// containsToolKind 报告精确成员关系且不根据名称推断别名。
+func containsToolKind(tools []ToolDefinition, kind ToolKind) bool {
+	for _, tool := range tools {
+		if tool.Kind == kind {
+			return true
+		}
+	}
+	return false
 }
 
 // vulcanRequest projects the envelope fields without performing a second semantic decision.
@@ -627,7 +670,9 @@ func (o ConversationOperation) vulcanRequest(envelope ExecutionRequest) VulcanRe
 		ContextManagementPolicy: o.ContextManagementPolicy,
 		RemoteCompaction:        o.RemoteCompaction,
 		CapabilityPolicy:        o.CapabilityPolicy,
+		ModelTools:              o.ModelTools,
 		Stream:                  envelope.Stream,
+		Budget:                  envelope.Budget,
 		RegisteredExtensions:    o.RegisteredExtensions,
 	}
 }

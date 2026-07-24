@@ -13,7 +13,9 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/execution"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // ExecutionStore persists durable execution records and event logs in SQLite.
@@ -560,6 +562,83 @@ type executionEncodedRecord struct {
 	createdSecretRefs []string
 }
 
+// executionTargetPayload persists immutable target, model-tool planning, and child lineage in one backward-compatible column.
+// executionTargetPayload 在一个向后兼容列中持久化不可变 Target、模型工具计划与子谱系。
+type executionTargetPayload struct {
+	// Target is the exact execution affinity.
+	// Target 是精确执行亲和性。
+	Target resolve.Target `json:"target"`
+	// ModelToolPlan includes private resolved Router bindings required by restart recovery.
+	// ModelToolPlan 包含重启恢复所需的私有已解析 Router 绑定。
+	ModelToolPlan executionModelToolPlanPayload `json:"model_tool_plan"`
+	// RouterToolLineage identifies an optional Router-managed child.
+	// RouterToolLineage 标识可选的 Router 管理子执行。
+	RouterToolLineage *execution.RouterToolLineage `json:"router_tool_lineage,omitempty"`
+	// CompletedRouterToolRounds preserves the next parent dispatch identity across restart recovery.
+	// CompletedRouterToolRounds 跨重启恢复保留下一次父模型分派身份。
+	CompletedRouterToolRounds uint32 `json:"completed_router_tool_rounds,omitempty"`
+}
+
+// executionModelToolPlanPayload persists the complete private model-tool plan.
+// executionModelToolPlanPayload 持久化完整私有模型工具计划。
+type executionModelToolPlanPayload struct {
+	// CatalogRevision identifies the parent catalog snapshot.
+	// CatalogRevision 标识父目录快照。
+	CatalogRevision uint64 `json:"catalog_revision"`
+	// Standard contains exact standard-tool decisions.
+	// Standard 包含精确标准工具决策。
+	Standard []executionModelToolPlanEntryPayload `json:"standard,omitempty"`
+	// Extra contains provider-native extra tool identifiers.
+	// Extra 包含供应商原生扩展工具标识。
+	Extra []string `json:"extra,omitempty"`
+	// Diagnostics contains safe compatibility facts produced while canonicalizing the accepted request.
+	// Diagnostics 包含规范化已接收请求时生成的安全兼容事实。
+	Diagnostics []vcp.ModelToolDiagnostic `json:"diagnostics,omitempty"`
+	// RouterExtensions retains the public closed identifiers for backward-compatible decoding.
+	// RouterExtensions 为向后兼容解码保留公开封闭标识。
+	RouterExtensions []vcp.RouterExtensionKind `json:"router_extensions,omitempty"`
+	// RouterExtensionBindings contains private frozen Router enhancement resolutions.
+	// RouterExtensionBindings 包含私有冻结 Router 增强能力解析。
+	RouterExtensionBindings []executionRouterExtensionPlanEntryPayload `json:"router_extension_bindings,omitempty"`
+}
+
+// executionModelToolPlanEntryPayload persists one public decision and its private Router resolution.
+// executionModelToolPlanEntryPayload 持久化一项公开决策及其私有 Router 解析。
+type executionModelToolPlanEntryPayload struct {
+	// Kind identifies the standard tool.
+	// Kind 标识标准工具。
+	Kind vcp.StandardModelToolKind `json:"kind"`
+	// Mode identifies disabled, native, or Router execution.
+	// Mode 标识禁用、原生或 Router 执行。
+	Mode vcp.ModelToolMode `json:"mode"`
+	// RouterBindingID identifies the selected administrator policy.
+	// RouterBindingID 标识选定的管理员策略。
+	RouterBindingID string `json:"router_binding_id,omitempty"`
+	// RouterBindingRevision identifies the frozen policy revision.
+	// RouterBindingRevision 标识冻结策略修订号。
+	RouterBindingRevision uint64 `json:"router_binding_revision,omitempty"`
+	// RouterBinding contains the private policy and child target.
+	// RouterBinding 包含私有策略与子 Target。
+	RouterBinding *routertool.ResolvedBinding `json:"router_binding,omitempty"`
+}
+
+// executionRouterExtensionPlanEntryPayload persists one enhancement decision and its private Router resolution.
+// executionRouterExtensionPlanEntryPayload 持久化一项增强能力决策及其私有 Router 解析。
+type executionRouterExtensionPlanEntryPayload struct {
+	// ID identifies the closed operation-backed enhancement.
+	// ID 标识封闭且由操作支持的增强能力。
+	ID vcp.RouterExtensionKind `json:"id"`
+	// RouterBindingID identifies the selected administrator policy.
+	// RouterBindingID 标识选定的管理员策略。
+	RouterBindingID string `json:"router_binding_id"`
+	// RouterBindingRevision identifies the frozen policy revision.
+	// RouterBindingRevision 标识冻结策略修订号。
+	RouterBindingRevision uint64 `json:"router_binding_revision"`
+	// RouterBinding contains the private policy and child target.
+	// RouterBinding 包含私有策略与子 Target。
+	RouterBinding *routertool.ResolvedBinding `json:"router_binding"`
+}
+
 // executionSelect is the sole column order accepted by scanExecution.
 // executionSelect 是 scanExecution 接受的唯一列顺序。
 const executionSelect = `SELECT id, owner_api_key_id, request_hash, idempotency_key, status, operation, revision, created_at, updated_at, expires_at, request_payload, target_payload, result_payload, failure_payload, provider_task_payload, provider_preparation_payload, provider_continuation_payload, provider_task_secret_ref, provider_preparation_secret_ref, provider_continuation_secret_ref, attempts_payload, retry_payload FROM executions`
@@ -608,8 +687,19 @@ func scanExecution(ctx context.Context, secrets secret.Store, scanner rowScanner
 	if errDecode = json.Unmarshal(requestPayload, &record.Request); errDecode != nil {
 		return execution.Record{}, fmt.Errorf("decode execution request: %w", errDecode)
 	}
-	if errDecode = json.Unmarshal(targetPayload, &record.Target); errDecode != nil {
-		return execution.Record{}, fmt.Errorf("decode execution target: %w", errDecode)
+	var persistedTarget executionTargetPayload
+	if errDecode = json.Unmarshal(targetPayload, &persistedTarget); errDecode != nil {
+		return execution.Record{}, fmt.Errorf("decode execution target payload: %w", errDecode)
+	}
+	if persistedTarget.Target.ProviderInstanceID == "" {
+		if errDecode = json.Unmarshal(targetPayload, &record.Target); errDecode != nil {
+			return execution.Record{}, fmt.Errorf("decode legacy execution target: %w", errDecode)
+		}
+	} else {
+		record.Target = persistedTarget.Target
+		record.ModelToolPlan = decodeExecutionModelToolPlan(persistedTarget.ModelToolPlan)
+		record.RouterToolLineage = persistedTarget.RouterToolLineage
+		record.CompletedRouterToolRounds = persistedTarget.CompletedRouterToolRounds
 	}
 	if len(resultPayload) > 0 {
 		record.Result = &execution.Result{}
@@ -684,7 +774,12 @@ func encodeExecutionRecord(ctx context.Context, secrets secret.Store, record exe
 	if errRequest != nil {
 		return executionEncodedRecord{}, fmt.Errorf("encode execution request: %w", errRequest)
 	}
-	targetPayload, errTarget := json.Marshal(record.Target)
+	targetPayload, errTarget := json.Marshal(executionTargetPayload{
+		Target:                    record.Target,
+		ModelToolPlan:             encodeExecutionModelToolPlan(record.ModelToolPlan),
+		RouterToolLineage:         record.RouterToolLineage,
+		CompletedRouterToolRounds: record.CompletedRouterToolRounds,
+	})
 	if errTarget != nil {
 		return executionEncodedRecord{}, fmt.Errorf("encode execution target: %w", errTarget)
 	}
@@ -742,6 +837,43 @@ func encodeExecutionRecord(ctx context.Context, secrets secret.Store, record exe
 		createdSecretRefs = append(createdSecretRefs, providerContinuationSecretRef)
 	}
 	return executionEncodedRecord{request: requestPayload, target: targetPayload, result: resultPayload, failure: failurePayload, attempts: attemptsPayload, retry: retryPayload, providerTask: providerTaskPayload, providerPreparation: providerPreparationPayload, providerContinuation: providerContinuationPayload, providerTaskSecretRef: providerTaskSecretRef, providerPreparationSecretRef: providerPreparationSecretRef, providerContinuationSecretRef: providerContinuationSecretRef, createdSecretRefs: createdSecretRefs}, nil
+}
+
+// encodeExecutionModelToolPlan converts a runtime plan into its complete private persistence shape.
+// encodeExecutionModelToolPlan 将运行时计划转换为完整私有持久化形态。
+func encodeExecutionModelToolPlan(plan execution.ModelToolPlan) executionModelToolPlanPayload {
+	payload := executionModelToolPlanPayload{CatalogRevision: plan.CatalogRevision, Extra: append([]string(nil), plan.Extra...), Diagnostics: append([]vcp.ModelToolDiagnostic(nil), plan.Diagnostics...)}
+	payload.Standard = make([]executionModelToolPlanEntryPayload, 0, len(plan.Standard))
+	for _, entry := range plan.Standard {
+		payload.Standard = append(payload.Standard, executionModelToolPlanEntryPayload{Kind: entry.Kind, Mode: entry.Mode, RouterBindingID: entry.RouterBindingID, RouterBindingRevision: entry.RouterBindingRevision, RouterBinding: entry.RouterBinding})
+	}
+	payload.RouterExtensions = make([]vcp.RouterExtensionKind, 0, len(plan.RouterExtensions))
+	payload.RouterExtensionBindings = make([]executionRouterExtensionPlanEntryPayload, 0, len(plan.RouterExtensions))
+	for _, entry := range plan.RouterExtensions {
+		payload.RouterExtensions = append(payload.RouterExtensions, entry.ID)
+		payload.RouterExtensionBindings = append(payload.RouterExtensionBindings, executionRouterExtensionPlanEntryPayload{ID: entry.ID, RouterBindingID: entry.RouterBindingID, RouterBindingRevision: entry.RouterBindingRevision, RouterBinding: entry.RouterBinding})
+	}
+	return payload
+}
+
+// decodeExecutionModelToolPlan restores one complete runtime plan from private persistence.
+// decodeExecutionModelToolPlan 从私有持久化恢复一个完整运行时计划。
+func decodeExecutionModelToolPlan(payload executionModelToolPlanPayload) execution.ModelToolPlan {
+	plan := execution.ModelToolPlan{CatalogRevision: payload.CatalogRevision, Extra: append([]string(nil), payload.Extra...), Diagnostics: append([]vcp.ModelToolDiagnostic(nil), payload.Diagnostics...)}
+	plan.Standard = make([]execution.ModelToolPlanEntry, 0, len(payload.Standard))
+	for _, entry := range payload.Standard {
+		plan.Standard = append(plan.Standard, execution.ModelToolPlanEntry{Kind: entry.Kind, Mode: entry.Mode, RouterBindingID: entry.RouterBindingID, RouterBindingRevision: entry.RouterBindingRevision, RouterBinding: entry.RouterBinding})
+	}
+	plan.RouterExtensions = make([]execution.RouterExtensionPlanEntry, 0, len(payload.RouterExtensionBindings))
+	for _, entry := range payload.RouterExtensionBindings {
+		plan.RouterExtensions = append(plan.RouterExtensions, execution.RouterExtensionPlanEntry{ID: entry.ID, RouterBindingID: entry.RouterBindingID, RouterBindingRevision: entry.RouterBindingRevision, RouterBinding: entry.RouterBinding})
+	}
+	if len(plan.RouterExtensions) == 0 {
+		for _, id := range payload.RouterExtensions {
+			plan.RouterExtensions = append(plan.RouterExtensions, execution.RouterExtensionPlanEntry{ID: id})
+		}
+	}
+	return plan
 }
 
 // executionRetryPayload persists pending and historical durable retry facts together.

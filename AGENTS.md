@@ -29,3 +29,8 @@ go build -o test-output ./cmd/vulcan-model-core
 - Keep logs free of credentials, tokens, prompts, tool arguments, and generated resources by default.
 - All Go types, interfaces, functions, methods, and non-obvious variables require bilingual comments: English first, Chinese second.
 - Run `gofmt`, `go test ./...`, and a command build after Go changes.
+
+
+## 测试用秘钥
+管理端秘钥：a123456
+API秘钥：sk-testapikey

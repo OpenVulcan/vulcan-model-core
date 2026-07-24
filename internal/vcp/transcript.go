@@ -17,12 +17,47 @@ type Transcript struct {
 	Candidates []TranscriptCandidate `json:"candidates"`
 }
 
+// TranscriptionResult binds one complete transcript to its exact ordered request resource.
+// TranscriptionResult 将一份完整转写绑定到其精确的有序请求资源。
+type TranscriptionResult struct {
+	// InputID is the VCP media input identifier from the accepted request.
+	// InputID 是已接收请求中的 VCP 媒体输入标识。
+	InputID string `json:"input_id"`
+	// ResourceID is the Router resource identifier owned by that media input.
+	// ResourceID 是该媒体输入拥有的 Router 资源标识。
+	ResourceID string `json:"resource_id"`
+	// Transcript is the complete non-realtime recognition result for a successful resource.
+	// Transcript 是成功资源的完整非实时识别结果。
+	Transcript *Transcript `json:"transcript,omitempty"`
+	// ErrorCode is a stable safe classification for one failed batch resource.
+	// ErrorCode 是一个失败批量资源的稳定安全分类。
+	ErrorCode string `json:"error_code,omitempty"`
+}
+
+// Validate verifies exact source ownership and the complete nested transcript.
+// Validate 校验精确来源归属及完整的嵌套转写。
+func (r TranscriptionResult) Validate() error {
+	if strings.TrimSpace(r.InputID) == "" || r.InputID != strings.TrimSpace(r.InputID) || strings.TrimSpace(r.ResourceID) == "" || r.ResourceID != strings.TrimSpace(r.ResourceID) {
+		return fmt.Errorf("%w: transcription result requires normalized input and resource identifiers", ErrInvalidRequest)
+	}
+	if (r.Transcript != nil) == (r.ErrorCode != "") || r.ErrorCode != "" && r.ErrorCode != "transcription_failed" {
+		return fmt.Errorf("%w: transcription result requires exactly one transcript or safe failure", ErrInvalidRequest)
+	}
+	if r.Transcript == nil {
+		return nil
+	}
+	return r.Transcript.Validate()
+}
+
 // TranscriptCandidate contains one complete recognition hypothesis.
 // TranscriptCandidate 包含一个完整识别假设。
 type TranscriptCandidate struct {
 	// CandidateID is stable and unique within one transcript.
 	// CandidateID 在一个转写结果内稳定且唯一。
 	CandidateID string `json:"candidate_id"`
+	// ChannelID identifies a provider-confirmed source channel when recognition requested explicit channels.
+	// ChannelID 标识转写明确请求声道时由供应商确认的源声道。
+	ChannelID *int `json:"channel_id,omitempty"`
 	// Text is the complete provider-returned transcript and may be empty for silence.
 	// Text 是供应商返回的完整转写，静音时可以为空。
 	Text string `json:"text"`
@@ -97,7 +132,7 @@ func (t Transcript) Validate() error {
 	candidateIDs := make(map[string]struct{}, len(t.Candidates))
 	segmentIDs := make(map[string]struct{})
 	for _, candidate := range t.Candidates {
-		if strings.TrimSpace(candidate.CandidateID) == "" || invalidConfidence(candidate.Confidence) {
+		if strings.TrimSpace(candidate.CandidateID) == "" || candidate.ChannelID != nil && *candidate.ChannelID < 0 || invalidConfidence(candidate.Confidence) {
 			return fmt.Errorf("%w: transcript candidate identity or confidence is invalid", ErrInvalidRequest)
 		}
 		if _, exists := candidateIDs[candidate.CandidateID]; exists {

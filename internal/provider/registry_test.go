@@ -60,7 +60,6 @@ func testProviderDefinition() providerconfig.ProviderDefinition {
 			MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery:    providerconfig.SupportUnsupported,
 			PlanReader:        providerconfig.SupportUnsupported,
 			EntitlementReader: providerconfig.SupportUnsupported,
 			AllowanceReader:   providerconfig.SupportUnsupported,
@@ -79,7 +78,6 @@ func testProviderRegistry(t *testing.T) *Registry {
 		Version:            "1",
 		DisplayName:        "Anthropic Messages",
 		RuntimeReady:       true,
-		ModelDiscovery:     providerconfig.SupportUnsupported,
 		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	})
 	if errProfile != nil {
@@ -127,17 +125,6 @@ func TestRegistryAcceptsDefinitionRegisteredDuringBootstrap(t *testing.T) {
 	}
 	if errDriver := secondRegistry.Register(testDriver{definition: changed}); errDriver == nil {
 		t.Fatal("expected mismatched pre-registered definition rejection")
-	}
-}
-
-// TestRegistryRejectsUnsupportedFeatureContract verifies metadata cannot overstate implementation.
-// TestRegistryRejectsUnsupportedFeatureContract 校验元数据不能夸大实际实现能力。
-func TestRegistryRejectsUnsupportedFeatureContract(t *testing.T) {
-	registry := testProviderRegistry(t)
-	definition := testProviderDefinition()
-	definition.Features.ModelDiscovery = providerconfig.SupportSupported
-	if err := registry.Register(testDriver{definition: definition}); err == nil {
-		t.Fatal("expected missing ModelDiscoverer implementation rejection")
 	}
 }
 

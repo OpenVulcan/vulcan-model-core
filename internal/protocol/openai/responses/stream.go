@@ -330,6 +330,10 @@ func (d *StreamDecoder) Push(event StreamEvent) ([]vcp.Event, error) {
 		if errWarning := d.emitProviderHostedTraceWarning("openai_responses.file_search_trace_omitted", &newEvents); errWarning != nil {
 			return nil, errWarning
 		}
+	case "response.web_extractor_call.in_progress", "response.web_extractor_call.extracting", "response.web_extractor_call.completed":
+		if errWarning := d.emitProviderHostedTraceWarning("openai_responses.web_extractor_trace_omitted", &newEvents); errWarning != nil {
+			return nil, errWarning
+		}
 	case "response.code_interpreter_call.in_progress", "response.code_interpreter_call.interpreting", "response.code_interpreter_call.completed", "response.code_interpreter_call_code.delta", "response.code_interpreter_call_code.done":
 		if errWarning := d.emitProviderHostedTraceWarning("openai_responses.code_interpreter_trace_omitted", &newEvents); errWarning != nil {
 			return nil, errWarning
@@ -594,7 +598,7 @@ func (d *StreamDecoder) observeOutputItemAdded(item OutputItem, outputIndex *int
 	case "web_search_call":
 		_, errSearch := d.ensureSearch(source, item, output)
 		return errSearch
-	case "file_search_call", "code_interpreter_call":
+	case "file_search_call", "code_interpreter_call", "web_extractor_call":
 		code, _ := providerHostedTraceWarning(item.Type)
 		return d.emitProviderHostedTraceWarning(code, output)
 	case "computer_call":
@@ -792,7 +796,7 @@ func (d *StreamDecoder) emitOutputItem(item OutputItem, outputIndex *int, output
 		if errComplete := d.completeSearch(semantic, item, output); errComplete != nil {
 			return errComplete
 		}
-	case "file_search_call", "code_interpreter_call":
+	case "file_search_call", "code_interpreter_call", "web_extractor_call":
 		code, _ := providerHostedTraceWarning(item.Type)
 		if errWarning := d.emitProviderHostedTraceWarning(code, output); errWarning != nil {
 			return errWarning
@@ -832,6 +836,11 @@ func (d *StreamDecoder) emitTextDelta(event StreamEvent, kind vcp.ContextKind, p
 	}
 	if semantic.contentCompleted {
 		return fmt.Errorf("%w: content delta arrived after completion", ErrInvalidUpstreamResponse)
+	}
+	// An empty provider delta advances no semantic content and must not create an invalid VCP content.delta event.
+	// 空的供应商增量不推进任何语义内容，也不得创建无效的 VCP content.delta 事件。
+	if event.Delta == "" {
+		return nil
 	}
 	semantic.content += event.Delta
 	delta := d.emitter.itemEvent(vcp.EventContentDelta, semantic.itemID)
@@ -1600,6 +1609,8 @@ func providerHostedTraceWarning(itemType string) (string, bool) {
 		return "openai_responses.file_search_trace_omitted", true
 	case "code_interpreter_call":
 		return "openai_responses.code_interpreter_trace_omitted", true
+	case "web_extractor_call":
+		return "openai_responses.web_extractor_trace_omitted", true
 	default:
 		return "", false
 	}

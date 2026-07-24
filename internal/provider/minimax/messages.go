@@ -46,6 +46,9 @@ func NewMessagesDriver(definitionID string, client *transport.Client, capabiliti
 		Authentication:     transport.Authentication{Mode: transport.AuthenticationHeader, HeaderName: "x-api-key"},
 		AllowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...),
 		StreamInputMode:    translateddriver.StreamInputLine,
+		// ForceTranslationStream preserves the Anthropic translator's SSE contract while the Router still aggregates non-stream callers.
+		// ForceTranslationStream 保留 Anthropic 转换器的 SSE 合同，同时 Router 仍为非流式调用方完成聚合。
+		ForceTranslationStream: true,
 	})
 	if errDriver != nil {
 		return nil, errDriver

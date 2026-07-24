@@ -28,21 +28,21 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 // ProjectRequestWithInputs compiles one VCP request with exact input-plan materializations.
 // ProjectRequestWithInputs 使用精确输入方案物化结果编译一条 VCP 请求。
 func ProjectRequestWithInputs(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
-	materialized := make(map[string]resource.MaterializedInput, len(inputs))
-	for _, input := range inputs {
-		if _, exists := materialized[input.ResourceID]; exists {
-			return ProjectedRequest{}, fmt.Errorf("%w: duplicate materialized resource %q", ErrUnsupportedContext, input.ResourceID)
-		}
-		materialized[input.ResourceID] = input
+	materialized, errIndex := resource.IndexMaterializedInputs(inputs)
+	if errIndex != nil {
+		return ProjectedRequest{}, fmt.Errorf("%w: %v", ErrUnsupportedContext, errIndex)
 	}
 	return projectRequest(request, target, capabilities, lineageID, now, materialized)
 }
 
 // projectRequest compiles text and optional materialized media through one deterministic path.
 // projectRequest 通过一条确定性路径编译文本和可选物化媒体。
-func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, materialized map[string]resource.MaterializedInput) (ProjectedRequest, error) {
+func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, now time.Time, materialized resource.MaterializedInputIndex) (ProjectedRequest, error) {
 	if errRequest := request.Validate(); errRequest != nil {
 		return ProjectedRequest{}, errRequest
+	}
+	if request.ReasoningPolicy.Enabled != nil || request.ReasoningPolicy.BudgetTokens != nil {
+		return ProjectedRequest{}, fmt.Errorf("%w: AI Studio has no verified carrier for reasoning enabled or budget_tokens", ErrUnsupportedContext)
 	}
 	if errTarget := validateTarget(target); errTarget != nil {
 		return ProjectedRequest{}, errTarget
@@ -415,7 +415,7 @@ func matchingToolReferences(tools []vcp.ToolDefinition, name string, references 
 
 // projectItem maps one canonical item to one exact AI Studio carrier and ledger decision.
 // projectItem 将一个规范项目映射到一个精确 AI Studio 载体和账本决策。
-func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.CapabilityPlan, capabilities ProfileCapabilities, lineageID string, position int, references *toolReferenceSet, calls map[string]toolCallReference, materialized map[string]resource.MaterializedInput) (Content, string, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, plan vcp.CapabilityPlan, capabilities ProfileCapabilities, lineageID string, position int, references *toolReferenceSet, calls map[string]toolCallReference, materialized resource.MaterializedInputIndex) (Content, string, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
 	// Client and audit scopes are Router-local, so sending them upstream would violate the VCP visibility boundary.
 	// 客户端和审计作用域仅限 Router 本地，因此将其发送上游会违反 VCP 可见性边界。
 	if item.Visibility != vcp.VisibilityModel {
@@ -509,22 +509,19 @@ func hasResourceContent(blocks []vcp.ContentBlock) bool {
 
 // projectUserParts preserves mixed text and media order using only accepted materializations.
 // projectUserParts 仅使用已接受物化结果保留混合文本与媒体顺序。
-func projectUserParts(blocks []vcp.ContentBlock, materialized map[string]resource.MaterializedInput) ([]Part, error) {
+func projectUserParts(blocks []vcp.ContentBlock, materialized resource.MaterializedInputIndex) ([]Part, error) {
 	parts := make([]Part, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Type == vcp.ContentText {
 			parts = append(parts, Part{Text: vcp.EscapeReservedFrameText(block.Text)})
 			continue
 		}
-		input, exists := materialized[block.ResourceRef]
+		input, exists := materialized.Find(block.ResourceRef, block.MediaRole)
 		if !exists {
 			return nil, fmt.Errorf("%w: resource %q has no accepted materialization", ErrUnsupportedContext, block.ResourceRef)
 		}
 		if !contentTypeMatchesMedia(block.Type, input.Kind) {
 			return nil, fmt.Errorf("%w: resource %q media kind differs from its content block", ErrUnsupportedContext, block.ResourceRef)
-		}
-		if block.MediaRole != input.Role {
-			return nil, fmt.Errorf("%w: resource %q media role differs from its accepted input plan", ErrUnsupportedContext, block.ResourceRef)
 		}
 		switch input.Mode {
 		case catalog.MaterializationInlineBase64:

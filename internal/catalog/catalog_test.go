@@ -305,6 +305,37 @@ func TestUnknownTokenLimitCannotCarryValue(t *testing.T) {
 	}
 }
 
+// TestTokenLimitsRejectIndividualCeilingsAboveSharedContext verifies every independent ceiling remains inside the conservative total window.
+// TestTokenLimitsRejectIndividualCeilingsAboveSharedContext 验证每个独立上限都位于保守总窗口以内。
+func TestTokenLimitsRejectIndividualCeilingsAboveSharedContext(t *testing.T) {
+	testCases := []struct {
+		// name identifies the independently invalid ceiling.
+		// name 标识独立无效的上限。
+		name   string
+		limits TokenLimits
+	}{
+		{name: "input", limits: TokenLimits{ContextWindow: OptionalTokenLimit{Known: true, Value: 8_192}, MaxInputTokens: OptionalTokenLimit{Known: true, Value: 8_193}}},
+		{name: "output", limits: TokenLimits{ContextWindow: OptionalTokenLimit{Known: true, Value: 8_192}, MaxOutputTokens: OptionalTokenLimit{Known: true, Value: 8_193}}},
+		{name: "reasoning", limits: TokenLimits{ContextWindow: OptionalTokenLimit{Known: true, Value: 8_192}, MaxReasoningTokens: OptionalTokenLimit{Known: true, Value: 8_193}}},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			if errValidate := testCase.limits.Validate(); errValidate == nil {
+				t.Fatalf("Validate() accepted %s ceiling above shared context", testCase.name)
+			}
+		})
+	}
+	valid := TokenLimits{
+		ContextWindow:      OptionalTokenLimit{Known: true, Value: 1_000_000},
+		MaxInputTokens:     OptionalTokenLimit{Known: true, Value: 991_808},
+		MaxOutputTokens:    OptionalTokenLimit{Known: true, Value: 65_536},
+		MaxReasoningTokens: OptionalTokenLimit{Known: true, Value: 81_920},
+	}
+	if errValidate := valid.Validate(); errValidate != nil {
+		t.Fatalf("Validate() rejected independent Qwen ceilings inside shared context: %v", errValidate)
+	}
+}
+
 // TestTokenRecommendationsValidateAgainstHardLimits verifies defaults remain positive and cannot exceed independently known ceilings.
 // TestTokenRecommendationsValidateAgainstHardLimits 验证默认值必须为正且不能超过独立已知硬上限。
 func TestTokenRecommendationsValidateAgainstHardLimits(t *testing.T) {

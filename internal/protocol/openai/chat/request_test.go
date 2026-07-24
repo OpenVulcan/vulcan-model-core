@@ -48,6 +48,30 @@ func TestProjectRequestWithInputsPreservesImageAndAudio(t *testing.T) {
 	}
 }
 
+// TestProjectRequestWithInputsPreservesRepeatedResourceRoles verifies one Router resource can appear under two explicit operation roles.
+// TestProjectRequestWithInputsPreservesRepeatedResourceRoles 验证同一个 Router 资源可在两个明确操作角色下出现。
+func TestProjectRequestWithInputsPreservesRepeatedResourceRoles(t *testing.T) {
+	request := chatTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Compare these uses"},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleReference},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "understanding", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+		{InputID: "reference", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+	}
+	capabilities := ProfileCapabilities{MediaInputKinds: []vcp.MediaKind{vcp.MediaImage}, MediaMaterializations: []catalog.UpstreamMaterializationMode{catalog.MaterializationInlineBase64}}
+	projected, errProject := ProjectRequestWithInputs(request, chatTarget(), capabilities, "lin_repeated_roles", time.Unix(40, 0), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	content := projected.Upstream.Messages[0].ContentParts
+	if len(content) != 3 || content[1].ImageURL == nil || content[2].ImageURL == nil {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
 // TestProjectRequestWithInputsRejectsUnverifiedVideo verifies Chat never invents a video carrier.
 // TestProjectRequestWithInputsRejectsUnverifiedVideo 验证 Chat 永不虚构视频载体。
 func TestProjectRequestWithInputsRejectsUnverifiedVideo(t *testing.T) {
@@ -56,6 +80,35 @@ func TestProjectRequestWithInputsRejectsUnverifiedVideo(t *testing.T) {
 	inputs := []resource.MaterializedInput{{InputID: "video", ResourceID: "video-resource", Kind: vcp.MediaVideo, Role: vcp.MediaRoleUnderstanding, MIMEType: "video/mp4", Mode: catalog.MaterializationInlineBase64, InlineBase64: "dmlkZW8="}}
 	if _, errProject := ProjectRequestWithInputs(request, chatTarget(), ProfileCapabilities{}, "lin_media", time.Unix(40, 0), inputs); !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
 		t.Fatalf("ProjectRequestWithInputs() error = %v, want ErrCapabilityUnavailable", errProject)
+	}
+}
+
+// TestProjectRequestWithInputsPreservesVerifiedURLs verifies direct and provider-object media carriers are emitted only by an explicit Profile.
+// TestProjectRequestWithInputsPreservesVerifiedURLs 验证直连与供应商对象媒体载体仅由显式 Profile 发出。
+func TestProjectRequestWithInputsPreservesVerifiedURLs(t *testing.T) {
+	request := chatTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Analyze"},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentAudio, ResourceRef: "audio-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentVideo, ResourceRef: "video-resource", MediaRole: vcp.MediaRoleUnderstanding},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "image", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationDirectRemoteURL, RemoteURL: "https://media.example/image.png"},
+		{InputID: "audio", ResourceID: "audio-resource", Kind: vcp.MediaAudio, Role: vcp.MediaRoleUnderstanding, MIMEType: "audio/aac", Mode: catalog.MaterializationProviderObjectURI, ProviderHandle: "oss://bucket/audio.aac"},
+		{InputID: "video", ResourceID: "video-resource", Kind: vcp.MediaVideo, Role: vcp.MediaRoleUnderstanding, MIMEType: "video/mp4", Mode: catalog.MaterializationProviderObjectURI, ProviderHandle: "oss://bucket/video.mp4"},
+	}
+	capabilities := ProfileCapabilities{
+		MediaInputKinds: []vcp.MediaKind{vcp.MediaImage, vcp.MediaAudio, vcp.MediaVideo}, MediaMaterializations: []catalog.UpstreamMaterializationMode{catalog.MaterializationDirectRemoteURL, catalog.MaterializationProviderObjectURI},
+		InputAudioURICarrier: true, InputAudioFormats: []string{"aac"},
+	}
+	projected, errProject := ProjectRequestWithInputs(request, chatTarget(), capabilities, "lin_media_url", time.Unix(41, 0), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	content := projected.Upstream.Messages[0].ContentParts
+	if len(content) != 4 || content[1].ImageURL == nil || content[1].ImageURL.URL != "https://media.example/image.png" || content[2].InputAudio == nil || content[2].InputAudio.Data != "oss://bucket/audio.aac" || content[2].InputAudio.Format != "aac" || content[3].VideoURL == nil || content[3].VideoURL.URL != "oss://bucket/video.mp4" {
+		t.Fatalf("content = %#v", content)
 	}
 }
 
@@ -267,6 +320,36 @@ func TestProjectRequestMapsReasoningEffortAndStrictSchema(t *testing.T) {
 	mode, exists := projected.CapabilityPlan.Decision(vcp.FeatureReasoning)
 	if !exists || mode != vcp.CapabilityNative {
 		t.Fatalf("reasoning capability mode = %q, exists = %t", mode, exists)
+	}
+}
+
+// TestProjectRequestRequiresRegisteredAdaptersForProviderReasoningControls verifies canonical switch and budget fields cannot disappear in generic Chat projection.
+// TestProjectRequestRequiresRegisteredAdaptersForProviderReasoningControls 验证规范开关与预算字段不能在通用 Chat 投影中消失。
+func TestProjectRequestRequiresRegisteredAdaptersForProviderReasoningControls(t *testing.T) {
+	enabled := true
+	budget := int64(4000)
+	tests := []struct {
+		name       string
+		policy     vcp.ReasoningPolicy
+		capability ProfileCapabilities
+	}{
+		{name: "switch without adapter", policy: vcp.ReasoningPolicy{Enabled: &enabled}, capability: ProfileCapabilities{Reasoning: true}},
+		{name: "budget without adapter", policy: vcp.ReasoningPolicy{BudgetTokens: &budget}, capability: ProfileCapabilities{Reasoning: true}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			request := chatTestRequest()
+			request.ReasoningPolicy = test.policy
+			if _, errProject := ProjectRequest(request, chatTarget(), test.capability, "lin_provider_reasoning", time.Unix(35, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+				t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+			}
+		})
+	}
+	request := chatTestRequest()
+	request.ReasoningPolicy = vcp.ReasoningPolicy{Enabled: &enabled, BudgetTokens: &budget}
+	capabilities := ProfileCapabilities{Reasoning: true, ProviderReasoningSwitchAdapter: true, ProviderReasoningBudgetAdapter: true}
+	if _, errProject := ProjectRequest(request, chatTarget(), capabilities, "lin_registered_reasoning", time.Unix(36, 0)); errProject != nil {
+		t.Fatalf("ProjectRequest() registered adapter error = %v", errProject)
 	}
 }
 

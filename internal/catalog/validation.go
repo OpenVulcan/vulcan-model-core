@@ -82,6 +82,45 @@ func (s Snapshot) Validate() error {
 		}
 		offerings[offering.ID] = offering
 	}
+	// operationPolicies indexes exhaustive code-owned publication decisions when the snapshot opts into policy control.
+	// operationPolicies 在快照启用策略控制时索引完整的代码拥有发布决策。
+	operationPolicies := make(map[string]ModelOperationPolicy, len(s.ModelOperationPolicies))
+	// operationPolicyIDs prevents duplicate immutable policy records.
+	// operationPolicyIDs 防止重复的不可变策略记录。
+	operationPolicyIDs := make(map[string]struct{}, len(s.ModelOperationPolicies))
+	// policiesByOffering proves every classified offering has at least one explicit operation decision.
+	// policiesByOffering 证明每个已分类 Offering 至少拥有一个显式操作决策。
+	policiesByOffering := make(map[string]int, len(s.Offerings))
+	for _, policy := range s.ModelOperationPolicies {
+		if errPolicy := policy.Validate(); errPolicy != nil {
+			return errPolicy
+		}
+		if policy.ProviderInstanceID != s.ProviderInstanceID {
+			return invalid("model operation policy %q crosses provider instances", policy.ID)
+		}
+		if _, exists := models[policy.ProviderModelID]; !exists {
+			return invalid("model operation policy %q references unknown model %q", policy.ID, policy.ProviderModelID)
+		}
+		offering, exists := offerings[policy.OfferingID]
+		if !exists {
+			return invalid("model operation policy %q references unknown offering %q", policy.ID, policy.OfferingID)
+		}
+		if offering.ProviderModelID != policy.ProviderModelID {
+			return invalid("model operation policy %q crosses model and offering ownership", policy.ID)
+		}
+		if _, exists := operationPolicyIDs[policy.ID]; exists {
+			return invalid("duplicate model operation policy id %q", policy.ID)
+		}
+		operationPolicyIDs[policy.ID] = struct{}{}
+		// policyKey is the unique decision subject within one provider snapshot.
+		// policyKey 是一个供应商快照内唯一的决策对象。
+		policyKey := modelOperationPolicyKey(policy.OfferingID, policy.Operation)
+		if existing, exists := operationPolicies[policyKey]; exists {
+			return invalid("offering %q operation %q has duplicate policies %q and %q", policy.OfferingID, policy.Operation, existing.ID, policy.ID)
+		}
+		operationPolicies[policyKey] = policy
+		policiesByOffering[policy.OfferingID]++
+	}
 	services := make(map[string]ProviderService, len(s.Services))
 	for _, service := range s.Services {
 		if errService := service.Validate(); errService != nil {
@@ -121,6 +160,9 @@ func (s Snapshot) Validate() error {
 	profileModels := make(map[string]string, len(s.Profiles))
 	profileServices := make(map[string]string, len(s.Profiles))
 	defaultProfiles := make(map[string]string)
+	// policyProfileCounts proves every supported operation publishes at least one executable profile.
+	// policyProfileCounts 证明每个已支持操作至少发布一个可执行规格。
+	policyProfileCounts := make(map[string]int, len(operationPolicies))
 	for _, profile := range s.Profiles {
 		if err := profile.Validate(); err != nil {
 			return err
@@ -136,6 +178,16 @@ func (s Snapshot) Validate() error {
 			}
 			profileSubject = "model\x00" + profile.OfferingID
 			profileModels[profile.ID] = offering.ProviderModelID
+			if len(operationPolicies) > 0 {
+				// policyKey is the exact publication decision required by this executable profile.
+				// policyKey 是该可执行规格必须具备的精确发布决策。
+				policyKey := modelOperationPolicyKey(profile.OfferingID, profile.Operation)
+				policy, exists := operationPolicies[policyKey]
+				if !exists || policy.Status != ModelOperationSupported {
+					return invalid("profile %q requires a supported model operation policy", profile.ID)
+				}
+				policyProfileCounts[policyKey]++
+			}
 		} else {
 			offering, exists := serviceOfferings[profile.ServiceOfferingID]
 			if !exists {
@@ -160,8 +212,33 @@ func (s Snapshot) Validate() error {
 		profiles[profile.ID] = profile
 	}
 	for offeringID := range offerings {
-		if _, exists := defaultProfiles["model\x00"+offeringID]; !exists {
-			return invalid("offering %q requires exactly one default profile", offeringID)
+		if len(operationPolicies) == 0 {
+			if _, exists := defaultProfiles["model\x00"+offeringID]; !exists {
+				return invalid("offering %q requires exactly one default profile", offeringID)
+			}
+			continue
+		}
+		if policiesByOffering[offeringID] == 0 {
+			return invalid("policy-controlled offering %q requires at least one operation policy", offeringID)
+		}
+		// supportedOperationExists records whether the offering must publish one default profile.
+		// supportedOperationExists 记录该 Offering 是否必须发布一个默认规格。
+		supportedOperationExists := false
+		for policyKey, policy := range operationPolicies {
+			if policy.OfferingID != offeringID || policy.Status != ModelOperationSupported {
+				continue
+			}
+			supportedOperationExists = true
+			if policyProfileCounts[policyKey] == 0 {
+				return invalid("supported model operation policy %q requires an execution profile", policy.ID)
+			}
+		}
+		_, defaultExists := defaultProfiles["model\x00"+offeringID]
+		if supportedOperationExists && !defaultExists {
+			return invalid("supported offering %q requires exactly one default profile", offeringID)
+		}
+		if !supportedOperationExists && defaultExists {
+			return invalid("unpublished offering %q cannot have a default profile", offeringID)
 		}
 	}
 	for offeringID := range serviceOfferings {
@@ -270,6 +347,42 @@ func (s Snapshot) Validate() error {
 			if _, exists := profiles[allowance.ScopeID]; !exists {
 				return invalid("allowance %q references unknown profile %q", allowance.ID, allowance.ScopeID)
 			}
+		}
+	}
+	// rateLimitIDs prevents duplicate capacity observations in one atomic snapshot.
+	// rateLimitIDs 防止一个原子快照中出现重复容量观测。
+	rateLimitIDs := make(map[string]struct{}, len(s.RateLimits))
+	for _, rateLimit := range s.RateLimits {
+		if errRateLimit := rateLimit.Validate(); errRateLimit != nil {
+			return errRateLimit
+		}
+		if rateLimit.ProviderInstanceID != s.ProviderInstanceID {
+			return invalid("rate limit %q crosses provider instances", rateLimit.ID)
+		}
+		if _, exists := rateLimitIDs[rateLimit.ID]; exists {
+			return invalid("duplicate rate limit snapshot id %q", rateLimit.ID)
+		}
+		rateLimitIDs[rateLimit.ID] = struct{}{}
+		switch rateLimit.Scope {
+		case RateLimitScopeProviderInstance:
+			if rateLimit.ScopeID != s.ProviderInstanceID {
+				return invalid("rate limit %q references another provider instance", rateLimit.ID)
+			}
+		case RateLimitScopeCredential:
+			if errCredential := validatePrefixedID("rate limit credential scope id", rateLimit.ScopeID, "cred_"); errCredential != nil {
+				return errCredential
+			}
+		case RateLimitScopeOffering:
+			if _, exists := offerings[rateLimit.ScopeID]; !exists {
+				return invalid("rate limit %q references unknown offering %q", rateLimit.ID, rateLimit.ScopeID)
+			}
+		case RateLimitScopeExecutionProfile:
+			if _, exists := profiles[rateLimit.ScopeID]; !exists {
+				return invalid("rate limit %q references unknown profile %q", rateLimit.ID, rateLimit.ScopeID)
+			}
+		case RateLimitScopeWorkspace:
+			// Workspace identifiers are provider-owned opaque values validated for normalization by RateLimitSnapshot.Validate.
+			// Workspace 标识是供应商拥有的不透明值，由 RateLimitSnapshot.Validate 校验规范化。
 		}
 	}
 	voiceIDs := make(map[string]struct{}, len(s.Voices))
@@ -431,10 +544,16 @@ func (p ExecutionProfile) Validate() error {
 		if p.Operation == vcp.OperationSearchWeb || p.Operation == vcp.OperationWebExtract {
 			return invalid("operation %q requires a service execution profile", p.Operation)
 		}
-		if p.Operation != "" && p.ActionBindingID == "" {
+		if p.Operation != "" && p.ActionBindingID == "" && !p.ProfileDriver {
 			return invalid("typed model execution profile requires action binding id")
 		}
+		if p.ProfileDriver && (p.Operation != vcp.OperationConversationRespond || p.ActionBindingID != "") {
+			return invalid("profile-driver execution requires an action-free conversation response operation")
+		}
 	} else {
+		if p.ProfileDriver {
+			return invalid("service execution profile cannot use a model profile driver")
+		}
 		if errOffering := validatePrefixedID("execution profile service offering id", p.ServiceOfferingID, "service_offer_"); errOffering != nil {
 			return errOffering
 		}
@@ -463,6 +582,57 @@ func (p ExecutionProfile) Validate() error {
 		return p.Capabilities.ValidateOperation(p.Operation)
 	}
 	return p.ServiceCapabilities.Validate(p.Operation)
+}
+
+// Validate verifies one code-owned model-operation publication decision.
+// Validate 校验一个代码拥有的模型操作发布决策。
+func (p ModelOperationPolicy) Validate() error {
+	if errID := validatePrefixedID("model operation policy id", p.ID, "policy_"); errID != nil {
+		return errID
+	}
+	if errInstance := validatePrefixedID("model operation policy instance id", p.ProviderInstanceID, "pvi_"); errInstance != nil {
+		return errInstance
+	}
+	if errModel := validatePrefixedID("model operation policy model id", p.ProviderModelID, "model_"); errModel != nil {
+		return errModel
+	}
+	if errOffering := validatePrefixedID("model operation policy offering id", p.OfferingID, "offer_"); errOffering != nil {
+		return errOffering
+	}
+	if !validModelOperation(p.Operation) || !validModelOperationSupportStatus(p.Status) || !validModelOperationSupportReason(p.Status, p.Reason) || !validModelSource(p.Source) || p.EvidenceRevision == 0 || p.Revision == 0 {
+		return invalid("model operation policy operation, status, reason, source, and revisions are required")
+	}
+	return nil
+}
+
+// modelOperationPolicyKey returns the unique subject key for one offering operation.
+// modelOperationPolicyKey 返回一个 Offering 操作的唯一对象键。
+func modelOperationPolicyKey(offeringID string, operation vcp.OperationKind) string {
+	return offeringID + "\x00" + string(operation)
+}
+
+// validModelOperation reports whether one closed VCP operation is owned by a model target rather than a special service.
+// validModelOperation 返回一个封闭 VCP 操作是否由模型目标而非特殊服务拥有。
+func validModelOperation(operation vcp.OperationKind) bool {
+	switch operation {
+	case vcp.OperationConversationRespond,
+		vcp.OperationMediaAnalyze,
+		vcp.OperationImageGenerate,
+		vcp.OperationImageEdit,
+		vcp.OperationVideoGenerate,
+		vcp.OperationVideoEdit,
+		vcp.OperationVideoExtend,
+		vcp.OperationSpeechSynthesize,
+		vcp.OperationSpeechTranscribe,
+		vcp.OperationEmbeddingCreate,
+		vcp.OperationRerankDocuments,
+		vcp.OperationMusicGenerate,
+		vcp.OperationMusicCoverPrepare,
+		vcp.OperationMusicCover:
+		return true
+	default:
+		return false
+	}
 }
 
 // Validate verifies one credential-specific model entitlement.
@@ -573,6 +743,51 @@ func (a AllowanceSnapshot) Validate() error {
 	return nil
 }
 
+// Validate verifies one provider capacity-limit snapshot and its freshness boundary.
+// Validate 校验一项供应商容量限制快照及其新鲜度边界。
+func (r RateLimitSnapshot) Validate() error {
+	if errID := validatePrefixedID("rate limit snapshot id", r.ID, "rate_"); errID != nil {
+		return errID
+	}
+	if errInstance := validatePrefixedID("rate limit snapshot instance id", r.ProviderInstanceID, "pvi_"); errInstance != nil {
+		return errInstance
+	}
+	if !validRateLimitScope(r.Scope) || strings.TrimSpace(r.ScopeID) == "" || r.ScopeID != strings.TrimSpace(r.ScopeID) || strings.TrimSpace(r.TierID) == "" || r.TierID != strings.TrimSpace(r.TierID) {
+		return invalid("rate limit scope, scope id, and tier id are required and normalized")
+	}
+	if r.CountLimit <= 0 || r.CountPeriodSeconds <= 0 {
+		return invalid("rate limit count ceiling and period must be positive")
+	}
+	// usageFieldsPresent counts the optional usage-limit tuple so partial provider facts are rejected.
+	// usageFieldsPresent 统计可选用量限制元组，避免接受不完整的供应商事实。
+	usageFieldsPresent := 0
+	if r.UsageLimit != nil {
+		if *r.UsageLimit <= 0 {
+			return invalid("rate limit usage ceiling must be positive")
+		}
+		usageFieldsPresent++
+	}
+	if r.UsagePeriodSeconds != nil {
+		if *r.UsagePeriodSeconds <= 0 {
+			return invalid("rate limit usage period must be positive")
+		}
+		usageFieldsPresent++
+	}
+	if r.UsageField != "" {
+		if errField := validateID("rate limit usage field", r.UsageField); errField != nil {
+			return errField
+		}
+		usageFieldsPresent++
+	}
+	if usageFieldsPresent != 0 && usageFieldsPresent != 3 {
+		return invalid("rate limit usage ceiling, period, and field must be provided together")
+	}
+	if !validModelSource(r.Source) || r.ObservedAt.IsZero() || !r.ExpiresAt.After(r.ObservedAt) || r.Revision == 0 {
+		return invalid("rate limit source, freshness, and revision are required")
+	}
+	return nil
+}
+
 // Validate verifies one quota window definition.
 // Validate 校验一个额度窗口定义。
 func (w AllowanceWindow) Validate() error {
@@ -639,6 +854,9 @@ func (c ModelCapabilities) Validate() error {
 			return invalid("hosted tool kind %q is duplicated", toolKind)
 		}
 		seenHostedTools[toolKind] = struct{}{}
+	}
+	if errModelTools := validateModelToolCapabilities(c.StandardTools, c.ExtraTools); errModelTools != nil {
+		return errModelTools
 	}
 	return c.validateExtended()
 }
@@ -878,6 +1096,20 @@ func (l TokenLimits) Validate() error {
 			return invalid("unknown token limit cannot carry a value")
 		}
 	}
+	if l.ContextWindow.Known {
+		for _, bounded := range []struct {
+			name  string
+			limit OptionalTokenLimit
+		}{
+			{name: "maximum input", limit: l.MaxInputTokens},
+			{name: "maximum output", limit: l.MaxOutputTokens},
+			{name: "maximum reasoning", limit: l.MaxReasoningTokens},
+		} {
+			if bounded.limit.Known && bounded.limit.Value > l.ContextWindow.Value {
+				return invalid("%s token limit %d exceeds shared context window %d", bounded.name, bounded.limit.Value, l.ContextWindow.Value)
+			}
+		}
+	}
 	return nil
 }
 
@@ -932,6 +1164,42 @@ func validCapabilityLevel(level CapabilityLevel) bool {
 	switch level {
 	case CapabilityNative, CapabilityEmulated, CapabilityUnsupported, CapabilityConditional, CapabilityUnknown:
 		return true
+	default:
+		return false
+	}
+}
+
+// validModelOperationSupportStatus reports whether one publication state is explicitly defined.
+// validModelOperationSupportStatus 返回一个发布状态是否已显式定义。
+func validModelOperationSupportStatus(status ModelOperationSupportStatus) bool {
+	switch status {
+	case ModelOperationSupported, ModelOperationUnsupported, ModelOperationPendingReview:
+		return true
+	default:
+		return false
+	}
+}
+
+// validModelOperationSupportReason reports whether one reason belongs to the selected publication state.
+// validModelOperationSupportReason 返回一个原因是否属于所选发布状态。
+func validModelOperationSupportReason(status ModelOperationSupportStatus, reason ModelOperationSupportReason) bool {
+	switch status {
+	case ModelOperationSupported:
+		return reason == SupportReasonRuntimeVerified || reason == SupportReasonProviderContractVerified
+	case ModelOperationUnsupported:
+		switch reason {
+		case SupportReasonProviderInferenceDisabled, SupportReasonOperationNotImplemented, SupportReasonCodingCapabilityInsufficient, SupportReasonDeprecatedOrSuperseded, SupportReasonOutOfScopeRealtime, SupportReasonOutOfScopeProduct:
+			return true
+		default:
+			return false
+		}
+	case ModelOperationPendingReview:
+		switch reason {
+		case SupportReasonMissingProtocolEvidence, SupportReasonMissingParameterMapping, SupportReasonMissingExecutionFixture, SupportReasonNewCatalogEntry:
+			return true
+		default:
+			return false
+		}
 	default:
 		return false
 	}
@@ -1058,6 +1326,17 @@ func validAllowanceStatus(status AllowanceStatus) bool {
 func validAllowanceUnit(unit AllowanceUnit) bool {
 	switch unit {
 	case UnitTokens, UnitRequests, UnitWeightedTokens, UnitProviderCredits, UnitMinorCurrency, UnitPercentage, UnitProviderDefined:
+		return true
+	default:
+		return false
+	}
+}
+
+// validRateLimitScope reports whether one provider capacity owner is explicitly supported.
+// validRateLimitScope 返回一个供应商容量所有者是否被显式支持。
+func validRateLimitScope(scope RateLimitScope) bool {
+	switch scope {
+	case RateLimitScopeProviderInstance, RateLimitScopeWorkspace, RateLimitScopeCredential, RateLimitScopeOffering, RateLimitScopeExecutionProfile:
 		return true
 	default:
 		return false

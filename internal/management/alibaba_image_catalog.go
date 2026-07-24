@@ -6,11 +6,14 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
-// alibabaModelStudioModels returns the evidence-closed embedding and regional synchronous image catalog.
-// alibabaModelStudioModels 返回证据封闭的 Embedding 与区域同步图片目录。
-func alibabaModelStudioModels(includeWanWorkspaceModels bool) []systemModelTemplate {
+// alibabaModelStudioModels returns the evidence-closed regional native-action catalog without copying unverified products across endpoint families.
+// alibabaModelStudioModels 返回证据封闭的区域原生动作目录，且不会在未经验证的入口家族间复制产品。
+func alibabaModelStudioModels(includeOmniModels bool, includeWanWorkspaceModels bool) []systemModelTemplate {
 	models := alibabaModelStudioEmbeddingModels()
 	models = append(models, alibabaAudioModels()...)
+	if includeOmniModels {
+		models = append(models, alibabaOmniModels()...)
+	}
 	models = append(models,
 		systemModelTemplate{
 			upstreamID: "qwen-image-2.0-pro", displayName: "Qwen Image 2.0 Pro", inputModalities: []string{"text"}, reasoning: catalog.CapabilityUnsupported, toolCalling: catalog.CapabilityUnsupported, parallelTools: catalog.CapabilityUnsupported, streamingTools: catalog.CapabilityUnsupported, strictSchema: catalog.CapabilityUnsupported, entitlementMode: catalog.EntitlementAllBoundCredentials,
@@ -26,6 +29,29 @@ func alibabaModelStudioModels(includeWanWorkspaceModels bool) []systemModelTempl
 		models = append(models, alibabaWanVideoModels()...)
 	}
 	return models
+}
+
+// alibabaTokenPlanQwenImageModels returns the two exact Qwen Image generation models published by Team plans.
+// alibabaTokenPlanQwenImageModels 返回团队套餐发布的两个精确 Qwen 图片生成模型。
+func alibabaTokenPlanQwenImageModels() []systemModelTemplate {
+	return []systemModelTemplate{
+		alibabaQwenImageGenerationTemplate("qwen-image-2.0", "Qwen Image 2.0"),
+		alibabaQwenImageGenerationTemplate("qwen-image-2.0-pro", "Qwen Image 2.0 Pro"),
+	}
+}
+
+// alibabaQwenImageGenerationTemplate builds one synchronous Qwen Image generation operation without adding edit support.
+// alibabaQwenImageGenerationTemplate 构建一个同步 Qwen 图片生成操作，且不会附带图片编辑支持。
+func alibabaQwenImageGenerationTemplate(upstreamID string, displayName string) systemModelTemplate {
+	return systemModelTemplate{
+		upstreamID: upstreamID, displayName: displayName, inputModalities: []string{"text"},
+		reasoning: catalog.CapabilityUnsupported, toolCalling: catalog.CapabilityUnsupported, parallelTools: catalog.CapabilityUnsupported,
+		streamingTools: catalog.CapabilityUnsupported, strictSchema: catalog.CapabilityUnsupported, entitlementMode: catalog.EntitlementAllBoundCredentials,
+		operation: vcp.OperationImageGenerate, actionBindingID: provideralibaba.ImageGenerateActionBindingID,
+		mediaOutputs: []catalog.MediaOutputCapability{alibabaQwenImageOutputCapability()},
+		parameters:   alibabaQwenImageParameters(true), parameterRules: alibabaQwenImageParameterRules(true),
+		usageMetrics: []catalog.UsageMetricCapability{{Unit: catalog.UsageUnitImages, Accuracy: catalog.UsageExact}, {Unit: catalog.UsageUnitPixels, Accuracy: catalog.UsageExact}},
+	}
 }
 
 // alibabaQwenImageEditCapability returns the official one-to-three image editing input contract.
@@ -48,20 +74,25 @@ func alibabaQwenImageOutputCapability() catalog.MediaOutputCapability {
 	}
 }
 
-// alibabaQwenImageParameters returns closed VCP parameter facts for generation or editing.
-// alibabaQwenImageParameters 返回生成或编辑的封闭 VCP 参数事实。
-func alibabaQwenImageParameters(includeSizeAndSeed bool) []catalog.ParameterDescriptor {
+// alibabaQwenImageParameters returns closed VCP parameter facts and optionally exposes exact generation dimensions.
+// alibabaQwenImageParameters 返回封闭 VCP 参数事实，并可选公开精确生成尺寸。
+func alibabaQwenImageParameters(includeSize bool) []catalog.ParameterDescriptor {
 	minimumCount, maximumCount, defaultCount := int64(1), int64(6), int64(1)
+	maximumNegativePromptLength := int64(500)
+	minimumSeed, maximumSeed := int64(0), int64(2147483647)
 	parameters := []catalog.ParameterDescriptor{
 		{ID: "count", Kind: catalog.ParameterCount, IntegerRange: &catalog.IntegerRange{Minimum: &minimumCount, Maximum: &maximumCount}, Default: &catalog.ParameterDefault{Source: catalog.ParameterDefaultProvider, Integer: &defaultCount}},
 		{ID: "output_format", Kind: catalog.ParameterFormat, AllowedValues: []string{"png"}},
+		{ID: "negative_prompt", Kind: catalog.ParameterString, StringRange: &catalog.StringRange{MaximumLength: &maximumNegativePromptLength}},
+		{ID: "prompt_extend", Kind: catalog.ParameterBoolean},
+		{ID: "watermark", Kind: catalog.ParameterBoolean},
+		{ID: "seed", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumSeed, Maximum: &maximumSeed}},
 	}
-	if includeSizeAndSeed {
-		minimumDimension, minimumSeed, maximumSeed := int64(1), int64(0), int64(2147483647)
+	if includeSize {
+		minimumDimension := int64(1)
 		parameters = append(parameters,
 			catalog.ParameterDescriptor{ID: "width", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumDimension}},
 			catalog.ParameterDescriptor{ID: "height", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumDimension}},
-			catalog.ParameterDescriptor{ID: "seed", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumSeed, Maximum: &maximumSeed}},
 		)
 	}
 	return parameters

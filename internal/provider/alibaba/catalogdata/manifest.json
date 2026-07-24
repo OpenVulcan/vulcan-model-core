@@ -1,0 +1,162 @@
+{
+  "schema_version": 2,
+  "entries": [
+    {
+      "catalog_id": "alibaba_model_studio_cn",
+      "product": "model_studio_api",
+      "console_site": "domestic",
+      "region": "cn_beijing",
+      "channel": "console_catalog",
+      "status": "verified",
+      "filename": "model-studio-cn.json",
+      "evidence": "Domestic cn-beijing listFoundationModels complete pagination retained as a credential-free static release snapshot.",
+      "evidence_source_type": "provider_console_snapshot",
+      "evidence_observed_at": "2026-07-22T16:54:12.842087Z",
+      "content_revision": "8e846896990755329db5a7131908453fbe228a3c55754a831fef2de4ad85f715"
+    },
+    {
+      "catalog_id": "alibaba_model_studio_sg_domestic",
+      "product": "model_studio_api",
+      "console_site": "domestic",
+      "region": "ap_southeast_1",
+      "channel": "console_catalog",
+      "status": "verified",
+      "filename": "model-studio-sg-domestic.json",
+      "evidence": "Domestic ap-southeast-1 listFoundationModels complete pagination retained as a credential-free static release snapshot.",
+      "evidence_source_type": "provider_console_snapshot",
+      "evidence_observed_at": "2026-07-22T16:55:20.3919865Z",
+      "content_revision": "cfe112abb5df534e0f339e689ef8253f62e50219acce2295fb5143abe6f48d50"
+    },
+    {
+      "catalog_id": "alibaba_model_studio_hong_kong",
+      "product": "model_studio_api",
+      "console_site": "domestic",
+      "region": "cn_hongkong",
+      "channel": "console_catalog",
+      "status": "unverified",
+      "evidence": "The Hong Kong endpoint boundary is known, but no independent complete model and capability snapshot has been approved.",
+      "evidence_source_type": "boundary_documentation",
+      "evidence_observed_at": "2026-07-23T00:00:00Z"
+    },
+    {
+      "catalog_id": "alibaba_model_studio_tokyo",
+      "product": "model_studio_api",
+      "console_site": "international",
+      "region": "ap_northeast_1",
+      "channel": "console_catalog",
+      "status": "unverified",
+      "evidence": "The Tokyo endpoint boundary is known, but no independent complete model and capability snapshot has been approved.",
+      "evidence_source_type": "boundary_documentation",
+      "evidence_observed_at": "2026-07-23T00:00:00Z"
+    },
+    {
+      "catalog_id": "alibaba_model_studio_frankfurt",
+      "product": "model_studio_api",
+      "console_site": "international",
+      "region": "eu_central_1",
+      "channel": "console_catalog",
+      "status": "unverified",
+      "evidence": "The Frankfurt endpoint boundary is known, but no independent complete model and capability snapshot has been approved.",
+      "evidence_source_type": "boundary_documentation",
+      "evidence_observed_at": "2026-07-23T00:00:00Z"
+    },
+    {
+      "catalog_id": "alibaba_model_studio_us",
+      "product": "model_studio_api",
+      "console_site": "international",
+      "region": "us_east_1",
+      "channel": "console_catalog",
+      "status": "unverified",
+      "evidence": "The Virginia endpoint boundary is known, but no independent complete model and capability snapshot has been approved.",
+      "evidence_source_type": "boundary_documentation",
+      "evidence_observed_at": "2026-07-23T00:00:00Z"
+    },
+    {
+      "catalog_id": "alibaba_model_studio_workspace_sg",
+      "product": "model_studio_api",
+      "console_site": "not_applicable",
+      "region": "ap_southeast_1",
+      "channel": "console_catalog",
+      "status": "unverified",
+      "evidence": "Workspace-scoped Singapore access requires independent workspace evidence and must not inherit the public Singapore snapshot.",
+      "evidence_source_type": "boundary_documentation",
+      "evidence_observed_at": "2026-07-23T00:00:00Z"
+    },
+    {
+      "catalog_id": "alibaba_coding_plan_cn",
+      "product": "coding_plan",
+      "console_site": "domestic",
+      "region": "cn_beijing",
+      "channel": "openai_chat",
+      "status": "verified",
+      "filename": "coding-plan-cn.json",
+      "evidence": "Official Coding Plan CN product matrix combined with exact Qwen Code preset and modality source at commit 819cd4ab4a335f04228c161cf89616c2cc88ef28.",
+      "evidence_source_type": "official_product_matrix_and_source",
+      "evidence_observed_at": "2026-07-23T00:00:00Z",
+      "content_revision": "9b14af77025cb76f6aa55ed66b19cb339b89bf259854fb4cdb8337e4f67474c7"
+    },
+    {
+      "catalog_id": "alibaba_coding_plan_global",
+      "product": "coding_plan",
+      "console_site": "international",
+      "region": "global",
+      "channel": "openai_chat",
+      "status": "verified",
+      "filename": "coding-plan-global.json",
+      "evidence": "Official Coding Plan Global product matrix combined with exact Qwen Code preset and modality source at commit 819cd4ab4a335f04228c161cf89616c2cc88ef28.",
+      "evidence_source_type": "official_product_matrix_and_source",
+      "evidence_observed_at": "2026-07-23T00:00:00Z",
+      "content_revision": "796f2ff3614ac4627e7778914712d0962e9284cff9d18ed3ca6a74b89fe61f03"
+    },
+    {
+      "catalog_id": "alibaba_token_plan_personal_cn",
+      "product": "token_plan_personal",
+      "console_site": "domestic",
+      "region": "cn_beijing",
+      "channel": "openai_chat",
+      "status": "verified",
+      "filename": "token-plan-personal-cn-static.json",
+      "evidence": "Official Personal CN plan matrix and Qwen Code modality facts; the release catalog never depends on a credential-scoped model-list call.",
+      "evidence_source_type": "official_product_matrix_and_source",
+      "evidence_observed_at": "2026-07-23T00:00:00Z",
+      "content_revision": "09edddafcad8e4aa3eb1345cc079575dfca08991631f6b5609f92783b76004ad"
+    },
+    {
+      "catalog_id": "alibaba_token_plan_personal_global",
+      "product": "token_plan_personal",
+      "console_site": "international",
+      "region": "ap_southeast_1",
+      "channel": "openai_chat",
+      "status": "unverified",
+      "evidence": "Personal Global is a separate commercial product, but its exact current model and capability matrix has not been independently approved.",
+      "evidence_source_type": "boundary_documentation",
+      "evidence_observed_at": "2026-07-23T00:00:00Z"
+    },
+    {
+      "catalog_id": "alibaba_token_plan_team_cn",
+      "product": "token_plan_team",
+      "console_site": "domestic",
+      "region": "cn_beijing",
+      "channel": "openai_chat",
+      "status": "verified",
+      "filename": "token-plan-team-cn.json",
+      "evidence": "Official Team CN product matrix combined with exact Qwen Code modality source at commit 819cd4ab4a335f04228c161cf89616c2cc88ef28.",
+      "evidence_source_type": "official_product_matrix_and_source",
+      "evidence_observed_at": "2026-07-23T00:00:00Z",
+      "content_revision": "0692568ca8be5c1ef2cc59b9087915d52c7cde9068761d912d3a1ed90b7af206"
+    },
+    {
+      "catalog_id": "alibaba_token_plan_team_global",
+      "product": "token_plan_team",
+      "console_site": "international",
+      "region": "ap_southeast_1",
+      "channel": "openai_chat",
+      "status": "verified",
+      "filename": "token-plan-team-global.json",
+      "evidence": "Official Team Global product matrix combined with exact Qwen Code modality source at commit 819cd4ab4a335f04228c161cf89616c2cc88ef28.",
+      "evidence_source_type": "official_product_matrix_and_source",
+      "evidence_observed_at": "2026-07-23T00:00:00Z",
+      "content_revision": "4029e18ccb6eb16d8bb43f5a4926cb0a4c61bb245b48614c506ffd435e5ed689"
+    }
+  ]
+}

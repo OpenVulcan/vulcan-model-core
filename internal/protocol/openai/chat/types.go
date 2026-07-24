@@ -46,6 +46,12 @@ type ProfileCapabilities struct {
 	// MediaMaterializations lists resource representations preserved by this exact provider Profile.
 	// MediaMaterializations 列出此精确供应商 Profile 可保真的资源表示方式。
 	MediaMaterializations []catalog.UpstreamMaterializationMode
+	// InputAudioFormats lists exact provider wire format labels accepted by input_audio.
+	// InputAudioFormats 列出 input_audio 接受的精确供应商 Wire 格式标签。
+	InputAudioFormats []string
+	// InputAudioURICarrier reports that input_audio.data may contain a provider-authorized URI instead of Base64 bytes.
+	// InputAudioURICarrier 表示 input_audio.data 可以包含供应商授权 URI，而不仅是 Base64 字节。
+	InputAudioURICarrier bool
 	// NativeSystemPreamble reports verified system message support at the first position.
 	// NativeSystemPreamble 表示经过验证的首位 system 消息支持。
 	NativeSystemPreamble bool
@@ -70,12 +76,24 @@ type ProfileCapabilities struct {
 	// Reasoning reports verified Chat reasoning parameter support.
 	// Reasoning 表示经过验证的 Chat 推理参数支持。
 	Reasoning bool
+	// ProviderReasoningSwitchAdapter reports that the registered provider adapter consumes VCP enabled without loss.
+	// ProviderReasoningSwitchAdapter 表示已注册供应商适配器能够无损消费 VCP enabled。
+	ProviderReasoningSwitchAdapter bool
+	// ProviderReasoningBudgetAdapter reports that the registered provider adapter validates and consumes VCP budget_tokens without loss.
+	// ProviderReasoningBudgetAdapter 表示已注册供应商适配器能够校验并无损消费 VCP budget_tokens。
+	ProviderReasoningBudgetAdapter bool
 	// ReasoningContent reports verified reasoning_content response and replay support.
 	// ReasoningContent 表示经过验证的 reasoning_content 响应与回放支持。
 	ReasoningContent bool
 	// StreamUsage reports verified stream_options.include_usage support.
 	// StreamUsage 表示经过验证的 stream_options.include_usage 支持。
 	StreamUsage bool
+	// NativeWebSearch reports verified provider-hosted search through the Chat request.
+	// NativeWebSearch 表示经过验证的 Chat 请求内供应商托管搜索支持。
+	NativeWebSearch bool
+	// MixedAudioOutput reports verified streaming text-plus-audio response support.
+	// MixedAudioOutput 表示经过验证的流式文本加音频响应支持。
+	MixedAudioOutput bool
 }
 
 // Request is the typed OpenAI Chat Completions request body.
@@ -120,9 +138,41 @@ type Request struct {
 	// ReasoningEffort constrains verified OpenAI Chat reasoning-model effort.
 	// ReasoningEffort 约束经过验证的 OpenAI Chat 推理模型强度。
 	ReasoningEffort string `json:"reasoning_effort,omitempty"`
+	// EnableThinking carries Alibaba's documented Qwen thinking switch only after an explicit provider adapter selects it.
+	// EnableThinking 仅在显式供应商适配器选择后携带 Alibaba 文档化的 Qwen 思考开关。
+	EnableThinking *bool `json:"enable_thinking,omitempty"`
+	// ThinkingBudget carries Alibaba's documented positive reasoning-token budget when the selected catalog profile supplies one.
+	// ThinkingBudget 在所选目录规格提供预算时携带 Alibaba 文档化的正推理 Token 预算。
+	ThinkingBudget *int64 `json:"thinking_budget,omitempty"`
+	// ToolStream enables Alibaba's documented incremental tool-argument stream only after exact model capability validation.
+	// ToolStream 仅在精确模型能力校验后启用 Alibaba 文档化的工具参数增量流。
+	ToolStream *bool `json:"tool_stream,omitempty"`
+	// VLHighResolutionImages enables Alibaba's documented high-resolution visual tokenization only for exact vision models with media input.
+	// VLHighResolutionImages 仅为具有媒体输入的精确视觉模型启用 Alibaba 文档化的高分辨率视觉分词。
+	VLHighResolutionImages *bool `json:"vl_high_resolution_images,omitempty"`
 	// Thinking carries the typed Moonshot thinking switch only after an explicitly registered provider adapter selects it.
 	// Thinking 仅在显式注册的供应商适配器选择后携带类型化 Moonshot 思考开关。
 	Thinking *ThinkingConfiguration `json:"thinking,omitempty"`
+	// Modalities selects the documented response modality combination for mixed-output models.
+	// Modalities 为混合输出模型选择文档化的响应模态组合。
+	Modalities []string `json:"modalities,omitempty"`
+	// Audio configures the voice and format for a documented mixed audio response.
+	// Audio 为文档化的混合音频响应配置音色与格式。
+	Audio *OutputAudioConfiguration `json:"audio,omitempty"`
+	// EnableSearch enables Alibaba's documented model-hosted web search after provider adaptation.
+	// EnableSearch 在供应商适配后启用阿里云文档化的模型托管网页搜索。
+	EnableSearch *bool `json:"enable_search,omitempty"`
+}
+
+// OutputAudioConfiguration contains one exact OpenAI-compatible conversational audio request.
+// OutputAudioConfiguration 包含一条精确的 OpenAI 兼容会话音频请求。
+type OutputAudioConfiguration struct {
+	// Voice is the exact built-in or account-owned provider voice identifier.
+	// Voice 是精确的供应商内置或账号自有音色标识。
+	Voice string `json:"voice"`
+	// Format is the exact provider output encoding.
+	// Format 是精确的供应商输出编码。
+	Format string `json:"format"`
 }
 
 // ThinkingMode identifies one closed Moonshot thinking switch value.
@@ -261,8 +311,8 @@ func (m *Message) UnmarshalJSON(data []byte) error {
 // ContentPart is one evidence-closed OpenAI Chat user content block.
 // ContentPart 是一个证据封闭的 OpenAI Chat 用户内容块。
 type ContentPart struct {
-	// Type selects text, image_url, or input_audio.
-	// Type 选择 text、image_url 或 input_audio。
+	// Type selects text, image_url, input_audio, or a profile-verified video_url.
+	// Type 选择 text、image_url、input_audio 或 Profile 已验证的 video_url。
 	Type string `json:"type"`
 	// Text contains a text block.
 	// Text 包含文本块。
@@ -270,6 +320,9 @@ type ContentPart struct {
 	// ImageURL contains an image URL or inline data URL.
 	// ImageURL 包含图片 URL 或内联 Data URL。
 	ImageURL *ImageURL `json:"image_url,omitempty"`
+	// VideoURL contains a direct or provider-authorized video URL.
+	// VideoURL 包含直连或供应商授权的视频 URL。
+	VideoURL *VideoURL `json:"video_url,omitempty"`
 	// InputAudio contains inline audio bytes and their documented encoding.
 	// InputAudio 包含内联音频字节及其已记录编码。
 	InputAudio *InputAudio `json:"input_audio,omitempty"`
@@ -283,14 +336,22 @@ type ImageURL struct {
 	URL string `json:"url"`
 }
 
+// VideoURL is the typed provider-verified Chat video_url payload.
+// VideoURL 是类型化且经供应商验证的 Chat video_url 载荷。
+type VideoURL struct {
+	// URL is a validated remote or provider-authorized object URL accepted by Chat.
+	// URL 是 Chat 接受的已校验远程 URL 或供应商授权对象 URL。
+	URL string `json:"url"`
+}
+
 // InputAudio is the typed OpenAI Chat input_audio payload.
 // InputAudio 是类型化 OpenAI Chat input_audio 载荷。
 type InputAudio struct {
-	// Data contains base64 audio bytes without a data URL prefix.
-	// Data 包含不带 Data URL 前缀的 Base64 音频字节。
+	// Data contains Base64 audio bytes or a URI only when the exact Profile verifies that carrier.
+	// Data 包含 Base64 音频字节；仅当精确 Profile 验证该载体时才可包含 URI。
 	Data string `json:"data"`
-	// Format is the documented mp3 or wav encoding name.
-	// Format 是已记录的 mp3 或 wav 编码名称。
+	// Format is one exact Profile-supported encoding label.
+	// Format 是精确 Profile 支持的编码标签之一。
 	Format string `json:"format"`
 }
 
@@ -483,9 +544,9 @@ type AssistantMessage struct {
 	// Annotations detects citation metadata that this first-phase VCP profile cannot represent.
 	// Annotations 检测到本第一阶段 VCP Profile 无法表示的引文元数据。
 	Annotations []UnsupportedResponsePayload `json:"annotations,omitempty"`
-	// Audio detects an audio response payload outside this text-only first-phase profile.
-	// Audio 检测到超出此文本优先第一阶段 Profile 范围的音频响应载荷。
-	Audio *UnsupportedResponsePayload `json:"audio,omitempty"`
+	// Audio contains a documented mixed-output audio payload when the selected profile requested it.
+	// Audio 在所选 Profile 明确请求时包含文档化的混合输出音频载荷。
+	Audio *AudioOutputDelta `json:"audio,omitempty"`
 }
 
 // Delta contains one streaming Chat assistant delta.
@@ -509,9 +570,23 @@ type Delta struct {
 	// FunctionCall is the deprecated single-function delta carrier that remains safely projectable as one VCP tool call.
 	// FunctionCall 是已废弃的单函数增量载体，仍可安全投影为一个 VCP 工具调用。
 	FunctionCall *FunctionCall `json:"function_call,omitempty"`
-	// Audio detects an audio response delta outside this text-only first-phase profile.
-	// Audio 检测到超出此文本优先第一阶段 Profile 范围的音频响应增量。
-	Audio *UnsupportedResponsePayload `json:"audio,omitempty"`
+	// Audio contains one documented mixed-output audio fragment.
+	// Audio 包含一个文档化的混合输出音频分片。
+	Audio *AudioOutputDelta `json:"audio,omitempty"`
+}
+
+// AudioOutputDelta contains one provider audio fragment and its optional provider metadata.
+// AudioOutputDelta 包含一个供应商音频分片及其可选供应商元数据。
+type AudioOutputDelta struct {
+	// Data contains one Base64 fragment of raw provider PCM audio.
+	// Data 包含一段供应商原始 PCM 音频的 Base64 分片。
+	Data string `json:"data,omitempty"`
+	// ID is the provider audio object identifier without Router continuation semantics.
+	// ID 是不具有 Router 续接语义的供应商音频对象标识。
+	ID string `json:"id,omitempty"`
+	// ExpiresAt is the provider metadata expiry timestamp when present.
+	// ExpiresAt 是存在时的供应商元数据过期时间戳。
+	ExpiresAt *int64 `json:"expires_at,omitempty"`
 }
 
 // ToolCallDelta contains one indexed streaming function call delta.

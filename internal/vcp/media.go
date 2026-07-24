@@ -63,6 +63,9 @@ const (
 	// MediaRoleCoverReference supplies a music-cover reference.
 	// MediaRoleCoverReference 提供翻唱参考。
 	MediaRoleCoverReference MediaInputRole = "cover_reference"
+	// MediaRoleReferenceVoice supplies a voice paired to one image or video reference.
+	// MediaRoleReferenceVoice 提供与一个图片或视频参考配对的声音。
+	MediaRoleReferenceVoice MediaInputRole = "reference_voice"
 )
 
 // ResourceReference identifies one Router-owned immutable resource.
@@ -91,6 +94,9 @@ type MediaInput struct {
 	// Resource references the Router-owned content.
 	// Resource 引用 Router 拥有的内容。
 	Resource ResourceReference `json:"resource"`
+	// RelatedInputID links a reference voice to the exact image or video input it accompanies.
+	// RelatedInputID 将参考声音链接到其伴随的精确图片或视频输入。
+	RelatedInputID string `json:"related_input_id,omitempty"`
 }
 
 // MediaAnalyzeTask identifies the requested analysis semantics.
@@ -209,6 +215,18 @@ type ImageEditOperation struct {
 	// OutputFormat requests a registered image format.
 	// OutputFormat 请求一个已注册图片格式。
 	OutputFormat string `json:"output_format,omitempty"`
+	// NegativePrompt describes visual properties excluded from the edited output.
+	// NegativePrompt 描述编辑结果中需要排除的视觉属性。
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+	// Seed requests deterministic provider initialization when supported.
+	// Seed 在支持时请求确定性的供应商初始化种子。
+	Seed *int64 `json:"seed,omitempty"`
+	// Watermark requests an explicit provider-supported watermark preference.
+	// Watermark 请求明确且供应商支持的水印偏好。
+	Watermark *bool `json:"watermark,omitempty"`
+	// PromptExtend requests provider-native prompt rewriting when exposed by the profile.
+	// PromptExtend 在 Profile 公开该能力时请求供应商原生提示词改写。
+	PromptExtend *bool `json:"prompt_extend,omitempty"`
 }
 
 // VideoGenerateOperation contains provider-independent video generation input.
@@ -270,7 +288,44 @@ type VideoEditOperation struct {
 	// References contains optional ordered references.
 	// References 包含可选有序参考资源。
 	References []MediaInput `json:"references,omitempty"`
+	// NegativePrompt describes visual or acoustic content that should be excluded.
+	// NegativePrompt 描述应排除的视觉或声音内容。
+	NegativePrompt string `json:"negative_prompt,omitempty"`
+	// DurationSeconds requests a supported output duration.
+	// DurationSeconds 请求一个受支持输出时长。
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	// Resolution requests one provider-declared output tier.
+	// Resolution 请求供应商声明的输出档位。
+	Resolution string `json:"resolution,omitempty"`
+	// AspectRatio requests one provider-declared display ratio.
+	// AspectRatio 请求供应商声明的显示长宽比。
+	AspectRatio string `json:"aspect_ratio,omitempty"`
+	// AudioMode requests provider-generated audio or preservation of the original track.
+	// AudioMode 请求供应商生成音频或保留原始音轨。
+	AudioMode VideoAudioMode `json:"audio_mode,omitempty"`
+	// PromptExtend requests provider-native prompt rewriting.
+	// PromptExtend 请求供应商原生提示词改写。
+	PromptExtend *bool `json:"prompt_extend,omitempty"`
+	// Watermark requests an explicit provider-supported watermark preference.
+	// Watermark 请求明确且供应商支持的水印偏好。
+	Watermark *bool `json:"watermark,omitempty"`
+	// Seed requests deterministic provider initialization when supported.
+	// Seed 在支持时请求确定性供应商初始化。
+	Seed *int64 `json:"seed,omitempty"`
 }
+
+// VideoAudioMode identifies one closed video-edit audio policy.
+// VideoAudioMode 标识一种封闭视频编辑音频策略。
+type VideoAudioMode string
+
+const (
+	// VideoAudioAuto lets the provider generate or adapt audio.
+	// VideoAudioAuto 允许供应商生成或调整音频。
+	VideoAudioAuto VideoAudioMode = "auto"
+	// VideoAudioOrigin preserves the source video's original audio.
+	// VideoAudioOrigin 保留源视频原始音频。
+	VideoAudioOrigin VideoAudioMode = "origin"
+)
 
 // VideoExtendOperation extends one existing video.
 // VideoExtendOperation 延长一个现有视频。
@@ -331,6 +386,12 @@ type SpeechSynthesizeOperation struct {
 	// Pronunciations contains ordered provider-compatible pronunciation mappings.
 	// Pronunciations 包含有序且与供应商兼容的发音映射。
 	Pronunciations []string `json:"pronunciations,omitempty"`
+	// Seed requests provider-relative deterministic synthesis when supported.
+	// Seed 请求供应商支持时的相对确定性语音合成。
+	Seed *int64 `json:"seed,omitempty"`
+	// EnableSSML requests explicit SSML parsing instead of plain text.
+	// EnableSSML 请求显式解析 SSML 而不是普通文本。
+	EnableSSML bool `json:"enable_ssml,omitempty"`
 }
 
 // SpeechSynthesisSegment binds one text span to one preset voice.
@@ -350,6 +411,9 @@ type SpeechTranscribeOperation struct {
 	// Source is an audio resource or a video resource with an audio track.
 	// Source 是音频资源或包含音轨的视频资源。
 	Source MediaInput `json:"source"`
+	// Sources contains an ordered batch of audio resources or videos with audio tracks.
+	// Sources 包含有序的音频资源或带音轨视频批次。
+	Sources []MediaInput `json:"sources,omitempty"`
 	// Language optionally fixes the source language.
 	// Language 可选地固定源语言。
 	Language string `json:"language,omitempty"`
@@ -374,6 +438,24 @@ type SpeechTranscribeOperation struct {
 	// CandidateCount requests a supported number of recognition alternatives.
 	// CandidateCount 请求受支持数量的识别候选。
 	CandidateCount int `json:"candidate_count,omitempty"`
+	// ChannelIDs selects the ordered source channels that the provider must transcribe.
+	// ChannelIDs 选择供应商必须转写的有序源声道。
+	ChannelIDs []int `json:"channel_ids,omitempty"`
+	// SpeakerCount supplies an expected speaker count and requires diarization.
+	// SpeakerCount 提供预期说话人数且要求启用说话人分离。
+	SpeakerCount int `json:"speaker_count,omitempty"`
+	// VocabularyID selects one provider-managed hot-word vocabulary.
+	// VocabularyID 选择一个由供应商管理的热词词表。
+	VocabularyID string `json:"vocabulary_id,omitempty"`
+}
+
+// OrderedSources returns the exact single-source or batch-source request order.
+// OrderedSources 返回精确的单源或批量来源请求顺序。
+func (o SpeechTranscribeOperation) OrderedSources() []MediaInput {
+	if len(o.Sources) != 0 {
+		return append([]MediaInput(nil), o.Sources...)
+	}
+	return []MediaInput{o.Source}
 }
 
 // MusicGenerateOperation contains music-generation input.
@@ -499,8 +581,8 @@ func (o ImageEditOperation) Validate() error {
 	if strings.TrimSpace(o.Instruction) == "" {
 		return fmt.Errorf("%w: image edit instruction is required", ErrInvalidRequest)
 	}
-	if o.Count < 0 || o.Width < 0 || o.Height < 0 {
-		return fmt.Errorf("%w: image edit count and dimensions cannot be negative", ErrInvalidRequest)
+	if o.Count < 0 || o.Width < 0 || o.Height < 0 || o.Seed != nil && *o.Seed < 0 {
+		return fmt.Errorf("%w: image edit count, dimensions, and seed cannot be negative", ErrInvalidRequest)
 	}
 	return validateMediaInputs(o.Sources, true)
 }
@@ -520,11 +602,14 @@ func (o VideoGenerateOperation) Validate() error {
 // Validate verifies video-edit source identity and instruction.
 // Validate 校验视频编辑来源身份和指令。
 func (o VideoEditOperation) Validate() error {
-	if strings.TrimSpace(o.Instruction) == "" {
-		return fmt.Errorf("%w: video edit instruction is required", ErrInvalidRequest)
-	}
 	if errSource := validateMediaInput(o.Source); errSource != nil {
 		return errSource
+	}
+	if o.DurationSeconds < 0 {
+		return fmt.Errorf("%w: video edit duration cannot be negative", ErrInvalidRequest)
+	}
+	if o.AudioMode != "" && o.AudioMode != VideoAudioAuto && o.AudioMode != VideoAudioOrigin {
+		return fmt.Errorf("%w: invalid video edit audio_mode %q", ErrInvalidRequest, o.AudioMode)
 	}
 	return validateMediaInputs(o.References, false)
 }
@@ -563,7 +648,7 @@ func (o SpeechSynthesizeOperation) Validate() error {
 	if o.Volume != nil && (math.IsNaN(*o.Volume) || math.IsInf(*o.Volume, 0)) {
 		return fmt.Errorf("%w: speech volume must be finite", ErrInvalidRequest)
 	}
-	if o.SampleRate < 0 || o.Bitrate < 0 || o.Channels < 0 {
+	if o.SampleRate < 0 || o.Bitrate < 0 || o.Channels < 0 || o.Seed != nil && *o.Seed < 0 {
 		return fmt.Errorf("%w: speech encoding fields cannot be negative", ErrInvalidRequest)
 	}
 	seenPronunciations := make(map[string]struct{}, len(o.Pronunciations))
@@ -582,15 +667,39 @@ func (o SpeechSynthesizeOperation) Validate() error {
 // Validate verifies non-realtime speech-to-text input.
 // Validate 校验非实时语音转文本输入。
 func (o SpeechTranscribeOperation) Validate() error {
-	if o.CandidateCount < 0 || (o.Source.Kind != MediaAudio && o.Source.Kind != MediaVideo) || o.Source.Role != MediaRoleTranscriptionSource {
-		return fmt.Errorf("%w: transcription requires an audio or video transcription_source and a non-negative candidate_count", ErrInvalidRequest)
+	usesSingleSource := strings.TrimSpace(o.Source.ID) != "" || strings.TrimSpace(o.Source.Resource.ResourceID) != "" || o.Source.Kind != "" || o.Source.Role != ""
+	usesBatchSources := len(o.Sources) != 0
+	if o.CandidateCount < 0 || usesSingleSource == usesBatchSources || len(o.Sources) > 100 || o.SpeakerCount < 0 || o.SpeakerCount > 0 && !o.Diarization {
+		return fmt.Errorf("%w: transcription requires exactly one source mode, at most 100 batch sources, non-negative counts, and diarization for speaker_count", ErrInvalidRequest)
+	}
+	if len(o.Hotwords) != 0 && strings.TrimSpace(o.VocabularyID) != "" {
+		return fmt.Errorf("%w: transcription hotwords and vocabulary_id are mutually exclusive", ErrInvalidRequest)
+	}
+	if o.VocabularyID != strings.TrimSpace(o.VocabularyID) {
+		return fmt.Errorf("%w: transcription vocabulary_id must be normalized", ErrInvalidRequest)
+	}
+	seenChannels := make(map[int]struct{}, len(o.ChannelIDs))
+	for _, channelID := range o.ChannelIDs {
+		if channelID < 0 {
+			return fmt.Errorf("%w: transcription channel_ids cannot be negative", ErrInvalidRequest)
+		}
+		if _, exists := seenChannels[channelID]; exists {
+			return fmt.Errorf("%w: transcription channel_ids cannot contain duplicates", ErrInvalidRequest)
+		}
+		seenChannels[channelID] = struct{}{}
 	}
 	for _, hotword := range o.Hotwords {
 		if strings.TrimSpace(hotword) == "" {
 			return fmt.Errorf("%w: transcription hotwords cannot be empty", ErrInvalidRequest)
 		}
 	}
-	return validateMediaInput(o.Source)
+	sources := o.OrderedSources()
+	for index := range sources {
+		if (sources[index].Kind != MediaAudio && sources[index].Kind != MediaVideo) || sources[index].Role != MediaRoleTranscriptionSource {
+			return fmt.Errorf("%w: transcription source %d must be an audio or video transcription_source", ErrInvalidRequest, index)
+		}
+	}
+	return validateMediaInputs(sources, true)
 }
 
 // Validate verifies music-generation input and mutually exclusive lyrics intent.
@@ -657,6 +766,25 @@ func validateMediaInputs(inputs []MediaInput, required bool) error {
 		}
 		seen[inputs[index].ID] = struct{}{}
 	}
+	for index := range inputs {
+		input := inputs[index]
+		if input.Role != MediaRoleReferenceVoice {
+			continue
+		}
+		if input.RelatedInputID == input.ID {
+			return fmt.Errorf("%w: media input %d cannot reference itself", ErrInvalidRequest, index)
+		}
+		relatedIndex := -1
+		for candidateIndex := range inputs {
+			if inputs[candidateIndex].ID == input.RelatedInputID {
+				relatedIndex = candidateIndex
+				break
+			}
+		}
+		if relatedIndex < 0 || (inputs[relatedIndex].Kind != MediaImage && inputs[relatedIndex].Kind != MediaVideo) || inputs[relatedIndex].Role != MediaRoleReference {
+			return fmt.Errorf("%w: media input %d reference_voice must target one reference image or video", ErrInvalidRequest, index)
+		}
+	}
 	return nil
 }
 
@@ -669,8 +797,15 @@ func validateMediaInput(input MediaInput) error {
 	if input.Kind != MediaImage && input.Kind != MediaAudio && input.Kind != MediaVideo && input.Kind != MediaFile {
 		return fmt.Errorf("%w: invalid media kind %q", ErrInvalidRequest, input.Kind)
 	}
+	if input.Role == MediaRoleReferenceVoice {
+		if input.Kind != MediaAudio || strings.TrimSpace(input.RelatedInputID) == "" {
+			return fmt.Errorf("%w: reference_voice requires audio and related_input_id", ErrInvalidRequest)
+		}
+	} else if strings.TrimSpace(input.RelatedInputID) != "" {
+		return fmt.Errorf("%w: related_input_id is reserved for reference_voice", ErrInvalidRequest)
+	}
 	switch input.Role {
-	case MediaRoleUnderstanding, MediaRoleReference, MediaRoleEditSource, MediaRoleMask, MediaRoleFirstFrame, MediaRoleLastFrame, MediaRoleSubjectReference, MediaRoleAudioTrack, MediaRoleTranscriptionSource, MediaRoleStyleReference, MediaRoleCoverReference:
+	case MediaRoleUnderstanding, MediaRoleReference, MediaRoleEditSource, MediaRoleMask, MediaRoleFirstFrame, MediaRoleLastFrame, MediaRoleSubjectReference, MediaRoleAudioTrack, MediaRoleTranscriptionSource, MediaRoleStyleReference, MediaRoleCoverReference, MediaRoleReferenceVoice:
 		return nil
 	default:
 		return fmt.Errorf("%w: invalid media role %q", ErrInvalidRequest, input.Role)

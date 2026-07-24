@@ -90,21 +90,25 @@ export interface ProviderDefinition {
   features: ProviderFeatures;
 }
 
+// ProviderSupportStatus is the closed implementation state returned for one provider-native reader.
+// ProviderSupportStatus 是一个供应商原生读取器返回的封闭实现状态。
+export type ProviderSupportStatus =
+  | "supported"
+  | "unsupported"
+  | "temporarily_unavailable";
+
 // ProviderFeatures identifies trusted provider-native metadata readers.
 // ProviderFeatures 标识受信任的供应商原生元数据读取器。
 export interface ProviderFeatures {
-  // model_discovery identifies the provider-native model catalog reader.
-  // model_discovery 标识供应商原生模型目录读取器。
-  model_discovery: string;
   // plan_reader identifies the provider-native commercial plan reader.
   // plan_reader 标识供应商原生商业套餐读取器。
-  plan_reader: string;
+  plan_reader: ProviderSupportStatus;
   // entitlement_reader identifies the provider-native entitlement reader.
   // entitlement_reader 标识供应商原生权益读取器。
-  entitlement_reader: string;
+  entitlement_reader: ProviderSupportStatus;
   // allowance_reader identifies the provider-native quota or credit reader.
   // allowance_reader 标识供应商原生额度或积分读取器。
-  allowance_reader: string;
+  allowance_reader: ProviderSupportStatus;
 }
 
 // ProviderAuthMethod describes one definition-owned authentication mechanism.
@@ -125,7 +129,13 @@ export interface ProviderAuthMethod {
   // plan_acquisition identifies how this authentication method obtains plan evidence.
   // plan_acquisition 标识该认证方式如何获得套餐证据。
   plan_acquisition:
-    "provider_detected" | "manual_required" | "manual_optional" | "unavailable";
+    | "provider_detected"
+    | "manual_required"
+    | "manual_optional"
+    | "unavailable";
+  // reader_features contains the exact reader surface for this authentication method after server-side narrowing.
+  // reader_features 包含此认证方式经服务端收窄后的精确读取能力面。
+  reader_features: ProviderFeatures;
 }
 
 // ProviderPlanOption describes one safe code-owned commercial tier.
@@ -383,7 +393,8 @@ export interface CustomProviderDefinitionInput {
 
 // VertexServiceAccountOnboardingInput contains one transient typed JSON document whose identity is derived server-side.
 // VertexServiceAccountOnboardingInput 包含一个临时类型化 JSON 文档，其身份由服务端派生。
-export interface VertexServiceAccountOnboardingInput extends Partial<CredentialReauthorizationTarget> {
+export interface VertexServiceAccountOnboardingInput
+  extends Partial<CredentialReauthorizationTarget> {
   // provider_definition_id selects the Vertex system definition.
   // provider_definition_id 选择 Vertex 系统 Definition。
   provider_definition_id: string;
@@ -711,6 +722,9 @@ export interface ProviderCredential {
     observed_at: string;
     expires_at?: string;
   };
+  // reader_features contains the exact metadata readers available to this credential.
+  // reader_features 包含此凭据可用的精确元数据读取器。
+  reader_features: ProviderFeatures;
   // revision is the persisted credential revision.
   // revision 是持久化凭据修订号。
   revision: number;
@@ -1013,12 +1027,267 @@ export interface ProviderCatalogMetadata {
   // voices contains cached credential-scoped provider voice entries.
   // voices 包含缓存的凭据作用域供应商声音项。
   voices: ProviderVoice[];
+  // rate_limits contains provider capacity ceilings separately from consumable allowances.
+  // rate_limits 包含与可消费额度分离的供应商容量上限。
+  rate_limits: ProviderCatalogAuditRateLimit[];
   // revision is the committed catalog snapshot revision.
   // revision 是已提交目录快照的修订号。
   revision: number;
   // observed_at is the server timestamp for the complete refresh.
   // observed_at 是完整刷新操作的服务端时间戳。
   observed_at: string;
+}
+
+// ProviderCatalogAuditModel contains one collected model whether or not publication policy exposes it.
+// ProviderCatalogAuditModel 包含一个已采集模型，无论发布策略是否公开它。
+export interface ProviderCatalogAuditModel {
+  // id is the provider-scoped internal model identifier.
+  // id 是供应商作用域内部模型标识。
+  id: string;
+  // upstream_model_id is the exact upstream request value.
+  // upstream_model_id 是精确上游请求值。
+  upstream_model_id: string;
+  // display_name is the provider-authored or generated label.
+  // display_name 是供应商编写或生成的标签。
+  display_name: string;
+  // source identifies the evidence authority.
+  // source 标识证据权威来源。
+  source: string;
+  // offering_ids lists every collected channel relation.
+  // offering_ids 列出全部已采集通道关系。
+  offering_ids: string[];
+}
+
+// ProviderCatalogAuditCapabilityLevel is the closed support vocabulary used by catalog evidence.
+// ProviderCatalogAuditCapabilityLevel 是目录证据使用的封闭支持级别词汇。
+export type ProviderCatalogAuditCapabilityLevel =
+  | "native"
+  | "emulated"
+  | "conditional"
+  | "unsupported"
+  | "unknown";
+
+// ProviderCatalogAuditTokenLimit preserves whether one token ceiling is authoritative.
+// ProviderCatalogAuditTokenLimit 保留一个 Token 上限是否具有权威性。
+export interface ProviderCatalogAuditTokenLimit {
+  // known reports whether value is an evidenced ceiling.
+  // known 表示 value 是否为有证据支持的上限。
+  known: boolean;
+  // value is present only for a known ceiling.
+  // value 仅在上限已知时存在。
+  value?: number;
+}
+
+// ProviderCatalogAuditCapabilities contains the normalized classifications rendered by the complete audit.
+// ProviderCatalogAuditCapabilities 包含完整审核所渲染的规范化能力分类。
+export interface ProviderCatalogAuditCapabilities {
+  // context_window is the conservative total ceiling shared by input, reasoning, and output.
+  // context_window 是输入、推理和输出共同占用的保守总上限。
+  context_window: ProviderCatalogAuditTokenLimit;
+  // max_input_tokens is the independently evidenced input ceiling.
+  // max_input_tokens 是独立证据支持的输入上限。
+  max_input_tokens: ProviderCatalogAuditTokenLimit;
+  // max_output_tokens is the independently evidenced output ceiling.
+  // max_output_tokens 是独立证据支持的输出上限。
+  max_output_tokens: ProviderCatalogAuditTokenLimit;
+  // max_reasoning_tokens is the independently evidenced reasoning ceiling.
+  // max_reasoning_tokens 是独立证据支持的推理上限。
+  max_reasoning_tokens: ProviderCatalogAuditTokenLimit;
+  // recommended_output_tokens is the provider-evidenced output default.
+  // recommended_output_tokens 是供应商证据支持的输出默认值。
+  recommended_output_tokens: ProviderCatalogAuditTokenLimit;
+  // recommended_reasoning_tokens is the provider-evidenced reasoning default.
+  // recommended_reasoning_tokens 是供应商证据支持的推理默认值。
+  recommended_reasoning_tokens: ProviderCatalogAuditTokenLimit;
+  // tool_calling classifies direct tool-call support.
+  // tool_calling 对直接工具调用支持进行分类。
+  tool_calling: ProviderCatalogAuditCapabilityLevel;
+  // parallel_tool_calls classifies parallel tool-call support.
+  // parallel_tool_calls 对并行工具调用支持进行分类。
+  parallel_tool_calls: ProviderCatalogAuditCapabilityLevel;
+  // streaming_tool_arguments classifies incremental tool argument support.
+  // streaming_tool_arguments 对增量工具参数支持进行分类。
+  streaming_tool_arguments: ProviderCatalogAuditCapabilityLevel;
+  // strict_json_schema classifies strict structured-output support.
+  // strict_json_schema 对严格结构化输出支持进行分类。
+  strict_json_schema: ProviderCatalogAuditCapabilityLevel;
+  // reasoning classifies reasoning control and output support.
+  // reasoning 对推理控制与输出支持进行分类。
+  reasoning: ProviderCatalogAuditCapabilityLevel;
+  // reasoning_efforts lists exact accepted reasoning strengths.
+  // reasoning_efforts 列出精确接受的推理强度。
+  reasoning_efforts: string[];
+  // reasoning_summary_modes lists exact accepted reasoning-summary modes.
+  // reasoning_summary_modes 列出精确接受的推理摘要模式。
+  reasoning_summary_modes: string[];
+  // input_modalities lists normalized accepted inputs.
+  // input_modalities 列出规范化的可接受输入。
+  input_modalities: string[];
+  // output_modalities lists normalized produced outputs.
+  // output_modalities 列出规范化的可生成输出。
+  output_modalities: string[];
+}
+
+// ProviderCatalogAuditOffering contains one unfiltered model-to-channel relation.
+// ProviderCatalogAuditOffering 包含一个未过滤的模型到通道关系。
+export interface ProviderCatalogAuditOffering {
+  // id is the immutable provider-scoped offering identifier.
+  // id 是不可变供应商作用域 Offering 标识。
+  id: string;
+  // provider_model_id identifies the exact collected model.
+  // provider_model_id 标识精确已采集模型。
+  provider_model_id: string;
+  // upstream_model_id is the exact upstream request value.
+  // upstream_model_id 是精确上游请求值。
+  upstream_model_id: string;
+  // channel_id identifies the exact protocol or native action channel.
+  // channel_id 标识精确协议或原生动作通道。
+  channel_id: string;
+  // capabilities contains the complete normalized channel capability evidence returned by the server.
+  // capabilities 包含服务端返回的完整规范化通道能力证据。
+  capabilities: ProviderCatalogAuditCapabilities;
+  // capability_revision identifies the exact capability evidence revision.
+  // capability_revision 标识精确能力证据修订号。
+  capability_revision: number;
+}
+
+// ProviderCatalogPolicyReason is the closed evidence reason returned by catalog policy validation.
+// ProviderCatalogPolicyReason 是目录策略校验返回的封闭证据原因。
+export type ProviderCatalogPolicyReason =
+  | "runtime_verified"
+  | "provider_contract_verified"
+  | "provider_inference_disabled"
+  | "operation_not_implemented"
+  | "coding_capability_insufficient"
+  | "deprecated_or_superseded"
+  | "out_of_scope_realtime"
+  | "out_of_scope_product"
+  | "missing_protocol_evidence"
+  | "missing_parameter_mapping"
+  | "missing_execution_fixture"
+  | "new_catalog_entry";
+
+// ProviderCatalogAuditPolicy contains one explicit publish or suppression decision.
+// ProviderCatalogAuditPolicy 包含一项显式发布或抑制决策。
+export interface ProviderCatalogAuditPolicy {
+  // id is the immutable decision identifier.
+  // id 是不可变决策标识。
+  id: string;
+  // provider_model_id identifies the classified model.
+  // provider_model_id 标识已分类模型。
+  provider_model_id: string;
+  // offering_id identifies the classified channel relation.
+  // offering_id 标识已分类通道关系。
+  offering_id: string;
+  // operation identifies the exact VCP operation.
+  // operation 标识精确 VCP 操作。
+  operation: string;
+  // status is the closed publication decision.
+  // status 是封闭发布决策。
+  status: "supported" | "unsupported" | "pending_review";
+  // reason is the code-owned evidence reason.
+  // reason 是代码拥有的证据原因。
+  reason: ProviderCatalogPolicyReason;
+  // source identifies the evidence authority.
+  // source 标识证据权威来源。
+  source: string;
+  // evidence_revision identifies the exact policy evidence revision.
+  // evidence_revision 标识精确策略证据修订号。
+  evidence_revision: number;
+}
+
+// ProviderCatalogAuditRateLimit contains one provider capacity fact without credentials.
+// ProviderCatalogAuditRateLimit 包含一个不带凭据的供应商容量事实。
+export interface ProviderCatalogAuditRateLimit {
+  // id is the immutable observation identifier.
+  // id 是不可变观测标识。
+  id: string;
+  // scope identifies the provider capacity owner kind.
+  // scope 标识供应商容量所有者类型。
+  scope: string;
+  // scope_id identifies the exact capacity owner.
+  // scope_id 标识精确容量所有者。
+  scope_id: string;
+  // tier_id preserves the provider-authored rate tier.
+  // tier_id 保留供应商编写的速率档位。
+  tier_id: string;
+  // count_limit is the known request-count ceiling.
+  // count_limit 是已知请求次数上限。
+  count_limit: number;
+  // count_period_seconds is the request-count window duration.
+  // count_period_seconds 是请求计数窗口秒数。
+  count_period_seconds: number;
+  // usage_limit is the optional provider metric ceiling.
+  // usage_limit 是可选供应商指标上限。
+  usage_limit?: number;
+  // usage_period_seconds is the optional provider metric window duration.
+  // usage_period_seconds 是可选供应商指标窗口秒数。
+  usage_period_seconds?: number;
+  // usage_field identifies the exact provider metric.
+  // usage_field 标识精确供应商指标。
+  usage_field?: string;
+  // observed_at records when the fact was obtained.
+  // observed_at 记录事实获取时间。
+  observed_at: string;
+  // expires_at records when the fact becomes stale.
+  // expires_at 记录事实何时过期。
+  expires_at: string;
+}
+
+// ProviderCatalogAudit contains the complete collected catalog and its explicit publication decisions.
+// ProviderCatalogAudit 包含完整已采集目录及其显式发布决策。
+export interface ProviderCatalogAudit {
+  // provider_instance_id owns every returned fact.
+  // provider_instance_id 拥有全部返回事实。
+  provider_instance_id: string;
+  // definition_id identifies the immutable provider product.
+  // definition_id 标识不可变供应商产品。
+  definition_id: string;
+  // model_catalog_id identifies the code-owned baseline.
+  // model_catalog_id 标识代码拥有基线。
+  model_catalog_id: string;
+  // product_name is the exact provider variant label.
+  // product_name 是精确供应商变体标签。
+  product_name: string;
+  // endpoint_regions lists configured non-secret regions.
+  // endpoint_regions 列出已配置非秘密区域。
+  endpoint_regions: string[];
+  // channel_ids lists every collected protocol or native action channel.
+  // channel_ids 列出全部已采集协议或原生动作通道。
+  channel_ids: string[];
+  // models contains published and suppressed models.
+  // models 包含已发布与被抑制模型。
+  models: ProviderCatalogAuditModel[];
+  // offerings contains all collected model-channel relations.
+  // offerings 包含全部已采集模型通道关系。
+  offerings: ProviderCatalogAuditOffering[];
+  // policies contains every explicit publication decision.
+  // policies 包含每项显式发布决策。
+  policies: ProviderCatalogAuditPolicy[];
+  // rate_limits contains current provider capacity facts.
+  // rate_limits 包含当前供应商容量事实。
+  rate_limits: ProviderCatalogAuditRateLimit[];
+  // revision identifies the complete atomic snapshot.
+  // revision 标识完整原子快照。
+  revision: number;
+  // observed_at records when the catalog was produced.
+  // observed_at 记录目录生成时间。
+  observed_at: string;
+  // source_revision is the dynamic upstream or generated source revision.
+  // source_revision 是动态上游或生成源修订号。
+  source_revision?: string;
+  // refreshed_at records the last dynamic refresh attempt.
+  // refreshed_at 记录最近动态刷新尝试时间。
+  refreshed_at?: string;
+  // expires_at records the dynamic freshness boundary.
+  // expires_at 记录动态新鲜度边界。
+  expires_at?: string;
+  // refresh_status reports the dynamic refresh lifecycle.
+  // refresh_status 报告动态刷新生命周期。
+  refresh_status?: string;
+  // stale reports whether dynamic evidence is retained past freshness.
+  // stale 报告动态证据是否已过新鲜期仍被保留。
+  stale: boolean;
 }
 
 // providerCatalogHasModels reports model discovery availability only from actual catalog entries.
@@ -1088,6 +1357,41 @@ const providerEndpointPresetSchema = z
     }
   });
 
+// providerSupportStatusSchema validates the server's closed reader implementation state.
+// providerSupportStatusSchema 校验服务端封闭的读取器实现状态。
+const providerSupportStatusSchema = z.enum([
+  "supported",
+  "unsupported",
+  "temporarily_unavailable",
+]);
+
+// providerFeaturesSchema validates one complete provider-native metadata reader surface.
+// providerFeaturesSchema 校验一个完整的供应商原生元数据读取能力面。
+const providerFeaturesSchema = z.object({
+  plan_reader: providerSupportStatusSchema,
+  entitlement_reader: providerSupportStatusSchema,
+  allowance_reader: providerSupportStatusSchema,
+});
+
+// providerAuthMethodSchema validates one definition-owned authentication mechanism and its narrowed readers.
+// providerAuthMethodSchema 校验一个由定义拥有的认证机制及其收窄读取器。
+const providerAuthMethodSchema = z.object({
+  id: z.string().min(1),
+  type: z.string().min(1),
+  refreshable: z.boolean(),
+  multiple_credentials: z.boolean().optional().default(false),
+  plan_acquisition: z
+    .enum([
+      "provider_detected",
+      "manual_required",
+      "manual_optional",
+      "unavailable",
+    ])
+    .optional()
+    .default("unavailable"),
+  reader_features: providerFeaturesSchema,
+});
+
 // providerGroupListResponseSchema validates the complete untrusted management response before UI state owns it.
 // providerGroupListResponseSchema 在 UI 状态接管前校验完整的不受信任管理响应。
 const providerGroupListResponseSchema = z.object({
@@ -1108,23 +1412,7 @@ const providerGroupListResponseSchema = z.object({
           model_catalog_id: z.string().min(1),
           protocol_profile_id: z.string().min(1),
           endpoint_presets: z.array(providerEndpointPresetSchema),
-          auth_methods: z.array(
-            z.object({
-              id: z.string().min(1),
-              type: z.string().min(1),
-              refreshable: z.boolean(),
-              multiple_credentials: z.boolean().optional().default(false),
-              plan_acquisition: z
-                .enum([
-                  "provider_detected",
-                  "manual_required",
-                  "manual_optional",
-                  "unavailable",
-                ])
-                .optional()
-                .default("unavailable"),
-            }),
-          ),
+          auth_methods: z.array(providerAuthMethodSchema),
           plan_options: z
             .array(
               z.object({
@@ -1139,12 +1427,7 @@ const providerGroupListResponseSchema = z.object({
             )
             .optional()
             .default([]),
-          features: z.object({
-            model_discovery: z.string(),
-            plan_reader: z.string(),
-            entitlement_reader: z.string(),
-            allowance_reader: z.string(),
-          }),
+          features: providerFeaturesSchema,
         }),
       ),
     }),
@@ -1159,23 +1442,7 @@ const providerDefinitionSummarySchema = z.object({
   display_name: z.string().min(1),
   group_id: z.string().min(1).optional(),
   protocol_profile_id: z.string().min(1),
-  auth_methods: z.array(
-    z.object({
-      id: z.string().min(1),
-      type: z.string().min(1),
-      refreshable: z.boolean(),
-      multiple_credentials: z.boolean().optional().default(false),
-      plan_acquisition: z
-        .enum([
-          "provider_detected",
-          "manual_required",
-          "manual_optional",
-          "unavailable",
-        ])
-        .optional()
-        .default("unavailable"),
-    }),
-  ),
+  auth_methods: z.array(providerAuthMethodSchema),
   plan_options: z
     .array(
       z.object({
@@ -1190,12 +1457,7 @@ const providerDefinitionSummarySchema = z.object({
     )
     .optional()
     .default([]),
-  features: z.object({
-    model_discovery: z.string(),
-    plan_reader: z.string(),
-    entitlement_reader: z.string(),
-    allowance_reader: z.string(),
-  }),
+  features: providerFeaturesSchema,
 });
 
 // providerDefinitionListResponseSchema validates the complete system and custom definition inventory.
@@ -1239,7 +1501,6 @@ const customProtocolProfileSchema = z
     display_name: z.string().min(1),
     user_configurable: z.boolean(),
     runtime_ready: z.boolean(),
-    model_discovery: protocolSupportStatusSchema,
     capabilities: z.array(protocolCapabilitySchema),
     allowed_auth_methods: z
       .array(z.enum(["bearer", "header_api_key"]))
@@ -1375,6 +1636,44 @@ const exactNonNegativeDecimalPattern =
 // exactNonNegativeIntegerPattern preserves nanosecond durations beyond JavaScript's safe integer range.
 // exactNonNegativeIntegerPattern 保留超过 JavaScript 安全整数范围的纳秒时长。
 const exactNonNegativeIntegerPattern = /^(0|[1-9][0-9]*)$/;
+
+// providerRateLimitSchema validates one complete provider capacity fact without treating it as consumable quota.
+// providerRateLimitSchema 校验一项完整供应商容量事实，且不会把它当作可消费额度。
+const providerRateLimitSchema: z.ZodType<ProviderCatalogAuditRateLimit> = z
+  .object({
+    id: z.string().min(1),
+    scope: z.enum([
+      "provider_instance",
+      "workspace",
+      "credential",
+      "offering",
+      "execution_profile",
+    ]),
+    scope_id: z.string().min(1),
+    tier_id: z.string().min(1),
+    count_limit: z.number().int().positive(),
+    count_period_seconds: z.number().int().positive(),
+    usage_limit: z.number().int().positive().optional(),
+    usage_period_seconds: z.number().int().positive().optional(),
+    usage_field: z.string().min(1).optional(),
+    observed_at: z.string().datetime({ offset: true }),
+    expires_at: z.string().datetime({ offset: true }),
+  })
+  .superRefine((limit, context) => {
+    // usageTupleSize rejects partially serialized optional provider-metric ceilings at the HTTP boundary.
+    // usageTupleSize 在 HTTP 边界拒绝仅序列化部分字段的可选供应商指标上限。
+    const usageTupleSize = [
+      limit.usage_limit,
+      limit.usage_period_seconds,
+      limit.usage_field,
+    ].filter((value) => value !== undefined).length;
+    if (usageTupleSize !== 0 && usageTupleSize !== 3) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "rate-limit usage fields must be all present or all absent",
+      });
+    }
+  });
 
 // providerCatalogMetadataSchema validates provider-native plan and allowance observations before rendering.
 // providerCatalogMetadataSchema 在渲染前校验供应商原生套餐与额度观测。
@@ -1586,8 +1885,138 @@ const providerCatalogMetadataSchema = z.object({
     )
     .optional()
     .default([]),
+  rate_limits: z.array(providerRateLimitSchema).optional().default([]),
   revision: z.number().int().positive(),
   observed_at: z.string().datetime({ offset: true }),
+});
+
+// providerCatalogAuditCapabilityLevelSchema validates the closed capability evidence vocabulary.
+// providerCatalogAuditCapabilityLevelSchema 校验封闭的能力证据词汇。
+const providerCatalogAuditCapabilityLevelSchema = z.enum([
+  "native",
+  "emulated",
+  "conditional",
+  "unsupported",
+  "unknown",
+]);
+
+// providerCatalogAuditTokenLimitSchema validates known and explicitly unknown token ceilings.
+// providerCatalogAuditTokenLimitSchema 校验已知与显式未知的 Token 上限。
+const providerCatalogAuditTokenLimitSchema: z.ZodType<ProviderCatalogAuditTokenLimit> =
+  z
+    .object({
+      known: z.boolean(),
+      value: z.number().int().nonnegative().optional(),
+    })
+    .superRefine((limit, context) => {
+      if (
+        (limit.known && limit.value === undefined) ||
+        (!limit.known && limit.value !== undefined && limit.value !== 0)
+      ) {
+        context.addIssue({
+          code: z.ZodIssueCode.custom,
+          message:
+            "catalog audit token limit known flag and value are inconsistent",
+        });
+      }
+    });
+
+// providerCatalogAuditCapabilitiesSchema validates every classification rendered by the catalog audit while preserving extended typed contracts.
+// providerCatalogAuditCapabilitiesSchema 校验目录审核渲染的每项分类，同时保留扩展类型化合同。
+const providerCatalogAuditCapabilitiesSchema: z.ZodType<ProviderCatalogAuditCapabilities> =
+  z
+    .object({
+      context_window: providerCatalogAuditTokenLimitSchema,
+      max_input_tokens: providerCatalogAuditTokenLimitSchema,
+      max_output_tokens: providerCatalogAuditTokenLimitSchema,
+      max_reasoning_tokens: providerCatalogAuditTokenLimitSchema,
+      recommended_output_tokens: providerCatalogAuditTokenLimitSchema,
+      recommended_reasoning_tokens: providerCatalogAuditTokenLimitSchema,
+      tool_calling: providerCatalogAuditCapabilityLevelSchema,
+      parallel_tool_calls: providerCatalogAuditCapabilityLevelSchema,
+      streaming_tool_arguments: providerCatalogAuditCapabilityLevelSchema,
+      strict_json_schema: providerCatalogAuditCapabilityLevelSchema,
+      reasoning: providerCatalogAuditCapabilityLevelSchema,
+      reasoning_efforts: z
+        .array(z.string().min(1))
+        .nullish()
+        .transform((values) => values ?? []),
+      reasoning_summary_modes: z
+        .array(z.string().min(1))
+        .nullish()
+        .transform((values) => values ?? []),
+      input_modalities: z
+        .array(z.string().min(1))
+        .nullish()
+        .transform((values) => values ?? []),
+      output_modalities: z
+        .array(z.string().min(1))
+        .nullish()
+        .transform((values) => values ?? []),
+    })
+    .passthrough();
+
+// providerCatalogAuditSchema validates complete collected facts, capability evidence, and explicit publication decisions.
+// providerCatalogAuditSchema 校验完整已采集事实、能力证据与显式发布决策。
+const providerCatalogAuditSchema: z.ZodType<ProviderCatalogAudit> = z.object({
+  provider_instance_id: z.string().min(1),
+  definition_id: z.string().min(1),
+  model_catalog_id: z.string().min(1),
+  product_name: z.string().min(1),
+  endpoint_regions: z.array(z.string().min(1)),
+  channel_ids: z.array(z.string().min(1)),
+  models: z.array(
+    z.object({
+      id: z.string().min(1),
+      upstream_model_id: z.string().min(1),
+      display_name: z.string().min(1),
+      source: z.string().min(1),
+      offering_ids: z.array(z.string().min(1)),
+    }),
+  ),
+  offerings: z.array(
+    z.object({
+      id: z.string().min(1),
+      provider_model_id: z.string().min(1),
+      upstream_model_id: z.string().min(1),
+      channel_id: z.string().min(1),
+      capabilities: providerCatalogAuditCapabilitiesSchema,
+      capability_revision: z.number().int().positive(),
+    }),
+  ),
+  policies: z.array(
+    z.object({
+      id: z.string().min(1),
+      provider_model_id: z.string().min(1),
+      offering_id: z.string().min(1),
+      operation: z.string().min(1),
+      status: z.enum(["supported", "unsupported", "pending_review"]),
+      reason: z.enum([
+        "runtime_verified",
+        "provider_contract_verified",
+        "provider_inference_disabled",
+        "operation_not_implemented",
+        "coding_capability_insufficient",
+        "deprecated_or_superseded",
+        "out_of_scope_realtime",
+        "out_of_scope_product",
+        "missing_protocol_evidence",
+        "missing_parameter_mapping",
+        "missing_execution_fixture",
+        "new_catalog_entry",
+      ]),
+      source: z.string().min(1),
+      evidence_revision: z.number().int().positive(),
+    }),
+  ),
+  rate_limits: z.array(providerRateLimitSchema),
+  revision: z.number().int().positive(),
+  observed_at: z.string().datetime({ offset: true }),
+  source_revision: z.string().min(1).optional(),
+  refreshed_at: z.string().datetime({ offset: true }).optional(),
+  expires_at: z.string().datetime({ offset: true }).optional(),
+  refresh_status: z.string().min(1).optional(),
+  stale: z.boolean(),
 });
 
 // payloadPathSchema accepts unambiguous dot-separated JSON object paths.
@@ -1943,6 +2372,7 @@ const providerCredentialSchema = z.object({
       expires_at: z.string().datetime({ offset: true }).optional(),
     })
     .optional(),
+  reader_features: providerFeaturesSchema,
   revision: z.number().int().positive(),
 });
 
@@ -2229,30 +2659,31 @@ export async function fetchProviderCatalog(
   return providerCatalogMetadataSchema.parse(await response.json());
 }
 
-// discoverCustomProviderModels refreshes one custom catalog with an explicitly selected same-instance credential.
-// discoverCustomProviderModels 使用一个显式选择的同实例凭据刷新自定义目录。
-export async function discoverCustomProviderModels(
+// fetchProviderCatalogAudit loads every collected model fact and explicit publication decision for one instance.
+// fetchProviderCatalogAudit 加载一个实例的全部已采集模型事实与显式发布决策。
+export async function fetchProviderCatalogAudit(
   managementAuthToken: string,
   providerInstanceID: string,
-  credentialID: string,
-): Promise<ProviderCatalogMetadata> {
+  signal?: AbortSignal,
+): Promise<ProviderCatalogAudit> {
   const response = await fetch(
-    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/custom-catalog/discover`,
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/catalog/audit`,
     {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${managementAuthToken}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ credential_id: credentialID }),
+      method: "GET",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+      signal,
     },
   );
   if (!response.ok) {
     throw new Error(
-      `custom provider model discovery failed with status ${response.status}`,
+      `provider catalog audit request failed with status ${response.status}`,
     );
   }
-  return providerCatalogMetadataSchema.parse(await response.json());
+  const audit = providerCatalogAuditSchema.parse(await response.json());
+  if (audit.provider_instance_id !== providerInstanceID) {
+    throw new Error("provider catalog audit returned a mismatched instance");
+  }
+  return audit;
 }
 
 // saveCustomProviderModels replaces one complete simplified custom model set.
@@ -3186,19 +3617,12 @@ export async function cancelAntigravityOAuthFlow(
   }
 }
 
-// refreshProviderMetadata requests one provider-native catalog refresh and returns only redacted metadata.
-// refreshProviderMetadata 请求一次供应商原生目录刷新并仅返回脱敏元数据。
-export async function refreshProviderMetadata(
-  managementAuthToken: string,
+// parseProviderMetadataRefreshResponse validates one refresh response without retaining provider payloads after parsing.
+// parseProviderMetadataRefreshResponse 校验一次刷新响应，且解析后不保留供应商载荷。
+async function parseProviderMetadataRefreshResponse(
+  response: Response,
   providerInstanceID: string,
 ): Promise<ProviderCatalogMetadata> {
-  const response = await fetch(
-    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/catalog/refresh`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${managementAuthToken}` },
-    },
-  );
   // payload is parsed once so malformed success and failure envelopes share an explicit invalid-response category.
   // payload 只解析一次，使格式错误的成功与失败信封共用显式无效响应分类。
   let payload: unknown;
@@ -3220,19 +3644,50 @@ export async function refreshProviderMetadata(
     );
   }
   const metadata = providerCatalogMetadataSchema.safeParse(payload);
-  if (!metadata.success) {
-    throw new ProviderMetadataRefreshError(
-      "provider_metadata_invalid_response",
-      response.status,
-    );
-  }
-  if (metadata.data.provider_instance_id !== providerInstanceID) {
+  if (
+    !metadata.success ||
+    metadata.data.provider_instance_id !== providerInstanceID
+  ) {
     throw new ProviderMetadataRefreshError(
       "provider_metadata_invalid_response",
       response.status,
     );
   }
   return metadata.data;
+}
+
+// refreshProviderCredentialEntitlements refreshes only one credential's plan and authorization evidence.
+// refreshProviderCredentialEntitlements 仅刷新一个凭据的套餐与授权证据。
+export async function refreshProviderCredentialEntitlements(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+): Promise<ProviderCatalogMetadata> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}/entitlements/refresh`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+    },
+  );
+  return parseProviderMetadataRefreshResponse(response, providerInstanceID);
+}
+
+// refreshProviderCredentialUsage refreshes only one credential's supported allowance observations.
+// refreshProviderCredentialUsage 仅刷新一个凭据受支持的额度观测。
+export async function refreshProviderCredentialUsage(
+  managementAuthToken: string,
+  providerInstanceID: string,
+  credentialID: string,
+): Promise<ProviderCatalogMetadata> {
+  const response = await fetch(
+    `/vulcan/manage/provider-instances/${encodeURIComponent(providerInstanceID)}/credentials/${encodeURIComponent(credentialID)}/usage/refresh`,
+    {
+      method: "POST",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+    },
+  );
+  return parseProviderMetadataRefreshResponse(response, providerInstanceID);
 }
 
 // refreshProviderCredential requests one explicit provider-token refresh and validates the returned credential identity.

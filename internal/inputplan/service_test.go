@@ -43,6 +43,25 @@ func (r fixedResourceReader) Get(_ context.Context, owner string, identifier str
 	return r.value, nil
 }
 
+// TestServiceRejectsUnknownOperationBeforeResolution verifies input plans enforce the closed VCP operation set.
+// TestServiceRejectsUnknownOperationBeforeResolution 验证输入方案强制执行封闭的 VCP 操作集合。
+func TestServiceRejectsUnknownOperationBeforeResolution(t *testing.T) {
+	t.Parallel()
+	now := time.Date(2026, 7, 20, 10, 0, 0, 0, time.UTC)
+	service, errService := NewService(&fixedResolver{target: inputPlanTarget()}, fixedResourceReader{value: inputPlanResource(now)}, NewMemoryStore(), ServiceOptions{TTL: time.Minute, Now: func() time.Time { return now }, NewID: func() (string, error) { return "ipl_11111111111111111111111111111111", nil }})
+	if errService != nil {
+		t.Fatalf("NewService() error = %v", errService)
+	}
+	request := Request{OwnerAPIKeyID: "api_owner", Model: vcp.ModelSelection{Target: vcp.ModelTargetExact, ProviderInstanceID: "pvi_1", ProviderModelID: "model_1", ExecutionProfileID: "profile_1"}, Operation: vcp.OperationKind("unknown.operation"), Inputs: []Input{{InputID: "image_1", ResourceID: inputPlanResource(now).ID, Role: vcp.MediaRoleUnderstanding}}}
+	if _, errCreate := service.Create(context.Background(), request); !errors.Is(errCreate, ErrInvalidPlan) {
+		t.Fatalf("Create() error = %v, want ErrInvalidPlan", errCreate)
+	}
+	plan := Plan{ID: "ipl_22222222222222222222222222222222", OwnerAPIKeyID: "api_owner", Accepted: true, Operation: request.Operation, Model: request.Model, Target: inputPlanTarget(), CapabilityRevision: 1, CatalogRevision: 1, Inputs: []PlannedInput{{InputID: "image_1", Kind: vcp.MediaImage, MIMEType: "image/png", SizeBytes: 1, Role: vcp.MediaRoleUnderstanding}}, CreatedAt: now, ExpiresAt: now.Add(time.Minute), Revision: 1}
+	if errValidate := plan.Validate(); !errors.Is(errValidate, ErrInvalidPlan) {
+		t.Fatalf("Plan.Validate() error = %v, want ErrInvalidPlan", errValidate)
+	}
+}
+
 // TestServiceFreezesMaterializationAndDetectsCapabilityDrift verifies deterministic planning and revalidation.
 // TestServiceFreezesMaterializationAndDetectsCapabilityDrift 验证确定性规划与重新校验。
 func TestServiceFreezesMaterializationAndDetectsCapabilityDrift(t *testing.T) {

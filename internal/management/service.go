@@ -5,13 +5,9 @@ package management
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"slices"
 	"strings"
 	"time"
@@ -31,15 +27,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
-)
-
-const (
-	// customModelDiscoveryTTL bounds freshness of a provider-owned standard model listing before explicit refresh.
-	// customModelDiscoveryTTL 限制供应商标准模型清单在显式刷新前的有效期。
-	customModelDiscoveryTTL = 15 * time.Minute
-	// maximumCustomModelDiscoveryBytes bounds untrusted standard model-list responses.
-	// maximumCustomModelDiscoveryBytes 限制不受信任的标准模型清单响应大小。
-	maximumCustomModelDiscoveryBytes = 1 << 20
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // OnboardSystemProviderInput contains the only operator-authored fields for one atomic system-provider onboarding.
@@ -543,9 +531,6 @@ type Service struct {
 	// now returns the authoritative lifecycle timestamp.
 	// now 返回权威生命周期时间戳。
 	now func() time.Time
-	// httpClient performs bounded custom-provider model discovery without forwarding redirects.
-	// httpClient 执行有界自定义供应商模型发现且不转发重定向。
-	httpClient *http.Client
 }
 
 // NewService creates one provider configuration application service.
@@ -559,9 +544,6 @@ func NewService(configurations providerconfig.Store, secrets secret.Store, catal
 		secrets:        secrets,
 		catalogs:       catalogs,
 		now:            time.Now,
-		httpClient: &http.Client{Timeout: 20 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error {
-			return http.ErrUseLastResponse
-		}},
 	}, nil
 }
 
@@ -890,7 +872,6 @@ func customDefinition(definitionID string, revision uint64, input CreateCustomDe
 			MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery:    providerconfig.SupportUnsupported,
 			PlanReader:        providerconfig.SupportUnsupported,
 			EntitlementReader: providerconfig.SupportUnsupported,
 			AllowanceReader:   providerconfig.SupportUnsupported,
@@ -1079,6 +1060,10 @@ func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, chann
 	if errProjection := validateCustomProjectionForProtocol(channelID, requestProjection); errProjection != nil {
 		return catalog.Snapshot{}, errProjection
 	}
+	delivery, errDelivery := defaultCustomDelivery(channelID)
+	if errDelivery != nil {
+		return catalog.Snapshot{}, errDelivery
+	}
 	identifiers := make([]string, 3)
 	for index, prefix := range []string{"model_", "offer_", "profile_"} {
 		identifier, errIdentifier := generateID(prefix)
@@ -1093,6 +1078,7 @@ func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, chann
 		Reasoning: input.Reasoning, ReasoningEfforts: reasoningValues(requestProjection.Reasoning.Effort),
 		ReasoningSummaryModes: reasoningValues(requestProjection.Reasoning.Summary),
 		InputModalities:       []string{"text"}, OutputModalities: []string{"text"},
+		Delivery: delivery,
 	}
 	if input.ContextWindow > 0 {
 		capabilities.Tokens.ContextWindow = catalog.OptionalTokenLimit{Known: true, Value: input.ContextWindow}
@@ -1104,195 +1090,13 @@ func buildInitialProviderCatalog(instance providerconfig.ProviderInstance, chann
 		ProviderInstanceID: instance.ID,
 		Models:             []catalog.ProviderModel{{ID: identifiers[0], ProviderInstanceID: instance.ID, UpstreamModelID: input.UpstreamModelID, DisplayName: input.DisplayName, Source: catalog.ModelSourceUserDeclared, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1}},
 		Offerings:          []catalog.ModelOffering{{ID: identifiers[1], ProviderInstanceID: instance.ID, ProviderModelID: identifiers[0], ChannelID: channelID, UpstreamModelID: input.UpstreamModelID, Capabilities: capabilities, RequestProjection: requestProjection, CapabilityRevision: 1, Revision: 1}},
-		Profiles:           []catalog.ExecutionProfile{{ID: identifiers[2], ProviderInstanceID: instance.ID, OfferingID: identifiers[1], DisplayName: "Default", Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchSeamless, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1}},
+		Profiles:           []catalog.ExecutionProfile{{ID: identifiers[2], ProviderInstanceID: instance.ID, OfferingID: identifiers[1], DisplayName: "Default", Default: true, Operation: vcp.OperationConversationRespond, ProfileDriver: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchSeamless, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1}},
 		Revision:           1, ObservedAt: observedAt,
 	}
 	if errValidate := snapshot.Validate(); errValidate != nil {
 		return catalog.Snapshot{}, errValidate
 	}
 	return snapshot, nil
-}
-
-// DiscoverCustomProviderModels reads a standard OpenAI-compatible model list with one explicit same-instance credential.
-// DiscoverCustomProviderModels 使用一个显式同实例凭据读取标准 OpenAI 兼容模型清单。
-func (s *Service) DiscoverCustomProviderModels(ctx context.Context, providerInstanceID string, credentialID string) (catalog.Snapshot, error) {
-	instance, errInstance := s.configurations.GetInstance(ctx, providerInstanceID)
-	if errInstance != nil {
-		return catalog.Snapshot{}, errInstance
-	}
-	definition, errDefinition := s.configurations.GetDefinition(ctx, instance.DefinitionID)
-	if errDefinition != nil {
-		return catalog.Snapshot{}, errDefinition
-	}
-	if definition.Kind != providerconfig.DefinitionKindCustom || (definition.ProtocolProfileID != protocolchat.ProfileID && definition.ProtocolProfileID != protocolresponses.ProfileID) {
-		return catalog.Snapshot{}, errors.New("standard model discovery is supported only for custom OpenAI Chat or Responses providers")
-	}
-	endpoints, errEndpoints := s.configurations.ListEndpoints(ctx, instance.ID)
-	if errEndpoints != nil {
-		return catalog.Snapshot{}, errEndpoints
-	}
-	if len(endpoints) != 1 || endpoints[0].Status != providerconfig.EndpointReady {
-		return catalog.Snapshot{}, errors.New("custom model discovery requires exactly one ready endpoint")
-	}
-	credential, errCredential := s.credential(ctx, instance.ID, credentialID)
-	if errCredential != nil {
-		return catalog.Snapshot{}, errCredential
-	}
-	authMethod, authExists := definition.AuthMethod(credential.AuthMethodID)
-	if !authExists || authMethod.Type != providerconfig.AuthMethodBearer || credential.Status != providerconfig.CredentialActive {
-		return catalog.Snapshot{}, errors.New("custom model discovery requires one active Bearer credential")
-	}
-	protectedSecret, errSecret := s.secrets.Get(ctx, credential.SecretRef)
-	if errSecret != nil {
-		return catalog.Snapshot{}, errSecret
-	}
-	defer clear(protectedSecret)
-	request, errRequest := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(endpoints[0].BaseURL, "/")+"/models", nil)
-	if errRequest != nil {
-		return catalog.Snapshot{}, errRequest
-	}
-	request.Header.Set("Authorization", "Bearer "+string(protectedSecret))
-	request.Header.Set("Accept", "application/json")
-	current, errCurrent := s.catalogs.Get(ctx, instance.ID)
-	if errCurrent != nil {
-		return catalog.Snapshot{}, errCurrent
-	}
-	if current.Dynamic != nil && strings.TrimSpace(current.Dynamic.ETag) != "" {
-		request.Header.Set("If-None-Match", current.Dynamic.ETag)
-	}
-	response, errDo := s.httpClient.Do(request)
-	if errDo != nil {
-		discoveryError := fmt.Errorf("discover custom provider models: %w", errDo)
-		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_unavailable", discoveryError)
-	}
-	defer response.Body.Close()
-	observedAt := s.now().UTC()
-	expiresAt := observedAt.Add(customModelDiscoveryTTL)
-	if response.StatusCode == http.StatusNotModified {
-		if current.Dynamic == nil {
-			return catalog.Snapshot{}, errors.New("custom provider returned not-modified without a last-good dynamic catalog")
-		}
-		return catalog.ApplyDynamicRefresh(ctx, s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: instance.ID, Authority: catalog.CatalogAuthorityProvider, ETag: response.Header.Get("ETag"), RefreshedAt: observedAt, ExpiresAt: expiresAt, NotModified: true})
-	}
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		discoveryError := fmt.Errorf("custom provider model discovery returned status %d", response.StatusCode)
-		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_rejected", discoveryError)
-	}
-	// modelListPayload intentionally decodes only the standard data[].id contract and ignores provider extensions.
-	// modelListPayload 有意仅解码标准 data[].id 合同并忽略供应商扩展。
-	var modelListPayload struct {
-		// Data contains standard OpenAI-compatible model objects.
-		// Data 包含标准 OpenAI 兼容模型对象。
-		Data []struct {
-			// ID is the exact upstream wire model identifier.
-			// ID 是精确的上游 Wire 模型标识。
-			ID string `json:"id"`
-		} `json:"data"`
-	}
-	encodedResponse, errRead := io.ReadAll(io.LimitReader(response.Body, maximumCustomModelDiscoveryBytes+1))
-	if errRead != nil || len(encodedResponse) > maximumCustomModelDiscoveryBytes {
-		discoveryError := errors.New("custom provider model list exceeds the allowed boundary")
-		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
-	}
-	if errDecode := json.Unmarshal(encodedResponse, &modelListPayload); errDecode != nil {
-		discoveryError := errors.New("custom provider returned an invalid model list")
-		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
-	}
-	if modelListPayload.Data == nil {
-		discoveryError := errors.New("custom provider model list omitted the standard data array")
-		return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
-	}
-	modelsByUpstreamID := make(map[string]catalog.ProviderModel, len(current.Models))
-	for _, model := range current.Models {
-		modelsByUpstreamID[model.UpstreamModelID] = model
-	}
-	offeringsByModelID := make(map[string][]catalog.ModelOffering, len(current.Models))
-	for _, offering := range current.Offerings {
-		offeringsByModelID[offering.ProviderModelID] = append(offeringsByModelID[offering.ProviderModelID], offering)
-	}
-	profilesByOfferingID := make(map[string][]catalog.ExecutionProfile, len(current.Offerings))
-	for _, profile := range current.Profiles {
-		profilesByOfferingID[profile.OfferingID] = append(profilesByOfferingID[profile.OfferingID], profile)
-	}
-	updated := catalog.Snapshot{
-		ProviderInstanceID: instance.ID, Plans: current.Plans, Entitlements: current.Entitlements,
-		ServiceEntitlements: current.ServiceEntitlements, Allowances: current.Allowances, Voices: current.Voices,
-		DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(current.DefaultAdditionalParameters),
-		Revision:                    current.Revision + 1, ObservedAt: observedAt,
-	}
-	seen := make(map[string]struct{}, len(modelListPayload.Data))
-	discoveredModelIDs := make([]string, 0, len(modelListPayload.Data))
-	for _, discovered := range modelListPayload.Data {
-		upstreamModelID := strings.TrimSpace(discovered.ID)
-		if upstreamModelID == "" {
-			discoveryError := errors.New("custom provider model list contains an empty model ID")
-			return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
-		}
-		if _, duplicate := seen[upstreamModelID]; duplicate {
-			discoveryError := errors.New("custom provider model list contains duplicate model IDs")
-			return catalog.Snapshot{}, s.failCustomModelDiscovery(ctx, current, "provider_discovery_invalid_response", discoveryError)
-		}
-		seen[upstreamModelID] = struct{}{}
-		discoveredModelIDs = append(discoveredModelIDs, upstreamModelID)
-		if existing, exists := modelsByUpstreamID[upstreamModelID]; exists {
-			updated.Models = append(updated.Models, existing)
-			for _, offering := range offeringsByModelID[existing.ID] {
-				updated.Offerings = append(updated.Offerings, offering)
-				updated.Profiles = append(updated.Profiles, profilesByOfferingID[offering.ID]...)
-			}
-			continue
-		}
-		initial, errInitial := buildInitialProviderCatalog(instance, definition.ProtocolProfileID, InitialProviderModelInput{UpstreamModelID: upstreamModelID, DisplayName: upstreamModelID}, updated.ObservedAt)
-		if errInitial != nil {
-			return catalog.Snapshot{}, errInitial
-		}
-		initial.Models[0].Source = catalog.ModelSourceProviderAPI
-		updated.Models = append(updated.Models, initial.Models[0])
-		updated.Offerings = append(updated.Offerings, initial.Offerings[0])
-		updated.Profiles = append(updated.Profiles, initial.Profiles[0])
-	}
-	resolver, errResolver := resolve.New(s.configurations, s.catalogs)
-	if errResolver != nil {
-		return catalog.Snapshot{}, errResolver
-	}
-	updated.Pools, errResolver = resolver.SummarizeSnapshot(ctx, updated, updated.ObservedAt, updated.Revision)
-	if errResolver != nil {
-		return catalog.Snapshot{}, errResolver
-	}
-	slices.Sort(discoveredModelIDs)
-	sourceRevision := customModelDiscoveryRevision(discoveredModelIDs)
-	return catalog.ApplyDynamicRefresh(ctx, s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: instance.ID, Authority: catalog.CatalogAuthorityProvider, SourceRevision: sourceRevision, ETag: response.Header.Get("ETag"), RefreshedAt: observedAt, ExpiresAt: expiresAt, Candidate: &updated})
-}
-
-// failCustomModelDiscovery preserves the provider failure and joins any durable failure-recording error.
-// failCustomModelDiscovery 保留供应商失败，并合并任何持久失败记录错误。
-func (s *Service) failCustomModelDiscovery(ctx context.Context, current catalog.Snapshot, failureCode string, discoveryError error) error {
-	errRecord := s.recordCustomModelDiscoveryFailure(ctx, current, failureCode)
-	if errRecord == nil {
-		return discoveryError
-	}
-	return errors.Join(discoveryError, fmt.Errorf("record custom model discovery failure: %w", errRecord))
-}
-
-// recordCustomModelDiscoveryFailure marks a prior dynamic snapshot stale while preserving every last-good catalog entity.
-// recordCustomModelDiscoveryFailure 在保留全部最后有效目录实体的同时将既有动态快照标记为过期。
-func (s *Service) recordCustomModelDiscoveryFailure(ctx context.Context, current catalog.Snapshot, failureCode string) error {
-	if current.Dynamic == nil {
-		return nil
-	}
-	_, errRefresh := catalog.ApplyDynamicRefresh(context.WithoutCancel(ctx), s.catalogs, catalog.DynamicRefresh{ProviderInstanceID: current.ProviderInstanceID, Authority: catalog.CatalogAuthorityProvider, RefreshedAt: s.now().UTC(), FailureCode: failureCode})
-	return errRefresh
-}
-
-// customModelDiscoveryRevision derives a stable order-independent source revision when the provider omits an ETag.
-// customModelDiscoveryRevision 在供应商省略 ETag 时派生稳定且与顺序无关的来源修订。
-func customModelDiscoveryRevision(modelIDs []string) string {
-	digest := sha256.New()
-	for _, modelID := range modelIDs {
-		_, _ = digest.Write([]byte(modelID))
-		_, _ = digest.Write([]byte{0})
-	}
-	return "sha256:" + hex.EncodeToString(digest.Sum(nil))
 }
 
 // SaveCustomProviderModels replaces a custom provider's simplified model set with explicit user-declared capabilities.

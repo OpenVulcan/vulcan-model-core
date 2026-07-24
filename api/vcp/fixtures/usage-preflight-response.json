@@ -2,6 +2,7 @@
   "protocol_version": "1.0",
   "request_id": "preflight_fixture",
   "target": {"model": {"target": "exact", "provider_instance_id": "pvi_fixture", "provider_model_id": "model_fixture", "execution_profile_id": "profile_fixture"}},
+  "model_tool_plan": {"catalog_revision": 7},
   "usage": {
     "input_tokens": 37,
     "total_tokens": 37,

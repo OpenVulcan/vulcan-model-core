@@ -8,7 +8,7 @@
   "properties": {
     "input_plan_id": {"type": "string", "pattern": "^ipl_[0-9a-f]{32}$"},
     "accepted": {"type": "boolean"},
-    "operation": {"type": "string"},
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "web.extract", "music.generate", "music.cover.prepare", "music.cover"]},
     "model": {"type": "object"},
     "capability_revision": {"type": "integer", "minimum": 0},
     "catalog_revision": {"type": "integer", "minimum": 0},

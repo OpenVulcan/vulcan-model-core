@@ -3,20 +3,22 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ProviderCredentialRefreshError,
   ProviderMetadataRefreshError,
+  fetchProviderCatalogAudit,
   fetchProviderFiles,
   parseAdditionalPayloadProjectionJSON,
   parseRequestProjectionJSON,
   providerCatalogHasModels,
   refreshProviderCredential,
-  refreshProviderMetadata,
+  refreshProviderCredentialEntitlements,
+  refreshProviderCredentialUsage,
   startKimiDeviceFlow,
   updateProviderEndpoint,
 } from "@/lib/provider-groups";
 
 describe("provider catalog actions", () => {
-  // This test verifies a search-only catalog cannot expose the supported-model action.
-  // 此测试验证仅搜索目录不能显示获取支持模型操作。
-  it("requires actual model entries before model discovery is available", () => {
+  // This test verifies a search-only catalog cannot expose the static model list action.
+  // 此测试验证仅搜索目录不能显示静态模型列表操作。
+  it("requires actual model entries before the model catalog is available", () => {
     expect(providerCatalogHasModels({ models: [] })).toBe(false);
     expect(
       providerCatalogHasModels({
@@ -135,6 +137,148 @@ describe("provider metadata transport", () => {
     vi.unstubAllGlobals();
   });
 
+  // This test verifies catalog, entitlement, and allowance refreshes remain separate credential-safe management operations.
+  // 此测试验证目录、授权与额度刷新保持为相互独立且凭据安全的管理操作。
+  it("targets separate credential entitlement and usage refresh routes", async () => {
+    const responsePayload = {
+      provider_instance_id: "pvi_alibaba",
+      models: [],
+      plans: [],
+      allowances: [],
+      revision: 2,
+      observed_at: "2026-07-23T12:00:00Z",
+    };
+    const fetchMock = vi.fn().mockImplementation(() =>
+      Promise.resolve(
+        new Response(JSON.stringify(responsePayload), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        }),
+      ),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    await refreshProviderCredentialEntitlements(
+      "management-token",
+      "pvi_alibaba",
+      "cred_primary",
+    );
+    await refreshProviderCredentialUsage(
+      "management-token",
+      "pvi_alibaba",
+      "cred_primary",
+    );
+
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      1,
+      "/vulcan/manage/provider-instances/pvi_alibaba/credentials/cred_primary/entitlements/refresh",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer management-token" },
+      },
+    );
+    expect(fetchMock).toHaveBeenNthCalledWith(
+      2,
+      "/vulcan/manage/provider-instances/pvi_alibaba/credentials/cred_primary/usage/refresh",
+      {
+        method: "POST",
+        headers: { Authorization: "Bearer management-token" },
+      },
+    );
+  });
+
+  // This test verifies the unfiltered catalog audit keeps suppressed entries and exact policy evidence visible to administrators.
+  // 此测试验证未过滤目录审计会向管理员保留被抑制条目与精确策略证据。
+  it("loads and validates the complete catalog audit contract", async () => {
+    const auditPayload = {
+      provider_instance_id: "pvi_alibaba",
+      definition_id: "system_alibaba_model_studio_cn",
+      model_catalog_id: "alibaba_model_studio_cn",
+      product_name: "Model Studio CN",
+      endpoint_regions: ["CN"],
+      channel_ids: ["alibaba.catalog"],
+      models: [
+        {
+          id: "model_suppressed",
+          upstream_model_id: "legacy-model",
+          display_name: "Legacy Model",
+          source: "provider_api",
+          offering_ids: ["offer_suppressed"],
+        },
+      ],
+      offerings: [
+        {
+          id: "offer_suppressed",
+          provider_model_id: "model_suppressed",
+          upstream_model_id: "legacy-model",
+          channel_id: "alibaba.catalog",
+          capabilities: {
+            context_window: { known: true, value: 131072 },
+            max_input_tokens: { known: false },
+            max_output_tokens: { known: true, value: 8192 },
+            max_reasoning_tokens: { known: false },
+            recommended_output_tokens: { known: false },
+            recommended_reasoning_tokens: { known: false },
+            tool_calling: "native",
+            parallel_tool_calls: "conditional",
+            streaming_tool_arguments: "unknown",
+            strict_json_schema: "unsupported",
+            reasoning: "native",
+            reasoning_efforts: ["high"],
+            reasoning_summary_modes: [],
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+            delivery: { synchronous: true },
+          },
+          capability_revision: 4,
+        },
+      ],
+      policies: [
+        {
+          id: "policy_suppressed",
+          provider_model_id: "model_suppressed",
+          offering_id: "offer_suppressed",
+          operation: "conversation.respond",
+          status: "unsupported",
+          reason: "deprecated_or_superseded",
+          source: "system",
+          evidence_revision: 1,
+        },
+      ],
+      rate_limits: [],
+      revision: 3,
+      observed_at: "2026-07-23T12:00:00Z",
+      stale: false,
+    };
+    const fetchMock = vi.fn().mockResolvedValue(
+      new Response(JSON.stringify(auditPayload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    const audit = await fetchProviderCatalogAudit(
+      "management-token",
+      "pvi_alibaba",
+    );
+
+    expect(audit.models[0]?.upstream_model_id).toBe("legacy-model");
+    expect(audit.policies[0]?.status).toBe("unsupported");
+    expect(audit.offerings[0]?.capabilities.input_modalities).toEqual([
+      "text",
+      "image",
+    ]);
+    expect(audit.offerings[0]?.capability_revision).toBe(4);
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-instances/pvi_alibaba/catalog/audit",
+      expect.objectContaining({
+        method: "GET",
+        headers: { Authorization: "Bearer management-token" },
+      }),
+    );
+  });
+
   // This test verifies malformed provider metadata is never mislabeled as a network outage.
   // 此测试验证格式错误的供应商元数据绝不会被误标为网络故障。
   it("classifies a malformed successful response explicitly", async () => {
@@ -149,7 +293,7 @@ describe("provider metadata transport", () => {
     );
 
     await expect(
-      refreshProviderMetadata("management-token", "instance-1"),
+      refreshProviderCredentialUsage("management-token", "instance-1", "credential-1"),
     ).rejects.toEqual(
       expect.objectContaining<Partial<ProviderMetadataRefreshError>>({
         code: "provider_metadata_invalid_response",
@@ -182,7 +326,7 @@ describe("provider metadata transport", () => {
     );
 
     await expect(
-      refreshProviderMetadata("management-token", "instance-1"),
+      refreshProviderCredentialUsage("management-token", "instance-1", "credential-1"),
     ).rejects.toEqual(
       expect.objectContaining<Partial<ProviderMetadataRefreshError>>({
         code: "provider_metadata_invalid_response",
@@ -266,9 +410,10 @@ describe("provider metadata transport", () => {
 
     // metadata is the exact validated management payload returned to page state.
     // metadata 是返回页面状态的精确已校验管理载荷。
-    const metadata = await refreshProviderMetadata(
+    const metadata = await refreshProviderCredentialUsage(
       "management-token",
       "instance-1",
+      "credential-1",
     );
     expect(metadata.allowances[0]?.window).toEqual({
       kind: "calendar",
@@ -328,9 +473,10 @@ describe("provider metadata transport", () => {
 
     // metadata is the normalized catalog returned to the provider management page.
     // metadata 是返回供应商管理页面的规范化目录。
-    const metadata = await refreshProviderMetadata(
+    const metadata = await refreshProviderCredentialUsage(
       "management-token",
       "instance-1",
+      "credential-1",
     );
     expect(metadata.voices[0]?.descriptions).toEqual([]);
   });
@@ -422,7 +568,7 @@ describe("provider metadata transport", () => {
     );
 
     await expect(
-      refreshProviderMetadata("management-token", "instance-1"),
+      refreshProviderCredentialUsage("management-token", "instance-1", "credential-1"),
     ).rejects.toEqual(
       expect.objectContaining<Partial<ProviderMetadataRefreshError>>({
         code: "provider_metadata_invalid_response",

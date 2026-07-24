@@ -121,6 +121,32 @@ const rerankSchema = z.object({
   score_semantics: z.string().min(1),
 }).passthrough()
 
+// standardModelToolSchema validates one closed provider-native standard tool contract.
+// standardModelToolSchema 校验一项封闭的供应商原生标准工具合同。
+const standardModelToolSchema = z.object({
+  kind: z.enum(["web_search", "web_extractor"]),
+  native: z.boolean(),
+  requires: z.array(z.enum(["web_search", "web_extractor"])).nullish().transform((values) => values ?? []),
+  requires_reasoning: z.boolean().optional().default(false),
+  requires_streaming: z.boolean().optional().default(false),
+  allows_caller_tools: z.boolean().optional().default(false),
+})
+
+// extraModelToolSchema validates one profile-owned non-standard model tool.
+// extraModelToolSchema 校验一项规格拥有的非标准模型工具。
+const extraModelToolSchema = z.object({
+  id: z.string().regex(/^[a-z][a-z0-9_]*$/),
+  display_name: z.string().min(1),
+  description: z.string().min(1),
+  input_modalities: stringArraySchema,
+  output_modalities: stringArraySchema,
+  requires_standard: z.array(z.enum(["web_search", "web_extractor"])).nullish().transform((values) => values ?? []),
+  requires_extra: stringArraySchema,
+  requires_reasoning: z.boolean().optional().default(false),
+  requires_streaming: z.boolean().optional().default(false),
+  allows_caller_tools: z.boolean().optional().default(false),
+})
+
 // modelCapabilitiesSchema validates every capability family rendered by the model page.
 // modelCapabilitiesSchema 校验模型页面渲染的每个能力类别。
 export const modelCapabilitiesSchema = z.object({
@@ -145,6 +171,9 @@ export const modelCapabilitiesSchema = z.object({
   parameters: z.array(parameterSchema).nullish().transform((values) => values ?? []),
   parameter_rules: z.array(z.object({ kind: z.string(), parameter_id: z.string(), related_parameter_ids: stringArraySchema, enum_value: z.string().optional() })).nullish().transform((values) => values ?? []),
   usage_metrics: z.array(z.object({ unit: z.string(), accuracy: z.enum(["exact", "estimated", "unknown"]) })).nullish().transform((values) => values ?? []),
+  standard_tools: z.array(standardModelToolSchema).nullish().transform((values) => values ?? []),
+  extra_tools: z.array(extraModelToolSchema).nullish().transform((values) => values ?? []),
+  hosted_tools: z.array(z.enum(["native_web_search", "provider_file_search", "provider_code_interpreter", "provider_computer_use"])).nullish().transform((values) => values ?? []),
 }).passthrough()
 
 // modelCatalogSchema validates one complete provider-scoped management catalog.
@@ -173,10 +202,42 @@ const serviceCapabilitiesSchema = z.object({
   web_extract: webExtractCapabilitiesSchema.optional(),
 }).passthrough()
 
+// catalogRateLimitSchema validates one provider capacity ceiling and its exact ownership scope.
+// catalogRateLimitSchema 校验一项供应商容量上限及其精确所有权作用域。
+const catalogRateLimitSchema = z.object({
+  id: z.string().min(1),
+  scope: z.enum(["provider_instance", "workspace", "credential", "offering", "execution_profile"]),
+  scope_id: z.string().min(1),
+  tier_id: z.string().min(1),
+  count_limit: z.number().int().positive(),
+  count_period_seconds: z.number().int().positive(),
+  usage_limit: z.number().int().positive().optional(),
+  usage_period_seconds: z.number().int().positive().optional(),
+  usage_field: z.string().min(1).optional(),
+  observed_at: z.string().datetime({ offset: true }),
+  expires_at: z.string().datetime({ offset: true }),
+}).superRefine((limit, context) => {
+  // usageTupleSize counts the provider metric tuple members so partial capacity facts cannot be rendered as complete limits.
+  // usageTupleSize 统计供应商指标元组成员，避免把不完整容量事实渲染为完整限制。
+  const usageTupleSize = [limit.usage_limit, limit.usage_period_seconds, limit.usage_field]
+    .filter((value) => value !== undefined).length
+  if (usageTupleSize !== 0 && usageTupleSize !== 3) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "rate-limit usage fields must be all present or all absent",
+    })
+  }
+})
+
+// CatalogRateLimit is one typed provider capacity ceiling displayed by management diagnostics.
+// CatalogRateLimit 是由管理诊断展示的一项类型化供应商容量上限。
+export type CatalogRateLimit = z.infer<typeof catalogRateLimitSchema>
+
 export const modelCatalogSchema = z.object({
   provider_instance_id: z.string().min(1),
   models: z.array(z.object({ id: z.string().min(1), upstream_model_id: z.string().min(1), display_name: z.string().min(1), entitlement_mode: z.string(), enabled: z.boolean(), authorization_status: z.enum(["authorized", "denied", "unknown"]), offerings: z.array(z.object({ id: z.string().min(1), upstream_model_id: z.string().min(1), profiles: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), default: z.boolean(), operation: z.string().min(1).optional().default(""), action_binding_id: z.string().min(1).optional().default(""), capabilities: modelCapabilitiesSchema, pool: poolSchema.nullable().optional() }).passthrough()) }).passthrough()) }).passthrough()),
   services: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), operation: z.string().min(1), enabled: z.boolean(), authorization_status: z.enum(["authorized", "denied", "unknown"]), offerings: z.array(z.object({ id: z.string().min(1), upstream_service_id: z.string().min(1), capabilities: serviceCapabilitiesSchema, profiles: z.array(z.object({ id: z.string().min(1), display_name: z.string().min(1), operation: z.string().min(1), action_binding_id: z.string().min(1), capabilities: serviceCapabilitiesSchema, pool: poolSchema.nullable().optional() }).passthrough()) }).passthrough()) }).passthrough()),
+  rate_limits: z.array(catalogRateLimitSchema).nullish().transform((values) => values ?? []),
   revision: z.number().int().positive(),
   observed_at: z.string().min(1),
 }).passthrough()
@@ -190,6 +251,42 @@ export interface ProviderCapabilityCatalog {
   // catalog is the complete typed management catalog.
   // catalog 是完整的类型化管理目录。
   catalog: z.infer<typeof modelCatalogSchema>
+}
+
+// selectProfileRateLimits returns only capacity facts whose owner can be proven to affect the exact rendered profile.
+// selectProfileRateLimits 仅返回可证实影响当前精确渲染规格的容量事实。
+// providerInstanceID, offeringID, and executionProfileID are immutable owner identifiers; the return value preserves source order.
+// providerInstanceID、offeringID 与 executionProfileID 是不可变所有者标识；返回值保留来源顺序。
+export function selectProfileRateLimits(
+  rateLimits: CatalogRateLimit[],
+  providerInstanceID: string,
+  offeringID: string,
+  executionProfileID: string,
+): CatalogRateLimit[] {
+  return rateLimits.filter((limit) => {
+    switch (limit.scope) {
+      case "provider_instance":
+        return limit.scope_id === providerInstanceID
+      case "offering":
+        return limit.scope_id === offeringID
+      case "execution_profile":
+        return limit.scope_id === executionProfileID
+      case "workspace":
+      case "credential":
+        return false
+    }
+  })
+}
+
+// isCatalogRateLimitExpired reports whether one capacity fact is stale at an explicit comparison time.
+// isCatalogRateLimitExpired 返回一项容量事实是否在显式比较时间点已经过期。
+// nowMilliseconds is supplied by the caller for deterministic testing; invalid timestamps are rejected by the catalog schema before this function.
+// nowMilliseconds 由调用方提供以支持确定性测试；无效时间戳会在进入此函数前被目录 Schema 拒绝。
+export function isCatalogRateLimitExpired(
+  rateLimit: CatalogRateLimit,
+  nowMilliseconds: number,
+): boolean {
+  return Date.parse(rateLimit.expires_at) <= nowMilliseconds
 }
 
 // webSearchResultSchema validates one provider-returned ranked search item.

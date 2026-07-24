@@ -49,6 +49,9 @@ type StreamDecoder struct {
 	// upstreamResponseID records the one provider response identifier observed across stream chunks.
 	// upstreamResponseID 记录跨流分片观察到的唯一 Provider 响应标识。
 	upstreamResponseID string
+	// allowAudio records that the validated request explicitly selected mixed audio output.
+	// allowAudio 记录已校验请求明确选择了混合音频输出。
+	allowAudio bool
 }
 
 // streamTool stores one stable tool call across delayed upstream fields.
@@ -97,10 +100,22 @@ type streamText struct {
 // NewStreamDecoder creates a decoder and emits response.started into its replay log.
 // NewStreamDecoder 创建解码器并向回放日志发出 response.started。
 func NewStreamDecoder(responseID string, now time.Time) (*StreamDecoder, error) {
+	return newStreamDecoder(responseID, now, false)
+}
+
+// NewAudioStreamDecoder creates a decoder that accepts documented audio metadata for one explicit mixed-output request.
+// NewAudioStreamDecoder 为一条明确的混合输出请求创建接受文档化音频元数据的解码器。
+func NewAudioStreamDecoder(responseID string, now time.Time) (*StreamDecoder, error) {
+	return newStreamDecoder(responseID, now, true)
+}
+
+// newStreamDecoder creates one decoder with a closed response union selected before reading provider bytes.
+// newStreamDecoder 使用读取供应商字节前选定的封闭响应联合创建一个解码器。
+func newStreamDecoder(responseID string, now time.Time, allowAudio bool) (*StreamDecoder, error) {
 	if responseID == "" {
 		return nil, fmt.Errorf("%w: response_id is required", ErrInvalidUpstreamResponse)
 	}
-	decoder := &StreamDecoder{emitter: newEmitter(responseID, now), reducer: vcp.NewReducer(responseID), tools: make(map[string]*streamTool), texts: make(map[string]*streamText), report: vcp.ExecutionReport{ResponseID: responseID, ExecutionID: vcp.DeriveID("exec", responseID)}}
+	decoder := &StreamDecoder{emitter: newEmitter(responseID, now), reducer: vcp.NewReducer(responseID), tools: make(map[string]*streamTool), texts: make(map[string]*streamText), report: vcp.ExecutionReport{ResponseID: responseID, ExecutionID: vcp.DeriveID("exec", responseID)}, allowAudio: allowAudio}
 	if errEmit := decoder.emit(decoder.emitter.event(vcp.EventResponseStarted), nil); errEmit != nil {
 		return nil, errEmit
 	}
@@ -184,12 +199,24 @@ func (d *StreamDecoder) Close(transportErr error) ([]vcp.Event, error) {
 	if d.reducer.Terminal() {
 		return nil, nil
 	}
-	newEvents := make([]vcp.Event, 0, 1)
+	newEvents := make([]vcp.Event, 0, 2)
 	terminalType := vcp.EventResponseIncomplete
 	if d.pendingTerminal != "" {
 		terminalType = d.pendingTerminal
 	} else if transportErr != nil {
 		terminalType = vcp.EventResponseFailed
+	}
+	// A provider-reported stream snapshot becomes final only after one legal upstream terminal has been confirmed.
+	// 供应商报告的流式快照仅在确认合法上游终态后才转为最终用量观测。
+	if d.pendingTerminal != "" && d.report.Usage != nil && !d.report.Usage.Final {
+		terminalUsage := cloneStreamUsage(d.report.Usage)
+		terminalUsage.Phase = "terminal"
+		terminalUsage.Final = true
+		usageEvent := d.emitter.event(vcp.EventUsageUpdated)
+		usageEvent.Usage = terminalUsage
+		if errUsage := d.emit(usageEvent, &newEvents); errUsage != nil {
+			return nil, errUsage
+		}
 	}
 	terminal := d.emitter.event(terminalType)
 	if d.pendingTerminal != "" {
@@ -269,7 +296,7 @@ func (d *StreamDecoder) observeChunkMetadata(chunk Chunk) error {
 	}
 	reportUnrepresentedUsageMetadata(&d.report, chunk.Usage)
 	for choiceIndex := range chunk.Choices {
-		if errChoice := reportChoiceMetadata(&d.report, chunk.Choices[choiceIndex]); errChoice != nil {
+		if errChoice := reportChoiceMetadata(&d.report, chunk.Choices[choiceIndex], d.allowAudio); errChoice != nil {
 			return errChoice
 		}
 	}

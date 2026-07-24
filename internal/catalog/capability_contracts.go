@@ -727,12 +727,13 @@ func validateMediaCapabilityEnums(capability MediaInputCapability) error {
 		return fmt.Errorf("%w: invalid media-only policy %q", ErrInvalidCatalog, capability.MediaOnlyPolicy)
 	}
 	_, allowsMediaOnlyConversation := interactions[MediaInteractionMediaOnlyConversation]
+	_, allowsAnalysis := interactions[MediaInteractionAnalysis]
 	_, allowsOperationInput := interactions[MediaInteractionOperationInput]
-	if !allowsMediaOnlyConversation && !allowsOperationInput && capability.MediaOnlyPolicy != MediaOnlyUnsupported {
+	if !allowsMediaOnlyConversation && !allowsAnalysis && !allowsOperationInput && capability.MediaOnlyPolicy != MediaOnlyUnsupported {
 		return fmt.Errorf("%w: media-only policy requires media-only interaction support", ErrInvalidCatalog)
 	}
-	if capability.MediaOnlyPolicy == MediaOnlyRouterInstruction && !allowsMediaOnlyConversation {
-		return fmt.Errorf("%w: Router media-only instructions require conversation interaction support", ErrInvalidCatalog)
+	if capability.MediaOnlyPolicy == MediaOnlyRouterInstruction && !allowsMediaOnlyConversation && !allowsAnalysis {
+		return fmt.Errorf("%w: Router media-only instructions require conversation or analysis interaction support", ErrInvalidCatalog)
 	}
 	for _, authority := range capability.AllowedAuthorities {
 		if authority != vcp.AuthoritySystem && authority != vcp.AuthorityDeveloper && authority != vcp.AuthorityUser && authority != vcp.AuthorityAssistant && authority != vcp.AuthorityTool && authority != vcp.AuthorityNone {
@@ -794,7 +795,7 @@ func validateEmbeddingEnums(capability EmbeddingCapabilities) error {
 // validMediaRole 报告一个 VCP 资源角色是否属于封闭协议集合。
 func validMediaRole(role vcp.MediaInputRole) bool {
 	switch role {
-	case vcp.MediaRoleUnderstanding, vcp.MediaRoleReference, vcp.MediaRoleEditSource, vcp.MediaRoleMask, vcp.MediaRoleFirstFrame, vcp.MediaRoleLastFrame, vcp.MediaRoleSubjectReference, vcp.MediaRoleAudioTrack, vcp.MediaRoleTranscriptionSource, vcp.MediaRoleStyleReference, vcp.MediaRoleCoverReference:
+	case vcp.MediaRoleUnderstanding, vcp.MediaRoleReference, vcp.MediaRoleEditSource, vcp.MediaRoleMask, vcp.MediaRoleFirstFrame, vcp.MediaRoleLastFrame, vcp.MediaRoleSubjectReference, vcp.MediaRoleAudioTrack, vcp.MediaRoleTranscriptionSource, vcp.MediaRoleStyleReference, vcp.MediaRoleCoverReference, vcp.MediaRoleReferenceVoice:
 		return true
 	default:
 		return false

@@ -8,16 +8,19 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	chatprofile "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/chat"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 )
 
@@ -57,6 +60,12 @@ const (
 	// codingFallbackDeviceID is CLIProxyAPI's exact execution fallback when Kimi CLI has no persisted device identity.
 	// codingFallbackDeviceID 是 Kimi CLI 没有持久化设备身份时 CLIProxyAPI 使用的精确执行回退值。
 	codingFallbackDeviceID = "cli-proxy-api-device"
+	// codingAccessTerminatedErrorType is Kimi's structured exhausted-billing-cycle identity observed from the official Coding endpoint.
+	// codingAccessTerminatedErrorType 是从官方 Coding 入口观察到的 Kimi 计费周期额度耗尽结构化身份。
+	codingAccessTerminatedErrorType = "access_terminated_error"
+	// codingAccessTerminatedCooldown avoids repeatedly calling a credential that Kimi reports exhausted for its current billing cycle.
+	// codingAccessTerminatedCooldown 避免重复调用 Kimi 报告当前计费周期额度耗尽的凭据。
+	codingAccessTerminatedCooldown = 30 * time.Minute
 )
 
 // CodingChatAdapter applies provider-proven Kimi Coding headers and thinking behavior after typed OpenAI Chat projection.
@@ -99,6 +108,19 @@ func (a *CodingChatAdapter) Adapt(ctx context.Context, execution provider.Execut
 		{Name: "X-Msh-Device-Model", Value: codingExecutionDeviceModel()},
 		{Name: "X-Msh-Device-Id", Value: deviceID},
 	}, nil
+}
+
+// ClassifyChatError maps Kimi's exact exhausted-cycle response identity without treating every HTTP 403 as quota exhaustion.
+// ClassifyChatError 映射 Kimi 精确的周期额度耗尽响应身份，而不会将所有 HTTP 403 都视为额度耗尽。
+func (a *CodingChatAdapter) ClassifyChatError(statusError transport.StatusError, _ resolve.Target, now time.Time) (provider.ClassifiedError, bool) {
+	if a == nil || statusError.StatusCode != http.StatusForbidden || statusError.ProviderType != codingAccessTerminatedErrorType || now.IsZero() {
+		return provider.ClassifiedError{}, false
+	}
+	retryAt := now.Add(codingAccessTerminatedCooldown)
+	if statusError.RetryAfter != nil {
+		retryAt = now.Add(*statusError.RetryAfter)
+	}
+	return provider.ClassifiedError{Category: "quota_exhausted", Scope: provider.ErrorScopeCredential, Action: provider.RetryOtherCredential, RetryAt: &retryAt, RuleID: "kimi_access_terminated_error"}, true
 }
 
 // applyKimiThinking maps VCP reasoning demand to Kimi's current thinking.type field and keeps both K2.7 Coding aliases on their K2.7 route.

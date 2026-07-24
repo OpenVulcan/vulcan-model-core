@@ -43,6 +43,29 @@ func TestProjectRequestWithInputsPreservesImageAudioAndFile(t *testing.T) {
 	}
 }
 
+// TestProjectRequestWithInputsPreservesRepeatedResourceRoles verifies Responses projection resolves repeated resources by semantic role.
+// TestProjectRequestWithInputsPreservesRepeatedResourceRoles 验证 Responses 投影会按语义角色解析重复资源。
+func TestProjectRequestWithInputsPreservesRepeatedResourceRoles(t *testing.T) {
+	request := responsesTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Compare these uses"},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentImage, ResourceRef: "image-resource", MediaRole: vcp.MediaRoleReference},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "understanding", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+		{InputID: "reference", ResourceID: "image-resource", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+	}
+	projected, errProject := ProjectRequestWithInputs(request, responsesTarget(), responsesCapabilities(), "lineage-repeated-roles", "", responsesNow(), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	content := projected.Upstream.Input[0].Content
+	if len(content) != 3 || content[1].ImageURL == "" || content[2].ImageURL == "" {
+		t.Fatalf("content = %#v", content)
+	}
+}
+
 // TestProjectRequestWithInputsRejectsUnverifiedVideo verifies no generic URL field masks absent video support.
 // TestProjectRequestWithInputsRejectsUnverifiedVideo 验证通用 URL 字段不会掩盖缺失的视频支持。
 func TestProjectRequestWithInputsRejectsUnverifiedVideo(t *testing.T) {
@@ -167,6 +190,29 @@ func TestProjectRequestBlocksUnavailableNativeWebSearch(t *testing.T) {
 	_, errProject := ProjectRequest(request, responsesTarget(), capabilities, "lineage-1", "", responsesNow())
 	if !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
 		t.Fatalf("ProjectRequest() error = %v, want ErrCapabilityUnavailable", errProject)
+	}
+}
+
+// TestProjectRequestProjectsNativeWebExtractorFromModelToolSelection verifies the standard capability uses the provider's exact hosted tool type.
+// TestProjectRequestProjectsNativeWebExtractorFromModelToolSelection 验证标准能力使用供应商精确的托管工具类型。
+func TestProjectRequestProjectsNativeWebExtractorFromModelToolSelection(t *testing.T) {
+	request := responsesTestRequest()
+	request.ModelTools = vcp.ModelToolSelection{Standard: []vcp.StandardModelToolSelection{{Kind: vcp.StandardModelToolWebExtractor, Mode: vcp.ModelToolNative}}}
+	capabilities := responsesCapabilities()
+	capabilities.NativeWebExtractor = true
+	projected, errProject := ProjectRequest(request, responsesTarget(), capabilities, "lineage-extractor", "", responsesNow())
+	if errProject != nil {
+		t.Fatalf("ProjectRequest() error = %v", errProject)
+	}
+	if len(projected.Upstream.Tools) != 1 || projected.Upstream.Tools[0].Type != "web_extractor" || projected.Upstream.ToolChoice == nil || projected.Upstream.ToolChoice.Mode != vcp.ToolChoiceAuto {
+		t.Fatalf("projected extractor request = %#v", projected.Upstream)
+	}
+
+	capabilities.NativeWebExtractor = false
+	_, errProject = ProjectRequest(request, responsesTarget(), capabilities, "lineage-extractor-blocked", "", responsesNow())
+	var modelToolError *vcp.ModelToolError
+	if !errors.As(errProject, &modelToolError) || modelToolError.Code != vcp.ModelToolNotSupported || modelToolError.ToolID != string(vcp.StandardModelToolWebExtractor) {
+		t.Fatalf("blocked extractor error = %v", errProject)
 	}
 }
 
@@ -299,6 +345,20 @@ func TestProjectRequestRejectsStopSequences(t *testing.T) {
 
 	if _, errProject := ProjectRequest(request, responsesTarget(), responsesCapabilities(), "lineage-stop", "", responsesNow()); !errors.Is(errProject, ErrUnsupportedContext) {
 		t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+	}
+}
+
+// TestProjectRequestRejectsUnverifiedReasoningSwitchAndBudget verifies unsupported canonical controls cannot be silently omitted by Responses.
+// TestProjectRequestRejectsUnverifiedReasoningSwitchAndBudget 验证 Responses 不能静默省略未验证的规范开关与预算控制。
+func TestProjectRequestRejectsUnverifiedReasoningSwitchAndBudget(t *testing.T) {
+	enabled := true
+	budget := int64(4000)
+	for _, policy := range []vcp.ReasoningPolicy{{Enabled: &enabled}, {BudgetTokens: &budget}} {
+		request := responsesTestRequest()
+		request.ReasoningPolicy = policy
+		if _, errProject := ProjectRequest(request, responsesTarget(), ProfileCapabilities{Reasoning: true}, "lin_reasoning_control", "", time.Unix(51, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+			t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+		}
 	}
 }
 

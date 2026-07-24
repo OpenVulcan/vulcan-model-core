@@ -6,7 +6,6 @@ import {
   LockKeyholeIcon,
   PlusIcon,
   PencilIcon,
-  RefreshCwIcon,
   ServerCogIcon,
   Settings2Icon,
   ShieldCheckIcon,
@@ -53,13 +52,11 @@ import {
   configureProvider,
   attachProviderCredential,
   createCustomProviderDefinition,
-  discoverCustomProviderModels,
   fetchProtocolProfiles,
   filterCustomProtocolProfiles,
   fetchProviderCatalog,
   fetchProviderDefinitions,
   fetchProviderEndpoints,
-  fetchProviderCredentials,
   fetchProviderGroups,
   fetchProviderInstances,
   parseAdditionalPayloadProjectionJSON,
@@ -72,7 +69,6 @@ import {
   type ProviderCatalogMetadata,
   type ProviderDefinitionSummary,
   type ProviderEndpoint,
-  type ProviderCredential,
   type ProviderGroup,
   type ProviderInstance,
   type SimpleCustomModelInput,
@@ -204,9 +200,6 @@ interface ProviderInventoryItem {
   // catalog is present only when the management-safe model snapshot loaded successfully.
   // catalog 仅在管理安全模型快照成功加载时存在。
   catalog: ProviderCatalogMetadata | null;
-  // credentials contains redacted choices only for explicit custom model discovery.
-  // credentials 仅包含用于显式自定义模型发现的脱敏选择项。
-  credentials: ProviderCredential[];
 }
 
 // ProviderCreationForm contains provider configuration fields and one optional transient API secret.
@@ -243,12 +236,6 @@ function emptyProviderCreationForm(): ProviderCreationForm {
     protocolProfileID: defaultCustomProtocolProfileID,
     secret: "",
   };
-}
-
-// supportsStandardModelDiscovery reports whether one custom protocol shares the standard OpenAI-compatible GET /models contract.
-// supportsStandardModelDiscovery 表示一个自定义协议是否共享标准 OpenAI 兼容 GET /models 合同。
-function supportsStandardModelDiscovery(protocolProfileID: string): boolean {
-  return protocolProfileID === "openai.chat" || protocolProfileID === "openai.responses";
 }
 
 // ProviderConfigurationPage renders immutable native integrations and credential-independent configured providers.
@@ -302,15 +289,6 @@ export function ProviderConfigurationPage({
   // configurationParentInstanceID preserves the provider configuration opened before a second-level editor.
   // configurationParentInstanceID 保留进入二级编辑器前打开的供应商配置。
   const [configurationParentInstanceID, setConfigurationParentInstanceID] = useState("");
-  // discoveryCredentialIDs stores one explicit credential selection per custom provider instance.
-  // discoveryCredentialIDs 为每个自定义供应商实例存储一个显式凭据选择。
-  const [discoveryCredentialIDs, setDiscoveryCredentialIDs] = useState<Record<string, string>>({});
-  // discoveringInstanceIDs identifies custom providers with an active model-list request.
-  // discoveringInstanceIDs 标识正在执行模型清单请求的自定义供应商。
-  const [discoveringInstanceIDs, setDiscoveringInstanceIDs] = useState<Set<string>>(new Set());
-  // discoveryErrors stores explicit discovery failures by provider instance.
-  // discoveryErrors 按供应商实例存储显式发现失败。
-  const [discoveryErrors, setDiscoveryErrors] = useState<Record<string, string>>({});
   // editingModelsInstanceID identifies the custom provider whose complete simplified model set is being edited.
   // editingModelsInstanceID 标识正在编辑完整简化模型集合的自定义供应商。
   const [editingModelsInstanceID, setEditingModelsInstanceID] = useState("");
@@ -448,14 +426,6 @@ export function ProviderConfigurationPage({
               instance.id,
               signal,
             );
-            const credentials =
-              definition.kind === "custom"
-                ? await fetchProviderCredentials(
-                    managementAuthToken,
-                    instance.id,
-                    signal,
-                  )
-                : [];
             let providerCatalog: ProviderCatalogMetadata | null = null;
             try {
               providerCatalog = await fetchProviderCatalog(
@@ -466,7 +436,7 @@ export function ProviderConfigurationPage({
             } catch {
               providerCatalog = null;
             }
-            return { instance, definition, endpoints, catalog: providerCatalog, credentials };
+            return { instance, definition, endpoints, catalog: providerCatalog };
           }),
         );
         setGroups(loadedGroups);
@@ -567,9 +537,8 @@ export function ProviderConfigurationPage({
         handle: form.handle.trim(),
         base_url: form.baseURL.trim(),
       });
-      let attachedCredentialID = "";
       if (form.secret.length > 0) {
-        const attachment = await attachProviderCredential(
+        await attachProviderCredential(
           managementAuthToken,
           configuration.provider_instance_id,
           {
@@ -578,55 +547,15 @@ export function ProviderConfigurationPage({
             secret: form.secret,
           },
         );
-        attachedCredentialID = attachment.credential_id;
       }
       closeDialog();
       await loadInventory();
-      if (attachedCredentialID) {
-        setDiscoveryCredentialIDs((current) => ({
-          ...current,
-          [configuration.provider_instance_id]: attachedCredentialID,
-        }));
-      }
     } catch (error) {
       setSubmitError(
         error instanceof Error ? error.message : t("providerConfig.createFailed"),
       );
     } finally {
       setSubmitting(false);
-    }
-  }
-
-  // discoverModels refreshes one custom model catalog with the exact credential selected by the operator.
-  // discoverModels 使用操作员精确选择的凭据刷新一个自定义模型目录。
-  async function discoverModels(providerInstanceID: string): Promise<void> {
-    const credentialID = discoveryCredentialIDs[providerInstanceID];
-    if (!credentialID) return;
-    setDiscoveringInstanceIDs((current) => new Set(current).add(providerInstanceID));
-    setDiscoveryErrors((current) => {
-      const next = { ...current };
-      delete next[providerInstanceID];
-      return next;
-    });
-    try {
-      await discoverCustomProviderModels(
-        managementAuthToken,
-        providerInstanceID,
-        credentialID,
-      );
-      await loadInventory();
-    } catch (error) {
-      setDiscoveryErrors((current) => ({
-        ...current,
-        [providerInstanceID]:
-          error instanceof Error ? error.message : t("providerConfig.discoveryFailed"),
-      }));
-    } finally {
-      setDiscoveringInstanceIDs((current) => {
-        const next = new Set(current);
-        next.delete(providerInstanceID);
-        return next;
-      });
     }
   }
 
@@ -1186,38 +1115,7 @@ export function ProviderConfigurationPage({
                 <p className="text-xs text-destructive">{t("providerConfig.catalogUnavailable")}</p>
               )}
               {configuringProvider.definition.kind === "custom" ? (
-                <div className="grid gap-2 rounded-md border p-3 sm:grid-cols-[minmax(0,1fr)_auto_auto_auto_auto] sm:items-end">
-                  {supportsStandardModelDiscovery(configuringProvider.definition.protocol_profile_id) ? (
-                    <>
-                      <div className="space-y-1.5">
-                        <Label>{t("providerConfig.discoveryCredential")}</Label>
-                        <ReadonlyCombobox
-                          value={discoveryCredentialIDs[configuringProvider.instance.id] ?? ""}
-                          onValueChange={(value) =>
-                            setDiscoveryCredentialIDs((current) => ({
-                              ...current,
-                              [configuringProvider.instance.id]: value,
-                            }))
-                          }
-                          options={configuringProvider.credentials.map((credential) => ({
-                            value: credential.id,
-                            label: credential.label,
-                          }))}
-                          placeholder={t("providerConfig.selectCredential")}
-                          className="w-full"
-                        />
-                      </div>
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={!discoveryCredentialIDs[configuringProvider.instance.id] || discoveringInstanceIDs.has(configuringProvider.instance.id)}
-                        onClick={() => void discoverModels(configuringProvider.instance.id)}
-                      >
-                        <RefreshCwIcon className={discoveringInstanceIDs.has(configuringProvider.instance.id) ? "size-4 animate-spin" : "size-4"} />
-                        {t("providerConfig.discoverModels")}
-                      </Button>
-                    </>
-                  ) : null}
+                <div className="flex flex-wrap gap-2 rounded-md border p-3">
                   <Button
                     type="button"
                     variant="outline"
@@ -1252,9 +1150,6 @@ export function ProviderConfigurationPage({
                     <PencilIcon className="size-4" />
                     {t("providerConfig.editModels")}
                   </Button>
-                  {supportsStandardModelDiscovery(configuringProvider.definition.protocol_profile_id) && discoveryErrors[configuringProvider.instance.id] ? (
-                    <p className="text-xs text-destructive sm:col-span-5">{discoveryErrors[configuringProvider.instance.id]}</p>
-                  ) : null}
                 </div>
               ) : null}
             </div>

@@ -4,11 +4,12 @@
   "title": "VCP Usage Preflight Response",
   "type": "object",
   "additionalProperties": false,
-  "required": ["protocol_version", "request_id", "target", "usage", "metrics"],
+  "required": ["protocol_version", "request_id", "target", "model_tool_plan", "usage", "metrics"],
   "properties": {
     "protocol_version": {"const": "1.0"},
     "request_id": {"type": "string", "minLength": 1},
     "target": {"type": "object", "minProperties": 1, "maxProperties": 1},
+    "model_tool_plan": {"$ref": "./execution-record.schema.json#/$defs/modelToolPlan"},
     "usage": {"$ref": "./usage-observation.schema.json"},
     "metrics": {
       "type": "array",

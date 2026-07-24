@@ -43,8 +43,8 @@ var (
 	ErrInvalidWanImageDriver = errors.New("invalid Alibaba Wan image driver")
 )
 
-// WanImageActionDriver executes one synchronous Wan 2.7 action for one immutable workspace definition.
-// WanImageActionDriver 为一个不可变工作区 Definition 执行一个同步 Wan 2.7 动作。
+// WanImageActionDriver executes one synchronous Wan 2.7 action for one immutable Alibaba product definition.
+// WanImageActionDriver 为一个不可变 Alibaba 产品 Definition 执行一个同步 Wan 2.7 动作。
 type WanImageActionDriver struct {
 	// definitionID is the sole provider definition permitted to use this driver.
 	// definitionID 是允许使用此 Driver 的唯一供应商 Definition。
@@ -159,6 +159,9 @@ type wanImageContent struct {
 // wanImageParameters contains the closed Wan controls represented by VCP.
 // wanImageParameters 包含 VCP 可表示的封闭 Wan 控制项。
 type wanImageParameters struct {
+	// NegativePrompt describes content excluded from the generated image.
+	// NegativePrompt 描述生成图片中需要排除的内容。
+	NegativePrompt string `json:"negative_prompt,omitempty"`
 	// Size selects one documented resolution tier.
 	// Size 选择一个文档明确的分辨率档位。
 	Size string `json:"size,omitempty"`
@@ -168,6 +171,12 @@ type wanImageParameters struct {
 	// Seed requests provider-relative deterministic output.
 	// Seed 请求供应商相对确定性输出。
 	Seed *int64 `json:"seed,omitempty"`
+	// PromptExtend controls provider-native prompt rewriting.
+	// PromptExtend 控制供应商原生提示词改写。
+	PromptExtend *bool `json:"prompt_extend,omitempty"`
+	// Watermark controls the provider-generated watermark.
+	// Watermark 控制供应商生成的水印。
+	Watermark *bool `json:"watermark,omitempty"`
 }
 
 // projectWanImageRequest maps one closed VCP image payload to the synchronous Wan endpoint.
@@ -181,8 +190,8 @@ func projectWanImageRequest(execution provider.ExecutionRequest, actionBindingID
 		if operation == nil || len(operation.References) > 9 {
 			return transport.Request{}, fmt.Errorf("%w: generation accepts at most nine ordered reference images", ErrInvalidWanImageDriver)
 		}
-		if operation.NegativePrompt != "" || operation.Width != 0 || operation.Height != 0 || operation.AspectRatio != "" || operation.Quality != "" || operation.Background != "" || operation.SafetyPolicy != "" {
-			return transport.Request{}, fmt.Errorf("%w: negative_prompt, dimensions, aspect_ratio, quality, background, and safety_policy have no Wan 2.7 carrier", ErrInvalidWanImageDriver)
+		if operation.Width != 0 || operation.Height != 0 || operation.AspectRatio != "" || operation.Quality != "" || operation.Background != "" || operation.SafetyPolicy != "" {
+			return transport.Request{}, fmt.Errorf("%w: dimensions, aspect_ratio, quality, background, and safety_policy have no configured Wan 2.7 carrier", ErrInvalidWanImageDriver)
 		}
 		if errParameters := validateWanImageParameters(execution.Binding.Target.UpstreamModelID, operation.Prompt, operation.Count, operation.Resolution, operation.OutputFormat, operation.Seed, len(operation.References) != 0); errParameters != nil {
 			return transport.Request{}, errParameters
@@ -193,7 +202,7 @@ func projectWanImageRequest(execution provider.ExecutionRequest, actionBindingID
 		}
 		contents = append(contents, materialized...)
 		contents = append(contents, wanImageContent{Text: operation.Prompt})
-		parameters = wanImageParameters{Size: wanResolution(operation.Resolution), Count: operation.Count, Seed: operation.Seed}
+		parameters = wanImageParameters{NegativePrompt: operation.NegativePrompt, Size: wanResolution(operation.Resolution), Count: operation.Count, Seed: operation.Seed, PromptExtend: operation.PromptExtend, Watermark: operation.Watermark}
 	case WanImageEditActionBindingID:
 		operation := execution.Execution.Payload.ImageEdit
 		if operation == nil || len(operation.Sources) < 1 || len(operation.Sources) > 9 {
@@ -202,7 +211,7 @@ func projectWanImageRequest(execution provider.ExecutionRequest, actionBindingID
 		if operation.Width != 0 || operation.Height != 0 || operation.AspectRatio != "" || operation.Quality != "" {
 			return transport.Request{}, fmt.Errorf("%w: edit dimensions, aspect_ratio, and quality have no configured Wan 2.7 carrier", ErrInvalidWanImageDriver)
 		}
-		if errParameters := validateWanImageParameters(execution.Binding.Target.UpstreamModelID, operation.Instruction, operation.Count, operation.Resolution, operation.OutputFormat, nil, true); errParameters != nil {
+		if errParameters := validateWanImageParameters(execution.Binding.Target.UpstreamModelID, operation.Instruction, operation.Count, operation.Resolution, operation.OutputFormat, operation.Seed, true); errParameters != nil {
 			return transport.Request{}, errParameters
 		}
 		materialized, errMaterialized := wanImageContents(operation.Sources, execution.MaterializedInputs, vcp.MediaRoleEditSource)
@@ -211,7 +220,7 @@ func projectWanImageRequest(execution provider.ExecutionRequest, actionBindingID
 		}
 		contents = append(contents, materialized...)
 		contents = append(contents, wanImageContent{Text: operation.Instruction})
-		parameters = wanImageParameters{Size: wanResolution(operation.Resolution), Count: operation.Count}
+		parameters = wanImageParameters{NegativePrompt: operation.NegativePrompt, Size: wanResolution(operation.Resolution), Count: operation.Count, Seed: operation.Seed, PromptExtend: operation.PromptExtend, Watermark: operation.Watermark}
 	default:
 		return transport.Request{}, ErrInvalidWanImageDriver
 	}
@@ -220,7 +229,7 @@ func projectWanImageRequest(execution provider.ExecutionRequest, actionBindingID
 	if errEncode != nil {
 		return transport.Request{}, fmt.Errorf("%w: encode request: %v", ErrInvalidWanImageDriver, errEncode)
 	}
-	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/services/aigc/multimodal-generation/generation", Body: encoded, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/services/aigc/multimodal-generation/generation", Body: encoded, Headers: alibabaJSONHeaders(execution.MaterializedInputs, false), Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
 }
 
 // validateWanImageParameters enforces the synchronous Wan 2.7 subset published by the catalog.
@@ -310,8 +319,10 @@ func wanImageMaterialization(input resource.MaterializedInput) (string, error) {
 			return "", fmt.Errorf("%w: direct image URL is invalid", ErrInvalidWanImageDriver)
 		}
 		return input.RemoteURL, nil
+	case catalog.MaterializationProviderObjectURI:
+		return alibabaObjectURI(input, ErrInvalidWanImageDriver)
 	default:
-		return "", fmt.Errorf("%w: Wan accepts inline Base64 or direct remote URL inputs only", ErrInvalidWanImageDriver)
+		return "", fmt.Errorf("%w: Wan accepts inline Base64, direct remote URL, or Alibaba object URI inputs only", ErrInvalidWanImageDriver)
 	}
 }
 

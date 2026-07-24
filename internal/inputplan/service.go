@@ -81,7 +81,7 @@ func NewService(resolver TargetResolver, resources ResourceReader, store Store, 
 // Create resolves one exact target and freezes a deterministic input path for every item.
 // Create 解析一个精确 Target 并为每个项目冻结确定性输入路径。
 func (s *Service) Create(ctx context.Context, request Request) (Plan, error) {
-	if s == nil || ctx == nil || strings.TrimSpace(request.OwnerAPIKeyID) == "" || request.Model.Target != vcp.ModelTargetExact || request.Model.ProviderInstanceID == "" || request.Model.ProviderModelID == "" || request.Model.ExecutionProfileID == "" || request.Operation == "" || len(request.Inputs) == 0 {
+	if s == nil || ctx == nil || strings.TrimSpace(request.OwnerAPIKeyID) == "" || request.Model.Target != vcp.ModelTargetExact || request.Model.ProviderInstanceID == "" || request.Model.ProviderModelID == "" || request.Model.ExecutionProfileID == "" || !request.Operation.Valid() || len(request.Inputs) == 0 {
 		return Plan{}, ErrInvalidPlan
 	}
 	now := s.options.Now().UTC()

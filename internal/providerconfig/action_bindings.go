@@ -113,7 +113,7 @@ func (b ProviderActionBinding) Validate() error {
 	if errID := validateIdentifier("provider action binding id", b.ID); errID != nil {
 		return errID
 	}
-	if !validOperationKind(b.Operation) {
+	if !b.Operation.Valid() {
 		return invalid("provider action binding operation %q is invalid", b.Operation)
 	}
 	if strings.TrimSpace(b.DriverID) == "" || strings.TrimSpace(b.DriverVersion) == "" || strings.TrimSpace(b.ProtocolProfileID) == "" || strings.TrimSpace(b.EndpointProfileID) == "" || b.Revision == 0 {
@@ -187,17 +187,6 @@ func (b SearchActionBinding) Validate() error {
 func validResourceMaterializationMode(mode ResourceMaterializationMode) bool {
 	switch mode {
 	case ResourceMaterializationInline, ResourceMaterializationDirectURL, ResourceMaterializationProviderFile, ResourceMaterializationObjectURI, ResourceMaterializationAssetID:
-		return true
-	default:
-		return false
-	}
-}
-
-// validOperationKind reports whether one VCP operation is registered.
-// validOperationKind 报告一个 VCP 操作是否已注册。
-func validOperationKind(operation vcp.OperationKind) bool {
-	switch operation {
-	case vcp.OperationConversationRespond, vcp.OperationMediaAnalyze, vcp.OperationImageGenerate, vcp.OperationImageEdit, vcp.OperationVideoGenerate, vcp.OperationVideoEdit, vcp.OperationVideoExtend, vcp.OperationSpeechSynthesize, vcp.OperationSpeechTranscribe, vcp.OperationEmbeddingCreate, vcp.OperationRerankDocuments, vcp.OperationSearchWeb, vcp.OperationWebExtract, vcp.OperationMusicGenerate, vcp.OperationMusicCoverPrepare, vcp.OperationMusicCover:
 		return true
 	default:
 		return false

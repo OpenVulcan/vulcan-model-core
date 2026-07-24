@@ -7,7 +7,9 @@ import (
 	"sync"
 	"time"
 
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -294,6 +296,28 @@ func cloneRecord(record Record) (Record, error) {
 		return Record{}, fmt.Errorf("%w: clone private execution request: %v", ErrInvalidExecution, errRequest)
 	}
 	record.Request = request
+	record.ModelToolPlan.Standard = append([]ModelToolPlanEntry(nil), record.ModelToolPlan.Standard...)
+	record.ModelToolPlan.Extra = append([]string(nil), record.ModelToolPlan.Extra...)
+	record.ModelToolPlan.RouterExtensions = append([]RouterExtensionPlanEntry(nil), record.ModelToolPlan.RouterExtensions...)
+	record.ModelToolPlan.Diagnostics = append([]vcp.ModelToolDiagnostic(nil), record.ModelToolPlan.Diagnostics...)
+	for index := range record.ModelToolPlan.Standard {
+		if record.ModelToolPlan.Standard[index].RouterBinding == nil {
+			continue
+		}
+		resolved := cloneResolvedRouterBinding(*record.ModelToolPlan.Standard[index].RouterBinding)
+		record.ModelToolPlan.Standard[index].RouterBinding = &resolved
+	}
+	for index := range record.ModelToolPlan.RouterExtensions {
+		if record.ModelToolPlan.RouterExtensions[index].RouterBinding == nil {
+			continue
+		}
+		resolved := cloneResolvedRouterBinding(*record.ModelToolPlan.RouterExtensions[index].RouterBinding)
+		record.ModelToolPlan.RouterExtensions[index].RouterBinding = &resolved
+	}
+	if record.RouterToolLineage != nil {
+		lineage := *record.RouterToolLineage
+		record.RouterToolLineage = &lineage
+	}
 	record.Attempts = append([]Attempt(nil), record.Attempts...)
 	for index := range record.Attempts {
 		record.Attempts[index].Usage = cloneUsageObservation(record.Attempts[index].Usage)
@@ -313,6 +337,7 @@ func cloneRecord(record Record) (Record, error) {
 		result.Search = cloneWebSearchResponse(record.Result.Search)
 		result.Extract = cloneWebExtractResponse(record.Result.Extract)
 		result.Transcript = cloneTranscript(record.Result.Transcript)
+		result.Transcriptions = cloneTranscriptionResults(record.Result.Transcriptions)
 		result.Resources = cloneResources(record.Result.Resources)
 		result.Usage = cloneUsageObservation(record.Result.Usage)
 		if record.Result.MusicCoverPreparation != nil {
@@ -351,6 +376,33 @@ func cloneRecord(record Record) (Record, error) {
 		record.Result.Continuation = &continuation
 	}
 	return record, nil
+}
+
+// cloneResolvedRouterBinding copies every mutable field currently owned by one frozen Router child resolution.
+// cloneResolvedRouterBinding 复制一个冻结 Router 子解析当前拥有的全部可变字段。
+func cloneResolvedRouterBinding(resolved routertool.ResolvedBinding) routertool.ResolvedBinding {
+	resolved.Binding.AllowedProviderInstanceIDs = append([]string(nil), resolved.Binding.AllowedProviderInstanceIDs...)
+	resolved.Binding.AllowedProviderModelIDs = append([]string(nil), resolved.Binding.AllowedProviderModelIDs...)
+	resolved.Binding.AllowedExecutionProfileIDs = append([]string(nil), resolved.Binding.AllowedExecutionProfileIDs...)
+	resolved.Target.ModelCapabilities = catalog.CloneModelCapabilities(resolved.Target.ModelCapabilities)
+	if resolved.Target.ServiceCapabilities != nil {
+		serviceCapabilities := *resolved.Target.ServiceCapabilities
+		if serviceCapabilities.WebSearch != nil {
+			webSearch := *serviceCapabilities.WebSearch
+			webSearch.OutputModes = append([]vcp.WebSearchOutputMode(nil), webSearch.OutputModes...)
+			webSearch.EvidenceKinds = append([]vcp.SearchEvidenceKind(nil), webSearch.EvidenceKinds...)
+			webSearch.EvidenceRequirements = append([]vcp.SearchEvidenceRequirement(nil), webSearch.EvidenceRequirements...)
+			serviceCapabilities.WebSearch = &webSearch
+		}
+		if serviceCapabilities.WebExtract != nil {
+			webExtract := *serviceCapabilities.WebExtract
+			webExtract.Depths = append([]vcp.WebExtractDepth(nil), webExtract.Depths...)
+			webExtract.Formats = append([]vcp.WebExtractFormat(nil), webExtract.Formats...)
+			serviceCapabilities.WebExtract = &webExtract
+		}
+		resolved.Target.ServiceCapabilities = &serviceCapabilities
+	}
+	return resolved
 }
 
 // cloneEmbeddingItems deep-copies every mutable embedding representation.
@@ -460,6 +512,7 @@ func cloneTranscript(source *vcp.Transcript) *vcp.Transcript {
 	cloned.Candidates = append([]vcp.TranscriptCandidate(nil), source.Candidates...)
 	for candidateIndex := range cloned.Candidates {
 		candidate := &cloned.Candidates[candidateIndex]
+		candidate.ChannelID = cloneIntPointer(source.Candidates[candidateIndex].ChannelID)
 		candidate.Confidence = cloneFloat64Pointer(source.Candidates[candidateIndex].Confidence)
 		candidate.Segments = append([]vcp.TranscriptSegment(nil), source.Candidates[candidateIndex].Segments...)
 		for segmentIndex := range candidate.Segments {
@@ -478,6 +531,16 @@ func cloneTranscript(source *vcp.Transcript) *vcp.Transcript {
 		}
 	}
 	return &cloned
+}
+
+// cloneTranscriptionResults deep-copies ordered resource-owned batch transcription trees.
+// cloneTranscriptionResults 深拷贝有序且归属资源的批量转写树。
+func cloneTranscriptionResults(source []vcp.TranscriptionResult) []vcp.TranscriptionResult {
+	cloned := append([]vcp.TranscriptionResult(nil), source...)
+	for index := range cloned {
+		cloned[index].Transcript = cloneTranscript(source[index].Transcript)
+	}
+	return cloned
 }
 
 // cloneResources deep-copies Router resources including private pointers retained by repositories.

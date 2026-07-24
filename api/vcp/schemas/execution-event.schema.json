@@ -17,6 +17,7 @@
     "attempt": {"$ref": "#/$defs/attempt"},
     "retry": {"$ref": "#/$defs/retry"},
     "provider_event": {"$ref": "./result-components.schema.json#/$defs/providerEvent"},
+    "model_tool": {"$ref": "#/$defs/modelToolEvent"},
     "progress": {"$ref": "#/$defs/progress"},
     "resource": {"$ref": "#/$defs/resourceEvent"},
     "transcript": {"$ref": "./result-components.schema.json#/$defs/transcriptSegment"},
@@ -54,6 +55,7 @@
       ]
     },
     {"properties": {"type": {"const": "provider.semantic"}}, "required": ["provider_event"]},
+    {"properties": {"type": {"const": "model_tool.lifecycle"}}, "required": ["model_tool"]},
     {"properties": {"type": {"const": "progress.updated"}}, "required": ["progress"]},
     {"properties": {"type": {"const": "resource.partial"}, "resource": {"required": ["kind", "mime_type", "partial_bytes"], "not": {"anyOf": [{"required": ["resource_id"]}, {"required": ["resource"]}]}}}, "required": ["resource"]},
     {"properties": {"type": {"const": "resource.completed"}, "resource": {"required": ["resource_id", "resource"], "not": {"required": ["partial_bytes"]}}}, "required": ["resource"]},
@@ -92,6 +94,38 @@
         "next_retry_at": {"type": "string", "format": "date-time"},
         "category": {"type": "string"}
       }
+    },
+    "modelToolEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["tool_id", "stage", "mode"],
+      "properties": {
+        "tool_id": {"type": "string", "pattern": "^[a-z0-9_.-]{1,128}$"},
+        "stage": {"enum": ["enabled", "mode_frozen", "router_call_started", "child_created", "child_completed", "child_failed", "result_injected", "parent_resumed"]},
+        "mode": {"enum": ["disabled", "native", "router_tool"]},
+        "tool_call_id": {"type": "string", "minLength": 1},
+        "child_execution_id": {"type": "string", "pattern": "^exe_[0-9a-f]{32}$"},
+        "round": {"type": "integer", "minimum": 1}
+      },
+      "oneOf": [
+        {
+          "properties": {"stage": {"enum": ["enabled", "mode_frozen"]}},
+          "not": {"anyOf": [{"required": ["tool_call_id"]}, {"required": ["child_execution_id"]}, {"required": ["round"]}]}
+        },
+        {
+          "properties": {"stage": {"const": "router_call_started"}, "mode": {"const": "router_tool"}},
+          "required": ["tool_call_id", "round"],
+          "not": {"required": ["child_execution_id"]}
+        },
+        {
+          "properties": {"stage": {"const": "child_failed"}, "mode": {"const": "router_tool"}},
+          "required": ["tool_call_id", "round"]
+        },
+        {
+          "properties": {"stage": {"enum": ["child_created", "child_completed", "result_injected", "parent_resumed"]}, "mode": {"const": "router_tool"}},
+          "required": ["tool_call_id", "child_execution_id", "round"]
+        }
+      ]
     },
     "progress": {
       "type": "object",

@@ -141,6 +141,36 @@ func TestVulcanRequestValidateReasoningSummaryModes(t *testing.T) {
 	}
 }
 
+// TestVulcanRequestValidateReasoningSwitchAndBudget verifies explicit disable, enable, and positive budget semantics cannot conflict.
+// TestVulcanRequestValidateReasoningSwitchAndBudget 验证显式关闭、开启与正数预算语义不能冲突。
+func TestVulcanRequestValidateReasoningSwitchAndBudget(t *testing.T) {
+	request := testTextRequest()
+	enabled := true
+	disabled := false
+	validBudget := int64(4000)
+	request.ReasoningPolicy = ReasoningPolicy{Enabled: &enabled, BudgetTokens: &validBudget}
+	if errValidate := request.Validate(); errValidate != nil {
+		t.Fatalf("valid reasoning policy error = %v", errValidate)
+	}
+	request.ReasoningPolicy = ReasoningPolicy{Enabled: &disabled, Effort: "none"}
+	if errValidate := request.Validate(); errValidate != nil {
+		t.Fatalf("valid disabled reasoning error = %v", errValidate)
+	}
+	request.ReasoningPolicy = ReasoningPolicy{Enabled: &disabled, BudgetTokens: &validBudget}
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("disabled budget error = %v", errValidate)
+	}
+	request.ReasoningPolicy = ReasoningPolicy{Enabled: &enabled, Effort: "none"}
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("enabled none error = %v", errValidate)
+	}
+	zeroBudget := int64(0)
+	request.ReasoningPolicy = ReasoningPolicy{BudgetTokens: &zeroBudget}
+	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("zero budget error = %v", errValidate)
+	}
+}
+
 // TestVulcanRequestValidateRejectsStrictNonFunctionTools verifies strict schema intent cannot be attached to a tool without a function-schema carrier.
 // TestVulcanRequestValidateRejectsStrictNonFunctionTools 验证严格 Schema 意图不能附加到没有函数 Schema 载体的工具。
 func TestVulcanRequestValidateRejectsStrictNonFunctionTools(t *testing.T) {

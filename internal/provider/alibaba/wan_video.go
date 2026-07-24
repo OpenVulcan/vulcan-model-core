@@ -59,7 +59,12 @@ func NewWanVideoTaskDriver(definitionID string, client *transport.Client) (*WanV
 
 // ProviderDefinitionID returns the sole provider definition owned by this driver.
 // ProviderDefinitionID 返回此 Driver 唯一拥有的供应商 Definition。
-func (d *WanVideoTaskDriver) ProviderDefinitionID() string { return d.definitionID }
+func (d *WanVideoTaskDriver) ProviderDefinitionID() string {
+	if d == nil {
+		return ""
+	}
+	return d.definitionID
+}
 
 // ActionBindingID returns the sole action binding owned by this driver.
 // ActionBindingID 返回此 Driver 唯一拥有的动作绑定。
@@ -89,7 +94,7 @@ func (d *WanVideoTaskDriver) Poll(ctx context.Context, execution provider.Execut
 	if errValidate := d.validateExecution(execution); errValidate != nil {
 		return provider.TaskResult{}, errValidate
 	}
-	if strings.TrimSpace(providerTaskID) == "" {
+	if strings.TrimSpace(providerTaskID) == "" || strings.TrimSpace(providerTaskID) != providerTaskID {
 		return provider.TaskResult{}, fmt.Errorf("%w: provider task identifier is required", ErrInvalidWanVideoDriver)
 	}
 	response, errRequest := d.client.Do(ctx, transport.Request{Binding: execution.Binding, Method: http.MethodGet, Path: "/api/v1/tasks/" + url.PathEscape(providerTaskID), Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}})
@@ -106,7 +111,7 @@ func (d *WanVideoTaskDriver) Cancel(ctx context.Context, execution provider.Exec
 	if errValidate := d.validateExecution(execution); errValidate != nil {
 		return provider.TaskResult{}, errValidate
 	}
-	if strings.TrimSpace(providerTaskID) == "" {
+	if strings.TrimSpace(providerTaskID) == "" || strings.TrimSpace(providerTaskID) != providerTaskID {
 		return provider.TaskResult{}, fmt.Errorf("%w: provider task identifier is required", ErrInvalidWanVideoDriver)
 	}
 	response, errRequest := d.client.Do(ctx, transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/tasks/" + url.PathEscape(providerTaskID) + "/cancel", Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}})
@@ -115,7 +120,10 @@ func (d *WanVideoTaskDriver) Cancel(ctx context.Context, execution provider.Exec
 	}
 	defer func() { _ = transport.DrainAndClose(response) }()
 	var result wanVideoCancelResponse
-	if errDecode := json.NewDecoder(response.Body).Decode(&result); errDecode != nil || strings.TrimSpace(result.RequestID) == "" || strings.TrimSpace(result.Code) != "" {
+	if errDecode := decodeAlibabaJSONResponse(response.Body, &result, ErrInvalidWanVideoResponse); errDecode != nil {
+		return provider.TaskResult{}, errDecode
+	}
+	if strings.TrimSpace(result.RequestID) == "" || strings.TrimSpace(result.Code) != "" {
 		return provider.TaskResult{}, fmt.Errorf("%w: cancellation was not confirmed", ErrInvalidWanVideoResponse)
 	}
 	return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskCancelled}, nil
@@ -216,9 +224,20 @@ type wanVideoTaskOutput struct {
 	// VideoURL is the temporary successful MP4 URL.
 	// VideoURL 是成功结果的临时 MP4 URL。
 	VideoURL string `json:"video_url,omitempty"`
+	// Results contains the alternate successful resource envelope used by HappyHorse and some Wan revisions.
+	// Results 包含 HappyHorse 与部分 Wan 修订使用的备用成功资源信封。
+	Results []wanVideoTaskResource `json:"results,omitempty"`
 	// Code is a safe provider failure classification.
 	// Code 是安全的供应商失败分类。
 	Code string `json:"code,omitempty"`
+}
+
+// wanVideoTaskResource contains one alternate provider video result.
+// wanVideoTaskResource 包含一个供应商备用视频结果。
+type wanVideoTaskResource struct {
+	// URL is the temporary successful video URL.
+	// URL 是成功结果的临时视频 URL。
+	URL string `json:"url"`
 }
 
 // wanVideoCancelResponse contains cancellation confirmation metadata.
@@ -281,7 +300,7 @@ func projectWanVideoStart(execution provider.ExecutionRequest) (transport.Reques
 	if errEncode != nil {
 		return transport.Request{}, errEncode
 	}
-	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/services/aigc/video-generation/video-synthesis", Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}, {Name: "X-DashScope-Async", Value: "enable"}}, Body: encoded, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/services/aigc/video-generation/video-synthesis", Headers: alibabaJSONHeaders(execution.MaterializedInputs, true), Body: encoded, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
 }
 
 // projectWanImageVideoMedia maps only documented first-frame, last-frame, and driving-audio combinations.
@@ -335,6 +354,9 @@ func exactWanImageVideoURL(input vcp.MediaInput, materialized []resource.Materia
 		if value.Mode == catalog.MaterializationDirectRemoteURL && strings.TrimSpace(value.RemoteURL) != "" {
 			return value.RemoteURL, nil
 		}
+		if value.Mode == catalog.MaterializationProviderObjectURI {
+			return alibabaObjectURI(value, ErrInvalidWanVideoDriver)
+		}
 		if input.Kind == vcp.MediaImage && value.Mode == catalog.MaterializationInlineBase64 && strings.TrimSpace(value.InlineBase64) != "" {
 			return "data:" + value.MIMEType + ";base64," + value.InlineBase64, nil
 		}
@@ -350,8 +372,14 @@ func exactWanAudioURL(input vcp.MediaInput, materialized []resource.Materialized
 		if value.InputID != input.ID {
 			continue
 		}
-		if value.ResourceID != input.Resource.ResourceID || value.Kind != input.Kind || value.Role != input.Role || value.Mode != catalog.MaterializationDirectRemoteURL || strings.TrimSpace(value.RemoteURL) == "" {
-			return "", fmt.Errorf("%w: audio input requires its exact public URL materialization", ErrInvalidWanVideoDriver)
+		if value.ResourceID != input.Resource.ResourceID || value.Kind != input.Kind || value.Role != input.Role {
+			return "", fmt.Errorf("%w: audio input does not match its exact materialization", ErrInvalidWanVideoDriver)
+		}
+		if value.Mode == catalog.MaterializationProviderObjectURI {
+			return alibabaObjectURI(value, ErrInvalidWanVideoDriver)
+		}
+		if value.Mode != catalog.MaterializationDirectRemoteURL || strings.TrimSpace(value.RemoteURL) == "" {
+			return "", fmt.Errorf("%w: audio input requires its exact public URL or Alibaba object materialization", ErrInvalidWanVideoDriver)
 		}
 		return value.RemoteURL, nil
 	}
@@ -373,7 +401,10 @@ func supportedWanVideoRatio(value string) bool {
 // decodeWanVideoStart 解码必需的排队任务标识。
 func decodeWanVideoStart(reader io.Reader, now time.Time) (provider.TaskResult, error) {
 	var response wanVideoTaskEnvelope
-	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil || response.Output.TaskStatus != "PENDING" || strings.TrimSpace(response.Output.TaskID) == "" {
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidWanVideoResponse); errDecode != nil {
+		return provider.TaskResult{}, errDecode
+	}
+	if response.Output.TaskStatus != "PENDING" || strings.TrimSpace(response.Output.TaskID) == "" || strings.TrimSpace(response.Output.TaskID) != response.Output.TaskID {
 		return provider.TaskResult{}, fmt.Errorf("%w: missing queued task", ErrInvalidWanVideoResponse)
 	}
 	return provider.TaskResult{ProviderTaskID: response.Output.TaskID, State: provider.TaskQueued, PollAfter: now.UTC().Add(15 * time.Second)}, nil
@@ -383,8 +414,11 @@ func decodeWanVideoStart(reader io.Reader, now time.Time) (provider.TaskResult, 
 // decodeWanVideoPoll 将文档明确的 Wan 状态映射到 Router 任务状态。
 func decodeWanVideoPoll(reader io.Reader, providerTaskID string, now time.Time) (provider.TaskResult, error) {
 	var response wanVideoTaskEnvelope
-	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil {
-		return provider.TaskResult{}, fmt.Errorf("%w: decode task: %v", ErrInvalidWanVideoResponse, errDecode)
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidWanVideoResponse); errDecode != nil {
+		return provider.TaskResult{}, errDecode
+	}
+	if response.Output.TaskID != providerTaskID {
+		return provider.TaskResult{}, fmt.Errorf("%w: task response correlation is invalid", ErrInvalidWanVideoResponse)
 	}
 	switch response.Output.TaskStatus {
 	case "PENDING":
@@ -392,10 +426,14 @@ func decodeWanVideoPoll(reader io.Reader, providerTaskID string, now time.Time) 
 	case "RUNNING":
 		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskRunning, PollAfter: now.UTC().Add(15 * time.Second)}, nil
 	case "SUCCEEDED":
-		if strings.TrimSpace(response.Output.VideoURL) == "" {
+		videoURL := strings.TrimSpace(response.Output.VideoURL)
+		if videoURL == "" && len(response.Output.Results) > 0 {
+			videoURL = strings.TrimSpace(response.Output.Results[0].URL)
+		}
+		if videoURL == "" {
 			return provider.TaskResult{}, fmt.Errorf("%w: completed task has no video URL", ErrInvalidWanVideoResponse)
 		}
-		result := provider.ExecutionResult{GeneratedResources: []provider.GeneratedResource{{OutputID: "video-0", Kind: vcp.MediaVideo, MIMEType: "video/mp4", DownloadURL: response.Output.VideoURL}}}
+		result := provider.ExecutionResult{GeneratedResources: []provider.GeneratedResource{{OutputID: "video-0", Kind: vcp.MediaVideo, MIMEType: "video/mp4", DownloadURL: videoURL}}}
 		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskSucceeded, Result: &result}, nil
 	case "FAILED", "UNKNOWN":
 		return provider.TaskResult{ProviderTaskID: providerTaskID, State: provider.TaskFailed, ErrorCode: "alibaba_video_generation_failed"}, nil

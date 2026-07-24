@@ -1,67 +1,134 @@
-# Alibaba Cloud Model Studio 套餐供应商证据快照
+# Alibaba Cloud Model Studio 与编程套餐静态证据边界
 
 ## 1. 文档目的
 
-本文固定 VulcanModelRouter 第一阶段 Alibaba Cloud Model Studio 编程套餐接入的事实边界。检索日期为 2026-07-19。代码只发布本文有官方证据支持的套餐、入口、模型和能力；按量 API、Workspace、图像、音频与视频能力留待第二阶段。
+本文固定 VulcanModelRouter 对 Alibaba Cloud Model Studio、Coding Plan 与 Token Plan 的静态目录、区域隔离、协议及凭据边界。当前基线审核日期为 2026-07-23。
 
-## 2. 官方来源
+系统不在运行期调用 `bl`、Bailian CLI 或上游模型列表接口，不允许用某个凭据返回的模型集合修改系统目录。模型更新只能通过提交新的独立静态快照、证据修订与审核结论完成。
 
-| 事实 | 官方来源 |
+## 2. 证据来源与裁决规则
+
+| 事实 | 证据 |
 | --- | --- |
-| CN OpenCode 套餐、Base URL、模型 ID 与推荐配置 | <https://help.aliyun.com/zh/model-studio/opencode> |
-| Global OpenCode 套餐、Base URL 与模型 ID | <https://www.alibabacloud.com/help/en/model-studio/opencode> |
-| Coding Plan 上下文窗口 | <https://help.aliyun.com/zh/model-studio/coding-plan-faq> |
-| CN 模型上下文与能力 | <https://help.aliyun.com/zh/model-studio/text-generation-model> |
-| Global 模型上下文与能力 | <https://www.alibabacloud.com/help/en/model-studio/text-generation-model/> |
-| Anthropic Messages 请求、鉴权与流事件 | <https://help.aliyun.com/zh/model-studio/anthropic-api-messages> |
-| Qwen `tool_stream` 行为 | <https://help.aliyun.com/zh/model-studio/qwen-api-via-openai-chat-completions> |
-| GLM Anthropic 工具流行为 | <https://help.aliyun.com/zh/model-studio/glm> |
-| OpenCode 配置字段语义 | <https://opencode.ai/docs/providers> |
+| Coding Plan、Token Plan 产品模型集合 | Alibaba 官方套餐产品页 |
+| API 入口、协议与推荐 Coding 模型 | Qwen Code 官方源码及 Alibaba 官方接入文档 |
+| Qwen Code 精确源码基线 | `819cd4ab4a335f04228c161cf89616c2cc88ef28` |
+| Model Studio CN / Singapore 完整目录 | 已脱敏并提交的 `listFoundationModels` 完整分页快照 |
+| `tool_stream` 与高分辨率视觉参数 | Alibaba 官方协议说明与 Qwen Code `dashscope.ts` |
 
-冲突裁决顺序为：套餐产品页决定模型集合，区域模型页决定固有能力，OpenCode 示例决定入口、协议与推荐参数。其他区域或同名模型的数据不能跨目录补全未知字段。
+冲突裁决顺序：
 
-## 3. 产品与入口矩阵
+1. 套餐产品页决定套餐的精确模型集合。
+2. 相同商业产品下的独立区域证据决定区域能力和限制。
+3. Qwen Code 源码决定其已验证的推荐模型、模态与请求扩展行为。
+4. 缺少独立证据的产品或区域保持不可发布，不从其他区域、套餐或账号复制事实。
 
-| Definition | 产品 | Region | 固定 Base URL | 唯一协议 | 鉴权 |
-| --- | --- | --- | --- | --- | --- |
-| `system_alibaba_coding_plan_cn` | Coding Plan CN | CN | `https://coding.dashscope.aliyuncs.com/apps/anthropic/v1` | `anthropic.messages` | API Key |
-| `system_alibaba_coding_plan_global` | Coding Plan Global | Global | `https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1` | `anthropic.messages` | API Key |
-| `system_alibaba_token_plan_personal_cn` | Token Plan Personal CN | CN | `https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1` | `anthropic.messages` | API Key |
-| `system_alibaba_token_plan_team_cn` | Token Plan Team CN | CN | `https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1` | `anthropic.messages` | API Key |
-| `system_alibaba_token_plan_team_global` | Token Plan Team Global | Global | `https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1` | `anthropic.messages` | API Key |
+## 3. 可执行产品与协议
 
-Driver 只追加 `/messages`，因此最终请求地址为 `<Base URL>/messages`。鉴权 Header 是 `x-api-key`；不会发送 Claude Code Beta、Session、Stainless 或浏览器指纹 Header。
+| Definition | 产品 | 固定 Base URL | Chat 路径 | 唯一会话协议 |
+| --- | --- | --- | --- | --- |
+| `system_alibaba_coding_plan_cn` | Coding Plan CN | `https://coding.dashscope.aliyuncs.com` | `/v1/chat/completions` | OpenAI Chat |
+| `system_alibaba_coding_plan_global` | Coding Plan Global | `https://coding-intl.dashscope.aliyuncs.com` | `/v1/chat/completions` | OpenAI Chat |
+| `system_alibaba_token_plan_personal_cn` | Token Plan Personal CN | `https://token-plan.cn-beijing.maas.aliyuncs.com` | `/compatible-mode/v1/chat/completions` | OpenAI Chat |
+| `system_alibaba_token_plan_team_cn` | Token Plan Team CN | `https://token-plan.cn-beijing.maas.aliyuncs.com` | `/compatible-mode/v1/chat/completions` | OpenAI Chat |
+| `system_alibaba_token_plan_team_global` | Token Plan Team Global | `https://token-plan.ap-southeast-1.maas.aliyuncs.com` | `/compatible-mode/v1/chat/completions` | OpenAI Chat |
+| `system_alibaba_model_studio_cn` | Model Studio CN | `https://dashscope.aliyuncs.com` | `/compatible-mode/v1/chat/completions` | OpenAI Chat |
+| `system_alibaba_model_studio_global` | Model Studio Singapore | `https://dashscope-intl.aliyuncs.com` | `/compatible-mode/v1/chat/completions` | OpenAI Chat |
 
-## 4. 模型目录边界
+所有产品只使用一个 API Key 凭据，不读取或保存 Bailian CLI Auth、AccessKey/SecretKey 管理凭据，也不为同一个供应商建立 Anthropic 双协议配置。
 
-| Catalog | 精确模型集合 |
-| --- | --- |
-| Coding Plan CN / Global | `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.5-plus`, `qwen3-max-2026-01-23`, `qwen3-coder-next`, `qwen3-coder-plus`, `MiniMax-M2.5`, `glm-5`, `glm-4.7`, `kimi-k2.5` |
-| Token Plan Personal CN | `qwen3.8-max-preview`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-flash`, `glm-5.2`, `deepseek-v4-pro` |
-| Token Plan Team CN | `qwen3.8-max-preview`, `qwen3.7-max`, `qwen3.7-plus`, `qwen3.6-plus`, `qwen3.6-flash`, `deepseek-v4-pro`, `deepseek-v4-flash`, `deepseek-v3.2`, `kimi-k2.7-code`, `kimi-k2.6`, `kimi-k2.5`, `glm-5.2`, `glm-5.1`, `glm-5`, `MiniMax-M2.5` |
-| Token Plan Team Global | 与 Team CN 相同，但不含 `qwen3.8-max-preview`；Global 的 `glm-5.2` 上下文为 198,000，不继承 CN 的 1,000,000。 |
+## 4. 静态目录文件
 
-所有模型在本阶段仅发布 `text -> text`。即使上游模型具备多模态能力，也不会在 VCP 目录中提前声明未实现的资源执行链路。
+每个已发布产品必须拥有独立 JSON 快照，Manifest 同时固定：
 
-## 5. Token 字段语义
+- 产品、控制台站点、区域和协议通道；
+- 证据类型与证据观测时间；
+- 快照文件名和 SHA-256 内容修订；
+- 已验证或未验证状态。
 
-- `ContextWindow`：输入、推理和输出共享的总上下文容量。
-- `MaxInputTokens`：独立可证明时记录的输入硬上限，不能由总上下文反推。
-- `MaxOutputTokens`：独立可证明时记录的输出硬上限。
-- `MaxReasoningTokens`：独立可证明时记录的推理硬上限。
-- `RecommendedOutputTokens`：供应商建议的默认输出预算，不是硬上限。
-- `RecommendedReasoningTokens`：供应商或 OpenCode 配置建议的默认推理预算，不是硬上限。
+当前已发布文件：
 
-Coding Plan 的 `1024` 和 Token Plan 的 `8192` 是推荐推理预算。qwen3.8 OpenCode 示例同时出现 `contextWindow=983616`、`maxOutputTokens=131072`、`budgetTokens=262144`；现有资料不足以证明 `983616` 是总上下文，因此代码仅记录已明确的最大输出 131,072，不把配置字段相加、互换或反推为硬上限。
+| Catalog | 静态文件 | 记录数 |
+| --- | --- | ---: |
+| Coding Plan CN | `coding-plan-cn.json` | 10 |
+| Coding Plan Global | `coding-plan-global.json` | 10 |
+| Token Plan Personal CN | `token-plan-personal-cn-static.json` | 11 |
+| Token Plan Team CN | `token-plan-team-cn.json` | 22 |
+| Token Plan Team Global | `token-plan-team-global.json` | 18 |
+| Model Studio CN | `model-studio-cn.json` | 471 |
+| Model Studio Singapore | `model-studio-sg-domestic.json` | 225 |
 
-## 6. 流式工具行为
+历史动态目录来源、动态模型权益与服务权益不会在迁移后保留。套餐模型及静态 Model Studio 模型统一使用“全部已绑定凭据”归属；最终可用性仍要求实例、入口、凭据和访问绑定均有效。
 
-Alibaba 的 `tool_stream` 默认关闭。只有同时满足以下条件才写入 `tool_stream=true`：VCP 请求要求流式输出、请求包含工具、目标模型位于官方明确支持的 Qwen/GLM 白名单。
+## 5. 套餐模型集合
 
-当前白名单为 `qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.6-flash`、`qwen3.5-plus`、`glm-5.2`、`glm-5.1`、`glm-5`、`glm-4.7`。未确认的 qwen3.8 以及 DeepSeek、Kimi、MiniMax 不注入该扩展字段。
+### 5.1 Coding Plan CN / Global
 
-上游 `input_json_delta.partial_json` 必须逐块转换为 VCP `tool.arguments.delta`，不能在工具块结束时合并为一个伪增量。驱动回归测试同时保护最终 URL、Header 白名单、自动参数和真实分片数量。
+10 个会话模型：
 
-## 7. 管理与执行隔离
+`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.5-plus`、`qwen3-max-2026-01-23`、`qwen3-coder-next`、`qwen3-coder-plus`、`MiniMax-M2.5`、`glm-5`、`glm-4.7`、`kimi-k2.5`。
 
-`alibaba` 仅是管理端分组。五个 Definition 分别拥有 Endpoint、模型目录、实例、凭据与执行 Driver；一次执行绑定一个不可变 Definition，不在 CN/Global、Coding Plan/Token Plan、Personal/Team 之间自动回退，也不增加公开 Anthropic 兼容入口。
+### 5.2 Token Plan Personal CN
+
+- 6 个会话模型：`qwen3.8-max-preview`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-flash`、`glm-5.2`、`deepseek-v4-pro`。
+- 2 个图像生成模型：`wan2.7-image`、`wan2.7-image-pro`。
+- 3 个视频生成模型：`happyhorse-1.1-t2v`、`happyhorse-1.1-i2v`、`happyhorse-1.1-r2v`。
+- 不发布 `happyhorse-1.0-video-edit`。
+
+### 5.3 Token Plan Team CN
+
+- 15 个会话模型：`qwen3.8-max-preview`、`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.6-flash`、`deepseek-v4-pro`、`deepseek-v4-flash`、`deepseek-v3.2`、`kimi-k2.7-code`、`kimi-k2.6`、`kimi-k2.5`、`glm-5.2`、`glm-5.1`、`glm-5`、`MiniMax-M2.5`。
+- 4 个图像生成模型：`qwen-image-2.0`、`qwen-image-2.0-pro`、`wan2.7-image`、`wan2.7-image-pro`。
+- 3 个 HappyHorse 视频生成模型，与 Personal CN 相同。
+
+### 5.4 Token Plan Team Global
+
+- 14 个会话模型，不含 `qwen3.8-max-preview`。
+- 4 个图像生成模型，与 Team CN 相同。
+- 不发布 HappyHorse。
+- Global 的上下文限制只使用 Global 独立证据，不继承 CN 数值。
+
+## 6. 多模态和请求扩展
+
+会话模型的图片、视频理解以模型级静态能力声明为准。内联 Base64、远程 URL 和上游对象引用必须通过 VCP 资源计划转换，不能把媒体输入猜测为普通文本。
+
+`tool_stream=true` 仅在以下三个条件同时满足时写入：
+
+1. VCP 请求为流式；
+2. 请求确实包含工具；
+3. 模型位于精确白名单。
+
+白名单为：
+
+`qwen3.7-max`、`qwen3.7-plus`、`qwen3.6-plus`、`qwen3.6-flash`、`qwen3.5-plus`、`glm-5.2`、`glm-5.1`、`glm-5`、`glm-4.7`。
+
+`vl_high_resolution_images=true` 仅在请求实际包含图片或视频且模型为 `qwen3.5-plus`、`qwen3.6-plus` 或 `qwen3.7-plus` 时写入。其他模型和纯文本请求不得注入。
+
+## 7. Token Plan Harness 工具证据边界
+
+Token Plan 产品页可以证明 `web_search`、`web_extractor`、`t2i_search`、`i2i_search` 与 `code_interpreter` 这些 Harness 工具名称存在。Qwen Code 官方源码进一步证明联网搜索通过独立的 Responses 请求启用 `web_search` 与 `web_extractor`，而不是通过普通 OpenAI Chat 请求字段启用。
+
+当前实现因此只在精确 Token Plan Responses Profile 中发布固定标准工具 `web_search` 与 `web_extractor`，并通过可重复脱敏实测确认请求投影、流式事件和结果归一可用。普通 Chat Profile 不发布这些能力，也不得静默丢弃相应选择。
+
+`t2i_search`、`i2i_search` 与 `code_interpreter` 仍缺少官方源码或可重复脱敏实测所证明的精确 Responses Wire、输入输出事件及结果结构，因此保持未发布。后续只有在证据补齐后，才能按“产品 + 区域 + 模型 + 协议”白名单作为模型额外工具发布，并同时补齐请求投影、响应归一、流式事件和用量测试。
+
+## 8. 未发布边界
+
+以下边界记录在 Manifest 中，但没有 RuntimeReady Definition、入口、驱动或 UI 新建项：
+
+- Token Plan Personal Global；
+- Model Studio Hong Kong；
+- Model Studio Tokyo；
+- Model Studio Frankfurt；
+- Model Studio Virginia；
+- Model Studio Workspace Singapore。
+
+它们必须在获得独立的完整模型、能力、参数和实际执行证据后，才可通过新的静态快照发布。
+
+## 9. 管理、执行与迁移隔离
+
+- 一次执行只绑定一个不可变 Alibaba Definition。
+- CN、Global、Personal、Team、Coding Plan 与 Model Studio 之间不自动回退。
+- 凭据新增、替换、删除只修改既有实例的凭据与绑定，不克隆供应商。
+- 启动迁移保留实例、入口、凭据、绑定、操作员附加参数、当前套餐、额度及声音缓存。
+- 启动迁移清除历史动态目录来源、动态模型权益和动态服务权益，并重建静态模型、操作、规格与账号池。

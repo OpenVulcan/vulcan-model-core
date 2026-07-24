@@ -98,7 +98,10 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 	demands := make([]CapabilityDemand, 0)
 	needsProjection := false
 	mediaFeatures := make(map[CapabilityFeature]struct{})
-	needsReasoning := request.ReasoningPolicy.Effort != "" || request.ReasoningPolicy.RequestedSummaryMode() != ""
+	// explicitlyEnabledReasoning distinguishes an affirmative switch from an explicit disable request.
+	// explicitlyEnabledReasoning 区分明确开启与明确关闭的推理请求。
+	explicitlyEnabledReasoning := request.ReasoningPolicy.Enabled != nil && *request.ReasoningPolicy.Enabled
+	needsReasoning := explicitlyEnabledReasoning || request.ReasoningPolicy.BudgetTokens != nil || request.ReasoningPolicy.Effort != "" && request.ReasoningPolicy.Effort != "none" || request.ReasoningPolicy.RequestedSummaryMode() != ""
 	needsStrictSchema := len(request.GenerationPolicy.StrictJSONSchema) > 0
 	needsContinuation := request.ReasoningPolicy.ContinuationID != ""
 	for _, item := range request.Context {
@@ -132,7 +135,13 @@ func deriveDemands(request VulcanRequest) []CapabilityDemand {
 	if needsProjection {
 		demands = append(demands, preferredDemand(FeatureOrderedContextProjection, true))
 	}
-	if len(request.Tools) > 0 {
+	structuredTools := 0
+	for _, tool := range request.Tools {
+		if tool.Kind == ToolFunction || tool.Kind == ToolCustom {
+			structuredTools++
+		}
+	}
+	if structuredTools > 0 {
 		demands = append(demands, requiredDemand(FeatureStructuredToolCalling, false))
 		for _, tool := range request.Tools {
 			if tool.Strict {

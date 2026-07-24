@@ -17,6 +17,60 @@ func alibabaAudioModels() []systemModelTemplate {
 	}
 }
 
+// alibabaCosyVoiceModels returns region-proven non-realtime CosyVoice synthesis models.
+// alibabaCosyVoiceModels 返回区域证据确认的非实时 CosyVoice 语音合成模型。
+func alibabaCosyVoiceModels(includeCNOnlyModels bool) []systemModelTemplate {
+	identities := []systemModelIdentity{
+		{upstreamID: "cosyvoice-v3-flash", displayName: "CosyVoice V3 Flash"},
+		{upstreamID: "cosyvoice-v3-plus", displayName: "CosyVoice V3 Plus"},
+	}
+	if includeCNOnlyModels {
+		identities = []systemModelIdentity{
+			{upstreamID: "cosyvoice-v2", displayName: "CosyVoice V2"},
+			{upstreamID: "cosyvoice-v3-flash", displayName: "CosyVoice V3 Flash"},
+			{upstreamID: "cosyvoice-v3-plus", displayName: "CosyVoice V3 Plus"},
+			{upstreamID: "cosyvoice-v3.5-flash", displayName: "CosyVoice V3.5 Flash"},
+			{upstreamID: "cosyvoice-v3.5-plus", displayName: "CosyVoice V3.5 Plus"},
+		}
+	}
+	models := make([]systemModelTemplate, 0, len(identities))
+	for _, identity := range identities {
+		models = append(models, alibabaCosyVoiceModel(identity))
+	}
+	return models
+}
+
+// alibabaCosyVoiceModel builds one streaming and non-streaming CosyVoice contract copied from Bailian CLI behavior.
+// alibabaCosyVoiceModel 根据百炼 CLI 行为构建一个流式与非流式 CosyVoice 合同。
+func alibabaCosyVoiceModel(identity systemModelIdentity) systemModelTemplate {
+	minimumTextLength := int64(1)
+	minimumSampleRate := int64(1)
+	minimumSeed, maximumSeed := int64(0), int64(65535)
+	minimumVolume, maximumVolume, defaultVolume := float64(0), float64(100), float64(50)
+	minimumMultiplier, maximumMultiplier, defaultMultiplier := float64(0.5), float64(2), float64(1)
+	defaultFormat := "mp3"
+	evidence := []catalog.CapabilityEvidence{{Source: catalog.ModelSourceProviderAPI, Reference: "bailian-cli/packages/commands/src/commands/speech/synthesize.ts", ObservedAt: mediaEvidenceObservedAt(), Revision: 1}}
+	return systemModelTemplate{
+		upstreamID: identity.upstreamID, displayName: identity.displayName, inputModalities: []string{"text"},
+		reasoning: catalog.CapabilityUnsupported, toolCalling: catalog.CapabilityUnsupported, parallelTools: catalog.CapabilityUnsupported, streamingTools: catalog.CapabilityUnsupported, strictSchema: catalog.CapabilityUnsupported, entitlementMode: catalog.EntitlementAllBoundCredentials,
+		operation: vcp.OperationSpeechSynthesize, actionBindingID: provideralibaba.CosyVoiceSynthesizeActionBindingID,
+		mediaOutputs: []catalog.MediaOutputCapability{{Kind: vcp.MediaAudio, Level: catalog.CapabilityNative, Formats: []string{"mp3", "pcm", "wav", "opus"}, MaxOutputs: catalog.OptionalLimit{Known: true, Value: 1}, Audio: &catalog.AudioMediaLimits{Encodings: []string{"mp3", "pcm", "wav", "opus"}}, Delivery: catalog.DeliveryCapabilities{Synchronous: true, Streaming: true}, Evidence: evidence, EvidenceRevision: 1}},
+		parameters: []catalog.ParameterDescriptor{
+			{ID: "text", Kind: catalog.ParameterString, Required: true, StringRange: &catalog.StringRange{MinimumLength: &minimumTextLength}},
+			{ID: "voice_id", Kind: catalog.ParameterString, Required: true, StringRange: &catalog.StringRange{MinimumLength: &minimumTextLength}},
+			{ID: "output_format", Kind: catalog.ParameterFormat, AllowedValues: []string{"mp3", "pcm", "wav", "opus"}, Default: &catalog.ParameterDefault{Source: catalog.ParameterDefaultProvider, String: &defaultFormat}},
+			{ID: "sample_rate", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumSampleRate}},
+			{ID: "volume", Kind: catalog.ParameterFloat, FloatRange: &catalog.FloatRange{Minimum: &minimumVolume, Maximum: &maximumVolume}, Default: &catalog.ParameterDefault{Source: catalog.ParameterDefaultProvider, Float: &defaultVolume}},
+			{ID: "speed", Kind: catalog.ParameterFloat, FloatRange: &catalog.FloatRange{Minimum: &minimumMultiplier, Maximum: &maximumMultiplier}, Default: &catalog.ParameterDefault{Source: catalog.ParameterDefaultProvider, Float: &defaultMultiplier}},
+			{ID: "pitch", Kind: catalog.ParameterFloat, FloatRange: &catalog.FloatRange{Minimum: &minimumMultiplier, Maximum: &maximumMultiplier}, Default: &catalog.ParameterDefault{Source: catalog.ParameterDefaultProvider, Float: &defaultMultiplier}},
+			{ID: "seed", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumSeed, Maximum: &maximumSeed}},
+			{ID: "language", Kind: catalog.ParameterString, StringRange: &catalog.StringRange{}},
+			{ID: "style", Kind: catalog.ParameterString, StringRange: &catalog.StringRange{}},
+			{ID: "enable_ssml", Kind: catalog.ParameterBoolean},
+		},
+	}
+}
+
 // alibabaQwen3TTSModel builds one system-voice-only non-streaming synthesis contract.
 // alibabaQwen3TTSModel 构建一个仅使用系统声音的非流式合成合同。
 func alibabaQwen3TTSModel(upstreamID string, displayName string, instructions bool) systemModelTemplate {
@@ -65,9 +119,9 @@ func alibabaFunASRModel() systemModelTemplate {
 	// evidence pins every declared input fact to the current official offline guide.
 	// evidence 将每项输入声明固定到当前官方离线指南。
 	evidence := []catalog.CapabilityEvidence{{Source: catalog.ModelSourceProviderAPI, Reference: "https://www.alibabacloud.com/help/en/model-studio/non-realtime-speech-recognition-user-guide", ObservedAt: mediaEvidenceObservedAt(), Revision: 1}}
-	// common contains the provider-wide single-file public URL limits.
-	// common 包含供应商范围的单文件公网 URL 限制。
-	common := catalog.CommonMediaLimits{MaxItemBytes: catalog.OptionalLimit{Known: true, Value: 2 << 30}, MaxItems: catalog.OptionalLimit{Known: true, Value: 1}, AllowsRemoteURL: catalog.OptionalBool{Known: true, Value: true}}
+	// common contains the provider-wide one-hundred-file public URL limits.
+	// common 包含供应商范围的最多一百个公网 URL 限制。
+	common := catalog.CommonMediaLimits{MaxItemBytes: catalog.OptionalLimit{Known: true, Value: 2 << 30}, MaxItems: catalog.OptionalLimit{Known: true, Value: 100}, AllowsRemoteURL: catalog.OptionalBool{Known: true, Value: true}}
 	// compatibility closes unsupported conversation-only features for this standalone operation.
 	// compatibility 为此独立操作封闭不受支持的会话专属特性。
 	compatibility := catalog.MediaCompatibility{ToolCalling: catalog.CapabilityUnsupported, Streaming: catalog.CapabilityUnsupported, Reasoning: catalog.CapabilityUnsupported, StructuredOutput: catalog.CapabilityUnsupported}
@@ -82,11 +136,19 @@ func alibabaFunASRModel() systemModelTemplate {
 		parameters: []catalog.ParameterDescriptor{
 			{ID: "language", Kind: catalog.ParameterEnum, AllowedValues: alibabaFunASRLanguages()},
 			{ID: "diarization", Kind: catalog.ParameterBoolean},
-			{ID: "segment_timestamps", Kind: catalog.ParameterBoolean},
-			{ID: "word_timestamps", Kind: catalog.ParameterBoolean},
 			{ID: "candidate_count", Kind: catalog.ParameterCount, IntegerRange: &catalog.IntegerRange{Maximum: catalogInt64(1)}},
+			{ID: "channel_ids", Kind: catalog.ParameterIntegerList, IntegerRange: &catalog.IntegerRange{Minimum: catalogInt64(0)}},
+			{ID: "speaker_count", Kind: catalog.ParameterCount, IntegerRange: &catalog.IntegerRange{Minimum: catalogInt64(1)}},
+			{ID: "vocabulary_id", Kind: catalog.ParameterString, StringRange: &catalog.StringRange{}},
 		},
+		parameterRules: []catalog.ParameterRule{{Kind: catalog.ParameterRuleRequiresBooleanValue, ParameterID: "speaker_count", RelatedParameterIDs: []string{"diarization"}, BooleanValue: catalogBool(true)}},
 	}
+}
+
+// catalogBool returns a stable pointer for one catalog boolean literal.
+// catalogBool 为一个目录布尔字面值返回稳定指针。
+func catalogBool(value bool) *bool {
+	return &value
 }
 
 // alibabaQwen3TTSVoices returns the closed non-realtime system voice set shared by the current aliases.

@@ -1,0 +1,24 @@
+{
+  "schema_version": 1,
+  "product": "coding_plan",
+  "console_site": "domestic",
+  "region": "cn_beijing",
+  "channel": "openai_chat",
+  "source_api": "static:official-coding-plan-cn-and-qwen-code@819cd4ab4a335f04228c161cf89616c2cc88ef28",
+  "source_revision": "9b14af77025cb76f6aa55ed66b19cb339b89bf259854fb4cdb8337e4f67474c7",
+  "observed_at": "2026-07-23T00:00:00Z",
+  "family_total": 10,
+  "record_total": 10,
+  "models": [
+    {"model_id":"MiniMax-M2.5","display_name":"MiniMax M2.5","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":196608},
+    {"model_id":"glm-4.7","display_name":"GLM-4.7","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":202752},
+    {"model_id":"glm-5","display_name":"GLM-5","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":202752},
+    {"model_id":"kimi-k2.5","display_name":"Kimi K2.5","source_family_id":"coding_plan_cn","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":262144},
+    {"model_id":"qwen3-coder-next","display_name":"Qwen3 Coder Next","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":262144},
+    {"model_id":"qwen3-coder-plus","display_name":"Qwen3 Coder Plus","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"qwen3-max-2026-01-23","display_name":"Qwen3 Max 0123","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":262144},
+    {"model_id":"qwen3.5-plus","display_name":"Qwen3.5 Plus","source_family_id":"coding_plan_cn","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"qwen3.6-plus","display_name":"Qwen3.6 Plus","source_family_id":"coding_plan_cn","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"qwen3.7-plus","display_name":"Qwen3.7 Plus","source_family_id":"coding_plan_cn","request_modalities":["text"],"response_modalities":["text"],"context_window":1000000}
+  ]
+}

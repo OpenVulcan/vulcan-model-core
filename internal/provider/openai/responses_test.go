@@ -149,6 +149,44 @@ func TestResponsesDriverRejectsNonAPIKeyCredentialBeforeNetwork(t *testing.T) {
 	}
 }
 
+// recordingResponsesAdapter is a minimal provider adapter used to verify constructor wiring.
+// recordingResponsesAdapter 是用于验证构造器接线的最小供应商适配器。
+type recordingResponsesAdapter struct{}
+
+// Adapt marks the projected copy with an explicit no-store decision.
+// Adapt 为投影副本标记明确的不留存决策。
+func (a *recordingResponsesAdapter) Adapt(_ context.Context, _ provider.ExecutionRequest, request *responsesprofile.Request) ([]transport.Header, error) {
+	if a == nil || request == nil {
+		return nil, errors.New("invalid recording Responses adapter")
+	}
+	// store is the explicit fixture value expected from the adapter.
+	// store 是适配器预期设置的显式夹具值。
+	store := false
+	request.Store = &store
+	return nil, nil
+}
+
+// TestBearerResponsesDriverAtPathValidatesClosedWireShape verifies normalized provider paths and Bearer-compatible credential types.
+// TestBearerResponsesDriverAtPathValidatesClosedWireShape 验证规范化供应商路径与 Bearer 兼容凭据类型。
+func TestBearerResponsesDriverAtPathValidatesClosedWireShape(t *testing.T) {
+	client, errClient := transport.NewClient(http.DefaultClient, secret.NewMemoryStore(), transport.RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	adapter := &recordingResponsesAdapter{}
+	if _, errDriver := NewBearerResponsesDriverAtPathWithRequestAdapter("definition-1", client, openAIResponsesCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey}, "/compatible-mode/v1/responses", adapter); errDriver != nil {
+		t.Fatalf("valid constructor error = %v", errDriver)
+	}
+	for _, invalidPath := range []string{"compatible-mode/v1/responses", "/compatible-mode/../responses", "/compatible-mode/v1/responses?debug=true", "/compatible-mode/v1/chat/completions"} {
+		if _, errDriver := NewBearerResponsesDriverAtPathWithRequestAdapter("definition-1", client, openAIResponsesCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey}, invalidPath, adapter); !errors.Is(errDriver, ErrInvalidResponsesDriver) {
+			t.Fatalf("path %q error = %v, want ErrInvalidResponsesDriver", invalidPath, errDriver)
+		}
+	}
+	if _, errDriver := NewBearerResponsesDriverAtPathWithRequestAdapter("definition-1", client, openAIResponsesCapabilities(), []providerconfig.AuthMethodType{providerconfig.AuthMethodServiceAccount}, "/compatible-mode/v1/responses", adapter); !errors.Is(errDriver, ErrInvalidResponsesDriver) {
+		t.Fatalf("service-account constructor error = %v, want ErrInvalidResponsesDriver", errDriver)
+	}
+}
+
 // writeResponsesSSE writes one valid typed Responses stream event using the SSE framing consumed by the driver.
 // writeResponsesSSE 使用 Driver 消费的 SSE 分帧写入一个有效类型化 Responses 流事件。
 func writeResponsesSSE(t *testing.T, writer io.Writer, event responsesprofile.StreamEvent) {

@@ -8,8 +8,8 @@
     "protocol_version": {"const": "1.0"},
     "request_id": {"type": "string", "minLength": 1},
     "provider_instance_id": {"type": "string", "minLength": 1},
-    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "music.generate", "music.cover.prepare", "music.cover"]},
-    "required_context_tokens": {"type": "integer", "minimum": 0},
+    "operation": {"enum": ["conversation.respond", "media.analyze", "image.generate", "image.edit", "video.generate", "video.edit", "video.extend", "speech.synthesize", "speech.transcribe", "embedding.create", "rerank.documents", "search.web", "web.extract", "music.generate", "music.cover.prepare", "music.cover"]},
+    "required_context_tokens": {"type": "integer", "minimum": 0, "description": "Minimum shared capacity required for input, reasoning, and reserved output."},
     "required_max_output_tokens": {"type": "integer", "minimum": 0},
     "required_input_modalities": {"type": "array", "uniqueItems": true, "items": {"enum": ["text", "image", "audio", "video", "file"]}},
     "required_output_modalities": {"type": "array", "uniqueItems": true, "items": {"enum": ["text", "image", "audio", "video", "file"]}},
@@ -20,7 +20,7 @@
   },
   "allOf": [
     {
-      "if": {"properties": {"operation": {"const": "search.web"}}, "required": ["operation"]},
+      "if": {"properties": {"operation": {"enum": ["search.web", "web.extract"]}}, "required": ["operation"]},
       "then": {
         "not": {
           "anyOf": [

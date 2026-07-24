@@ -12,6 +12,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
@@ -372,8 +373,184 @@ func validContinuationInvalidationReason(reason ContinuationInvalidationReason) 
 	return reason == ContinuationInvalidatedExpired || reason == ContinuationInvalidatedTargetUnavailable || reason == ContinuationInvalidatedProviderRejected
 }
 
-// Result contains the operation-specific canonical result currently produced by registered drivers.
-// Result 包含当前注册 Driver 生成的操作特定规范结果。
+// ModelToolPlanEntry freezes one requested standard tool and its exact execution backend.
+// ModelToolPlanEntry 冻结一个请求的标准工具及其精确执行后端。
+type ModelToolPlanEntry struct {
+	// Kind identifies the standard model tool.
+	// Kind 标识标准模型工具。
+	Kind vcp.StandardModelToolKind `json:"kind"`
+	// Mode identifies disabled, native, or Router execution.
+	// Mode 标识禁用、原生或 Router 执行。
+	Mode vcp.ModelToolMode `json:"mode"`
+	// RouterBindingID identifies the selected administrator policy without exposing its backend target.
+	// RouterBindingID 标识选定的管理员策略且不暴露其后端 Target。
+	RouterBindingID string `json:"router_binding_id,omitempty"`
+	// RouterBindingRevision identifies the frozen policy revision.
+	// RouterBindingRevision 标识冻结的策略修订号。
+	RouterBindingRevision uint64 `json:"router_binding_revision,omitempty"`
+	// RouterBinding privately contains the immutable Router policy and child target only for router_tool mode.
+	// RouterBinding 仅在 router_tool 模式下私有包含不可变 Router 策略与子 Target。
+	RouterBinding *routertool.ResolvedBinding `json:"-"`
+}
+
+// RouterExtensionPlanEntry freezes one requested Router enhancement and its exact child target.
+// RouterExtensionPlanEntry 冻结一个请求的 Router 增强能力及其精确子 Target。
+type RouterExtensionPlanEntry struct {
+	// ID identifies the closed operation-backed enhancement.
+	// ID 标识封闭且由操作支持的增强能力。
+	ID vcp.RouterExtensionKind `json:"id"`
+	// RouterBindingID identifies the selected administrator binding.
+	// RouterBindingID 标识选定的管理员绑定。
+	RouterBindingID string `json:"router_binding_id"`
+	// RouterBindingRevision freezes the selected binding revision.
+	// RouterBindingRevision 冻结选定的绑定修订号。
+	RouterBindingRevision uint64 `json:"router_binding_revision"`
+	// RouterBinding privately contains the immutable Router policy and child target.
+	// RouterBinding 私有包含不可变 Router 策略与子 Target。
+	RouterBinding *routertool.ResolvedBinding `json:"-"`
+}
+
+// ModelToolPlan freezes all model-tool decisions used by one durable execution.
+// ModelToolPlan 冻结一个持久执行使用的全部模型工具决策。
+type ModelToolPlan struct {
+	// CatalogRevision identifies the parent model catalog snapshot used for planning.
+	// CatalogRevision 标识用于规划的父模型目录快照。
+	CatalogRevision uint64 `json:"catalog_revision"`
+	// Standard contains requested standard tools in canonical request order.
+	// Standard 按规范请求顺序包含请求的标准工具。
+	Standard []ModelToolPlanEntry `json:"standard,omitempty"`
+	// Extra contains exact provider-native extra tool identifiers.
+	// Extra 包含精确供应商原生扩展工具标识。
+	Extra []string `json:"extra,omitempty"`
+	// RouterExtensions contains exact operation-backed Router enhancement identifiers.
+	// RouterExtensions 包含精确的操作支持 Router 增强工具标识。
+	RouterExtensions []RouterExtensionPlanEntry `json:"router_extensions,omitempty"`
+	// Diagnostics contains safe compatibility records produced while canonicalizing the accepted request.
+	// Diagnostics 包含规范化已接收请求时生成的安全兼容记录。
+	Diagnostics []vcp.ModelToolDiagnostic `json:"diagnostics,omitempty"`
+}
+
+// Public returns the non-secret VCP representation of this frozen execution plan.
+// Public 返回该冻结执行计划不含秘密的 VCP 表示。
+func (p ModelToolPlan) Public() vcp.ModelToolPlan {
+	public := vcp.ModelToolPlan{
+		CatalogRevision: p.CatalogRevision,
+		Extra:           append([]string(nil), p.Extra...),
+		Diagnostics:     append([]vcp.ModelToolDiagnostic(nil), p.Diagnostics...),
+	}
+	public.RouterExtensions = make([]vcp.RouterExtensionPlanEntry, 0, len(p.RouterExtensions))
+	for _, entry := range p.RouterExtensions {
+		public.RouterExtensions = append(public.RouterExtensions, vcp.RouterExtensionPlanEntry{
+			ID:                    entry.ID,
+			RouterBindingID:       entry.RouterBindingID,
+			RouterBindingRevision: entry.RouterBindingRevision,
+		})
+	}
+	public.Standard = make([]vcp.ModelToolPlanEntry, 0, len(p.Standard))
+	for _, entry := range p.Standard {
+		public.Standard = append(public.Standard, vcp.ModelToolPlanEntry{
+			Kind:                  entry.Kind,
+			Mode:                  entry.Mode,
+			RouterBindingID:       entry.RouterBindingID,
+			RouterBindingRevision: entry.RouterBindingRevision,
+		})
+	}
+	return public
+}
+
+// RouterToolLineage identifies one Router-managed child execution.
+// RouterToolLineage 标识一个由 Router 管理的子执行。
+type RouterToolLineage struct {
+	// ParentExecutionID identifies the model execution that requested the tool.
+	// ParentExecutionID 标识请求工具的模型执行。
+	ParentExecutionID string `json:"parent_execution_id"`
+	// ParentToolCallID identifies the exact model-produced tool call.
+	// ParentToolCallID 标识模型生成的精确工具调用。
+	ParentToolCallID string `json:"parent_tool_call_id"`
+	// ParentRound is the positive Router tool loop round.
+	// ParentRound 是正数的 Router 工具循环轮次。
+	ParentRound uint32 `json:"parent_round"`
+	// BindingID identifies the frozen Router tool binding.
+	// BindingID 标识冻结的 Router 工具绑定。
+	BindingID string `json:"binding_id"`
+}
+
+// Validate verifies an immutable model-tool plan against its parent target and accepted request.
+// Validate 根据父 Target 与已接收请求校验不可变模型工具计划。
+func (p ModelToolPlan) Validate(request vcp.ExecutionRequest, target resolve.Target) error {
+	noSelections := request.Operation != vcp.OperationConversationRespond || request.Payload.Conversation == nil || len(request.Payload.Conversation.ModelTools.Standard) == 0 && len(request.Payload.Conversation.ModelTools.Extra) == 0 && len(request.Payload.Conversation.ModelTools.RouterExtensions) == 0
+	if p.CatalogRevision == 0 && len(p.Standard) == 0 && len(p.Extra) == 0 && len(p.RouterExtensions) == 0 && len(p.Diagnostics) == 0 && noSelections {
+		return nil
+	}
+	if p.CatalogRevision != target.CatalogRevision {
+		return fmt.Errorf("%w: model tool plan catalog revision differs from target", ErrInvalidExecution)
+	}
+	if request.Operation != vcp.OperationConversationRespond {
+		if len(p.Standard) != 0 || len(p.Extra) != 0 || len(p.RouterExtensions) != 0 || len(p.Diagnostics) != 0 {
+			return fmt.Errorf("%w: non-conversation execution cannot carry a model tool plan", ErrInvalidExecution)
+		}
+		return nil
+	}
+	seenDiagnostics := make(map[vcp.ModelToolDiagnosticCode]struct{}, len(p.Diagnostics))
+	for _, diagnostic := range p.Diagnostics {
+		if !diagnostic.Code.Valid() {
+			return fmt.Errorf("%w: model tool plan contains an invalid diagnostic", ErrInvalidExecution)
+		}
+		if _, duplicate := seenDiagnostics[diagnostic.Code]; duplicate {
+			return fmt.Errorf("%w: model tool plan contains a duplicate diagnostic", ErrInvalidExecution)
+		}
+		seenDiagnostics[diagnostic.Code] = struct{}{}
+	}
+	operation := request.Payload.Conversation
+	if operation == nil || len(p.Standard) != len(operation.ModelTools.Standard) || len(p.Extra) != len(operation.ModelTools.Extra) || len(p.RouterExtensions) != len(operation.ModelTools.RouterExtensions) {
+		return fmt.Errorf("%w: model tool plan differs from accepted selections", ErrInvalidExecution)
+	}
+	for index, entry := range p.Standard {
+		selection := operation.ModelTools.Standard[index]
+		if entry.Kind != selection.Kind || entry.Mode != selection.Mode {
+			return fmt.Errorf("%w: model tool plan standard selection differs from request", ErrInvalidExecution)
+		}
+		if entry.Mode == vcp.ModelToolRouter {
+			if entry.RouterBinding == nil || entry.RouterBindingID != entry.RouterBinding.Binding.ID || entry.RouterBindingRevision != entry.RouterBinding.Binding.Revision || entry.RouterBinding.Binding.Kind != entry.Kind || entry.RouterBinding.Target.Operation == "" {
+				return fmt.Errorf("%w: Router tool plan entry is incomplete", ErrInvalidExecution)
+			}
+			if errBinding := entry.RouterBinding.Validate(); errBinding != nil {
+				return fmt.Errorf("%w: Router tool binding is invalid: %v", ErrInvalidExecution, errBinding)
+			}
+		} else if entry.RouterBinding != nil || entry.RouterBindingID != "" || entry.RouterBindingRevision != 0 {
+			return fmt.Errorf("%w: non-Router tool plan entry contains a Router binding", ErrInvalidExecution)
+		}
+	}
+	for index, id := range p.Extra {
+		if id != operation.ModelTools.Extra[index] {
+			return fmt.Errorf("%w: model tool plan extra selection differs from request", ErrInvalidExecution)
+		}
+	}
+	for index, entry := range p.RouterExtensions {
+		if entry.ID != operation.ModelTools.RouterExtensions[index] {
+			return fmt.Errorf("%w: model tool plan Router extension selection differs from request", ErrInvalidExecution)
+		}
+		if entry.RouterBinding == nil || entry.RouterBindingID != entry.RouterBinding.Binding.ID || entry.RouterBindingRevision != entry.RouterBinding.Binding.Revision || entry.RouterBinding.Binding.Extension != entry.ID || entry.RouterBinding.Target.Operation != entry.ID.Operation() {
+			return fmt.Errorf("%w: Router extension plan entry is incomplete", ErrInvalidExecution)
+		}
+		if errBinding := entry.RouterBinding.Validate(); errBinding != nil {
+			return fmt.Errorf("%w: Router extension binding is invalid: %v", ErrInvalidExecution, errBinding)
+		}
+	}
+	return nil
+}
+
+// Validate verifies complete Router child lineage without accepting partial parent relationships.
+// Validate 校验完整 Router 子执行谱系且不接受部分父级关系。
+func (l RouterToolLineage) Validate() error {
+	if strings.TrimSpace(l.ParentExecutionID) == "" || strings.TrimSpace(l.ParentToolCallID) == "" || l.ParentRound == 0 || strings.TrimSpace(l.BindingID) == "" {
+		return fmt.Errorf("%w: Router tool lineage is incomplete", ErrInvalidExecution)
+	}
+	return nil
+}
+
+// Result contains one closed successful execution result.
+// Result 包含一个封闭的成功执行结果。
 type Result struct {
 	// Conversation contains a completed conversational response.
 	// Conversation 包含已完成的会话响应。
@@ -396,6 +573,9 @@ type Result struct {
 	// Transcript contains one complete typed non-realtime recognition result.
 	// Transcript 包含一个完整的类型化非实时识别结果。
 	Transcript *vcp.Transcript `json:"transcript,omitempty"`
+	// Transcriptions contains ordered resource-owned results for batch recognition.
+	// Transcriptions 包含批量识别的有序且归属资源的结果。
+	Transcriptions []vcp.TranscriptionResult `json:"transcriptions,omitempty"`
 	// MusicCoverPreparation contains one public Router-owned cover preparation result.
 	// MusicCoverPreparation 包含一个公开的 Router 所有翻唱准备结果。
 	MusicCoverPreparation *vcp.MusicCoverPreparation `json:"music_cover_preparation,omitempty"`
@@ -431,6 +611,15 @@ type Record struct {
 	// Target is the private immutable provider target snapshot.
 	// Target 是私有不可变供应商 Target 快照。
 	Target resolve.Target `json:"-"`
+	// ModelToolPlan is the immutable standard and extra tool plan accepted with the request.
+	// ModelToolPlan 是随请求接收的不可变标准及扩展工具计划。
+	ModelToolPlan ModelToolPlan `json:"model_tool_plan"`
+	// RouterToolLineage is present only for a Router-created child service execution.
+	// RouterToolLineage 仅在 Router 创建的子服务执行中存在。
+	RouterToolLineage *RouterToolLineage `json:"router_tool_lineage,omitempty"`
+	// CompletedRouterToolRounds counts parent model rounds whose child results were durably committed.
+	// CompletedRouterToolRounds 统计子结果已经持久提交的父模型工具轮次。
+	CompletedRouterToolRounds uint32 `json:"-"`
 	// Status is the current durable lifecycle state.
 	// Status 是当前持久化生命周期状态。
 	Status Status `json:"status"`
@@ -567,7 +756,64 @@ const (
 	// EventProviderSemantic wraps one already typed VCP conversation event without flattening its payload.
 	// EventProviderSemantic 包装一个已经类型化的 VCP 会话事件且不扁平化其载荷。
 	EventProviderSemantic EventType = "provider.semantic"
+	// EventModelToolLifecycle records one safe parent-visible model-tool transition.
+	// EventModelToolLifecycle 记录一个父执行可见且安全的模型工具转换。
+	EventModelToolLifecycle EventType = "model_tool.lifecycle"
 )
+
+// ModelToolEventStage identifies one closed parent execution transition for an enabled model tool.
+// ModelToolEventStage 标识一个已启用模型工具在父执行中的封闭转换。
+type ModelToolEventStage string
+
+const (
+	// ModelToolStageEnabled records that one requested tool passed admission validation.
+	// ModelToolStageEnabled 记录一个请求工具已经通过接收校验。
+	ModelToolStageEnabled ModelToolEventStage = "enabled"
+	// ModelToolStageModeFrozen records the immutable native or Router execution decision.
+	// ModelToolStageModeFrozen 记录不可变的原生或 Router 执行决策。
+	ModelToolStageModeFrozen ModelToolEventStage = "mode_frozen"
+	// ModelToolStageRouterCallStarted records one provider-authored Router tool call before child execution.
+	// ModelToolStageRouterCallStarted 记录子执行前一个由供应商生成的 Router 工具调用。
+	ModelToolStageRouterCallStarted ModelToolEventStage = "router_call_started"
+	// ModelToolStageChildCreated records the opaque child execution relationship.
+	// ModelToolStageChildCreated 记录不透明的子执行关系。
+	ModelToolStageChildCreated ModelToolEventStage = "child_created"
+	// ModelToolStageChildCompleted records successful child completion.
+	// ModelToolStageChildCompleted 记录子执行成功完成。
+	ModelToolStageChildCompleted ModelToolEventStage = "child_completed"
+	// ModelToolStageChildFailed records a failed child attempt without provider-private error text.
+	// ModelToolStageChildFailed 记录失败的子执行尝试且不包含供应商私有错误正文。
+	ModelToolStageChildFailed ModelToolEventStage = "child_failed"
+	// ModelToolStageResultInjected records safe normalized result insertion into the parent context.
+	// ModelToolStageResultInjected 记录安全归一结果已经写入父执行上下文。
+	ModelToolStageResultInjected ModelToolEventStage = "result_injected"
+	// ModelToolStageParentResumed records that the same parent model will continue after a completed Router round.
+	// ModelToolStageParentResumed 记录同一个父模型将在 Router 轮次完成后继续执行。
+	ModelToolStageParentResumed ModelToolEventStage = "parent_resumed"
+)
+
+// ModelToolEvent contains only safe identifiers required to audit one parent tool transition.
+// ModelToolEvent 仅包含审计一个父执行工具转换所需的安全标识。
+type ModelToolEvent struct {
+	// ToolID identifies the public standard, extra, or Router extension tool.
+	// ToolID 标识公开标准、额外或 Router 增强工具。
+	ToolID string `json:"tool_id"`
+	// Stage identifies the closed lifecycle transition.
+	// Stage 标识封闭生命周期转换。
+	Stage ModelToolEventStage `json:"stage"`
+	// Mode identifies the frozen implementation source.
+	// Mode 标识冻结的实现来源。
+	Mode vcp.ModelToolMode `json:"mode"`
+	// ToolCallID identifies one provider-authored call without exposing arguments.
+	// ToolCallID 标识一个供应商生成的调用且不暴露参数。
+	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ChildExecutionID identifies one opaque Router child execution.
+	// ChildExecutionID 标识一个不透明 Router 子执行。
+	ChildExecutionID string `json:"child_execution_id,omitempty"`
+	// Round is the positive Router loop round for call-scoped stages.
+	// Round 是调用作用域阶段对应的正数 Router 循环轮次。
+	Round uint32 `json:"round,omitempty"`
+}
 
 // LifecycleEvent contains an exact status transition payload.
 // LifecycleEvent 包含精确状态转换载荷。
@@ -725,6 +971,9 @@ type Event struct {
 	// ProviderEvent contains one typed provider conversation event.
 	// ProviderEvent 包含一个类型化供应商会话事件。
 	ProviderEvent *vcp.Event `json:"provider_event,omitempty"`
+	// ModelTool contains one safe parent-visible model-tool transition.
+	// ModelTool 包含一个父执行可见且安全的模型工具转换。
+	ModelTool *ModelToolEvent `json:"model_tool,omitempty"`
 	// Progress contains one real provider progress observation.
 	// Progress 包含一个真实供应商进度观测。
 	Progress *ProgressEvent `json:"progress,omitempty"`
@@ -766,7 +1015,7 @@ func (e Event) Validate() error {
 	// payloadCount enforces a closed exact-one union across every semantic payload family.
 	// payloadCount 在每个语义载荷类别之间强制封闭唯一联合体。
 	payloadCount := 0
-	for _, present := range []bool{e.Lifecycle != nil, e.Attempt != nil, e.Retry != nil, e.ProviderEvent != nil, e.Progress != nil, e.Resource != nil, e.Transcript != nil, e.Embedding != nil, e.Rerank != nil, e.SearchQuery != nil, e.SearchResult != nil, e.SearchAnswer != nil, e.Citation != nil, e.Usage != nil} {
+	for _, present := range []bool{e.Lifecycle != nil, e.Attempt != nil, e.Retry != nil, e.ProviderEvent != nil, e.ModelTool != nil, e.Progress != nil, e.Resource != nil, e.Transcript != nil, e.Embedding != nil, e.Rerank != nil, e.SearchQuery != nil, e.SearchResult != nil, e.SearchAnswer != nil, e.Citation != nil, e.Usage != nil} {
 		if present {
 			payloadCount++
 		}
@@ -780,6 +1029,12 @@ func (e Event) Validate() error {
 		}
 		if errProviderEvent := e.ProviderEvent.Validate(); errProviderEvent != nil {
 			return fmt.Errorf("%w: provider event is invalid: %v", ErrInvalidExecution, errProviderEvent)
+		}
+		return nil
+	}
+	if e.Type == EventModelToolLifecycle {
+		if e.ModelTool == nil || !validModelToolEvent(*e.ModelTool) {
+			return fmt.Errorf("%w: model tool event is invalid", ErrInvalidExecution)
 		}
 		return nil
 	}
@@ -876,6 +1131,43 @@ func (e Event) Validate() error {
 	return nil
 }
 
+// validModelToolEvent verifies one closed stage without accepting private tool arguments or provider details.
+// validModelToolEvent 校验一个封闭阶段且不接受私有工具参数或供应商详情。
+func validModelToolEvent(event ModelToolEvent) bool {
+	if !vcp.ValidModelToolID(event.ToolID) || !event.Mode.Valid() {
+		return false
+	}
+	callScoped := event.Stage == ModelToolStageRouterCallStarted || event.Stage == ModelToolStageChildCreated || event.Stage == ModelToolStageChildCompleted || event.Stage == ModelToolStageChildFailed || event.Stage == ModelToolStageResultInjected || event.Stage == ModelToolStageParentResumed
+	if event.Stage == ModelToolStageEnabled || event.Stage == ModelToolStageModeFrozen {
+		return event.ToolCallID == "" && event.ChildExecutionID == "" && event.Round == 0
+	}
+	if !callScoped || event.Mode != vcp.ModelToolRouter || strings.TrimSpace(event.ToolCallID) == "" || event.Round == 0 {
+		return false
+	}
+	if event.Stage == ModelToolStageRouterCallStarted {
+		return event.ChildExecutionID == ""
+	}
+	if event.Stage == ModelToolStageChildFailed {
+		return event.ChildExecutionID == "" || validModelToolChildExecutionID(event.ChildExecutionID)
+	}
+	return validModelToolChildExecutionID(event.ChildExecutionID)
+}
+
+// validModelToolChildExecutionID verifies the opaque Router execution identifier shape published by the event schema.
+// validModelToolChildExecutionID 校验事件 Schema 公开的不透明 Router 执行标识格式。
+func validModelToolChildExecutionID(value string) bool {
+	if len(value) != 36 || !strings.HasPrefix(value, "exe_") {
+		return false
+	}
+	for _, character := range value[4:] {
+		if character >= '0' && character <= '9' || character >= 'a' && character <= 'f' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
 // validProgress verifies only internally consistent provider-reported progress facts.
 // validProgress 仅校验内部一致的供应商报告进度事实。
 func validProgress(progress ProgressEvent) bool {
@@ -922,6 +1214,14 @@ func (r Record) Validate() error {
 	}
 	if r.Operation != r.Request.Operation || r.Target.Operation != r.Operation || r.Target.ProviderInstanceID == "" || r.Target.ExecutionProfileID == "" {
 		return fmt.Errorf("%w: request, operation, and target do not match", ErrInvalidExecution)
+	}
+	if errModelTools := r.ModelToolPlan.Validate(r.Request, r.Target); errModelTools != nil {
+		return errModelTools
+	}
+	if r.RouterToolLineage != nil {
+		if errLineage := r.RouterToolLineage.Validate(); errLineage != nil {
+			return errLineage
+		}
 	}
 	if (r.Status == StatusFailed) != (r.Failure != nil) {
 		return fmt.Errorf("%w: safe failure must exist only for failed execution", ErrInvalidExecution)

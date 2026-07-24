@@ -97,3 +97,38 @@ func TestControllerPersistsExactCredentialEndpointAndSharedScopes(t *testing.T) 
 		}
 	}
 }
+
+// TestControllerCredentialRefreshClearsOnlyCredentialScope verifies token refresh cannot erase unrelated provider evidence.
+// TestControllerCredentialRefreshClearsOnlyCredentialScope 验证 Token 刷新不会清除无关的供应商证据。
+func TestControllerCredentialRefreshClearsOnlyCredentialScope(t *testing.T) {
+	now := time.Date(2026, 7, 24, 4, 0, 0, 0, time.UTC)
+	store := routingstate.NewMemoryStore(now)
+	controller, _ := NewController(store)
+	target := resolve.Target{ProviderInstanceID: "pvi_refresh", CredentialID: "cred_refresh", EndpointID: "ep_refresh", ProviderModelID: "model_refresh"}
+	request := provider.ExecutionRequest{Binding: transport.Binding{Target: target, Credential: providerconfig.Credential{ID: target.CredentialID, ProviderInstanceID: target.ProviderInstanceID}}}
+	for _, classified := range []provider.ClassifiedError{
+		{Category: "authentication_failed", Scope: provider.ErrorScopeCredential, Action: provider.RetryOtherCredential, RuleID: "credential_failure"},
+		{Category: "transient", Scope: provider.ErrorScopeEndpoint, Action: provider.RetryOtherEndpoint, RuleID: "endpoint_failure"},
+		{Category: "quota_exhausted", Scope: provider.ErrorScopeModel, Action: provider.RetryOtherCredential, RuleID: "model_failure"},
+	} {
+		if errFailure := controller.RecordFailure(context.Background(), request, classified, now); errFailure != nil {
+			t.Fatalf("RecordFailure(%s) error = %v", classified.Scope, errFailure)
+		}
+	}
+	refreshedAt := now.Add(time.Minute)
+	if errRefresh := controller.RecordCredentialRefreshSuccess(context.Background(), target.ProviderInstanceID, target.CredentialID, refreshedAt); errRefresh != nil {
+		t.Fatalf("RecordCredentialRefreshSuccess() error = %v", errRefresh)
+	}
+	credentialState, errCredential := store.GetRuntimeScopeState(context.Background(), target.ProviderInstanceID, routingstate.ScopeCredential, target.CredentialID)
+	if errCredential != nil || credentialState.Status != routingstate.ModelReady || credentialState.CoolingUntil != nil || credentialState.FailureCategory != "" || credentialState.LastSuccessAt == nil || !credentialState.LastSuccessAt.Equal(refreshedAt) {
+		t.Fatalf("credential state=%+v error=%v", credentialState, errCredential)
+	}
+	endpointState, errEndpoint := store.GetRuntimeScopeState(context.Background(), target.ProviderInstanceID, routingstate.ScopeEndpoint, target.EndpointID)
+	if errEndpoint != nil || endpointState.Status != routingstate.ModelCooling {
+		t.Fatalf("endpoint state=%+v error=%v", endpointState, errEndpoint)
+	}
+	modelState, errModel := store.GetCredentialModelState(context.Background(), target.ProviderInstanceID, target.CredentialID, target.ProviderModelID)
+	if errModel != nil || modelState.Status != routingstate.ModelCooling {
+		t.Fatalf("model state=%+v error=%v", modelState, errModel)
+	}
+}

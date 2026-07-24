@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "product": "token_plan_team",
+  "console_site": "international",
+  "region": "ap_southeast_1",
+  "channel": "openai_chat",
+  "source_api": "static:official-token-plan-team-global@2026-07-23",
+  "source_revision": "4029e18ccb6eb16d8bb43f5a4926cb0a4c61bb245b48614c506ffd435e5ed689",
+  "observed_at": "2026-07-23T00:00:00Z",
+  "family_total": 18,
+  "record_total": 18,
+  "models": [
+    {"model_id":"MiniMax-M2.5","display_name":"MiniMax M2.5","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":192000},
+    {"model_id":"deepseek-v3.2","display_name":"DeepSeek V3.2","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":128000},
+    {"model_id":"deepseek-v4-flash","display_name":"DeepSeek V4 Flash","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"deepseek-v4-pro","display_name":"DeepSeek V4 Pro","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"glm-5","display_name":"GLM-5","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":198000},
+    {"model_id":"glm-5.1","display_name":"GLM-5.1","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":198000},
+    {"model_id":"glm-5.2","display_name":"GLM-5.2","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":198000},
+    {"model_id":"kimi-k2.5","display_name":"Kimi K2.5","source_family_id":"token_plan_team_global","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":256000},
+    {"model_id":"kimi-k2.6","display_name":"Kimi K2.6","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":256000},
+    {"model_id":"kimi-k2.7-code","display_name":"Kimi K2.7 Code","source_family_id":"token_plan_team_global","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":256000},
+    {"model_id":"qwen-image-2.0","display_name":"Qwen Image 2.0","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["image"]},
+    {"model_id":"qwen-image-2.0-pro","display_name":"Qwen Image 2.0 Pro","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["image"]},
+    {"model_id":"qwen3.6-flash","display_name":"Qwen3.6 Flash","source_family_id":"token_plan_team_global","request_modalities":["image","text"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"qwen3.6-plus","display_name":"Qwen3.6 Plus","source_family_id":"token_plan_team_global","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"qwen3.7-max","display_name":"Qwen3.7 Max","source_family_id":"token_plan_team_global","request_modalities":["text"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"qwen3.7-plus","display_name":"Qwen3.7 Plus","source_family_id":"token_plan_team_global","request_modalities":["image","text","video"],"response_modalities":["text"],"context_window":1000000},
+    {"model_id":"wan2.7-image","display_name":"Wan 2.7 Image","source_family_id":"token_plan_team_global","request_modalities":["image","text"],"response_modalities":["image"]},
+    {"model_id":"wan2.7-image-pro","display_name":"Wan 2.7 Image Pro","source_family_id":"token_plan_team_global","request_modalities":["image","text"],"response_modalities":["image"]}
+  ]
+}

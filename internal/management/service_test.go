@@ -2,10 +2,7 @@ package management
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
-	"net/http"
-	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -15,6 +12,7 @@ import (
 	protocolresponses "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // onboardingDeleteFailureStore simulates a secret compensation failure after a successful write.
@@ -26,135 +24,6 @@ type onboardingDeleteFailureStore struct {
 	// deleteError is returned for every compensation deletion.
 	// deleteError 在每次补偿删除时返回。
 	deleteError error
-}
-
-// TestDiscoverCustomProviderModelsUsesExplicitCredential verifies standard discovery neither guesses an account nor loses known model metadata.
-// TestDiscoverCustomProviderModelsUsesExplicitCredential 验证标准发现既不猜测账号也不丢失已知模型元数据。
-func TestDiscoverCustomProviderModelsUsesExplicitCredential(t *testing.T) {
-	ctx := context.Background()
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		if request.Method != http.MethodGet || request.URL.Path != "/v1/models" || request.Header.Get("Authorization") != "Bearer discovery-secret" {
-			t.Fatalf("unexpected discovery request method=%s path=%s authorization=%q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
-		}
-		writer.Header().Set("Content-Type", "application/json")
-		_, _ = writer.Write([]byte(`{"data":[{"id":"known-model","object":"model"},{"id":"new-model","owned_by":"provider"}]}`))
-	}))
-	defer server.Close()
-	service, _, _ := managementTestService(t)
-	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
-		ID: "custom_discovery", DisplayName: "Discovery", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
-	})
-	if errDefinition != nil {
-		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
-	}
-	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
-		DefinitionID: definition.ID, Handle: "discovery", DisplayName: "Discovery", BaseURL: server.URL + "/v1",
-		InitialModel: &InitialProviderModelInput{UpstreamModelID: "known-model", DisplayName: "Known Model", ContextWindow: 131072, ToolCalling: catalog.CapabilityNative},
-	})
-	if errConfigure != nil {
-		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
-	}
-	attachment, errAttach := service.AttachCredential(ctx, AddCredentialInput{
-		ProviderInstanceID: configured.Configuration.Instance.ID, AuthMethodID: "default", Label: "Discovery Key", Secret: []byte("discovery-secret"),
-	})
-	if errAttach != nil {
-		t.Fatalf("AttachCredential() error = %v", errAttach)
-	}
-	configuredAdditional, errAdditional := service.SaveCustomProviderAdditionalParameters(ctx, configured.Configuration.Instance.ID, catalog.AdditionalPayloadProjection{Default: []catalog.PayloadParameter{{Path: "temperature", Value: json.RawMessage(`0.7`)}}})
-	if errAdditional != nil {
-		t.Fatalf("SaveCustomProviderAdditionalParameters() error = %v", errAdditional)
-	}
-	if len(configuredAdditional.DefaultAdditionalParameters.Default) != 1 {
-		t.Fatalf("configured provider additional parameters = %#v", configuredAdditional.DefaultAdditionalParameters)
-	}
-	discovered, errDiscover := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
-	if errDiscover != nil {
-		t.Fatalf("DiscoverCustomProviderModels() error = %v", errDiscover)
-	}
-	if len(discovered.Models) != 2 || discovered.Models[0].DisplayName != "Known Model" || discovered.Models[1].Source != catalog.ModelSourceProviderAPI {
-		t.Fatalf("discovered models = %#v", discovered.Models)
-	}
-	if discovered.Offerings[0].Capabilities.ToolCalling != catalog.CapabilityNative || discovered.Offerings[0].Capabilities.Reasoning != catalog.CapabilityNative || len(discovered.Offerings[0].RequestProjection.Reasoning.Effort) == 0 {
-		t.Fatalf("default custom capabilities or reasoning projection = %#v", discovered.Offerings[0])
-	}
-	if len(discovered.DefaultAdditionalParameters.Default) != 1 {
-		t.Fatalf("discovery discarded provider additional parameters = %#v", discovered.DefaultAdditionalParameters)
-	}
-	edited, errEdit := service.SaveCustomProviderModels(ctx, configured.Configuration.Instance.ID, []InitialProviderModelInput{
-		{UpstreamModelID: "known-model", DisplayName: "Renamed Model", ContextWindow: 262144, MaxOutputTokens: 16384, ToolCalling: catalog.CapabilityUnsupported, Reasoning: catalog.CapabilityNative},
-	})
-	if errEdit != nil {
-		t.Fatalf("SaveCustomProviderModels() error = %v", errEdit)
-	}
-	if len(edited.Models) != 1 || edited.Models[0].DisplayName != "Renamed Model" || edited.Offerings[0].Capabilities.Tokens.ContextWindow.Value != 262144 || edited.Offerings[0].Capabilities.Reasoning != catalog.CapabilityNative {
-		t.Fatalf("edited custom models = %#v offerings=%#v", edited.Models, edited.Offerings)
-	}
-	if len(edited.DefaultAdditionalParameters.Default) != 1 {
-		t.Fatalf("model editing discarded provider additional parameters = %#v", edited.DefaultAdditionalParameters)
-	}
-}
-
-// TestDiscoverCustomProviderModelsMaintainsDynamicLastGood verifies ETag reuse, deletion tombstones, and stale failure preservation.
-// TestDiscoverCustomProviderModelsMaintainsDynamicLastGood 验证 ETag 复用、删除墓碑与失败后的过期快照保留。
-func TestDiscoverCustomProviderModelsMaintainsDynamicLastGood(t *testing.T) {
-	ctx := context.Background()
-	requestCount := 0
-	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
-		requestCount++
-		switch requestCount {
-		case 1:
-			writer.Header().Set("ETag", `"models-v1"`)
-			_, _ = writer.Write([]byte(`{"data":[{"id":"retained-model"},{"id":"removed-model"}]}`))
-		case 2:
-			if request.Header.Get("If-None-Match") != `"models-v1"` {
-				t.Fatalf("If-None-Match = %q", request.Header.Get("If-None-Match"))
-			}
-			writer.WriteHeader(http.StatusNotModified)
-		case 3:
-			writer.Header().Set("ETag", `"models-v2"`)
-			_, _ = writer.Write([]byte(`{"data":[{"id":"retained-model"}]}`))
-		default:
-			writer.WriteHeader(http.StatusServiceUnavailable)
-		}
-	}))
-	defer server.Close()
-	service, _, _ := managementTestService(t)
-	now := time.Date(2026, time.July, 21, 22, 0, 0, 0, time.UTC)
-	service.now = func() time.Time { return now }
-	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{ID: "custom_dynamic_discovery", DisplayName: "Dynamic Discovery", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer})
-	if errDefinition != nil {
-		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
-	}
-	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{DefinitionID: definition.ID, Handle: "dynamic-discovery", DisplayName: "Dynamic Discovery", BaseURL: server.URL + "/v1", InitialModel: &InitialProviderModelInput{UpstreamModelID: "retained-model", DisplayName: "Retained Model"}})
-	if errConfigure != nil {
-		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
-	}
-	attachment, errAttach := service.AttachCredential(ctx, AddCredentialInput{ProviderInstanceID: configured.Configuration.Instance.ID, AuthMethodID: "default", Label: "Discovery Key", Secret: []byte("discovery-secret")})
-	if errAttach != nil {
-		t.Fatalf("AttachCredential() error = %v", errAttach)
-	}
-	first, errFirst := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
-	if errFirst != nil || first.Dynamic == nil || first.Dynamic.ETag != `"models-v1"` || first.Dynamic.Status != catalog.CatalogRefreshFresh || len(first.Models) != 2 {
-		t.Fatalf("first discovery = %+v, error = %v", first, errFirst)
-	}
-	now = now.Add(time.Minute)
-	notModified, errNotModified := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
-	if errNotModified != nil || notModified.Dynamic == nil || notModified.Dynamic.RefreshedAt != now || notModified.Revision != first.Revision+1 {
-		t.Fatalf("not-modified discovery = %+v, error = %v", notModified, errNotModified)
-	}
-	now = now.Add(time.Minute)
-	replaced, errReplaced := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID)
-	if errReplaced != nil || replaced.Dynamic == nil || replaced.Dynamic.ETag != `"models-v2"` || len(replaced.Models) != 1 || len(replaced.Dynamic.Tombstones) != 1 || replaced.Dynamic.Tombstones[0].Kind != "model" {
-		t.Fatalf("replacement discovery = %+v, error = %v", replaced, errReplaced)
-	}
-	now = now.Add(time.Minute)
-	if _, errFailure := service.DiscoverCustomProviderModels(ctx, configured.Configuration.Instance.ID, attachment.Credential.ID); errFailure == nil {
-		t.Fatal("failed discovery unexpectedly succeeded")
-	}
-	stale, errStale := service.catalogs.Get(ctx, configured.Configuration.Instance.ID)
-	if errStale != nil || stale.Dynamic == nil || stale.Dynamic.Status != catalog.CatalogRefreshStale || stale.Dynamic.FailureCode != "provider_discovery_rejected" || len(stale.Models) != 1 || len(stale.Dynamic.Tombstones) != 1 {
-		t.Fatalf("stale last-good = %+v, error = %v", stale, errStale)
-	}
 }
 
 // Delete returns the configured compensation failure without removing the secret.
@@ -175,7 +44,6 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 		UserConfigurable:           true,
 		CustomDefinitionCompatible: true,
 		RuntimeReady:               true,
-		ModelDiscovery:             providerconfig.SupportUnsupported,
 		AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
@@ -201,7 +69,6 @@ func managementTestService(t *testing.T) (*Service, *providerconfig.MemoryStore,
 			MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery:    providerconfig.SupportUnsupported,
 			PlanReader:        providerconfig.SupportUnsupported,
 			EntitlementReader: providerconfig.SupportUnsupported,
 			AllowanceReader:   providerconfig.SupportUnsupported,
@@ -240,7 +107,7 @@ func TestConfigureProviderThenAttachCredentialSeparatesProviderAndAccountLifecyc
 	if errConfigure != nil {
 		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
 	}
-	if configured.Configuration.Instance.Status != providerconfig.LifecycleDraft || len(configured.Configuration.Endpoints) != 1 || len(configured.Catalog.Models) != 1 || !configured.Catalog.Offerings[0].Capabilities.Tokens.ContextWindow.Known || configured.Catalog.Offerings[0].Capabilities.Tokens.ContextWindow.Value != 131072 {
+	if configured.Configuration.Instance.Status != providerconfig.LifecycleDraft || len(configured.Configuration.Endpoints) != 1 || len(configured.Catalog.Models) != 1 || !configured.Catalog.Offerings[0].Capabilities.Tokens.ContextWindow.Known || configured.Catalog.Offerings[0].Capabilities.Tokens.ContextWindow.Value != 131072 || !configured.Catalog.Offerings[0].Capabilities.Delivery.Synchronous || !configured.Catalog.Offerings[0].Capabilities.Delivery.Streaming || configured.Catalog.Profiles[0].Operation != vcp.OperationConversationRespond || !configured.Catalog.Profiles[0].ProfileDriver || !configured.Catalog.Profiles[0].Capabilities.Delivery.Synchronous || !configured.Catalog.Profiles[0].Capabilities.Delivery.Streaming {
 		t.Fatalf("configured provider = %#v catalog=%#v", configured.Configuration, configured.Catalog)
 	}
 	credentials, errCredentials := configurations.ListCredentials(ctx, configured.Configuration.Instance.ID)

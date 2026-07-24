@@ -5,6 +5,21 @@ import (
 	"testing"
 )
 
+// TestOperationKindValidMatchesClosedOperationSet verifies the sole runtime operation registry.
+// TestOperationKindValidMatchesClosedOperationSet 验证唯一的运行时操作注册表。
+func TestOperationKindValidMatchesClosedOperationSet(t *testing.T) {
+	t.Parallel()
+	operations := []OperationKind{OperationConversationRespond, OperationMediaAnalyze, OperationImageGenerate, OperationImageEdit, OperationVideoGenerate, OperationVideoEdit, OperationVideoExtend, OperationSpeechSynthesize, OperationSpeechTranscribe, OperationEmbeddingCreate, OperationRerankDocuments, OperationSearchWeb, OperationWebExtract, OperationMusicGenerate, OperationMusicCoverPrepare, OperationMusicCover}
+	for _, operation := range operations {
+		if !operation.Valid() {
+			t.Fatalf("operation %q is not registered", operation)
+		}
+	}
+	if OperationKind("unknown.operation").Valid() {
+		t.Fatal("unknown operation unexpectedly belongs to the closed set")
+	}
+}
+
 // TestExecutionRequestRejectsTargetAndPayloadAmbiguity verifies the closed execution union.
 // TestExecutionRequestRejectsTargetAndPayloadAmbiguity 校验封闭执行联合体。
 func TestExecutionRequestRejectsTargetAndPayloadAmbiguity(t *testing.T) {
@@ -95,6 +110,22 @@ func TestWebSearchOperationValidatesPolicies(t *testing.T) {
 	}
 }
 
+// TestVideoReferenceVoiceRequiresExactRelatedInput verifies positional provider pairing becomes an explicit stable relation.
+// TestVideoReferenceVoiceRequiresExactRelatedInput 验证供应商位置配对会成为显式稳定关系。
+func TestVideoReferenceVoiceRequiresExactRelatedInput(t *testing.T) {
+	operation := VideoGenerateOperation{Prompt: "The subject speaks", Inputs: []MediaInput{
+		{ID: "subject", Kind: MediaImage, Role: MediaRoleReference, Resource: ResourceReference{ResourceID: "resource-subject"}},
+		{ID: "voice", Kind: MediaAudio, Role: MediaRoleReferenceVoice, Resource: ResourceReference{ResourceID: "resource-voice"}, RelatedInputID: "subject"},
+	}}
+	if errValidate := operation.Validate(); errValidate != nil {
+		t.Fatalf("Validate() error = %v", errValidate)
+	}
+	operation.Inputs[1].RelatedInputID = "missing"
+	if errValidate := operation.Validate(); errValidate == nil {
+		t.Fatal("expected dangling reference voice relation to fail")
+	}
+}
+
 // TestMediaOperationRequiresExplicitTaskInput verifies media-only task semantics.
 // TestMediaOperationRequiresExplicitTaskInput 校验仅媒体任务语义。
 func TestMediaOperationRequiresExplicitTaskInput(t *testing.T) {
@@ -139,6 +170,38 @@ func TestConversationOperationRequiresExplicitMediaRoleAndMediaOnlyIntent(t *tes
 	}
 }
 
+// TestConversationRequestProjectsNativeStandardSearchIntoCompatibilityTool verifies new callers reach reviewed provider adapters without creating duplicate legacy tools.
+// TestConversationRequestProjectsNativeStandardSearchIntoCompatibilityTool 验证新调用方可到达已审核供应商适配器且不会创建重复旧工具。
+func TestConversationRequestProjectsNativeStandardSearchIntoCompatibilityTool(t *testing.T) {
+	request := validConversationExecutionRequest()
+	request.Payload.Conversation.ModelTools.Standard = []StandardModelToolSelection{{Kind: StandardModelToolWebSearch, Mode: ModelToolNative}}
+	projected, errProject := request.ConversationRequest()
+	if errProject != nil {
+		t.Fatalf("ConversationRequest() error = %v", errProject)
+	}
+	if len(projected.Tools) != 1 || projected.Tools[0].Kind != ToolNativeWebSearch || projected.Tools[0].Name != string(StandardModelToolWebSearch) {
+		t.Fatalf("projected tools = %#v", projected.Tools)
+	}
+
+	request.Payload.Conversation.Tools = []ToolDefinition{{Kind: ToolNativeWebSearch, Name: "web_search"}}
+	projected, errProject = request.ConversationRequest()
+	if errProject != nil {
+		t.Fatalf("ConversationRequest() compatibility error = %v", errProject)
+	}
+	if len(projected.Tools) != 1 {
+		t.Fatalf("duplicate compatibility tools = %#v", projected.Tools)
+	}
+
+	request.Payload.Conversation.ToolPolicy.Choice = ToolChoiceNone
+	projected, errProject = request.ConversationRequest()
+	if errProject != nil {
+		t.Fatalf("ConversationRequest() disabled error = %v", errProject)
+	}
+	if len(projected.Tools) != 0 {
+		t.Fatalf("tool_policy none exposed tools to provider: %#v", projected.Tools)
+	}
+}
+
 // TestExecutionRequestRejectsNonPositiveOperationBudget verifies configured ceilings fail before routing.
 // TestExecutionRequestRejectsNonPositiveOperationBudget 验证已配置非正数上限在路由前失败。
 func TestExecutionRequestRejectsNonPositiveOperationBudget(t *testing.T) {
@@ -148,6 +211,58 @@ func TestExecutionRequestRejectsNonPositiveOperationBudget(t *testing.T) {
 	if errValidate := request.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
 		t.Fatalf("invalid operation budget error = %v, want ErrInvalidRequest", errValidate)
 	}
+}
+
+// TestConversationAudioOutputRequiresClosedStreamingShape verifies mixed audio cannot be inferred or combined with reasoning.
+// TestConversationAudioOutputRequiresClosedStreamingShape 验证混合音频不能被推断，也不能与思考组合。
+func TestConversationAudioOutputRequiresClosedStreamingShape(t *testing.T) {
+	request := validConversationExecutionRequest()
+	request.Stream = true
+	request.Payload.Conversation.GenerationPolicy.OutputModalities = []string{"text", "audio"}
+	request.Payload.Conversation.GenerationPolicy.AudioOutput = &ConversationAudioOutput{VoiceID: "Tina", OutputFormat: "wav"}
+	if errValidate := request.Validate(); errValidate != nil {
+		t.Fatalf("valid conversational audio failed validation: %v", errValidate)
+	}
+
+	nonStreaming := request
+	nonStreaming.Stream = false
+	if errValidate := nonStreaming.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("non-stream audio error = %v, want ErrInvalidRequest", errValidate)
+	}
+
+	missingModality := request
+	missingModality.Payload.Conversation = cloneConversationOperation(request.Payload.Conversation)
+	missingModality.Payload.Conversation.GenerationPolicy.OutputModalities = []string{"text"}
+	if errValidate := missingModality.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("missing audio modality error = %v, want ErrInvalidRequest", errValidate)
+	}
+
+	reasoning := request
+	reasoning.Payload.Conversation = cloneConversationOperation(request.Payload.Conversation)
+	reasoning.Payload.Conversation.ReasoningPolicy.Effort = "high"
+	if errValidate := reasoning.Validate(); !errors.Is(errValidate, ErrInvalidRequest) {
+		t.Fatalf("audio reasoning error = %v, want ErrInvalidRequest", errValidate)
+	}
+}
+
+// cloneConversationOperation isolates pointer-backed test policy mutations.
+// cloneConversationOperation 隔离测试中由指针承载的策略变更。
+func cloneConversationOperation(source *ConversationOperation) *ConversationOperation {
+	cloned := *source
+	if source.ReasoningPolicy.Enabled != nil {
+		enabled := *source.ReasoningPolicy.Enabled
+		cloned.ReasoningPolicy.Enabled = &enabled
+	}
+	if source.ReasoningPolicy.BudgetTokens != nil {
+		budget := *source.ReasoningPolicy.BudgetTokens
+		cloned.ReasoningPolicy.BudgetTokens = &budget
+	}
+	cloned.GenerationPolicy.OutputModalities = append([]string(nil), source.GenerationPolicy.OutputModalities...)
+	if source.GenerationPolicy.AudioOutput != nil {
+		audio := *source.GenerationPolicy.AudioOutput
+		cloned.GenerationPolicy.AudioOutput = &audio
+	}
+	return &cloned
 }
 
 // TestEveryOperationAcceptsOnlyItsOwnPayload verifies the complete public operation union with one valid and one mismatched case per operation.

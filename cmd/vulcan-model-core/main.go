@@ -23,6 +23,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/inputplan"
 	"github.com/OpenVulcan/vulcan-model-core/internal/management"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
+	provideralibaba "github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba"
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
@@ -35,6 +36,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/refresh"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resource"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimefeedback"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
@@ -204,6 +206,15 @@ func run(ctx context.Context, args []string) error {
 	if reconciledMiniMaxOrigins > 0 {
 		log.Printf("reconciled %d persisted MiniMax provider Origin(s)", reconciledMiniMaxOrigins)
 	}
+	// reconciledAlibabaCatalogs upgrades historical Alibaba snapshots to the complete explicit-policy baseline before any resolver or management query reads them.
+	// reconciledAlibabaCatalogs 在任何 Resolver 或管理查询读取历史 Alibaba 快照前，将其升级到完整的显式策略基线。
+	reconciledAlibabaCatalogs, errReconcileAlibabaCatalogs := management.ReconcileAlibabaSystemCatalogs(ctx, configurations, catalogs)
+	if errReconcileAlibabaCatalogs != nil {
+		return fmt.Errorf("reconcile persisted Alibaba system catalogs: %w", errReconcileAlibabaCatalogs)
+	}
+	if reconciledAlibabaCatalogs > 0 {
+		log.Printf("reconciled %d persisted Alibaba catalog(s) to the complete policy baseline", reconciledAlibabaCatalogs)
+	}
 	// reconciledTavilyCatalogs adds the typed Extract contract to historical Tavily snapshots before management discovery.
 	// reconciledTavilyCatalogs 在管理发现前为历史 Tavily 快照补充类型化 Extract 合同。
 	reconciledTavilyCatalogs, errReconcileTavilyCatalogs := management.ReconcileTavilyExtractCatalogs(ctx, configurations, catalogs)
@@ -221,6 +232,15 @@ func run(ctx context.Context, args []string) error {
 	}
 	if reconciledKimiCatalogs > 0 {
 		log.Printf("reconciled %d persisted Kimi catalog(s) to the single Chat protocol", reconciledKimiCatalogs)
+	}
+	// reconciledCustomCatalogs restores protocol-guaranteed synchronous and streaming modes omitted by historical custom model builders.
+	// reconciledCustomCatalogs 恢复历史自定义模型构建器遗漏的协议保证同步与流式模式。
+	reconciledCustomCatalogs, errReconcileCustomCatalogs := management.ReconcileCustomConversationCatalogs(ctx, configurations, catalogs)
+	if errReconcileCustomCatalogs != nil {
+		return fmt.Errorf("reconcile persisted custom provider delivery modes: %w", errReconcileCustomCatalogs)
+	}
+	if reconciledCustomCatalogs > 0 {
+		log.Printf("reconciled %d persisted custom provider catalog(s) with executable delivery modes", reconciledCustomCatalogs)
 	}
 	// reconciledCodexCatalogs removes historical unknown-plan privilege before any target can be resolved.
 	// reconciledCodexCatalogs 在任何 Target 可被解析前删除历史未知套餐权限。
@@ -255,9 +275,27 @@ func run(ctx context.Context, args []string) error {
 	if errMiniMaxFileUploader != nil {
 		return fmt.Errorf("create MiniMax file uploader: %w", errMiniMaxFileUploader)
 	}
-	// assetBindingCleaner deletes exact MiniMax provider files before local resource removal.
-	// assetBindingCleaner 在删除本地资源前删除精确 MiniMax 供应商文件。
-	assetBindingCleaner, errAssetBindingCleaner := resource.NewAssetBindingCleaner(assetBindings, secrets, miniMaxFileUploader)
+	// alibabaOSSDefinitionIDs is the exact CN set with verified temporary-upload request paths.
+	// alibabaOSSDefinitionIDs 是已验证临时上传请求路径的精确 CN 集合。
+	alibabaOSSDefinitionIDs := []string{bootstrap.AlibabaModelStudioCNDefinitionID, bootstrap.AlibabaTokenPlanPersonalCNDefinitionID}
+	// alibabaOSSUploader owns temporary 48-hour oss:// materializations for the proven CN products.
+	// alibabaOSSUploader 管理已证明 CN 产品的临时 48 小时 oss:// 物化结果。
+	alibabaOSSUploader, errAlibabaOSSUploader := provideralibaba.NewOSSUploader(configurations, secrets, &http.Client{Timeout: 5 * time.Minute}, alibabaOSSDefinitionIDs, provideralibaba.OSSUploaderOptions{})
+	if errAlibabaOSSUploader != nil {
+		return fmt.Errorf("create Alibaba OSS uploader: %w", errAlibabaOSSUploader)
+	}
+	// assetUploaders routes exact provider definitions without cross-provider fallback.
+	// assetUploaders 按精确供应商定义路由且不进行跨供应商回退。
+	assetUploaders, errAssetUploaders := resource.NewAssetUploaderRouter(
+		resource.AssetUploaderRoute{ProviderDefinitionIDs: []string{bootstrap.MiniMaxGlobalDefinitionID, bootstrap.MiniMaxCNDefinitionID}, Uploader: miniMaxFileUploader},
+		resource.AssetUploaderRoute{ProviderDefinitionIDs: alibabaOSSDefinitionIDs, Uploader: alibabaOSSUploader},
+	)
+	if errAssetUploaders != nil {
+		return fmt.Errorf("create provider asset uploader router: %w", errAssetUploaders)
+	}
+	// assetBindingCleaner dispatches exact provider cleanup before local resource removal.
+	// assetBindingCleaner 在删除本地资源前分派精确供应商清理。
+	assetBindingCleaner, errAssetBindingCleaner := resource.NewAssetBindingCleaner(assetBindings, secrets, assetUploaders)
 	if errAssetBindingCleaner != nil {
 		return fmt.Errorf("create provider asset binding cleaner: %w", errAssetBindingCleaner)
 	}
@@ -285,6 +323,18 @@ func run(ctx context.Context, args []string) error {
 	if errTargetResolver != nil {
 		return fmt.Errorf("create provider target resolver: %w", errTargetResolver)
 	}
+	// routerToolBindings persists explicit standard-tool service backends.
+	// routerToolBindings 持久化显式标准工具服务后端。
+	routerToolBindings, errRouterToolBindings := sqlitestore.NewRouterToolStore(database)
+	if errRouterToolBindings != nil {
+		return fmt.Errorf("create Router tool binding store: %w", errRouterToolBindings)
+	}
+	// routerToolResolver freezes one ready child target before parent execution admission.
+	// routerToolResolver 在父执行接收前冻结一个就绪子 Target。
+	routerToolResolver, errRouterToolResolver := routertool.NewResolver(routerToolBindings, targetResolver)
+	if errRouterToolResolver != nil {
+		return fmt.Errorf("create Router tool resolver: %w", errRouterToolResolver)
+	}
 	// inputPlanStore persists conditional media decisions across process restarts.
 	// inputPlanStore 跨进程重启持久化条件媒体决策。
 	inputPlanStore, errInputPlanStore := sqlitestore.NewInputPlanStore(database)
@@ -305,7 +355,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	// inputMaterializer realizes code-declared inline, direct URL, and registered provider-asset plans.
 	// inputMaterializer 实现代码声明的内联、直连 URL 与已注册供应商资产方案。
-	inputMaterializer, errInputMaterializer := resource.NewMaterializer(resourceService, assetBindings, secrets, miniMaxFileUploader, resource.MaterializerOptions{})
+	inputMaterializer, errInputMaterializer := resource.NewMaterializer(resourceService, assetBindings, secrets, assetUploaders, resource.MaterializerOptions{})
 	if errInputMaterializer != nil {
 		return fmt.Errorf("create input materializer: %w", errInputMaterializer)
 	}
@@ -732,7 +782,7 @@ func run(ctx context.Context, args []string) error {
 	}
 	// executions owns the durable public execution lifecycle and exact provider dispatch.
 	// executions 拥有持久化公共执行生命周期与精确供应商分派。
-	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway, RuntimeFeedback: runtimeFeedback, Leases: executionStore, LeaseTTL: 30 * time.Second})
+	executions, errExecutions := executioncore.NewService(executionStore, targetResolver, configurations, inputPlans, inputMaterializer, executionDrivers, executioncore.ServiceOptions{Retention: 24 * time.Hour, OutputResources: resourceGateway, RuntimeFeedback: runtimeFeedback, Leases: executionStore, LeaseTTL: 30 * time.Second, ModelTools: routerToolResolver})
 	if errExecutions != nil {
 		return fmt.Errorf("create execution service: %w", errExecutions)
 	}
@@ -755,40 +805,43 @@ func run(ctx context.Context, args []string) error {
 	// api exposes separated authenticated Vulcan management and call-plane routes.
 	// api 暴露相互隔离且经认证的 Vulcan 管理面和调用面路由。
 	api, errAPI := httpapi.NewWithControlPlane(executionDrivers, httpapi.ControlPlane{
-		Query:                   managementQueries,
-		Commands:                managementCommands,
-		ModelAccess:             modelAccessCommands,
-		CustomCatalogs:          customCatalogCommands,
-		MetadataRefresh:         metadataRefreshCoordinator,
-		Routing:                 routingManagement,
-		Protocols:               protocols,
-		APIKeys:                 controlConfiguration,
-		Auth:                    controlConfiguration,
-		Access:                  accessController,
-		CallIdentityVerifier:    callIdentityVerifier,
-		AccessDiagnostics:       accessController,
-		Resources:               resourceGateway,
-		InputPlans:              inputPlans,
-		Executions:              executions,
-		Preflight:               executions,
-		ResourceDiagnostics:     resourceService,
-		ExecutionDiagnostics:    executions,
-		CatalogChanges:          catalogs,
-		ProviderFileDiagnostics: miniMaxFileUploader,
-		Targets:                 targetResolver,
-		KimiDeviceFlows:         kimiDeviceFlows,
-		KimiTokens:              kimiTokens,
-		MiniMaxDeviceFlows:      miniMaxDeviceFlows,
-		MiniMaxTokens:           miniMaxTokens,
-		XAIDeviceFlows:          xaiDeviceFlows,
-		XAITokens:               xaiTokens,
-		CodexDeviceFlows:        codexDeviceFlows,
-		CodexOAuthFlows:         codexOAuthFlows,
-		CodexTokens:             codexTokens,
-		ClaudeOAuthFlows:        claudeOAuthFlows,
-		ClaudeTokens:            claudeTokens,
-		AntigravityOAuthFlows:   antigravityOAuthFlows,
-		AntigravityTokens:       antigravityTokens,
+		Query:                     managementQueries,
+		Commands:                  managementCommands,
+		ModelAccess:               modelAccessCommands,
+		CustomCatalogs:            customCatalogCommands,
+		MetadataRefresh:           metadataRefreshCoordinator,
+		Routing:                   routingManagement,
+		RouterTools:               routerToolBindings,
+		ModelToolAvailability:     routerToolResolver,
+		Protocols:                 protocols,
+		APIKeys:                   controlConfiguration,
+		Auth:                      controlConfiguration,
+		Access:                    accessController,
+		CallIdentityVerifier:      callIdentityVerifier,
+		AccessDiagnostics:         accessController,
+		Resources:                 resourceGateway,
+		InputPlans:                inputPlans,
+		Executions:                executions,
+		Preflight:                 executions,
+		ResourceDiagnostics:       resourceService,
+		ExecutionDiagnostics:      executions,
+		CatalogChanges:            catalogs,
+		ProviderFileDiagnostics:   miniMaxFileUploader,
+		Targets:                   targetResolver,
+		CredentialRefreshRecovery: runtimeFeedback,
+		KimiDeviceFlows:           kimiDeviceFlows,
+		KimiTokens:                kimiTokens,
+		MiniMaxDeviceFlows:        miniMaxDeviceFlows,
+		MiniMaxTokens:             miniMaxTokens,
+		XAIDeviceFlows:            xaiDeviceFlows,
+		XAITokens:                 xaiTokens,
+		CodexDeviceFlows:          codexDeviceFlows,
+		CodexOAuthFlows:           codexOAuthFlows,
+		CodexTokens:               codexTokens,
+		ClaudeOAuthFlows:          claudeOAuthFlows,
+		ClaudeTokens:              claudeTokens,
+		AntigravityOAuthFlows:     antigravityOAuthFlows,
+		AntigravityTokens:         antigravityTokens,
 	})
 	if errAPI != nil {
 		return fmt.Errorf("create HTTP API: %w", errAPI)

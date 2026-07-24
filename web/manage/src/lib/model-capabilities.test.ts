@@ -3,8 +3,10 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   capabilityLevelSchema,
   formatKnownLimit,
+  isCatalogRateLimitExpired,
   modelCapabilitiesSchema,
   modelCatalogSchema,
+  selectProfileRateLimits,
   testExtractService,
   testSearchService,
 } from "@/lib/model-capabilities";
@@ -54,6 +56,17 @@ function createCapabilitiesFixture() {
     parameters: [],
     parameter_rules: [],
     usage_metrics: [{ unit: "input_tokens", accuracy: "exact" }],
+    standard_tools: [{ kind: "web_search", native: true, requires: [] }],
+    extra_tools: [{
+      id: "code_interpreter",
+      display_name: "Code Interpreter",
+      description: "Executes provider-hosted code.",
+      input_modalities: ["text"],
+      output_modalities: ["text", "file"],
+      requires_standard: [],
+      requires_extra: [],
+    }],
+    hosted_tools: ["native_web_search"],
   } as const;
 }
 
@@ -64,6 +77,9 @@ describe("model capability schema", () => {
     expect(parsed.reasoning).toBe("unknown");
     expect(parsed.max_input_tokens).toEqual({ known: false });
     expect(parsed.media_inputs[0]?.level).toBe("conditional");
+    expect(parsed.standard_tools[0]?.kind).toBe("web_search");
+    expect(parsed.extra_tools[0]?.id).toBe("code_interpreter");
+    expect(parsed.hosted_tools).toEqual(["native_web_search"]);
   });
 
   it("rejects contradictory known-limit objects", () => {
@@ -78,6 +94,21 @@ describe("model capability schema", () => {
 
   it("rejects unrecognized support levels", () => {
     expect(() => capabilityLevelSchema.parse("assumed")).toThrow();
+  });
+
+  it("rejects caller-owned tool kinds in the legacy hosted-tool compatibility field", () => {
+    expect(() =>
+      modelCapabilitiesSchema.parse({
+        ...createCapabilitiesFixture(),
+        hosted_tools: ["function"],
+      }),
+    ).toThrow();
+    expect(() =>
+      modelCapabilitiesSchema.parse({
+        ...createCapabilitiesFixture(),
+        hosted_tools: ["custom"],
+      }),
+    ).toThrow();
   });
 
   // This test reproduces current Go DTO omission, nil-slice, embedding, rerank, and pool encodings.
@@ -184,6 +215,51 @@ describe("model capability schema", () => {
         },
       ],
       services: [],
+      rate_limits: [
+        {
+          id: "rate_provider",
+          scope: "provider_instance",
+          scope_id: "pvi_capabilities",
+          tier_id: "provider-default",
+          count_limit: 1000,
+          count_period_seconds: 60,
+          observed_at: "2026-07-20T00:00:00Z",
+          expires_at: "2026-07-21T00:00:00Z",
+        },
+        {
+          id: "rate_offering",
+          scope: "offering",
+          scope_id: "offering_capabilities",
+          tier_id: "offering-default",
+          count_limit: 100,
+          count_period_seconds: 60,
+          usage_limit: 100000,
+          usage_period_seconds: 60,
+          usage_field: "tokens",
+          observed_at: "2026-07-20T00:00:00Z",
+          expires_at: "2026-07-21T00:00:00Z",
+        },
+        {
+          id: "rate_profile",
+          scope: "execution_profile",
+          scope_id: "profile_embedding",
+          tier_id: "embedding-default",
+          count_limit: 10,
+          count_period_seconds: 60,
+          observed_at: "2026-07-20T00:00:00Z",
+          expires_at: "2026-07-21T00:00:00Z",
+        },
+        {
+          id: "rate_credential",
+          scope: "credential",
+          scope_id: "credential_hidden",
+          tier_id: "credential-private",
+          count_limit: 5,
+          count_period_seconds: 60,
+          observed_at: "2026-07-20T00:00:00Z",
+          expires_at: "2026-07-21T00:00:00Z",
+        },
+      ],
       revision: 1,
       observed_at: "2026-07-20T00:00:00Z",
     });
@@ -208,6 +284,41 @@ describe("model capability schema", () => {
     expect(parsed.models[0]?.offerings[0]?.profiles[2]?.operation).toBe("");
     expect(parsed.models[0]?.offerings[0]?.profiles[2]?.action_binding_id).toBe(
       "",
+    );
+    expect(
+      selectProfileRateLimits(
+        parsed.rate_limits,
+        parsed.provider_instance_id,
+        "offering_capabilities",
+        "profile_embedding",
+      ).map((limit) => limit.id),
+    ).toEqual(["rate_provider", "rate_offering", "rate_profile"]);
+    expect(
+      isCatalogRateLimitExpired(
+        parsed.rate_limits[0],
+        Date.parse("2026-07-20T23:59:59Z"),
+      ),
+    ).toBe(false);
+    expect(
+      isCatalogRateLimitExpired(
+        parsed.rate_limits[0],
+        Date.parse("2026-07-21T00:00:00Z"),
+      ),
+    ).toBe(true);
+
+    // incompleteUsageTuple proves the browser rejects an ambiguous provider metric instead of hiding missing fields.
+    // incompleteUsageTuple 证明浏览器会拒绝歧义供应商指标，而不是隐藏缺失字段。
+    const incompleteUsageTuple = {
+      ...parsed,
+      rate_limits: [
+        {
+          ...parsed.rate_limits[0],
+          usage_limit: 1,
+        },
+      ],
+    };
+    expect(() => modelCatalogSchema.parse(incompleteUsageTuple)).toThrow(
+      "rate-limit usage fields must be all present or all absent",
     );
   });
 });

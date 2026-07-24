@@ -29,11 +29,21 @@ func (s *Service) Preflight(ctx context.Context, ownerAPIKeyID string, request v
 	if errValidate := request.Validate(); errValidate != nil {
 		return vcp.UsagePreflightResponse{}, errValidate
 	}
+	canonicalExecution, compatibilityDiagnostics, errCompatibility := canonicalizeLegacyModelTools(request.Execution)
+	if errCompatibility != nil {
+		return vcp.UsagePreflightResponse{}, errCompatibility
+	}
+	request.Execution = canonicalExecution
 	now := s.options.Now().UTC()
 	target, errTarget := s.resolveTarget(ctx, request.Execution, now, nil)
 	if errTarget != nil {
 		return vcp.UsagePreflightResponse{}, errTarget
 	}
+	modelToolPlan, errModelTools := s.resolveModelToolPlan(ctx, request.Execution, target, now)
+	if errModelTools != nil {
+		return vcp.UsagePreflightResponse{}, errModelTools
+	}
+	modelToolPlan.Diagnostics = compatibilityDiagnostics
 	binding, definition, errBinding := s.loadBinding(ctx, target)
 	if errBinding != nil {
 		return vcp.UsagePreflightResponse{}, errBinding
@@ -44,7 +54,7 @@ func (s *Service) Preflight(ctx context.Context, ownerAPIKeyID string, request v
 		return vcp.UsagePreflightResponse{}, errUsage
 	}
 	metrics := append([]vcp.PreflightMetric{tokenMetric}, exactOperationMetrics(request.Execution)...)
-	return vcp.UsagePreflightResponse{ProtocolVersion: vcp.ProtocolVersion, RequestID: request.RequestID, Target: request.Execution.Target, Usage: usage, Metrics: metrics}, nil
+	return vcp.UsagePreflightResponse{ProtocolVersion: vcp.ProtocolVersion, RequestID: request.RequestID, Target: request.Execution.Target, ModelToolPlan: modelToolPlan.Public(), Usage: usage, Metrics: metrics}, nil
 }
 
 // preflightTokenUsage uses a native counter for text-only conversation requests and otherwise returns an explicit estimate or unknown value.

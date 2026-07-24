@@ -169,11 +169,11 @@ type OptionalTokenLimit struct {
 	Value int64
 }
 
-// TokenLimits describes independently sourced model token ceilings.
-// TokenLimits 描述独立来源的模型 Token 上限。
+// TokenLimits describes independently sourced model token ceilings under one fixed shared-window semantic.
+// TokenLimits 以固定共享窗口语义描述独立来源的模型 Token 上限。
 type TokenLimits struct {
-	// ContextWindow is the total provider-defined context ceiling.
-	// ContextWindow 是供应商定义的总上下文上限。
+	// ContextWindow is the conservative total ceiling shared by input, reasoning, and generated output.
+	// ContextWindow 是输入、推理和生成输出共同占用的保守总上限。
 	ContextWindow OptionalTokenLimit
 	// MaxInputTokens is the explicit input ceiling when independently known.
 	// MaxInputTokens 是独立已知时的明确输入上限。
@@ -257,6 +257,12 @@ type ModelCapabilities struct {
 	// UsageMetrics lists independently observable usage dimensions.
 	// UsageMetrics 列出可独立观察的用量维度。
 	UsageMetrics []UsageMetricCapability
+	// StandardTools lists verified provider-native implementations of closed Vulcan model tools.
+	// StandardTools 列出封闭 Vulcan 模型工具经过验证的供应商原生实现。
+	StandardTools []StandardModelToolCapability
+	// ExtraTools lists profile-scoped non-standard provider or model tools.
+	// ExtraTools 列出规格作用域的非标准供应商或模型工具。
+	ExtraTools []ModelExtraToolCapability
 	// HostedTools lists exact provider-hosted tool kinds supported by this profile.
 	// HostedTools 列出此规格支持的精确供应商托管工具类型。
 	HostedTools []vcp.ToolKind
@@ -402,6 +408,9 @@ type ExecutionProfile struct {
 	// ActionBindingID identifies one code-owned provider action binding.
 	// ActionBindingID 标识一个代码拥有的供应商动作绑定。
 	ActionBindingID string
+	// ProfileDriver declares that this conversation profile executes through the immutable provider definition's primary profile Driver instead of an ActionBinding.
+	// ProfileDriver 声明此会话规格通过不可变供应商定义的主 Profile Driver 执行，而不是通过 ActionBinding 执行。
+	ProfileDriver bool
 	// DisplayName is the client-visible profile name.
 	// DisplayName 是客户端可见的规格名称。
 	DisplayName string
@@ -428,6 +437,100 @@ type ExecutionProfile struct {
 	CapabilityRevision uint64
 	// Revision is the immutable profile catalog revision.
 	// Revision 是不可变的规格目录修订号。
+	Revision uint64
+}
+
+// ModelOperationSupportStatus identifies whether one exact offering operation is published by the Router.
+// ModelOperationSupportStatus 标识 Router 是否发布一个精确 Offering 操作。
+type ModelOperationSupportStatus string
+
+const (
+	// ModelOperationSupported means the operation is verified, implemented, and eligible for profile publication.
+	// ModelOperationSupported 表示该操作已验证、已实现且可发布执行规格。
+	ModelOperationSupported ModelOperationSupportStatus = "supported"
+	// ModelOperationUnsupported means the operation is retained as catalog evidence but not published.
+	// ModelOperationUnsupported 表示该操作作为目录证据保留，但明确不发布。
+	ModelOperationUnsupported ModelOperationSupportStatus = "unsupported"
+	// ModelOperationPendingReview means evidence exists but is insufficient for a publication decision.
+	// ModelOperationPendingReview 表示已有证据但不足以作出发布决策。
+	ModelOperationPendingReview ModelOperationSupportStatus = "pending_review"
+)
+
+// ModelOperationSupportReason identifies one closed reason behind an operation publication decision.
+// ModelOperationSupportReason 标识操作发布决策背后的一个封闭原因。
+type ModelOperationSupportReason string
+
+const (
+	// SupportReasonRuntimeVerified records a repeatable runtime execution fixture.
+	// SupportReasonRuntimeVerified 记录可重复的运行时执行夹具。
+	SupportReasonRuntimeVerified ModelOperationSupportReason = "runtime_verified"
+	// SupportReasonProviderContractVerified records a verified provider contract without live execution.
+	// SupportReasonProviderContractVerified 记录已验证但未实时执行的供应商合同。
+	SupportReasonProviderContractVerified ModelOperationSupportReason = "provider_contract_verified"
+	// SupportReasonProviderInferenceDisabled records an upstream inference-disabled model.
+	// SupportReasonProviderInferenceDisabled 记录上游已禁用推理的模型。
+	SupportReasonProviderInferenceDisabled ModelOperationSupportReason = "provider_inference_disabled"
+	// SupportReasonOperationNotImplemented records a VCP operation not implemented by the Router.
+	// SupportReasonOperationNotImplemented 记录 Router 尚未实现的 VCP 操作。
+	SupportReasonOperationNotImplemented ModelOperationSupportReason = "operation_not_implemented"
+	// SupportReasonCodingCapabilityInsufficient records a model that fails the verified coding capability boundary.
+	// SupportReasonCodingCapabilityInsufficient 记录未通过已验证 Coding 能力边界的模型。
+	SupportReasonCodingCapabilityInsufficient ModelOperationSupportReason = "coding_capability_insufficient"
+	// SupportReasonDeprecatedOrSuperseded records an explicitly deprecated or superseded model.
+	// SupportReasonDeprecatedOrSuperseded 记录已明确弃用或被替代的模型。
+	SupportReasonDeprecatedOrSuperseded ModelOperationSupportReason = "deprecated_or_superseded"
+	// SupportReasonOutOfScopeRealtime records a realtime operation excluded from the current scope.
+	// SupportReasonOutOfScopeRealtime 记录当前范围明确排除的实时操作。
+	SupportReasonOutOfScopeRealtime ModelOperationSupportReason = "out_of_scope_realtime"
+	// SupportReasonOutOfScopeProduct records an upstream product outside the current scope.
+	// SupportReasonOutOfScopeProduct 记录当前范围之外的上游产品。
+	SupportReasonOutOfScopeProduct ModelOperationSupportReason = "out_of_scope_product"
+	// SupportReasonMissingProtocolEvidence records a missing exact wire-contract mapping.
+	// SupportReasonMissingProtocolEvidence 记录缺少精确 Wire 合同映射。
+	SupportReasonMissingProtocolEvidence ModelOperationSupportReason = "missing_protocol_evidence"
+	// SupportReasonMissingParameterMapping records incomplete request-parameter evidence.
+	// SupportReasonMissingParameterMapping 记录不完整的请求参数证据。
+	SupportReasonMissingParameterMapping ModelOperationSupportReason = "missing_parameter_mapping"
+	// SupportReasonMissingExecutionFixture records a missing repeatable execution fixture.
+	// SupportReasonMissingExecutionFixture 记录缺少可重复执行夹具。
+	SupportReasonMissingExecutionFixture ModelOperationSupportReason = "missing_execution_fixture"
+	// SupportReasonNewCatalogEntry records a newly discovered operation awaiting review.
+	// SupportReasonNewCatalogEntry 记录等待审核的新发现操作。
+	SupportReasonNewCatalogEntry ModelOperationSupportReason = "new_catalog_entry"
+)
+
+// ModelOperationPolicy records the code-owned publication decision for one offering operation.
+// ModelOperationPolicy 记录代码拥有的一个 Offering 操作发布决策。
+type ModelOperationPolicy struct {
+	// ID is the immutable policy identifier.
+	// ID 是不可变的策略标识。
+	ID string
+	// ProviderInstanceID owns the policy.
+	// ProviderInstanceID 是拥有该策略的供应商实例。
+	ProviderInstanceID string
+	// ProviderModelID identifies the classified model.
+	// ProviderModelID 标识被分类的模型。
+	ProviderModelID string
+	// OfferingID identifies the exact provider channel offering.
+	// OfferingID 标识精确的供应商通道 Offering。
+	OfferingID string
+	// Operation identifies the classified VCP operation.
+	// Operation 标识被分类的 VCP 操作。
+	Operation vcp.OperationKind
+	// Status controls whether an execution profile may be published.
+	// Status 控制是否可以发布执行规格。
+	Status ModelOperationSupportStatus
+	// Reason records the closed evidence-backed decision reason.
+	// Reason 记录由证据支持的封闭决策原因。
+	Reason ModelOperationSupportReason
+	// Source records the policy evidence source.
+	// Source 记录策略证据来源。
+	Source ModelSource
+	// EvidenceRevision identifies provider evidence independently from schema changes.
+	// EvidenceRevision 独立于 Schema 变更标识供应商证据版本。
+	EvidenceRevision uint64
+	// Revision is the immutable policy revision.
+	// Revision 是不可变的策略修订号。
 	Revision uint64
 }
 
@@ -723,6 +826,75 @@ type AllowanceSnapshot struct {
 	Revision uint64
 }
 
+// RateLimitScope identifies the exact owner of one provider capacity limit.
+// RateLimitScope 标识一项供应商容量限制的精确所有者。
+type RateLimitScope string
+
+const (
+	// RateLimitScopeProviderInstance applies a limit to one provider instance.
+	// RateLimitScopeProviderInstance 将限制应用到一个供应商实例。
+	RateLimitScopeProviderInstance RateLimitScope = "provider_instance"
+	// RateLimitScopeWorkspace applies a limit to one provider workspace.
+	// RateLimitScopeWorkspace 将限制应用到一个供应商 Workspace。
+	RateLimitScopeWorkspace RateLimitScope = "workspace"
+	// RateLimitScopeCredential applies a limit to one credential.
+	// RateLimitScopeCredential 将限制应用到一个凭据。
+	RateLimitScopeCredential RateLimitScope = "credential"
+	// RateLimitScopeOffering applies a limit to one model offering.
+	// RateLimitScopeOffering 将限制应用到一个模型 Offering。
+	RateLimitScopeOffering RateLimitScope = "offering"
+	// RateLimitScopeExecutionProfile applies a limit to one execution profile.
+	// RateLimitScopeExecutionProfile 将限制应用到一个执行规格。
+	RateLimitScopeExecutionProfile RateLimitScope = "execution_profile"
+)
+
+// RateLimitSnapshot records one provider capacity limit without treating it as consumable allowance.
+// RateLimitSnapshot 记录一项供应商容量限制，且不会把它视为可消费额度。
+type RateLimitSnapshot struct {
+	// ID is the immutable rate-limit snapshot identifier.
+	// ID 是不可变的限速快照标识。
+	ID string
+	// ProviderInstanceID owns the snapshot.
+	// ProviderInstanceID 是拥有该快照的供应商实例。
+	ProviderInstanceID string
+	// Scope identifies the upstream capacity owner.
+	// Scope 标识上游容量所有者。
+	Scope RateLimitScope
+	// ScopeID identifies the exact instance, workspace, credential, offering, or profile.
+	// ScopeID 标识精确的实例、Workspace、凭据、Offering 或 Profile。
+	ScopeID string
+	// TierID preserves the provider tier identifier without inferring precedence.
+	// TierID 原样保留供应商 Tier 标识且不推断优先级。
+	TierID string
+	// CountLimit is the known positive request-count ceiling.
+	// CountLimit 是已知的正请求次数上限。
+	CountLimit int64
+	// CountPeriodSeconds is the exact positive count-window duration.
+	// CountPeriodSeconds 是精确的正计数窗口秒数。
+	CountPeriodSeconds int64
+	// UsageLimit is the optional positive provider usage ceiling.
+	// UsageLimit 是可选的正供应商用量上限。
+	UsageLimit *int64
+	// UsagePeriodSeconds is the optional positive usage-window duration.
+	// UsagePeriodSeconds 是可选的正用量窗口秒数。
+	UsagePeriodSeconds *int64
+	// UsageField identifies the exact provider metric counted by UsageLimit.
+	// UsageField 标识 UsageLimit 统计的精确供应商指标。
+	UsageField string
+	// Source records the snapshot evidence source.
+	// Source 记录快照证据来源。
+	Source ModelSource
+	// ObservedAt records when the capacity fact was obtained.
+	// ObservedAt 记录获得容量事实的时间。
+	ObservedAt time.Time
+	// ExpiresAt records when the capacity snapshot becomes stale.
+	// ExpiresAt 记录容量快照何时过期。
+	ExpiresAt time.Time
+	// Revision is the immutable rate-limit snapshot revision.
+	// Revision 是不可变的限速快照修订号。
+	Revision uint64
+}
+
 // PoolSummary describes aggregated runtime eligibility for one execution profile.
 // PoolSummary 描述一个执行规格的聚合运行时资格。
 type PoolSummary struct {
@@ -788,6 +960,9 @@ type Snapshot struct {
 	// Profiles contains client-selectable capability shapes.
 	// Profiles 包含客户端可选择的能力形态。
 	Profiles []ExecutionProfile
+	// ModelOperationPolicies contains code-owned model-operation publication decisions.
+	// ModelOperationPolicies 包含代码拥有的模型操作发布决策。
+	ModelOperationPolicies []ModelOperationPolicy
 	// Entitlements contains credential-specific model authorization.
 	// Entitlements 包含凭据特定的模型授权。
 	Entitlements []ModelEntitlement
@@ -800,6 +975,9 @@ type Snapshot struct {
 	// Allowances contains arbitrary quotas, balances, and credits.
 	// Allowances 包含任意额度、余额和 Credit。
 	Allowances []AllowanceSnapshot
+	// RateLimits contains provider capacity ceilings that are not consumable allowances.
+	// RateLimits 包含不属于可消费额度的供应商容量上限。
+	RateLimits []RateLimitSnapshot
 	// Voices contains credential-scoped provider voice catalog observations.
 	// Voices 包含凭据作用域的供应商声音目录观测。
 	Voices []VoiceSnapshot

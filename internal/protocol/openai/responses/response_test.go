@@ -76,6 +76,19 @@ func TestDecodeResponsePreservesNativeWebSearchCall(t *testing.T) {
 	}
 }
 
+// TestDecodeResponseAuditsNativeWebExtractorTrace verifies provider-owned extraction details never become assistant content.
+// TestDecodeResponseAuditsNativeWebExtractorTrace 验证供应商拥有的提取明细绝不会成为助手内容。
+func TestDecodeResponseAuditsNativeWebExtractorTrace(t *testing.T) {
+	upstream := Response{ID: "upstream-extractor", Status: "completed", Output: []OutputItem{{ID: "extract-call-1", Type: "web_extractor_call", Status: "completed", URLs: []string{"https://example.com/private"}, Goal: "private goal", Output: "private extracted body"}}}
+	response, events, report, errDecode := DecodeResponse("response-vcp-extractor", upstream, responsesNow())
+	if errDecode != nil {
+		t.Fatalf("DecodeResponse() error = %v", errDecode)
+	}
+	if len(response.Items) != 0 || len(events) < 2 || !slices.Contains(report.ConversionSummary, "openai_responses.web_extractor_trace_omitted") {
+		t.Fatalf("response = %#v events = %#v report = %#v", response, events, report)
+	}
+}
+
 // TestDecodeResponseAuditsDocumentedResponseMetadata verifies every documented complete-response field without a VCP carrier is represented by a safe fixed audit code.
 // TestDecodeResponseAuditsDocumentedResponseMetadata 验证每个没有 VCP 承载字段的文档化完整响应字段都会由安全固定审计代码表示。
 func TestDecodeResponseAuditsDocumentedResponseMetadata(t *testing.T) {

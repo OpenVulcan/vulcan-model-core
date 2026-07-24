@@ -10,7 +10,6 @@ import {
 // unavailableFeatures is the exact management feature contract for API-key-only test definitions.
 // unavailableFeatures 是仅 API Key 测试定义的精确管理功能合同。
 const unavailableFeatures = {
-  model_discovery: "unsupported",
   plan_reader: "unsupported",
   entitlement_reader: "unsupported",
   allowance_reader: "unsupported",
@@ -33,7 +32,12 @@ const kimiGroupResponse = {
           variant_description: "CN API site.",
           model_catalog_id: "kimi_open_platform",
           auth_methods: [
-            { id: "api_key", type: "api_key", refreshable: false },
+            {
+              id: "api_key",
+              type: "api_key",
+              refreshable: false,
+              reader_features: unavailableFeatures,
+            },
           ],
           features: unavailableFeatures,
           protocol_profile_id: "openai.chat",
@@ -54,7 +58,12 @@ const kimiGroupResponse = {
           variant_description: "Global API site.",
           model_catalog_id: "kimi_open_platform",
           auth_methods: [
-            { id: "api_key", type: "api_key", refreshable: false },
+            {
+              id: "api_key",
+              type: "api_key",
+              refreshable: false,
+              reader_features: unavailableFeatures,
+            },
           ],
           features: unavailableFeatures,
           protocol_profile_id: "openai.chat",
@@ -75,8 +84,18 @@ const kimiGroupResponse = {
           variant_description: "Coding membership.",
           model_catalog_id: "kimi_coding",
           auth_methods: [
-            { id: "api_key", type: "api_key", refreshable: false },
-            { id: "device_flow", type: "device_flow", refreshable: true },
+            {
+              id: "api_key",
+              type: "api_key",
+              refreshable: false,
+              reader_features: unavailableFeatures,
+            },
+            {
+              id: "device_flow",
+              type: "device_flow",
+              refreshable: true,
+              reader_features: unavailableFeatures,
+            },
           ],
           features: unavailableFeatures,
           protocol_profile_id: "openai.chat",
@@ -113,17 +132,24 @@ function alibabaDefinition(
     variant_description: `${variantName} subscription.`,
     variant_description_key: descriptionKey,
     model_catalog_id: catalogID,
-    auth_methods: [{ id: "api_key", type: "api_key", refreshable: false }],
+    auth_methods: [
+      {
+        id: "api_key",
+        type: "api_key",
+        refreshable: false,
+        reader_features: unavailableFeatures,
+      },
+    ],
     features: unavailableFeatures,
-    protocol_profile_id: "anthropic.messages",
+    protocol_profile_id: "openai.chat",
     endpoint_presets: [
       { id: endpointID, base_url: baseURL, region, user_editable: false },
     ],
   };
 }
 
-// alibabaGroupResponse exposes all five regional commercial products through one grouped card.
-// alibabaGroupResponse 通过一个分组卡片暴露全部五个区域商业产品。
+// alibabaGroupResponse exposes five plan products through one grouped card without stale compatibility paths.
+// alibabaGroupResponse 通过一个分组卡片暴露五个套餐产品，且不保留过时兼容路径。
 const alibabaGroupResponse = {
   provider_groups: [
     {
@@ -132,11 +158,51 @@ const alibabaGroupResponse = {
       description: "Alibaba coding subscriptions.",
       description_key: "providers.alibaba.description",
       provider_definitions: [
-        alibabaDefinition("system_alibaba_coding_plan_cn", "Coding Plan CN", "alibaba_coding_plan_cn", "coding_plan_cn", "https://coding.dashscope.aliyuncs.com/apps/anthropic/v1", "CN", "providers.alibaba.codingPlanCNDescription"),
-        alibabaDefinition("system_alibaba_coding_plan_global", "Coding Plan Global", "alibaba_coding_plan_global", "coding_plan_global", "https://coding-intl.dashscope.aliyuncs.com/apps/anthropic/v1", "Global", "providers.alibaba.codingPlanGlobalDescription"),
-        alibabaDefinition("system_alibaba_token_plan_personal_cn", "Token Plan Personal CN", "alibaba_token_plan_personal_cn", "token_plan_personal_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1", "CN", "providers.alibaba.tokenPlanPersonalCNDescription"),
-        alibabaDefinition("system_alibaba_token_plan_team_cn", "Token Plan Team CN", "alibaba_token_plan_team_cn", "token_plan_team_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com/apps/anthropic/v1", "CN", "providers.alibaba.tokenPlanTeamCNDescription"),
-        alibabaDefinition("system_alibaba_token_plan_team_global", "Token Plan Team Global", "alibaba_token_plan_team_global", "token_plan_team_global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1", "Global", "providers.alibaba.tokenPlanTeamGlobalDescription"),
+        alibabaDefinition(
+          "system_alibaba_coding_plan_cn",
+          "Coding Plan CN",
+          "alibaba_coding_plan_cn",
+          "coding_plan_cn",
+          "https://coding.dashscope.aliyuncs.com",
+          "CN",
+          "providers.alibaba.codingPlanCNDescription",
+        ),
+        alibabaDefinition(
+          "system_alibaba_coding_plan_global",
+          "Coding Plan Global",
+          "alibaba_coding_plan_global",
+          "coding_plan_global",
+          "https://coding-intl.dashscope.aliyuncs.com",
+          "Global",
+          "providers.alibaba.codingPlanGlobalDescription",
+        ),
+        alibabaDefinition(
+          "system_alibaba_token_plan_personal_cn",
+          "Token Plan Personal CN",
+          "alibaba_token_plan_personal_cn",
+          "token_plan_personal_cn",
+          "https://token-plan.cn-beijing.maas.aliyuncs.com",
+          "CN",
+          "providers.alibaba.tokenPlanPersonalCNDescription",
+        ),
+        alibabaDefinition(
+          "system_alibaba_token_plan_team_cn",
+          "Token Plan Team CN",
+          "alibaba_token_plan_team_cn",
+          "token_plan_team_cn",
+          "https://token-plan.cn-beijing.maas.aliyuncs.com",
+          "CN",
+          "providers.alibaba.tokenPlanTeamCNDescription",
+        ),
+        alibabaDefinition(
+          "system_alibaba_token_plan_team_global",
+          "Token Plan Team Global",
+          "alibaba_token_plan_team_global",
+          "token_plan_team_global",
+          "https://token-plan.ap-southeast-1.maas.aliyuncs.com",
+          "Global",
+          "providers.alibaba.tokenPlanTeamGlobalDescription",
+        ),
       ],
     },
   ],
@@ -154,24 +220,29 @@ const alibabaWorkspaceGroupResponse = {
       provider_definitions: [
         {
           id: "system_alibaba_model_studio_workspace_global",
-          display_name: "Alibaba Model Studio Workspace Global",
+          display_name: "Alibaba Model Studio Workspace Singapore",
           group_id: "alibaba",
-          variant_name: "Model Studio Workspace Global",
+          variant_name: "Model Studio Workspace Singapore",
           variant_description:
             "Alibaba Model Studio API hosted in Singapore and isolated by workspace ID.",
           variant_description_key:
-            "providers.alibaba.modelStudioWorkspaceGlobalDescription",
-          model_catalog_id: "alibaba_model_studio_workspace_global",
+            "providers.alibaba.modelStudioWorkspaceSingaporeDescription",
+          model_catalog_id: "alibaba_model_studio_workspace_sg",
           auth_methods: [
-            { id: "api_key", type: "api_key", refreshable: false },
+            {
+              id: "api_key",
+              type: "api_key",
+              refreshable: false,
+              reader_features: unavailableFeatures,
+            },
           ],
           features: unavailableFeatures,
           protocol_profile_id: "alibaba.embedding",
           endpoint_presets: [
             {
-              id: "model_studio_workspace_global",
+              id: "model_studio_workspace_singapore",
               base_url: "",
-              region: "Global",
+              region: "Singapore",
               user_editable: false,
               parameters: [
                 {
@@ -206,7 +277,12 @@ const mixedProviderGroupResponse = {
           variant_description: "OpenAI API service.",
           model_catalog_id: "openai",
           auth_methods: [
-            { id: "api_key", type: "api_key", refreshable: false },
+            {
+              id: "api_key",
+              type: "api_key",
+              refreshable: false,
+              reader_features: unavailableFeatures,
+            },
           ],
           features: unavailableFeatures,
           protocol_profile_id: "openai.responses",
@@ -241,9 +317,19 @@ const antigravityGroupResponse = {
           variant_description:
             "Google account-scoped Antigravity agent backend.",
           model_catalog_id: "google_antigravity",
-          auth_methods: [{ id: "oauth", type: "oauth", refreshable: true }],
+          auth_methods: [
+            {
+              id: "oauth",
+              type: "oauth",
+              refreshable: true,
+              reader_features: {
+                plan_reader: "supported",
+                entitlement_reader: "unsupported",
+                allowance_reader: "supported",
+              },
+            },
+          ],
           features: {
-            model_discovery: "supported",
             plan_reader: "supported",
             entitlement_reader: "unsupported",
             allowance_reader: "supported",
@@ -280,7 +366,14 @@ const claudeGroupResponse = {
           variant_description:
             "Anthropic account-scoped Claude Code subscription.",
           model_catalog_id: "anthropic_claude_code",
-          auth_methods: [{ id: "oauth", type: "oauth", refreshable: true }],
+          auth_methods: [
+            {
+              id: "oauth",
+              type: "oauth",
+              refreshable: true,
+              reader_features: unavailableFeatures,
+            },
+          ],
           features: unavailableFeatures,
           protocol_profile_id: "anthropic.messages",
           endpoint_presets: [
@@ -314,8 +407,18 @@ const codexGroupResponse = {
           variant_description: "OpenAI account-scoped Codex subscription.",
           model_catalog_id: "openai_codex",
           auth_methods: [
-            { id: "oauth", type: "oauth", refreshable: true },
-            { id: "device_flow", type: "device_flow", refreshable: true },
+            {
+              id: "oauth",
+              type: "oauth",
+              refreshable: true,
+              reader_features: unavailableFeatures,
+            },
+            {
+              id: "device_flow",
+              type: "device_flow",
+              refreshable: true,
+              reader_features: unavailableFeatures,
+            },
           ],
           features: unavailableFeatures,
           protocol_profile_id: "openai.responses",
@@ -356,6 +459,7 @@ const vertexGroupResponse = {
               id: "service_account",
               type: "service_account",
               refreshable: false,
+              reader_features: unavailableFeatures,
             },
           ],
           features: unavailableFeatures,
@@ -407,6 +511,7 @@ const authorizedVertexCredentialsResponse = {
       expires_at: null,
       cooling_until: null,
       priority: 0,
+      reader_features: unavailableFeatures,
       revision: 1,
       scope_refs: [{ kind: "project", id: "vertex-project" }],
     },
@@ -448,6 +553,7 @@ const authorizedCNCredentialsResponse = {
       status: "active",
       expires_at: null,
       cooling_until: null,
+      reader_features: unavailableFeatures,
       revision: 1,
     },
   ],
@@ -484,6 +590,7 @@ const authorizedCodingCredentialsResponse = {
       status: "active",
       expires_at: "2026-07-18T13:00:00Z",
       cooling_until: null,
+      reader_features: unavailableFeatures,
       revision: 1,
     },
   ],
@@ -520,6 +627,11 @@ const authorizedAntigravityCredentialsResponse = {
       status: "active",
       expires_at: "2026-07-19T13:00:00Z",
       cooling_until: null,
+      reader_features: {
+        plan_reader: "supported",
+        entitlement_reader: "unsupported",
+        allowance_reader: "supported",
+      },
       revision: 1,
     },
   ],
@@ -584,18 +696,15 @@ describe("ProviderManagementPage", () => {
   it("resolves a provider-detected membership plan by exact credential ownership", () => {
     // detectedPlanLabel is the membership label resolved from provider metadata for the matching credential.
     // detectedPlanLabel 是根据匹配凭据的供应商元数据解析出的会员套餐标签。
-    const detectedPlanLabel = credentialPlanLabel(
-      undefined,
-      {
-        detected_plan: {
-          plan_code: "researcher",
-          plan_name: "Researcher",
-          status: "active",
-          evidence_source: "provider_api",
-          observed_at: "2026-07-22T04:00:00Z",
-        },
+    const detectedPlanLabel = credentialPlanLabel(undefined, {
+      detected_plan: {
+        plan_code: "researcher",
+        plan_name: "Researcher",
+        status: "active",
+        evidence_source: "provider_api",
+        observed_at: "2026-07-22T04:00:00Z",
       },
-    );
+    });
     expect(detectedPlanLabel).toBe("Researcher");
     expect(credentialPlanLabel(undefined, {})).toBeUndefined();
   });
@@ -624,10 +733,8 @@ describe("ProviderManagementPage", () => {
     ).toBeGreaterThan(1);
     expect(screen.getByText("API key")).toBeInTheDocument();
     expect(
-      screen.getByText(
-        "This provider does not expose account, plan, or allowance data.",
-      ),
-    ).toBeInTheDocument();
+      screen.queryByText("This provider does not support model catalog refresh."),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("Coding Plan")).not.toBeInTheDocument();
 
     fireEvent.click(screen.getByRole("button", { name: "Add provider" }));
@@ -651,6 +758,110 @@ describe("ProviderManagementPage", () => {
         headers: { Authorization: "Bearer management-token" },
       }),
     );
+  });
+
+  // This test verifies complete catalog audit rows render collected channel capabilities and their exact evidence revision.
+  // 此测试验证完整目录审核行会渲染已采集通道能力及其精确证据修订。
+  it("renders capability evidence in the complete catalog audit", async () => {
+    // auditPayload contains one suppressed-or-published-independent model capability record.
+    // auditPayload 包含一条独立于抑制或发布状态的模型能力记录。
+    const auditPayload = {
+      provider_instance_id: "pvi_kimi_cn",
+      definition_id: "system_kimi_cn",
+      model_catalog_id: "kimi_open_platform",
+      product_name: "CN",
+      endpoint_regions: ["CN"],
+      channel_ids: ["openai.chat"],
+      models: [
+        {
+          id: "model_audit",
+          upstream_model_id: "kimi-audit",
+          display_name: "Kimi Audit",
+          source: "system",
+          offering_ids: ["offer_audit"],
+        },
+      ],
+      offerings: [
+        {
+          id: "offer_audit",
+          provider_model_id: "model_audit",
+          upstream_model_id: "kimi-audit",
+          channel_id: "openai.chat",
+          capabilities: {
+            context_window: { known: true, value: 131072 },
+            max_input_tokens: { known: false },
+            max_output_tokens: { known: true, value: 8192 },
+            max_reasoning_tokens: { known: false },
+            recommended_output_tokens: { known: false },
+            recommended_reasoning_tokens: { known: false },
+            tool_calling: "native",
+            parallel_tool_calls: "conditional",
+            streaming_tool_arguments: "unknown",
+            strict_json_schema: "unsupported",
+            reasoning: "native",
+            reasoning_efforts: ["high"],
+            reasoning_summary_modes: [],
+            input_modalities: ["text", "image"],
+            output_modalities: ["text"],
+            delivery: { synchronous: true },
+          },
+          capability_revision: 4,
+        },
+      ],
+      policies: [
+        {
+          id: "policy_audit",
+          provider_model_id: "model_audit",
+          offering_id: "offer_audit",
+          operation: "conversation.respond",
+          status: "supported",
+          reason: "runtime_verified",
+          source: "system",
+          evidence_revision: 4,
+        },
+      ],
+      rate_limits: [],
+      revision: 4,
+      observed_at: "2026-07-23T06:00:00Z",
+      stale: false,
+    };
+    const fetchMock = vi
+      .fn()
+      .mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        if (url === "/vulcan/manage/provider-groups")
+          return Promise.resolve(jsonResponse(kimiGroupResponse));
+        if (url === "/vulcan/manage/provider-instances")
+          return Promise.resolve(jsonResponse(authorizedCNInstanceResponse));
+        if (url === "/vulcan/manage/provider-instances/pvi_kimi_cn/credentials")
+          return Promise.resolve(jsonResponse(authorizedCNCredentialsResponse));
+        if (
+          url === "/vulcan/manage/provider-instances/pvi_kimi_cn/catalog/audit"
+        )
+          return Promise.resolve(jsonResponse(auditPayload));
+        return Promise.resolve(new Response(null, { status: 404 }));
+      });
+    vi.stubGlobal("fetch", fetchMock);
+    renderPage();
+
+    await screen.findByText("API key");
+    fireEvent.click(screen.getByRole("button", { name: "Catalog audit" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Complete catalog audit" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Channels and capabilities")).toBeInTheDocument();
+    // auditRow joins split semantic labels and values exactly as a user reads one model row.
+    // auditRow 按用户读取一行模型的方式连接分离的语义标签与值。
+    const auditRow = screen.getByText("Kimi Audit").closest("tr");
+    expect(auditRow).not.toBeNull();
+    expect(auditRow).toHaveTextContent("Input modalities: text, image");
+    expect(auditRow).toHaveTextContent("Output modalities: text");
+    expect(auditRow).toHaveTextContent("Tool calling: Native");
+    expect(auditRow).toHaveTextContent("Capability revision 4");
+    expect(
+      screen.getByText("Complete capability evidence"),
+    ).toBeInTheDocument();
   });
 
   // This test verifies an API key is replaced through the credential-specific route without creating another provider.
@@ -684,16 +895,17 @@ describe("ProviderManagementPage", () => {
     renderPage();
 
     await screen.findByText("API key");
-    fireEvent.click(
-      screen.getByRole("button", { name: "Replace credential" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Replace credential" }));
+    expect(
+      screen.getByRole("heading", { name: "Replace credential" }),
+    ).toBeInTheDocument();
     expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
-    fireEvent.change(screen.getByLabelText("API key"), {
+    const replacementInput = screen.getByLabelText("New API key");
+    expect(replacementInput).toHaveFocus();
+    fireEvent.change(replacementInput, {
       target: { value: "replacement-kimi-key" },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Replace credential" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Replace credential" }));
     await waitFor(() => {
       const replacementCall = fetchMock.mock.calls.find(
         ([url, init]) =>
@@ -743,11 +955,9 @@ describe("ProviderManagementPage", () => {
     expect(
       document.querySelectorAll("[data-provider-variant-row]"),
     ).toHaveLength(5);
-    expect(screen.getAllByText("anthropic.messages")).toHaveLength(5);
+    expect(screen.getAllByText("openai.chat")).toHaveLength(5);
     expect(
-      screen.getByText(
-        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/apps/anthropic/v1",
-      ),
+      screen.getByText("https://token-plan.ap-southeast-1.maas.aliyuncs.com"),
     ).toBeInTheDocument();
 
     fireEvent.click(
@@ -755,7 +965,10 @@ describe("ProviderManagementPage", () => {
     );
     expect(screen.getByText("Configure provider")).toBeInTheDocument();
     expect(screen.getByLabelText("Name")).toBeInTheDocument();
-    expect(screen.getByLabelText("API key")).toHaveAttribute("type", "password");
+    expect(screen.getByLabelText("API key")).toHaveAttribute(
+      "type",
+      "password",
+    );
   });
 
   // This test verifies a parameterized Alibaba endpoint loads and submits its declared workspace value.
@@ -767,9 +980,7 @@ describe("ProviderManagementPage", () => {
         (input: string | URL | Request, init?: RequestInit) => {
           const url = String(input);
           if (url === "/vulcan/manage/provider-groups")
-            return Promise.resolve(
-              jsonResponse(alibabaWorkspaceGroupResponse),
-            );
+            return Promise.resolve(jsonResponse(alibabaWorkspaceGroupResponse));
           if (url === "/vulcan/manage/provider-instances")
             return Promise.resolve(
               jsonResponse(emptyProviderInstancesResponse),
@@ -830,14 +1041,11 @@ describe("ProviderManagementPage", () => {
         init?.method === "POST",
     );
     expect(JSON.parse(String(onboardingCall?.[1]?.body))).toEqual({
-      provider_definition_id:
-        "system_alibaba_model_studio_workspace_global",
+      provider_definition_id: "system_alibaba_model_studio_workspace_global",
       name: "Alibaba Workspace",
       auth_method_id: "api_key",
       secret: "test-api-key",
-      endpoint_parameters: [
-        { id: "workspace_id", value: "workspace-one" },
-      ],
+      endpoint_parameters: [{ id: "workspace_id", value: "workspace-one" }],
     });
   });
 
@@ -906,6 +1114,7 @@ describe("ProviderManagementPage", () => {
                   status: "active",
                   expires_at: null,
                   cooling_until: null,
+                  reader_features: unavailableFeatures,
                   revision: 1,
                 },
               ],
@@ -939,7 +1148,12 @@ describe("ProviderManagementPage", () => {
       display_name: "Acme Gateway",
       protocol_profile_id: "openai.chat",
       auth_methods: [
-        { id: "default", type: "bearer", refreshable: false },
+        {
+          id: "default",
+          type: "bearer",
+          refreshable: false,
+          reader_features: unavailableFeatures,
+        },
       ],
       features: unavailableFeatures,
     };
@@ -969,6 +1183,7 @@ describe("ProviderManagementPage", () => {
           status: "active",
           expires_at: null,
           cooling_until: null,
+          reader_features: unavailableFeatures,
           revision: 1,
         },
       ],
@@ -981,7 +1196,6 @@ describe("ProviderManagementPage", () => {
           display_name: "Gemini GenerateContent (Vertex-compatible)",
           user_configurable: true,
           runtime_ready: true,
-          model_discovery: "unsupported",
           capabilities: [],
           allowed_auth_methods: ["header_api_key"],
         },
@@ -991,7 +1205,6 @@ describe("ProviderManagementPage", () => {
           display_name: "OpenAI Chat Completions",
           user_configurable: true,
           runtime_ready: true,
-          model_discovery: "unsupported",
           capabilities: [],
           allowed_auth_methods: ["bearer"],
         },
@@ -1001,7 +1214,6 @@ describe("ProviderManagementPage", () => {
           display_name: "OpenAI Responses",
           user_configurable: true,
           runtime_ready: true,
-          model_discovery: "unsupported",
           capabilities: [],
           allowed_auth_methods: ["bearer"],
         },
@@ -1011,7 +1223,6 @@ describe("ProviderManagementPage", () => {
           display_name: "Anthropic Messages",
           user_configurable: true,
           runtime_ready: true,
-          model_discovery: "unsupported",
           capabilities: [],
           allowed_auth_methods: ["header_api_key"],
         },
@@ -1376,7 +1587,9 @@ describe("ProviderManagementPage", () => {
           if (url === "/vulcan/manage/provider-groups")
             return Promise.resolve(jsonResponse(vertexGroupResponse));
           if (url === "/vulcan/manage/provider-instances")
-            return Promise.resolve(jsonResponse(authorizedVertexInstanceResponse));
+            return Promise.resolve(
+              jsonResponse(authorizedVertexInstanceResponse),
+            );
           if (
             url === "/vulcan/manage/provider-instances/pvi_vertex/credentials"
           )
@@ -1408,9 +1621,7 @@ describe("ProviderManagementPage", () => {
         )
       ).length,
     ).toBeGreaterThan(1);
-    fireEvent.click(
-      screen.getByRole("button", { name: "Replace credential" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Replace credential" }));
     expect(screen.queryByLabelText("Vertex location")).not.toBeInTheDocument();
     fireEvent.change(screen.getByLabelText("Service account JSON"), {
       target: {
@@ -1423,14 +1634,11 @@ describe("ProviderManagementPage", () => {
         }),
       },
     });
-    fireEvent.click(
-      screen.getByRole("button", { name: "Replace credential" }),
-    );
+    fireEvent.click(screen.getByRole("button", { name: "Replace credential" }));
     await waitFor(() => {
       const replacementCall = fetchMock.mock.calls.find(
         ([url, init]) =>
-          String(url) ===
-            "/vulcan/manage/vertex/service-accounts/onboard" &&
+          String(url) === "/vulcan/manage/vertex/service-accounts/onboard" &&
           init?.method === "POST",
       );
       expect(replacementCall?.[1]?.body).toContain(
@@ -1883,11 +2091,11 @@ describe("ProviderManagementPage", () => {
     );
   });
 
-  // This test verifies persisted plan, credit, and reset-window data loads locally before any explicit upstream refresh.
-  // 此测试验证已持久化的套餐、积分与重置窗口数据会在任何显式上游刷新前从本地加载。
-  it("loads cached account metadata and still permits an explicit refresh", async () => {
-    // cachedMetadata is the redacted database snapshot returned by both local reads and a later explicit refresh.
-    // cachedMetadata 是本地读取与后续显式刷新返回的脱敏数据库快照。
+  // This test verifies persisted static model, plan, credit, and reset-window data loads without an upstream model request.
+  // 此测试验证已持久化的静态模型、套餐、积分与重置窗口数据无需上游模型请求即可加载。
+  it("loads the cached static catalog and account metadata without model discovery", async () => {
+    // cachedMetadata is the redacted database snapshot returned by the local catalog read.
+    // cachedMetadata 是本地目录读取返回的脱敏数据库快照。
     const cachedMetadata = {
       provider_instance_id: "pvi_antigravity",
       models: [
@@ -1988,12 +2196,6 @@ describe("ProviderManagementPage", () => {
             init?.method === "GET"
           )
             return Promise.resolve(jsonResponse(cachedMetadata));
-          if (
-            url ===
-              "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh" &&
-            init?.method === "POST"
-          )
-            return Promise.resolve(jsonResponse(cachedMetadata));
           return Promise.resolve(new Response(null, { status: 404 }));
         },
       );
@@ -2010,15 +2212,6 @@ describe("ProviderManagementPage", () => {
     expect(fetchMock).not.toHaveBeenCalledWith(
       "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh",
       expect.anything(),
-    );
-    fireEvent.click(
-      screen.getByRole("button", { name: "Refresh account data" }),
-    );
-    await waitFor(() =>
-      expect(fetchMock).toHaveBeenCalledWith(
-        "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh",
-        expect.objectContaining({ method: "POST" }),
-      ),
     );
     expect(screen.getByText("Gemini 3 Pro")).toBeInTheDocument();
     expect(screen.getByText("gemini-3-pro-preview")).toBeInTheDocument();
@@ -2134,7 +2327,9 @@ describe("ProviderManagementPage", () => {
 
     expect(await screen.findByText("Google Account")).toBeInTheDocument();
     fireEvent.click(screen.getByRole("button", { name: "Reauthorize" }));
-    fireEvent.click(screen.getByRole("button", { name: "Start authorization" }));
+    fireEvent.click(
+      screen.getByRole("button", { name: "Start authorization" }),
+    );
     await screen.findByRole("link", { name: "Open authorization page" });
     fireEvent.change(screen.getByLabelText("Callback URL"), {
       target: { value: "http://localhost:51121/oauth-callback?code=test" },
@@ -2152,9 +2347,7 @@ describe("ProviderManagementPage", () => {
       expect(call?.[1]?.body).toContain(
         '"provider_instance_id":"pvi_antigravity"',
       );
-      expect(call?.[1]?.body).toContain(
-        '"credential_id":"cred_antigravity"',
-      );
+      expect(call?.[1]?.body).toContain('"credential_id":"cred_antigravity"');
     });
   });
 
@@ -2190,10 +2383,10 @@ describe("ProviderManagementPage", () => {
     renderPage();
 
     expect(await screen.findByText("Google Account")).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Delete credential" }),
-    );
-    expect(await screen.findByText("Delete this credential?")).toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "Delete credential" }));
+    expect(
+      await screen.findByText("Delete this credential?"),
+    ).toBeInTheDocument();
     const deleteButtons = screen.getAllByRole("button", {
       name: "Delete credential",
     });
@@ -2254,53 +2447,6 @@ describe("ProviderManagementPage", () => {
       expect(await screen.findByText(failure.message)).toBeInTheDocument();
     },
   );
-
-  // This test verifies a rejected saved credential is distinguished from a temporary provider outage.
-  // 此测试验证已保存凭据被拒绝时能够与供应商临时不可用明确区分。
-  it("renders an actionable metadata authentication failure", async () => {
-    const fetchMock = vi
-      .fn()
-      .mockImplementation(
-        (input: string | URL | Request, init?: RequestInit) => {
-          const url = String(input);
-          if (url === "/vulcan/manage/provider-groups")
-            return Promise.resolve(jsonResponse(antigravityGroupResponse));
-          if (url === "/vulcan/manage/provider-instances")
-            return Promise.resolve(jsonResponse(authorizedAntigravityResponse));
-          if (
-            url ===
-            "/vulcan/manage/provider-instances/pvi_antigravity/credentials"
-          )
-            return Promise.resolve(
-              jsonResponse(authorizedAntigravityCredentialsResponse),
-            );
-          if (
-            url ===
-              "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh" &&
-            init?.method === "POST"
-          )
-            return Promise.resolve(
-              jsonResponse(
-                { error: "provider_metadata_authentication_failed" },
-                424,
-              ),
-            );
-          return Promise.resolve(new Response(null, { status: 404 }));
-        },
-      );
-    vi.stubGlobal("fetch", fetchMock);
-    renderPage();
-
-    expect(await screen.findByText("Google Account")).toBeInTheDocument();
-    fireEvent.click(
-      screen.getByRole("button", { name: "Refresh account data" }),
-    );
-    expect(
-      await screen.findByText(
-        "The saved credential was rejected. Reauthorize this provider.",
-      ),
-    ).toBeInTheDocument();
-  });
 
   // This test verifies an unfinished server-owned device authorization can be explicitly released.
   // 此测试验证未完成且由服务端拥有的设备授权可以被显式释放。
@@ -2371,4 +2517,5 @@ describe("ProviderManagementPage", () => {
       }),
     );
   });
+
 });

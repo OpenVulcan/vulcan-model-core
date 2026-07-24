@@ -535,7 +535,6 @@ func sqliteCustomOnboarding(definitionID string, instanceID string, handle strin
 		AuthMethodIDs: []string{"default"}, RuntimeReady: true,
 		AuthMethods: []providerconfig.AuthMethodDefinition{{ID: "default", Type: providerconfig.AuthMethodBearer, MultipleCredentials: true}}, Revision: 1,
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery:    providerconfig.SupportUnsupported,
 			PlanReader:        providerconfig.SupportUnsupported,
 			EntitlementReader: providerconfig.SupportUnsupported,
 			AllowanceReader:   providerconfig.SupportUnsupported,

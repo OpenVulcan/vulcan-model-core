@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 // TestCapabilityMappingRoundTripPreservesRecommendations verifies the custom-catalog HTTP boundary does not fuse defaults with hard token limits.
@@ -21,9 +22,10 @@ func TestCapabilityMappingRoundTripPreservesRecommendations(t *testing.T) {
 		},
 		InputModalities:  []string{"text"},
 		OutputModalities: []string{"text"},
+		HostedTools:      []vcp.ToolKind{vcp.ToolNativeWebSearch},
 	}
 	roundTrip := capabilityFromView(capabilityView(capabilities))
-	if roundTrip.Tokens != capabilities.Tokens || roundTrip.Recommendations != capabilities.Recommendations {
+	if roundTrip.Tokens != capabilities.Tokens || roundTrip.Recommendations != capabilities.Recommendations || len(roundTrip.HostedTools) != 1 || roundTrip.HostedTools[0] != vcp.ToolNativeWebSearch {
 		t.Fatalf("round-trip token facts = limits %#v recommendations %#v", roundTrip.Tokens, roundTrip.Recommendations)
 	}
 }

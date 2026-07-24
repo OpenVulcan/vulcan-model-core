@@ -26,21 +26,21 @@ func ProjectRequest(request vcp.VulcanRequest, target resolve.Target, capabiliti
 // ProjectRequestWithInputs compiles one Responses request with exact accepted resource materializations.
 // ProjectRequestWithInputs 使用精确已接受资源物化结果编译一条 Responses 请求。
 func ProjectRequestWithInputs(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, previousResponseID string, now time.Time, inputs []resource.MaterializedInput) (ProjectedRequest, error) {
-	materialized := make(map[string]resource.MaterializedInput, len(inputs))
-	for _, input := range inputs {
-		if _, exists := materialized[input.ResourceID]; exists {
-			return ProjectedRequest{}, fmt.Errorf("%w: duplicate materialized resource %q", ErrUnsupportedContext, input.ResourceID)
-		}
-		materialized[input.ResourceID] = input
+	materialized, errIndex := resource.IndexMaterializedInputs(inputs)
+	if errIndex != nil {
+		return ProjectedRequest{}, fmt.Errorf("%w: %v", ErrUnsupportedContext, errIndex)
 	}
 	return projectRequest(request, target, capabilities, lineageID, previousResponseID, now, materialized)
 }
 
 // projectRequest compiles text and optional typed media through one deterministic Responses path.
 // projectRequest 通过一条确定性 Responses 路径编译文本和可选类型化媒体。
-func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, previousResponseID string, now time.Time, materialized map[string]resource.MaterializedInput) (ProjectedRequest, error) {
+func projectRequest(request vcp.VulcanRequest, target resolve.Target, capabilities ProfileCapabilities, lineageID string, previousResponseID string, now time.Time, materialized resource.MaterializedInputIndex) (ProjectedRequest, error) {
 	if errRequest := request.Validate(); errRequest != nil {
 		return ProjectedRequest{}, errRequest
+	}
+	if request.ReasoningPolicy.Enabled != nil || request.ReasoningPolicy.BudgetTokens != nil {
+		return ProjectedRequest{}, fmt.Errorf("%w: Responses has no verified carrier for reasoning enabled or budget_tokens", ErrUnsupportedContext)
 	}
 	if len(request.GenerationPolicy.Stop) > 0 {
 		return ProjectedRequest{}, fmt.Errorf("%w: stop sequences have no OpenAI Responses wire carrier", ErrUnsupportedContext)
@@ -239,10 +239,16 @@ func projectTools(upstream *Request, request vcp.VulcanRequest, capabilities Pro
 	// toolKinds maps the exact namespace/name identity to its closed VCP kind.
 	// toolKinds 将精确命名空间/名称身份映射到其封闭 VCP Kind。
 	toolKinds := make(map[string]vcp.ToolKind)
-	if len(request.Tools) == 0 {
+	// nativeExtractorSelected is true only for the closed model-tool decision admitted by the Router.
+	// nativeExtractorSelected 仅在 Router 已接收封闭模型工具决策时为真。
+	nativeExtractorSelected := selectedNativeStandardModelTool(request.ModelTools, vcp.StandardModelToolWebExtractor)
+	if nativeExtractorSelected && !capabilities.NativeWebExtractor {
+		return nil, vcp.NewModelToolError(vcp.ModelToolNotSupported, string(vcp.StandardModelToolWebExtractor), "projection", false)
+	}
+	if len(request.Tools) == 0 && !nativeExtractorSelected {
 		return toolKinds, nil
 	}
-	upstream.Tools = make([]Tool, 0, len(request.Tools))
+	upstream.Tools = make([]Tool, 0, len(request.Tools)+1)
 	for _, tool := range request.Tools {
 		identity := toolIdentity(tool.Namespace, tool.Name)
 		if _, exists := toolKinds[identity]; exists {
@@ -298,6 +304,9 @@ func projectTools(upstream *Request, request vcp.VulcanRequest, capabilities Pro
 		}
 		toolKinds[identity] = tool.Kind
 	}
+	if nativeExtractorSelected {
+		upstream.Tools = append(upstream.Tools, Tool{Type: "web_extractor"})
+	}
 	choice := request.ToolPolicy.Choice
 	if choice == "" {
 		choice = vcp.ToolChoiceAuto
@@ -329,6 +338,17 @@ func projectTools(upstream *Request, request vcp.VulcanRequest, capabilities Pro
 	return toolKinds, nil
 }
 
+// selectedNativeStandardModelTool reports whether one exact standard capability was frozen in native mode.
+// selectedNativeStandardModelTool 报告一个精确标准能力是否以原生方式冻结。
+func selectedNativeStandardModelTool(selection vcp.ModelToolSelection, kind vcp.StandardModelToolKind) bool {
+	for _, standard := range selection.Standard {
+		if standard.Kind == kind && standard.Mode == vcp.ModelToolNative {
+			return true
+		}
+	}
+	return false
+}
+
 // isResponsesHostedTool reports built-ins whose named selection does not use a caller tool name.
 // isResponsesHostedTool 报告指定选择不使用调用方工具名的内置工具。
 func isResponsesHostedTool(kind vcp.ToolKind) bool {
@@ -351,7 +371,7 @@ func findNamedTool(tools []vcp.ToolDefinition, name string) (vcp.ToolDefinition,
 
 // projectItem maps one canonical item to one exact Responses input carrier and ledger decision.
 // projectItem 将一个规范项目映射到一个精确 Responses 输入载体和账本决策。
-func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, lineageID string, position int, toolKinds map[string]vcp.ToolKind, callProjections map[string]toolCallProjection, materialized map[string]resource.MaterializedInput) (InputItem, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
+func projectItem(item vcp.ContextItem, request vcp.VulcanRequest, capabilities ProfileCapabilities, lineageID string, position int, toolKinds map[string]vcp.ToolKind, callProjections map[string]toolCallProjection, materialized resource.MaterializedInputIndex) (InputItem, vcp.CapabilityMode, vcp.ExecutionEquivalence, string, string, string, bool, error) {
 	// Client and audit scopes are Router-local, so sending them upstream would violate the VCP visibility boundary.
 	// 客户端和审计作用域仅限 Router 本地，因此将其发送上游会违反 VCP 可见性边界。
 	if item.Visibility != vcp.VisibilityModel {
@@ -484,11 +504,11 @@ func textInputItemOutput(value string) *InputItemOutput {
 
 // responsesComputerScreenshot projects one exact PNG materialization into computer_call_output.
 // responsesComputerScreenshot 将一个精确 PNG 物化结果投影为 computer_call_output。
-func responsesComputerScreenshot(screenshot vcp.ComputerScreenshotResult, upstreamCallID string, materialized map[string]resource.MaterializedInput) (InputItem, error) {
+func responsesComputerScreenshot(screenshot vcp.ComputerScreenshotResult, upstreamCallID string, materialized resource.MaterializedInputIndex) (InputItem, error) {
 	if strings.TrimSpace(upstreamCallID) == "" {
 		return InputItem{}, fmt.Errorf("%w: computer screenshot requires an upstream call identifier", ErrUnsupportedContext)
 	}
-	input, exists := materialized[screenshot.ResourceRef]
+	input, exists := materialized.Find(screenshot.ResourceRef, vcp.MediaRoleUnderstanding)
 	if !exists || input.ResourceID != screenshot.ResourceRef {
 		return InputItem{}, fmt.Errorf("%w: computer screenshot resource %q has no accepted materialization", ErrUnsupportedContext, screenshot.ResourceRef)
 	}
@@ -518,15 +538,15 @@ func hasResourceContent(blocks []vcp.ContentBlock) bool {
 
 // responsesMediaMessage preserves mixed content order using only evidence-closed media carriers.
 // responsesMediaMessage 仅使用证据封闭的媒体载体保留混合内容顺序。
-func responsesMediaMessage(blocks []vcp.ContentBlock, capabilities ProfileCapabilities, materialized map[string]resource.MaterializedInput) (InputItem, error) {
+func responsesMediaMessage(blocks []vcp.ContentBlock, capabilities ProfileCapabilities, materialized resource.MaterializedInputIndex) (InputItem, error) {
 	content := make([]InputContent, 0, len(blocks))
 	for _, block := range blocks {
 		if block.Type == vcp.ContentText {
 			content = append(content, InputContent{Type: "input_text", Text: vcp.EscapeReservedFrameText(block.Text)})
 			continue
 		}
-		input, exists := materialized[block.ResourceRef]
-		if !exists || block.MediaRole != input.Role {
+		input, exists := materialized.Find(block.ResourceRef, block.MediaRole)
+		if !exists {
 			return InputItem{}, fmt.Errorf("%w: resource %q has no matching accepted materialization", ErrUnsupportedContext, block.ResourceRef)
 		}
 		kind, matches := responsesContentMediaKind(block.Type)

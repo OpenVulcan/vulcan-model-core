@@ -14,7 +14,6 @@ import { ProviderConfigurationPage } from "@/pages/provider-configuration-page";
 // unavailableFeatures supplies one explicit no-reader contract for the test provider.
 // unavailableFeatures 为测试供应商提供一个显式无读取器合同。
 const unavailableFeatures = {
-  model_discovery: "unsupported",
   plan_reader: "unsupported",
   entitlement_reader: "unsupported",
   allowance_reader: "unsupported",
@@ -46,6 +45,7 @@ const definition = {
       refreshable: false,
       multiple_credentials: true,
       plan_acquisition: "unavailable",
+      reader_features: unavailableFeatures,
     },
   ],
   plan_options: [],
@@ -116,7 +116,6 @@ function commonReadResponse(url: string): Response | null {
           display_name: "OpenAI Chat Completions",
           user_configurable: true,
           runtime_ready: true,
-          model_discovery: "unsupported",
           capabilities: [],
           allowed_auth_methods: ["bearer"],
         },
@@ -208,7 +207,6 @@ describe("separated provider and credential management", () => {
                     display_name: "OpenAI Chat Completions",
                     user_configurable: true,
                     runtime_ready: true,
-                    model_discovery: "unsupported",
                     capabilities: [],
                     allowed_auth_methods: ["bearer"],
                   },
@@ -218,7 +216,6 @@ describe("separated provider and credential management", () => {
                     display_name: "OpenAI Responses",
                     user_configurable: true,
                     runtime_ready: true,
-                    model_discovery: "unsupported",
                     capabilities: [],
                     allowed_auth_methods: ["bearer"],
                   },
@@ -228,7 +225,6 @@ describe("separated provider and credential management", () => {
                     display_name: "Anthropic Messages",
                     user_configurable: true,
                     runtime_ready: true,
-                    model_discovery: "unsupported",
                     capabilities: [],
                     allowed_auth_methods: ["header_api_key"],
                   },
@@ -238,7 +234,6 @@ describe("separated provider and credential management", () => {
                     display_name: "Google AI Studio",
                     user_configurable: true,
                     runtime_ready: true,
-                    model_discovery: "unsupported",
                     capabilities: [],
                     allowed_auth_methods: ["header_api_key"],
                   },
@@ -302,7 +297,7 @@ describe("separated provider and credential management", () => {
       target: { value: "https://api.deepseek.com/v1" },
     });
     fireEvent.change(screen.getByLabelText("API key (optional)"), {
-      target: { value: "sk-deepseek-test" },
+      target: { value: "test-deepseek-api-key" },
     });
     fireEvent.click(screen.getByRole("button", { name: "Create provider" }));
 
@@ -341,7 +336,7 @@ describe("separated provider and credential management", () => {
         body: JSON.stringify({
           auth_method_id: "default",
           label: "DeepSeek",
-          secret: "sk-deepseek-test",
+          secret: "test-deepseek-api-key",
         }),
       }),
     );
@@ -664,11 +659,15 @@ describe("separated provider and credential management", () => {
           refreshable: false,
           multiple_credentials: true,
           plan_acquisition: "unavailable",
+          reader_features: {
+            plan_reader: "supported",
+            entitlement_reader: "supported",
+            allowance_reader: "supported",
+          },
         },
       ],
       plan_options: [],
       features: {
-        model_discovery: "supported",
         plan_reader: "supported",
         entitlement_reader: "supported",
         allowance_reader: "supported",
@@ -884,7 +883,6 @@ describe("separated provider and credential management", () => {
                     display_name: "OpenAI Chat Completions",
                     user_configurable: true,
                     runtime_ready: true,
-                    model_discovery: "supported",
                     capabilities: [],
                     allowed_auth_methods: ["bearer"],
                   },
@@ -914,19 +912,16 @@ describe("separated provider and credential management", () => {
                     expires_at: null,
                     cooling_until: null,
                     priority: 2,
+                    reader_features: {
+                      plan_reader: "supported",
+                      entitlement_reader: "supported",
+                      allowance_reader: "supported",
+                    },
                     revision: 1,
                   },
                 ],
               }),
             );
-          }
-          if (
-            url.endsWith(
-              `/provider-instances/${miniMaxInstance.id}/catalog/refresh`,
-            ) &&
-            method === "POST"
-          ) {
-            return Promise.resolve(jsonResponse(miniMaxCatalog));
           }
           if (
             url.endsWith(`/provider-instances/${miniMaxInstance.id}/catalog`) &&
@@ -1061,7 +1056,7 @@ describe("separated provider and credential management", () => {
     expect(screen.queryByText("MiniMax M2.5")).not.toBeInTheDocument();
 
     fireEvent.click(
-      screen.getByRole("button", { name: "Get supported models" }),
+      screen.getByRole("button", { name: "View models" }),
     );
     expect(
       await screen.findByRole("heading", { name: "Supported models" }),
@@ -1152,6 +1147,7 @@ describe("separated provider and credential management", () => {
           refreshable: false,
           multiple_credentials: true,
           plan_acquisition: "unavailable",
+          reader_features: unavailableFeatures,
         },
       ],
       plan_options: [],
@@ -1276,6 +1272,171 @@ describe("separated provider and credential management", () => {
     ).toBeInTheDocument();
     expect(screen.getByLabelText("Credential name")).toHaveValue(
       "Unconfigured Native",
+    );
+  });
+
+  // This test verifies API-only credentials use the static model catalog and entitlement reader without inventing an allowance reader.
+  // 此测试验证仅 API 凭据使用静态模型目录与权益读取器，但不会虚构额度读取器。
+  it("renders the exact reader boundary for an API-only credential", async () => {
+    // apiOnlyFeatures is the verified reader contract for an Alibaba API-key credential.
+    // apiOnlyFeatures 是阿里云 API Key 凭据经过验证的读取器合同。
+    const apiOnlyFeatures = {
+      plan_reader: "unsupported",
+      entitlement_reader: "supported",
+      allowance_reader: "unsupported",
+    };
+    // apiOnlyDefinition owns the API-only credential and its code-owned static model catalog.
+    // apiOnlyDefinition 拥有仅 API 凭据及其代码拥有的静态模型目录。
+    const apiOnlyDefinition = {
+      ...definition,
+      id: "system_alibaba_modelstudio_cn",
+      display_name: "Alibaba Model Studio CN",
+      group_id: "alibaba",
+      variant_name: "Model Studio CN",
+      model_catalog_id: "alibaba_model_studio_cn",
+      auth_methods: [
+        {
+          ...definition.auth_methods[0],
+          reader_features: apiOnlyFeatures,
+        },
+      ],
+      features: apiOnlyFeatures,
+    };
+    // apiOnlyInstance is the configured Alibaba provider selected by the credential workspace.
+    // apiOnlyInstance 是凭据工作区选中的已配置阿里云供应商。
+    const apiOnlyInstance = {
+      ...instance,
+      id: "pvi_alibaba_modelstudio_cn",
+      definition_id: apiOnlyDefinition.id,
+      handle: "alibaba-modelstudio-cn",
+      display_name: "Alibaba Model Studio CN",
+    };
+    // apiOnlyCredential carries the same server-narrowed reader features returned by the management API.
+    // apiOnlyCredential 携带管理 API 返回的同一组服务端收窄读取能力。
+    const apiOnlyCredential = {
+      id: "cred_alibaba_api_key",
+      provider_instance_id: apiOnlyInstance.id,
+      auth_method_id: "api_key",
+      label: "Alibaba API Key",
+      status: "active",
+      expires_at: null,
+      cooling_until: null,
+      priority: 0,
+      reader_features: apiOnlyFeatures,
+      revision: 1,
+    };
+    // fetchMock serves only the authoritative inventory needed by this reader-boundary assertion.
+    // fetchMock 仅提供此读取器边界断言所需的权威清单。
+    const fetchMock = vi
+      .fn()
+      .mockImplementation(
+        (input: string | URL | Request, init?: RequestInit) => {
+          const url = String(input);
+          if (url.endsWith("/provider-groups")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_groups: [
+                  {
+                    id: "alibaba",
+                    display_name: "Alibaba Cloud",
+                    description: "Alibaba Cloud provider variants.",
+                    provider_definitions: [apiOnlyDefinition],
+                  },
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/provider-definitions")) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_definitions: [
+                  {
+                    id: apiOnlyDefinition.id,
+                    kind: "system",
+                    display_name: apiOnlyDefinition.display_name,
+                    group_id: apiOnlyDefinition.group_id,
+                    protocol_profile_id: apiOnlyDefinition.protocol_profile_id,
+                    auth_methods: apiOnlyDefinition.auth_methods,
+                    plan_options: [],
+                    features: apiOnlyFeatures,
+                  },
+                ],
+              }),
+            );
+          }
+          if (url.endsWith("/provider-instances")) {
+            return Promise.resolve(
+              jsonResponse({ provider_instances: [apiOnlyInstance] }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${apiOnlyInstance.id}/credentials`,
+            )
+          ) {
+            return Promise.resolve(
+              jsonResponse({ credentials: [apiOnlyCredential] }),
+            );
+          }
+          if (url.endsWith(`/provider-instances/${apiOnlyInstance.id}/catalog`)) {
+            return Promise.resolve(
+              jsonResponse({
+                provider_instance_id: apiOnlyInstance.id,
+                models: [
+                  {
+                    id: "model_qwen_api_only",
+                    upstream_model_id: "qwen-api-only",
+                    display_name: "Qwen API Only",
+                    entitlement_mode: "explicit",
+                    enabled: true,
+                    authorization_status: "authorized",
+                  },
+                ],
+                plans: [],
+                allowances: [],
+                revision: 2,
+                observed_at: "2026-07-23T08:00:00Z",
+              }),
+            );
+          }
+          if (url.endsWith("/protocol-profiles")) {
+            return Promise.resolve(jsonResponse({ protocol_profiles: [] }));
+          }
+          return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+        },
+      );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <I18nProvider>
+        <CredentialManagementPage managementAuthToken="management-token" />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText("Alibaba API Key")).toBeInTheDocument();
+    expect(
+      screen.getByText("Usage queries are not supported"),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Refresh access" }),
+    ).toBeInTheDocument();
+    expect(
+      await screen.findByRole("button", { name: "View models" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Refresh usage" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(screen.getByRole("button", { name: "View models" }));
+    expect(await screen.findByText("Qwen API Only")).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(
+        ([request, options]) =>
+          String(request).includes("/catalog/discover") ||
+          String(request).includes("/catalog/refresh") ||
+          options?.method === "POST",
+      ),
+    ).toBe(
+      false,
     );
   });
 });

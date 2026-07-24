@@ -17,7 +17,6 @@ func testProtocolProfile() ProtocolProfile {
 		UserConfigurable:           true,
 		CustomDefinitionCompatible: true,
 		RuntimeReady:               true,
-		ModelDiscovery:             SupportSupported,
 		Capabilities: []ProtocolCapabilityFact{
 			{Capability: ProtocolCapabilityStructuredTools, Status: SupportSupported},
 			{Capability: ProtocolCapabilityStreamingToolArguments, Status: SupportSupported},
@@ -266,10 +265,45 @@ func TestMutationValidationPreservesRecordOwnership(t *testing.T) {
 // testFeatureSet 返回一组显式不支持的可选能力测试夹具。
 func testFeatureSet() ProviderFeatureSet {
 	return ProviderFeatureSet{
-		ModelDiscovery:    SupportUnsupported,
 		PlanReader:        SupportUnsupported,
 		EntitlementReader: SupportUnsupported,
 		AllowanceReader:   SupportUnsupported,
+	}
+}
+
+// TestAuthMethodReaderFeaturesNarrowProviderCapabilities verifies API-only credentials can omit plan and allowance readers without degrading execution support.
+// TestAuthMethodReaderFeaturesNarrowProviderCapabilities 验证仅 API 凭据可以省略套餐与用量 Reader，且不会降低执行支持。
+func TestAuthMethodReaderFeaturesNarrowProviderCapabilities(t *testing.T) {
+	// definition advertises the complete driver-level reader surface.
+	// definition 声明完整的 Driver 级 Reader 能力面。
+	definition := testSystemDefinition()
+	definition.Features = ProviderFeatureSet{PlanReader: SupportSupported, EntitlementReader: SupportSupported, AllowanceReader: SupportSupported}
+	// apiOnlyFeatures restricts one API key to entitlement evidence.
+	// apiOnlyFeatures 将一个 API Key 限制为授权证据能力。
+	apiOnlyFeatures := ProviderFeatureSet{PlanReader: SupportUnsupported, EntitlementReader: SupportSupported, AllowanceReader: SupportUnsupported}
+	definition.AuthMethods[1].ReaderFeatures = &apiOnlyFeatures
+	if errValidate := definition.Validate(); errValidate != nil {
+		t.Fatalf("validate auth-method reader features: %v", errValidate)
+	}
+	// effectiveFeatures is the exact reader surface selected for the API key.
+	// effectiveFeatures 是为 API Key 选择的精确 Reader 能力面。
+	effectiveFeatures, exists := definition.ReaderFeaturesForAuthMethod("api_key")
+	if !exists || effectiveFeatures != apiOnlyFeatures {
+		t.Fatalf("effective API-only reader features = %#v, %v", effectiveFeatures, exists)
+	}
+	// inheritedFeatures preserves legacy definitions without auth-method overrides.
+	// inheritedFeatures 为没有认证方式覆盖的旧定义保留继承语义。
+	inheritedFeatures, exists := definition.ReaderFeaturesForAuthMethod("oauth")
+	if !exists || inheritedFeatures != definition.Features {
+		t.Fatalf("inherited reader features = %#v, %v", inheritedFeatures, exists)
+	}
+
+	// invalidDefinition proves an auth method cannot enable a reader disabled by its provider.
+	// invalidDefinition 证明认证方式不能启用供应商已禁用的 Reader。
+	invalidDefinition := testSystemDefinition()
+	invalidDefinition.AuthMethods[1].ReaderFeatures = &apiOnlyFeatures
+	if errValidate := invalidDefinition.Validate(); errValidate == nil {
+		t.Fatal("auth-method reader features unexpectedly exceeded provider capabilities")
 	}
 }
 

@@ -8,6 +8,7 @@
     "credential_status": "active",
     "supported_context_profile_ids": [],
     "allowances": [],
+    "allowance_support": "supported",
     "catalog_revision": 1,
     "observed_at": "2026-07-21T12:00:00Z"
   }

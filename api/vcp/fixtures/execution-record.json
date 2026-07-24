@@ -2,6 +2,7 @@
   "id": "exe_0123456789abcdef0123456789abcdef",
   "status": "succeeded",
   "operation": "search.web",
+  "model_tool_plan": {"catalog_revision": 0},
   "result": {"search": {"query": "Vulcan protocol", "evidence": {"status": "confirmed", "kinds": ["structured_result"]}}, "usage": {"service_units": 0.25, "service_unit": "credits", "source": "provider_reported", "aggregation": "snapshot", "phase": "terminal", "accounting_basis": "provider_credit", "final": true}},
   "created_at": "2026-07-21T00:00:00Z",
   "updated_at": "2026-07-21T00:00:01Z",

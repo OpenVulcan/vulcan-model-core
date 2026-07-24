@@ -13,6 +13,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/execution"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
@@ -309,6 +310,46 @@ func TestExecutionStorePersistsAttemptAndResultUsage(t *testing.T) {
 	reopened, errGet := store.Get(ctx, record.OwnerAPIKeyID, record.ID)
 	if errGet != nil || len(reopened.Attempts) != 1 || reopened.Attempts[0].Usage == nil || reopened.Result == nil || reopened.Result.Usage == nil || *reopened.Attempts[0].Usage.InputTokens != 12 || *reopened.Result.Usage.OutputTokens != 4 {
 		t.Fatalf("reopened usage attempt=%#v result=%#v error=%v", reopened.Attempts, reopened.Result, errGet)
+	}
+}
+
+// TestExecutionStorePersistsPrivateRouterToolPlan verifies restart recovery retains the child target without public disclosure.
+// TestExecutionStorePersistsPrivateRouterToolPlan 验证重启恢复保留子 Target 且不公开披露。
+func TestExecutionStorePersistsPrivateRouterToolPlan(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "router-tool-plan.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer func() { _ = database.Close() }()
+	store, errStore := NewExecutionStore(database, secret.NewMemoryStore())
+	if errStore != nil {
+		t.Fatalf("NewExecutionStore() error = %v", errStore)
+	}
+	now := time.Date(2026, time.July, 23, 15, 0, 0, 0, time.UTC)
+	record := sqliteExecutionRecord(now)
+	record.Request.Payload.Conversation.ModelTools.Standard = []vcp.StandardModelToolSelection{{Kind: vcp.StandardModelToolWebSearch, Mode: vcp.ModelToolRouter}}
+	record.CompletedRouterToolRounds = 2
+	childTarget := resolve.Target{ProviderDefinitionID: "definition_search_private", ProviderInstanceID: "pvi_search_private", ChannelID: "channel_search_private", EndpointID: "endpoint_search_private", CredentialID: "credential_search_private", SubjectKind: resolve.ExecutionSubjectService, ProviderServiceID: "search.web", ServiceOfferingID: "offering_search", Operation: vcp.OperationSearchWeb, ExecutionProfileID: "profile_search", CatalogRevision: 2}
+	binding := routertool.Binding{ID: "rtb_search", Kind: vcp.StandardModelToolWebSearch, ProviderInstanceID: childTarget.ProviderInstanceID, ProviderServiceID: childTarget.ProviderServiceID, ServiceOfferingID: childTarget.ServiceOfferingID, ExecutionProfileID: childTarget.ExecutionProfileID, Enabled: true, TimeoutMilliseconds: 5000, MaximumCalls: 2, MaximumResults: 5, MaximumURLs: 1, MaximumResultBytes: 65536, SafetyPolicy: routertool.SafetyPublicHTTPSOnly, Revision: 1, CreatedAt: now, UpdatedAt: now}
+	record.ModelToolPlan = execution.ModelToolPlan{
+		CatalogRevision: record.Target.CatalogRevision,
+		Standard:        []execution.ModelToolPlanEntry{{Kind: binding.Kind, Mode: vcp.ModelToolRouter, RouterBindingID: binding.ID, RouterBindingRevision: binding.Revision, RouterBinding: &routertool.ResolvedBinding{Binding: binding, Target: childTarget}}},
+		Diagnostics:     []vcp.ModelToolDiagnostic{{Code: vcp.ModelToolDiagnosticLegacyNativeWebSearchMigrated}},
+	}
+	if _, _, errCreate := store.Create(ctx, record, sqliteLifecycleEvent(record.ID, 1, now, execution.EventExecutionAccepted, execution.StatusAccepted)); errCreate != nil {
+		t.Fatalf("Create() error = %v", errCreate)
+	}
+	reopened, errGet := store.Get(ctx, record.OwnerAPIKeyID, record.ID)
+	if errGet != nil || reopened.CompletedRouterToolRounds != 2 || len(reopened.ModelToolPlan.Standard) != 1 || reopened.ModelToolPlan.Standard[0].RouterBinding == nil || reopened.ModelToolPlan.Standard[0].RouterBinding.Target.CredentialID != childTarget.CredentialID || len(reopened.ModelToolPlan.Diagnostics) != 1 || reopened.ModelToolPlan.Diagnostics[0].Code != vcp.ModelToolDiagnosticLegacyNativeWebSearchMigrated {
+		t.Fatalf("reopened plan=%+v error=%v", reopened.ModelToolPlan, errGet)
+	}
+	publicPayload, errMarshal := json.Marshal(reopened)
+	if errMarshal != nil {
+		t.Fatalf("marshal public record: %v", errMarshal)
+	}
+	if strings.Contains(string(publicPayload), childTarget.CredentialID) || strings.Contains(string(publicPayload), childTarget.EndpointID) {
+		t.Fatalf("public record exposed private Router child target: %s", publicPayload)
 	}
 }
 

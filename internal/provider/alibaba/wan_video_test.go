@@ -3,6 +3,7 @@ package alibaba
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -123,6 +124,24 @@ func TestWanImageVideoProjectsClosedMediaCombination(t *testing.T) {
 	}
 	if upstream.Model != "wan2.7-i2v" || upstream.Input.Prompt != "" || upstream.Input.AudioURL != "" || len(upstream.Input.Media) != 3 || upstream.Input.Media[0].Type != "first_frame" || upstream.Input.Media[0].URL != "data:image/png;base64,Zmlyc3Q=" || upstream.Input.Media[1].Type != "last_frame" || upstream.Input.Media[2].Type != "driving_audio" {
 		t.Fatalf("upstream = %#v", upstream)
+	}
+}
+
+// TestDecodeWanVideoPollRejectsMismatchedTask verifies a provider response cannot be rebound to another queued task.
+// TestDecodeWanVideoPollRejectsMismatchedTask 验证供应商响应不能重新绑定到另一个排队任务。
+func TestDecodeWanVideoPollRejectsMismatchedTask(t *testing.T) {
+	_, errDecode := decodeWanVideoPoll(strings.NewReader(`{"output":{"task_id":"task-other","task_status":"SUCCEEDED","video_url":"https://outputs.example/video.mp4"}}`), "task-expected", time.Now())
+	if errDecode == nil || !strings.Contains(errDecode.Error(), "correlation") {
+		t.Fatalf("decodeWanVideoPoll() error = %v", errDecode)
+	}
+}
+
+// TestDecodeWanVideoTaskRejectsTrailingJSON verifies task decoders accept exactly one upstream JSON document.
+// TestDecodeWanVideoTaskRejectsTrailingJSON 验证任务解码器仅接受一个上游 JSON 文档。
+func TestDecodeWanVideoTaskRejectsTrailingJSON(t *testing.T) {
+	response := `{"output":{"task_id":"task-one","task_status":"PENDING"}} {}`
+	if _, errDecode := decodeWanVideoStart(strings.NewReader(response), time.Now().UTC()); !errors.Is(errDecode, ErrInvalidWanVideoResponse) {
+		t.Fatalf("decodeWanVideoStart() error = %v", errDecode)
 	}
 }
 

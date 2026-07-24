@@ -16,10 +16,12 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"path"
 	"strings"
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
 	responsesprofile "github.com/OpenVulcan/vulcan-model-core/internal/protocol/openai/responses"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider/transport"
@@ -60,36 +62,72 @@ type ResponsesDriver struct {
 	// endpointPath is the immutable Responses path appended to the configured Base URL.
 	// endpointPath 是追加到已配置 Base URL 的不可变 Responses 路径。
 	endpointPath string
+	// requestAdapter owns an explicitly registered provider-specific Responses wire extension.
+	// requestAdapter 管理一个显式注册的供应商专用 Responses Wire 扩展。
+	requestAdapter ResponsesRequestAdapter
+}
+
+// ResponsesRequestAdapter mutates only the projected request copy and returns non-secret provider headers.
+// ResponsesRequestAdapter 仅修改投影请求副本并返回非秘密供应商请求头。
+type ResponsesRequestAdapter interface {
+	// Adapt applies one verified provider-specific Responses wire contract.
+	// Adapt 应用一个经过验证的供应商专用 Responses Wire 合同。
+	Adapt(context.Context, provider.ExecutionRequest, *responsesprofile.Request) ([]transport.Header, error)
 }
 
 // NewResponsesDriver creates a driver that remains permanently bound to one provider definition and transport client.
 // NewResponsesDriver 创建一个永久绑定到一个 Provider Definition 与传输客户端的 Driver。
 func NewResponsesDriver(definitionID string, client *transport.Client, capabilities responsesprofile.ProfileCapabilities) (*ResponsesDriver, error) {
-	return newResponsesDriver(definitionID, client, capabilities, []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey}, openAIResponsesEndpointPath)
+	return newResponsesDriver(definitionID, client, capabilities, []providerconfig.AuthMethodType{providerconfig.AuthMethodAPIKey}, openAIResponsesEndpointPath, nil)
 }
 
 // NewOpenAIResponsesCompatibilityDriver creates a custom-provider Responses driver over a versioned Base URL and Bearer credential.
 // NewOpenAIResponsesCompatibilityDriver 基于带版本 Base URL 与 Bearer 凭据创建自定义供应商 Responses Driver。
 func NewOpenAIResponsesCompatibilityDriver(definitionID string, client *transport.Client, capabilities responsesprofile.ProfileCapabilities) (*ResponsesDriver, error) {
-	return newResponsesDriver(definitionID, client, capabilities, []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer}, openAIResponsesCompatibilityEndpointPath)
+	return newResponsesDriver(definitionID, client, capabilities, []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer}, openAIResponsesCompatibilityEndpointPath, nil)
+}
+
+// NewBearerResponsesDriverAtPathWithRequestAdapter creates a path-bound Responses driver with one required provider adapter.
+// NewBearerResponsesDriverAtPathWithRequestAdapter 创建一个绑定路径且带必需供应商适配器的 Responses Driver。
+func NewBearerResponsesDriverAtPathWithRequestAdapter(definitionID string, client *transport.Client, capabilities responsesprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, endpointPath string, requestAdapter ResponsesRequestAdapter) (*ResponsesDriver, error) {
+	if dependency.IsNil(requestAdapter) {
+		return nil, ErrInvalidResponsesDriver
+	}
+	return newResponsesDriver(definitionID, client, capabilities, allowedAuthMethods, endpointPath, requestAdapter)
 }
 
 // newResponsesDriver validates and copies one exact Responses endpoint and authentication shape.
 // newResponsesDriver 校验并复制一个精确的 Responses Endpoint 与认证形态。
-func newResponsesDriver(definitionID string, client *transport.Client, capabilities responsesprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, endpointPath string) (*ResponsesDriver, error) {
+func newResponsesDriver(definitionID string, client *transport.Client, capabilities responsesprofile.ProfileCapabilities, allowedAuthMethods []providerconfig.AuthMethodType, endpointPath string, requestAdapter ResponsesRequestAdapter) (*ResponsesDriver, error) {
 	if strings.TrimSpace(definitionID) == "" || client == nil {
 		return nil, ErrInvalidResponsesDriver
 	}
-	if endpointPath != openAIResponsesEndpointPath && endpointPath != openAIResponsesCompatibilityEndpointPath {
+	if !validResponsesEndpointPath(endpointPath) {
 		return nil, ErrInvalidResponsesDriver
 	}
-	if len(allowedAuthMethods) != 1 || (allowedAuthMethods[0] != providerconfig.AuthMethodAPIKey && allowedAuthMethods[0] != providerconfig.AuthMethodBearer) {
+	if len(allowedAuthMethods) == 0 {
 		return nil, ErrInvalidResponsesDriver
+	}
+	for _, authMethod := range allowedAuthMethods {
+		switch authMethod {
+		case providerconfig.AuthMethodAPIKey, providerconfig.AuthMethodBearer, providerconfig.AuthMethodOAuth, providerconfig.AuthMethodDeviceFlow:
+		default:
+			return nil, fmt.Errorf("%w: authentication type %q cannot use a Bearer header", ErrInvalidResponsesDriver, authMethod)
+		}
 	}
 	copiedCapabilities := capabilities
 	copiedCapabilities.MediaInputKinds = append([]vcp.MediaKind(nil), capabilities.MediaInputKinds...)
 	copiedCapabilities.MediaMaterializations = append([]catalog.UpstreamMaterializationMode(nil), capabilities.MediaMaterializations...)
-	return &ResponsesDriver{definitionID: definitionID, client: client, capabilities: copiedCapabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...), endpointPath: endpointPath}, nil
+	return &ResponsesDriver{definitionID: definitionID, client: client, capabilities: copiedCapabilities, allowedAuthMethods: append([]providerconfig.AuthMethodType(nil), allowedAuthMethods...), endpointPath: endpointPath, requestAdapter: requestAdapter}, nil
+}
+
+// validResponsesEndpointPath reports whether one immutable compatibility path is normalized and ends at Responses.
+// validResponsesEndpointPath 返回一个不可变兼容路径是否规范化并终止于 Responses。
+func validResponsesEndpointPath(endpointPath string) bool {
+	return strings.HasPrefix(endpointPath, "/") &&
+		!strings.ContainsAny(endpointPath, "?#\\") &&
+		path.Clean(endpointPath) == endpointPath &&
+		strings.HasSuffix(endpointPath, "/responses")
 }
 
 // ProviderDefinitionID returns the exact definition that owns this Responses driver.
@@ -127,6 +165,16 @@ func (d *ResponsesDriver) Execute(ctx context.Context, execution provider.Execut
 	if errProject != nil {
 		return provider.ExecutionResult{}, errProject
 	}
+	// headers begins with the profile-owned content type before a provider adapter adds verified non-secret fields.
+	// headers 以 Profile 所有的内容类型开始，随后由供应商适配器增加已验证的非秘密字段。
+	headers := []transport.Header{{Name: "Content-Type", Value: "application/json"}}
+	if d.requestAdapter != nil {
+		adaptedHeaders, errAdapt := d.requestAdapter.Adapt(ctx, execution, &projected.Upstream)
+		if errAdapt != nil {
+			return provider.ExecutionResult{}, errAdapt
+		}
+		headers = append(headers, adaptedHeaders...)
+	}
 	encodedRequest, errMarshal := json.Marshal(projected.Upstream)
 	if errMarshal != nil {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: encode request: %v", ErrInvalidResponsesDriver, errMarshal)
@@ -139,7 +187,7 @@ func (d *ResponsesDriver) Execute(ctx context.Context, execution provider.Execut
 	}
 	outbound := transport.Request{
 		Binding: execution.Binding, Method: http.MethodPost, Path: d.endpointPath, Body: encodedRequest,
-		Headers:        []transport.Header{{Name: "Content-Type", Value: "application/json"}},
+		Headers:        headers,
 		Authentication: transport.Authentication{Mode: transport.AuthenticationBearer},
 		Stream:         projected.Upstream.Stream, IdempotencyKey: execution.Request.IdempotencyKey,
 	}

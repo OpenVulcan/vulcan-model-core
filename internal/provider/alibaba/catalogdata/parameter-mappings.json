@@ -1,0 +1,506 @@
+{
+  "schema_version": 1,
+  "entries": [
+    {
+      "id": "alibaba.chat.reasoning.budget",
+      "action_binding_id": "action_conversation_respond",
+      "operation": "conversation.respond",
+      "vcp_field": "reasoning_policy.budget_tokens",
+      "outbound_json_path": "thinking_budget",
+      "evidence_revision": 1,
+      "evidence": "Alibaba OpenAI Chat adapter request fixture"
+    },
+    {
+      "id": "alibaba.chat.reasoning.enabled",
+      "action_binding_id": "action_conversation_respond",
+      "operation": "conversation.respond",
+      "vcp_field": "reasoning_policy.enabled",
+      "outbound_json_path": "enable_thinking",
+      "evidence_revision": 1,
+      "evidence": "Alibaba OpenAI Chat adapter request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.enable_ssml",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "enable_ssml",
+      "outbound_json_path": "input.enable_ssml",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.format",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "output_format",
+      "outbound_json_path": "input.format",
+      "transform": "format_default",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.instruction",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "style",
+      "outbound_json_path": "input.instruction",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.language",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "language",
+      "outbound_json_path": "input.language_hints",
+      "transform": "singleton_array",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.pitch",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "pitch",
+      "outbound_json_path": "input.pitch",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.sample_rate",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "sample_rate",
+      "outbound_json_path": "input.sample_rate",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.seed",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "seed",
+      "outbound_json_path": "input.seed",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.speed",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "speed",
+      "outbound_json_path": "input.rate",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.text",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "text",
+      "outbound_json_path": "input.text",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.voice",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "voice_id",
+      "outbound_json_path": "input.voice",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.cosyvoice.volume",
+      "action_binding_id": "action_alibaba_cosyvoice_synthesize",
+      "operation": "speech.synthesize",
+      "vcp_field": "volume",
+      "outbound_json_path": "input.volume",
+      "evidence_revision": 1,
+      "evidence": "CosyVoice non-realtime driver request fixture"
+    },
+    {
+      "id": "alibaba.fun_asr.channel_ids",
+      "action_binding_id": "action_alibaba_fun_asr_transcribe",
+      "operation": "speech.transcribe",
+      "vcp_field": "channel_ids",
+      "outbound_json_path": "parameters.channel_id",
+      "evidence_revision": 1,
+      "evidence": "Fun-ASR task driver request fixture"
+    },
+    {
+      "id": "alibaba.fun_asr.diarization",
+      "action_binding_id": "action_alibaba_fun_asr_transcribe",
+      "operation": "speech.transcribe",
+      "vcp_field": "diarization",
+      "outbound_json_path": "parameters.diarization_enabled",
+      "evidence_revision": 1,
+      "evidence": "Fun-ASR task driver request fixture"
+    },
+    {
+      "id": "alibaba.fun_asr.language",
+      "action_binding_id": "action_alibaba_fun_asr_transcribe",
+      "operation": "speech.transcribe",
+      "vcp_field": "language",
+      "outbound_json_path": "parameters.language_hints",
+      "transform": "singleton_array",
+      "evidence_revision": 1,
+      "evidence": "Fun-ASR task driver request fixture"
+    },
+    {
+      "id": "alibaba.fun_asr.sources",
+      "action_binding_id": "action_alibaba_fun_asr_transcribe",
+      "operation": "speech.transcribe",
+      "vcp_field": "sources",
+      "outbound_json_path": "input.file_urls",
+      "evidence_revision": 1,
+      "evidence": "Fun-ASR task driver request fixture"
+    },
+    {
+      "id": "alibaba.fun_asr.speaker_count",
+      "action_binding_id": "action_alibaba_fun_asr_transcribe",
+      "operation": "speech.transcribe",
+      "vcp_field": "speaker_count",
+      "outbound_json_path": "parameters.speaker_count",
+      "evidence_revision": 1,
+      "evidence": "Fun-ASR task driver request fixture"
+    },
+    {
+      "id": "alibaba.fun_asr.vocabulary_id",
+      "action_binding_id": "action_alibaba_fun_asr_transcribe",
+      "operation": "speech.transcribe",
+      "vcp_field": "vocabulary_id",
+      "outbound_json_path": "parameters.vocabulary_id",
+      "evidence_revision": 1,
+      "evidence": "Fun-ASR task driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.duration",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "duration_seconds",
+      "outbound_json_path": "parameters.duration",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.negative_prompt",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "negative_prompt",
+      "outbound_json_path": "input.negative_prompt",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.prompt_extend",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "prompt_extend",
+      "outbound_json_path": "parameters.prompt_extend",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.ratio",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "aspect_ratio",
+      "outbound_json_path": "parameters.ratio",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.reference_voice",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "inputs.related_input_id",
+      "outbound_json_path": "input.media[].reference_voice",
+      "transform": "media_relation",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse reference-video driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.resolution",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "resolution",
+      "outbound_json_path": "parameters.resolution",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.seed",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "seed",
+      "outbound_json_path": "parameters.seed",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse.watermark",
+      "action_binding_id": "action_alibaba_happyhorse_video_generate",
+      "operation": "video.generate",
+      "vcp_field": "watermark",
+      "outbound_json_path": "parameters.watermark",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse generation driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.audio_setting",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "audio_mode",
+      "outbound_json_path": "parameters.audio_setting",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.duration",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "duration_seconds",
+      "outbound_json_path": "parameters.duration",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.negative_prompt",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "negative_prompt",
+      "outbound_json_path": "input.negative_prompt",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.prompt_extend",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "prompt_extend",
+      "outbound_json_path": "parameters.prompt_extend",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.ratio",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "aspect_ratio",
+      "outbound_json_path": "parameters.ratio",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.resolution",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "resolution",
+      "outbound_json_path": "parameters.resolution",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.seed",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "seed",
+      "outbound_json_path": "parameters.seed",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.happyhorse_edit.watermark",
+      "action_binding_id": "action_alibaba_happyhorse_video_edit",
+      "operation": "video.edit",
+      "vcp_field": "watermark",
+      "outbound_json_path": "parameters.watermark",
+      "evidence_revision": 1,
+      "evidence": "HappyHorse edit driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image.count",
+      "action_binding_id": "action_alibaba_qwen_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "count",
+      "outbound_json_path": "parameters.n",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image.negative_prompt",
+      "action_binding_id": "action_alibaba_qwen_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "negative_prompt",
+      "outbound_json_path": "parameters.negative_prompt",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image.prompt_extend",
+      "action_binding_id": "action_alibaba_qwen_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "prompt_extend",
+      "outbound_json_path": "parameters.prompt_extend",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image.seed",
+      "action_binding_id": "action_alibaba_qwen_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "seed",
+      "outbound_json_path": "parameters.seed",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image.size",
+      "action_binding_id": "action_alibaba_qwen_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "width,height",
+      "outbound_json_path": "parameters.size",
+      "transform": "width_height_product",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image.watermark",
+      "action_binding_id": "action_alibaba_qwen_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "watermark",
+      "outbound_json_path": "parameters.watermark",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image_edit.count",
+      "action_binding_id": "action_alibaba_qwen_image_edit",
+      "operation": "image.edit",
+      "vcp_field": "count",
+      "outbound_json_path": "parameters.n",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image edit synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image_edit.negative_prompt",
+      "action_binding_id": "action_alibaba_qwen_image_edit",
+      "operation": "image.edit",
+      "vcp_field": "negative_prompt",
+      "outbound_json_path": "parameters.negative_prompt",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image edit synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image_edit.prompt_extend",
+      "action_binding_id": "action_alibaba_qwen_image_edit",
+      "operation": "image.edit",
+      "vcp_field": "prompt_extend",
+      "outbound_json_path": "parameters.prompt_extend",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image edit synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image_edit.seed",
+      "action_binding_id": "action_alibaba_qwen_image_edit",
+      "operation": "image.edit",
+      "vcp_field": "seed",
+      "outbound_json_path": "parameters.seed",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image edit synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_image_edit.watermark",
+      "action_binding_id": "action_alibaba_qwen_image_edit",
+      "operation": "image.edit",
+      "vcp_field": "watermark",
+      "outbound_json_path": "parameters.watermark",
+      "evidence_revision": 1,
+      "evidence": "Qwen Image edit synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.qwen_omni.audio_format",
+      "action_binding_id": "action_conversation_respond",
+      "operation": "conversation.respond",
+      "vcp_field": "generation_policy.audio_output.format",
+      "outbound_json_path": "audio.format",
+      "evidence_revision": 1,
+      "evidence": "Qwen3.5 Omni streaming request fixture"
+    },
+    {
+      "id": "alibaba.qwen_omni.audio_voice",
+      "action_binding_id": "action_conversation_respond",
+      "operation": "conversation.respond",
+      "vcp_field": "generation_policy.audio_output.voice",
+      "outbound_json_path": "audio.voice",
+      "evidence_revision": 1,
+      "evidence": "Qwen3.5 Omni streaming request fixture"
+    },
+    {
+      "id": "alibaba.qwen_omni.modalities",
+      "action_binding_id": "action_conversation_respond",
+      "operation": "conversation.respond",
+      "vcp_field": "generation_policy.output_modalities",
+      "outbound_json_path": "modalities",
+      "evidence_revision": 1,
+      "evidence": "Qwen3.5 Omni streaming request fixture"
+    },
+    {
+      "id": "alibaba.wan_image.count",
+      "action_binding_id": "action_alibaba_wan_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "count",
+      "outbound_json_path": "parameters.n",
+      "evidence_revision": 1,
+      "evidence": "Wan image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.wan_image.negative_prompt",
+      "action_binding_id": "action_alibaba_wan_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "negative_prompt",
+      "outbound_json_path": "parameters.negative_prompt",
+      "evidence_revision": 1,
+      "evidence": "Wan image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.wan_image.prompt_extend",
+      "action_binding_id": "action_alibaba_wan_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "prompt_extend",
+      "outbound_json_path": "parameters.prompt_extend",
+      "evidence_revision": 1,
+      "evidence": "Wan image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.wan_image.resolution",
+      "action_binding_id": "action_alibaba_wan_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "resolution",
+      "outbound_json_path": "parameters.size",
+      "transform": "resolution_uppercase",
+      "evidence_revision": 1,
+      "evidence": "Wan image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.wan_image.seed",
+      "action_binding_id": "action_alibaba_wan_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "seed",
+      "outbound_json_path": "parameters.seed",
+      "evidence_revision": 1,
+      "evidence": "Wan image synchronous driver request fixture"
+    },
+    {
+      "id": "alibaba.wan_image.watermark",
+      "action_binding_id": "action_alibaba_wan_image_generate",
+      "operation": "image.generate",
+      "vcp_field": "watermark",
+      "outbound_json_path": "parameters.watermark",
+      "evidence_revision": 1,
+      "evidence": "Wan image synchronous driver request fixture"
+    }
+  ]
+}

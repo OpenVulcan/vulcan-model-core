@@ -115,6 +115,15 @@ func (c *Controller) RecordSuccess(ctx context.Context, request provider.Executi
 	return errors.Join(recordedErrors...)
 }
 
+// RecordCredentialRefreshSuccess clears only the temporary credential-scope failure disproved by a successful provider token refresh.
+// RecordCredentialRefreshSuccess 仅清除已被供应商 Token 刷新成功所否定的临时凭据作用域故障。
+func (c *Controller) RecordCredentialRefreshSuccess(ctx context.Context, instanceID string, credentialID string, now time.Time) error {
+	if instanceID == "" || credentialID == "" {
+		return errors.New("provider instance and credential identifiers are required")
+	}
+	return c.recordScopeSuccess(ctx, instanceID, routingstate.ScopeCredential, credentialID, now)
+}
+
 // recordModelSuccess clears one exact successful account-model pair.
 // recordModelSuccess 清除一个精确成功账号模型组合。
 func (c *Controller) recordModelSuccess(ctx context.Context, instanceID string, credentialID string, modelID string, now time.Time) error {

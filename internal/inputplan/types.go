@@ -206,7 +206,7 @@ type Plan struct {
 // Validate verifies the persisted plan envelope and exact accepted/rejected shape.
 // Validate 校验持久方案信封及精确接受/拒绝形态。
 func (p Plan) Validate() error {
-	if !validPlanID(p.ID) || strings.TrimSpace(p.OwnerAPIKeyID) == "" || p.Operation == "" || p.Model.Target != vcp.ModelTargetExact || p.Model.ProviderInstanceID == "" || p.Model.ProviderModelID == "" || p.Model.ExecutionProfileID == "" || p.CreatedAt.IsZero() || !p.ExpiresAt.After(p.CreatedAt) || p.Revision == 0 {
+	if !validPlanID(p.ID) || strings.TrimSpace(p.OwnerAPIKeyID) == "" || !p.Operation.Valid() || p.Model.Target != vcp.ModelTargetExact || p.Model.ProviderInstanceID == "" || p.Model.ProviderModelID == "" || p.Model.ExecutionProfileID == "" || p.CreatedAt.IsZero() || !p.ExpiresAt.After(p.CreatedAt) || p.Revision == 0 {
 		return fmt.Errorf("%w: identity, owner, operation, timestamps, and revision are required", ErrInvalidPlan)
 	}
 	if p.Accepted {

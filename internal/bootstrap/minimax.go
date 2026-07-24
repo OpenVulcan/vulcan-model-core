@@ -37,7 +37,7 @@ func registerMiniMaxProviderCatalog(registry *providerconfig.SystemRegistry) err
 	// deviceFlow is region-specific and obtains quota from the same selected API Origin without region probing.
 	// deviceFlow 按区域区分，并从同一个所选 API Origin 获取额度且不探测区域。
 	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
-	features := providerconfig.ProviderFeatureSet{ModelDiscovery: providerconfig.SupportUnsupported, PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportSupported}
+	features := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportSupported}
 	definitions := []providerconfig.ProviderDefinition{
 		miniMaxProviderDefinition(MiniMaxGlobalDefinitionID, "MiniMax Global", "Global", "MiniMax Global multimodal API services.", "providers.minimax.globalDescription", 10, "https://api.minimax.io", "Global", []providerconfig.AuthMethodDefinition{auth, deviceFlow}, features),
 		miniMaxProviderDefinition(MiniMaxCNDefinitionID, "MiniMax CN", "CN", "MiniMax CN multimodal API services.", "providers.minimax.cnDescription", 20, "https://api.minimaxi.com", "CN", []providerconfig.AuthMethodDefinition{auth, deviceFlow}, features),

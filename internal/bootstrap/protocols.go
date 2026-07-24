@@ -35,13 +35,20 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 	// profiles 有意不发布 Profile 全局高级能力声明，因为这些事实取决于精确 Target。
 	profiles := []providerconfig.ProtocolProfile{
 		{
+			ID:                 provideralibaba.MediaAnalyzeProtocolProfileID,
+			Version:            "1",
+			DisplayName:        "Alibaba Qwen Omni Media Analysis",
+			UserConfigurable:   false,
+			RuntimeReady:       true,
+			AllowedAuthMethods: nil,
+		},
+		{
 			ID:                         chat.ProfileID,
 			Version:                    "1",
 			DisplayName:                "OpenAI Chat Completions",
 			UserConfigurable:           true,
 			CustomDefinitionCompatible: true,
 			RuntimeReady:               true,
-			ModelDiscovery:             providerconfig.SupportUnsupported,
 			AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 		},
 		{
@@ -51,7 +58,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			UserConfigurable:           true,
 			CustomDefinitionCompatible: true,
 			RuntimeReady:               true,
-			ModelDiscovery:             providerconfig.SupportUnsupported,
 			AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 		},
 		{
@@ -60,7 +66,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Responses",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -70,7 +75,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			UserConfigurable:           false,
 			CustomDefinitionCompatible: true,
 			RuntimeReady:               true,
-			ModelDiscovery:             providerconfig.SupportUnsupported,
 			AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodHeaderKey},
 		},
 		{
@@ -80,7 +84,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			UserConfigurable:           true,
 			CustomDefinitionCompatible: true,
 			RuntimeReady:               true,
-			ModelDiscovery:             providerconfig.SupportUnsupported,
 			AllowedAuthMethods:         []providerconfig.AuthMethodType{providerconfig.AuthMethodHeaderKey},
 		},
 		{
@@ -89,7 +92,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenAI Codex",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -98,7 +100,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google Interactions",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -107,7 +108,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google Antigravity",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -116,7 +116,22 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Alibaba Model Studio Embeddings",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
+			AllowedAuthMethods: nil,
+		},
+		{
+			ID:                 provideralibaba.RerankProtocolProfileID,
+			Version:            "1",
+			DisplayName:        "Alibaba Qwen3 Rerank",
+			UserConfigurable:   false,
+			RuntimeReady:       true,
+			AllowedAuthMethods: nil,
+		},
+		{
+			ID:                 provideralibaba.SearchWebProtocolProfileID,
+			Version:            "2025-03-26",
+			DisplayName:        "Alibaba Model Studio WebSearch MCP",
+			UserConfigurable:   false,
+			RuntimeReady:       true,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -125,7 +140,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Anthropic Messages Web Search 2025-03-05",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -134,7 +148,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Tavily Search API",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -143,7 +156,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Tavily Extract API",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -152,7 +164,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google AI Studio Embeddings",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -161,14 +172,13 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google AI Studio Media Analysis",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
-			ID: providergoogle.VideoGenerateProtocolProfileID, Version: "3.1", DisplayName: "Google Veo Video Generation", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providergoogle.VideoGenerateProtocolProfileID, Version: "3.1", DisplayName: "Google Veo Video Generation", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
-			ID: providergoogle.VideoExtendProtocolProfileID, Version: "3.1", DisplayName: "Google Veo Video Extension", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providergoogle.VideoExtendProtocolProfileID, Version: "3.1", DisplayName: "Google Veo Video Extension", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 providergoogle.SearchProtocolProfileID,
@@ -176,7 +186,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google Interactions Search Grounding",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -185,7 +194,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google Interactions Image Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -194,7 +202,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google Interactions Image Editing",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -203,7 +210,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Google Interactions Speech Synthesis",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -212,7 +218,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Alibaba Qwen Image Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -221,7 +226,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Alibaba Qwen Image Editing",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -230,7 +234,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Alibaba Wan 2.7 Image Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -239,7 +242,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Alibaba Wan 2.7 Image Editing",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -248,17 +250,35 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "Alibaba Wan 2.7 Video Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideralibaba.SpeechSynthesizeProtocolProfileID, Version: "1", DisplayName: "Alibaba Qwen3-TTS Non-Realtime Speech", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID:                 provideralibaba.HappyHorseVideoGenerateProtocolProfileID,
+			Version:            "1",
+			DisplayName:        "Alibaba HappyHorse Video Generation",
+			UserConfigurable:   false,
+			RuntimeReady:       true,
+			AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideralibaba.SpeechTranscribeProtocolProfileID, Version: "1", DisplayName: "Alibaba Qwen3-ASR Synchronous Transcription", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID:                 provideralibaba.HappyHorseVideoEditProtocolProfileID,
+			Version:            "1",
+			DisplayName:        "Alibaba HappyHorse Video Editing",
+			UserConfigurable:   false,
+			RuntimeReady:       true,
+			AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideralibaba.SpeechTranscribeAsyncProtocolProfileID, Version: "1", DisplayName: "Alibaba Fun-ASR Asynchronous Transcription", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: provideralibaba.SpeechSynthesizeProtocolProfileID, Version: "1", DisplayName: "Alibaba Qwen3-TTS Non-Realtime Speech", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
+		},
+		{
+			ID: provideralibaba.CosyVoiceSynthesizeProtocolProfileID, Version: "1", DisplayName: "Alibaba CosyVoice Non-Realtime Speech", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
+		},
+		{
+			ID: provideralibaba.SpeechTranscribeProtocolProfileID, Version: "1", DisplayName: "Alibaba Qwen3-ASR Synchronous Transcription", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
+		},
+		{
+			ID: provideralibaba.SpeechTranscribeAsyncProtocolProfileID, Version: "1", DisplayName: "Alibaba Fun-ASR Asynchronous Transcription", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 providerminimax.ImageGenerateProtocolProfileID,
@@ -266,14 +286,13 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "MiniMax Image Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
-			ID: providerminimax.MediaAnalyzeProtocolProfileID, Version: "1", DisplayName: "MiniMax Coding Plan VLM", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providerminimax.MediaAnalyzeProtocolProfileID, Version: "1", DisplayName: "MiniMax Coding Plan VLM", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
-			ID: providerminimax.SearchWebProtocolProfileID, Version: "1", DisplayName: "MiniMax Coding Plan Search", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providerminimax.SearchWebProtocolProfileID, Version: "1", DisplayName: "MiniMax Coding Plan Search", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 providerminimax.VideoGenerateProtocolProfileID,
@@ -281,7 +300,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "MiniMax Video Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -290,7 +308,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "MiniMax Speech Synthesis",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -299,17 +316,16 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "MiniMax Long-Text Speech Synthesis",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
-			ID: providerminimax.MusicGenerateProtocolProfileID, Version: "1", DisplayName: "MiniMax Music Generation", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providerminimax.MusicGenerateProtocolProfileID, Version: "1", DisplayName: "MiniMax Music Generation", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
-			ID: providerminimax.MusicCoverPrepareProtocolProfileID, Version: "1", DisplayName: "MiniMax Music Cover Preparation", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providerminimax.MusicCoverPrepareProtocolProfileID, Version: "1", DisplayName: "MiniMax Music Cover Preparation", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
-			ID: providerminimax.MusicCoverProtocolProfileID, Version: "1", DisplayName: "MiniMax Prepared Music Cover", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: providerminimax.MusicCoverProtocolProfileID, Version: "1", DisplayName: "MiniMax Prepared Music Cover", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 provideropenai.EmbeddingProtocolProfileID,
@@ -317,7 +333,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenAI Embeddings",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -326,14 +341,13 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenAI Responses Web Search 2025-08-26",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideropenai.SpeechSynthesizeProtocolProfileID, Version: "1", DisplayName: "OpenAI Audio Speech", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: provideropenai.SpeechSynthesizeProtocolProfileID, Version: "1", DisplayName: "OpenAI Audio Speech", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideropenai.SpeechTranscribeProtocolProfileID, Version: "1", DisplayName: "OpenAI Audio Transcriptions", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: provideropenai.SpeechTranscribeProtocolProfileID, Version: "1", DisplayName: "OpenAI Audio Transcriptions", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 provideropenai.ImageGenerateProtocolProfileID,
@@ -341,7 +355,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenAI Image Generation API",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -350,7 +363,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenAI Image Edit API",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -359,7 +371,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenRouter Embeddings",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -368,7 +379,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenRouter Rerank",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -377,7 +387,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenRouter Image API",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -386,14 +395,13 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "OpenRouter Video API",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideropenrouter.SpeechSynthesizeProtocolProfileID, Version: "1", DisplayName: "OpenRouter Audio Speech", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: provideropenrouter.SpeechSynthesizeProtocolProfileID, Version: "1", DisplayName: "OpenRouter Audio Speech", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
-			ID: provideropenrouter.SpeechTranscribeProtocolProfileID, Version: "1", DisplayName: "OpenRouter Audio Transcriptions", UserConfigurable: false, RuntimeReady: true, ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: nil,
+			ID: provideropenrouter.SpeechTranscribeProtocolProfileID, Version: "1", DisplayName: "OpenRouter Audio Transcriptions", UserConfigurable: false, RuntimeReady: true, AllowedAuthMethods: nil,
 		},
 		{
 			ID:                 providerxai.SearchProtocolProfileID,
@@ -401,7 +409,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Responses Web Search",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -410,7 +417,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Imagine Image Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -419,7 +425,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Imagine Image Editing",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -428,7 +433,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Imagine Video Generation",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -437,7 +441,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Imagine Video Editing",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 		{
@@ -446,7 +449,6 @@ func RegisterProtocolProfiles(registry *providerconfig.ProtocolRegistry) error {
 			DisplayName:        "xAI Imagine Video Extension",
 			UserConfigurable:   false,
 			RuntimeReady:       true,
-			ModelDiscovery:     providerconfig.SupportUnsupported,
 			AllowedAuthMethods: nil,
 		},
 	}

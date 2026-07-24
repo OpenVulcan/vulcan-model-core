@@ -21,57 +21,6 @@ type Driver interface {
 	ClassifyError(ErrorObservation) (ClassifiedError, bool)
 }
 
-// DiscoveryRequest identifies one provider instance and optional credential discovery scope.
-// DiscoveryRequest 标识一个供应商实例和可选凭据发现作用域。
-type DiscoveryRequest struct {
-	// ProviderInstance is the exact provider configuration being inspected.
-	// ProviderInstance 是正在检查的精确供应商配置。
-	ProviderInstance providerconfig.ProviderInstance
-	// Credential optionally narrows discovery to one account-specific scope.
-	// Credential 可选地将发现范围限制到一个账号特定作用域。
-	Credential *providerconfig.Credential
-	// ETag is the opaque validator from the last successful provider discovery.
-	// ETag 是上一次供应商发现成功返回的不透明校验值。
-	ETag string
-}
-
-// ModelDiscoveryResult contains provider-scoped model metadata without protocol payloads.
-// ModelDiscoveryResult 包含不带协议 Payload 的供应商作用域模型元数据。
-type ModelDiscoveryResult struct {
-	// Models contains logical provider models discovered by the driver.
-	// Models 包含 Driver 发现的逻辑供应商模型。
-	Models []catalog.ProviderModel
-	// Offerings contains channel-specific products discovered by the driver.
-	// Offerings 包含 Driver 发现的通道特定产品。
-	Offerings []catalog.ModelOffering
-	// Profiles contains provider-defined client-selectable capability shapes.
-	// Profiles 包含供应商定义的客户端可选能力形态。
-	Profiles []catalog.ExecutionProfile
-	// ObservedAt records when discovery completed.
-	// ObservedAt 记录发现完成时间。
-	ObservedAt time.Time
-	// ExpiresAt is the provider-owned freshness boundary for this complete result.
-	// ExpiresAt 是该完整结果由供应商确定的新鲜度边界。
-	ExpiresAt time.Time
-	// SourceRevision is the provider-owned revision or monotonic catalog version.
-	// SourceRevision 是供应商拥有的修订号或单调递增目录版本。
-	SourceRevision string
-	// ETag is the opaque conditional validator returned by the provider.
-	// ETag 是供应商返回的不透明条件校验值。
-	ETag string
-	// NotModified confirms that the ETag still identifies the complete last-good result.
-	// NotModified 确认 ETag 仍标识完整的最后有效结果。
-	NotModified bool
-}
-
-// ModelDiscoverer is implemented by drivers that can query provider-native models.
-// ModelDiscoverer 由可以查询供应商原生模型的 Driver 实现。
-type ModelDiscoverer interface {
-	// DiscoverModels returns provider-scoped model metadata for one instance or credential.
-	// DiscoverModels 返回一个实例或凭据的供应商作用域模型元数据。
-	DiscoverModels(context.Context, DiscoveryRequest) (ModelDiscoveryResult, error)
-}
-
 // PlanReader is implemented by drivers that can query commercial plan metadata.
 // PlanReader 由可以查询商业套餐元数据的 Driver 实现。
 type PlanReader interface {

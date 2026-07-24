@@ -135,3 +135,19 @@ func validExtendedCapabilities() ModelCapabilities {
 		UsageMetrics:   []UsageMetricCapability{{Unit: UsageUnitImages, Accuracy: UsageExact}, {Unit: UsageUnitPixels, Accuracy: UsageEstimated}},
 	}
 }
+
+// TestMediaOnlyRouterInstructionAcceptsDedicatedAnalysis verifies a versioned Router instruction can back one media-only analysis operation.
+// TestMediaOnlyRouterInstructionAcceptsDedicatedAnalysis 验证版本化 Router 指令可以支撑一个纯媒体分析操作。
+func TestMediaOnlyRouterInstructionAcceptsDedicatedAnalysis(t *testing.T) {
+	capability := MediaInputCapability{
+		Kind: vcp.MediaImage, Roles: []vcp.MediaInputRole{vcp.MediaRoleUnderstanding}, Level: CapabilityNative,
+		InteractionModes: []MediaInteractionMode{MediaInteractionAnalysis}, MediaOnlyPolicy: MediaOnlyRouterInstruction,
+		ClientWorkflows: []ClientResourceWorkflow{ClientWorkflowUploadThenReference}, MaterializationModes: []UpstreamMaterializationMode{MaterializationInlineBase64},
+		Common: CommonMediaLimits{MIMETypes: []string{"image/png"}}, Image: &ImageMediaLimits{},
+		Compatibility: MediaCompatibility{ToolCalling: CapabilityUnsupported, Streaming: CapabilityUnsupported, Reasoning: CapabilityUnsupported, StructuredOutput: CapabilityUnsupported},
+		Evidence:      []CapabilityEvidence{{Source: ModelSourceSystem, Reference: "analysis-fixture", ObservedAt: time.Date(2026, time.July, 23, 0, 0, 0, 0, time.UTC), Revision: 1}}, EvidenceRevision: 1,
+	}
+	if errValidate := capability.Validate(); errValidate != nil {
+		t.Fatalf("Validate() error = %v", errValidate)
+	}
+}

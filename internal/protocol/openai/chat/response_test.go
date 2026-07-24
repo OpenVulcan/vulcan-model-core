@@ -128,7 +128,7 @@ func TestDecodeResponseAuditsDocumentedMetadataAndProjectsLegacyFunctionCall(t *
 func TestDecodeResponseRejectsUnsupportedAudioPayload(t *testing.T) {
 	_, _, _, errDecode := DecodeResponse(
 		"resp_audio_payload",
-		Response{Choices: []Choice{{Index: 0, Message: &AssistantMessage{Audio: &UnsupportedResponsePayload{}}, FinishReason: "stop"}}},
+		Response{Choices: []Choice{{Index: 0, Message: &AssistantMessage{Audio: &AudioOutputDelta{}}, FinishReason: "stop"}}},
 		time.Unix(46, 0),
 	)
 	if !errors.Is(errDecode, ErrInvalidUpstreamResponse) {

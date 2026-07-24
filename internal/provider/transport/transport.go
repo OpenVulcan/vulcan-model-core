@@ -12,6 +12,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -26,6 +27,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
 	"github.com/OpenVulcan/vulcan-model-core/internal/secret"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 var (
@@ -56,6 +58,12 @@ const (
 	// maximumResponseDrainBytes permits small connection-reuse cleanup without consuming an unbounded upstream body.
 	// maximumResponseDrainBytes 允许为连接复用清理小型正文，同时避免消费无界上游正文。
 	maximumResponseDrainBytes int64 = 64 * 1024
+	// maximumStructuredErrorBytes bounds the untrusted JSON inspected only for closed error code and type tokens.
+	// maximumStructuredErrorBytes 限制仅为封闭错误代码与类型 Token 检查的不可信 JSON 大小。
+	maximumStructuredErrorBytes int64 = 64 * 1024
+	// maximumStructuredErrorTokenBytes bounds one provider error code or type before it can enter trusted classification.
+	// maximumStructuredErrorTokenBytes 限制进入受信任分类前的单个供应商错误代码或类型长度。
+	maximumStructuredErrorTokenBytes = 128
 )
 
 // boundedResponseReader turns a byte budget into an explicit overflow error instead of a silent truncated EOF.
@@ -176,7 +184,16 @@ func (b Binding) Validate() error {
 	if strings.TrimSpace(b.Target.ProviderDefinitionID) == "" || strings.TrimSpace(b.Target.ProviderInstanceID) == "" || strings.TrimSpace(b.Target.ChannelID) == "" || strings.TrimSpace(b.Target.EndpointID) == "" || strings.TrimSpace(b.Target.CredentialID) == "" || strings.TrimSpace(b.Target.ExecutionProfileID) == "" {
 		return fmt.Errorf("%w: target must contain exact provider, channel, endpoint, credential, and profile identifiers", ErrInvalidBinding)
 	}
-	modelTarget := b.Target.SubjectKind == resolve.ExecutionSubjectModel && strings.TrimSpace(b.Target.ProviderModelID) != "" && strings.TrimSpace(b.Target.OfferingID) != "" && strings.TrimSpace(b.Target.UpstreamModelID) != "" && ((b.Target.Operation == "") == (b.Target.ActionBindingID == ""))
+	// legacyModelExecution is the historical untyped profile-driver shape retained only for persisted compatibility.
+	// legacyModelExecution 是仅为持久化兼容保留的历史无类型 Profile Driver 形态。
+	legacyModelExecution := b.Target.Operation == "" && b.Target.ActionBindingID == "" && !b.Target.ProfileDriver
+	// actionModelExecution is a typed model operation owned by one immutable ActionBinding.
+	// actionModelExecution 是由一个不可变 ActionBinding 拥有的类型化模型操作。
+	actionModelExecution := b.Target.Operation != "" && b.Target.ActionBindingID != "" && !b.Target.ProfileDriver
+	// profileModelExecution is the explicit typed conversation path for a provider definition's primary profile Driver.
+	// profileModelExecution 是供应商定义主 Profile Driver 的显式类型化会话路径。
+	profileModelExecution := b.Target.Operation == vcp.OperationConversationRespond && b.Target.ActionBindingID == "" && b.Target.ProfileDriver
+	modelTarget := b.Target.SubjectKind == resolve.ExecutionSubjectModel && strings.TrimSpace(b.Target.ProviderModelID) != "" && strings.TrimSpace(b.Target.OfferingID) != "" && strings.TrimSpace(b.Target.UpstreamModelID) != "" && (legacyModelExecution || actionModelExecution || profileModelExecution)
 	// legacyModelTarget preserves the current conversation-driver boundary until every system model profile is migrated to an ActionBinding.
 	// legacyModelTarget 在所有系统模型 Profile 迁移到 ActionBinding 前保留当前会话 Driver 边界。
 	legacyModelTarget := b.Target.SubjectKind == "" && strings.TrimSpace(b.Target.ProviderModelID) != "" && strings.TrimSpace(b.Target.UpstreamModelID) != ""
@@ -630,6 +647,12 @@ type StatusError struct {
 	// RetryAfter is the parsed retry delay when the server supplied one.
 	// RetryAfter 是服务端提供时解析出的重试延迟。
 	RetryAfter *time.Duration
+	// ProviderCode is a bounded structured provider error code containing only safe token characters.
+	// ProviderCode 是仅包含安全 Token 字符的有界结构化供应商错误代码。
+	ProviderCode string
+	// ProviderType is a bounded structured provider error type containing only safe token characters.
+	// ProviderType 是仅包含安全 Token 字符的有界结构化供应商错误类型。
+	ProviderType string
 }
 
 // Error returns a client-safe error string without upstream body content.
@@ -644,7 +667,56 @@ func newStatusError(response *http.Response) StatusError {
 	if response == nil {
 		return StatusError{}
 	}
-	return StatusError{StatusCode: response.StatusCode, RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now())}
+	code, errorType := readStructuredErrorIdentity(response.Body)
+	return StatusError{StatusCode: response.StatusCode, RetryAfter: parseRetryAfter(response.Header.Get("Retry-After"), time.Now()), ProviderCode: code, ProviderType: errorType}
+}
+
+// readStructuredErrorIdentity extracts only bounded token-shaped code and type fields from one untrusted JSON error body.
+// readStructuredErrorIdentity 仅从一个不可信 JSON 错误正文中提取有界且呈 Token 形态的代码与类型字段。
+func readStructuredErrorIdentity(body io.Reader) (string, string) {
+	if body == nil {
+		return "", ""
+	}
+	encoded, errRead := io.ReadAll(io.LimitReader(body, maximumStructuredErrorBytes+1))
+	if errRead != nil || int64(len(encoded)) > maximumStructuredErrorBytes {
+		return "", ""
+	}
+	var document map[string]json.RawMessage
+	if errDecode := json.Unmarshal(encoded, &document); errDecode != nil {
+		return "", ""
+	}
+	code := safeStructuredErrorToken(document["code"])
+	errorType := safeStructuredErrorToken(document["type"])
+	var nested map[string]json.RawMessage
+	if encodedError, exists := document["error"]; exists && json.Unmarshal(encodedError, &nested) == nil {
+		if code == "" {
+			code = safeStructuredErrorToken(nested["code"])
+		}
+		if errorType == "" {
+			errorType = safeStructuredErrorToken(nested["type"])
+		}
+	}
+	return code, errorType
+}
+
+// safeStructuredErrorToken accepts only short ASCII identifiers and rejects free-form provider text.
+// safeStructuredErrorToken 仅接受短 ASCII 标识符并拒绝供应商自由文本。
+func safeStructuredErrorToken(encoded json.RawMessage) string {
+	var value string
+	if len(encoded) == 0 || json.Unmarshal(encoded, &value) != nil {
+		return ""
+	}
+	value = strings.TrimSpace(value)
+	if value == "" || len(value) > maximumStructuredErrorTokenBytes {
+		return ""
+	}
+	for _, character := range value {
+		if (character >= 'a' && character <= 'z') || (character >= 'A' && character <= 'Z') || (character >= '0' && character <= '9') || character == '_' || character == '-' || character == '.' || character == ':' {
+			continue
+		}
+		return ""
+	}
+	return value
 }
 
 // parseRetryAfter parses standard Retry-After seconds or HTTP-date values.

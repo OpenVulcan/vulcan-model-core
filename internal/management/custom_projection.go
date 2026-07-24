@@ -11,6 +11,17 @@ import (
 // defaultReasoningEfforts 列出 OpenAI 兼容自定义协议共享的可编辑默认强度。
 var defaultReasoningEfforts = []string{"none", "minimal", "low", "medium", "high", "xhigh", "max"}
 
+// defaultCustomDelivery returns the executable delivery modes guaranteed by every supported custom conversation protocol.
+// defaultCustomDelivery 返回每个受支持自定义会话协议保证可执行的交付模式。
+func defaultCustomDelivery(protocolProfileID string) (catalog.DeliveryCapabilities, error) {
+	switch protocolProfileID {
+	case "openai.chat", "openai.responses", "anthropic.messages":
+		return catalog.DeliveryCapabilities{Synchronous: true, Streaming: true}, nil
+	default:
+		return catalog.DeliveryCapabilities{}, fmt.Errorf("custom delivery does not support protocol profile %q", protocolProfileID)
+	}
+}
+
 // defaultCustomRequestProjection returns an executable editable baseline for one supported custom protocol.
 // defaultCustomRequestProjection 为一个受支持的自定义协议返回可执行且可编辑的默认配置。
 func defaultCustomRequestProjection(protocolProfileID string) (catalog.RequestProjection, error) {

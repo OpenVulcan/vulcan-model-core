@@ -6,8 +6,8 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
-// alibabaWanImageModels returns the workspace-only synchronous Wan 2.7 image templates.
-// alibabaWanImageModels 返回仅工作区可用的同步 Wan 2.7 图片模板。
+// alibabaWanImageModels returns the complete synchronous Wan 2.7 generation and editing templates proven for workspace APIs.
+// alibabaWanImageModels 返回已为工作空间 API 证实的完整同步 Wan 2.7 图片生成与编辑模板。
 func alibabaWanImageModels() []systemModelTemplate {
 	models := make([]systemModelTemplate, 0, 4)
 	for _, identity := range []systemModelIdentity{{upstreamID: "wan2.7-image-pro", displayName: "Wan 2.7 Image Pro"}, {upstreamID: "wan2.7-image", displayName: "Wan 2.7 Image"}} {
@@ -15,6 +15,16 @@ func alibabaWanImageModels() []systemModelTemplate {
 			alibabaWanImageTemplate(identity, vcp.OperationImageGenerate),
 			alibabaWanImageTemplate(identity, vcp.OperationImageEdit),
 		)
+	}
+	return models
+}
+
+// alibabaTokenPlanWanImageModels returns only the synchronous generation operations proven for Personal CN Token Plan.
+// alibabaTokenPlanWanImageModels 仅返回已为中国站个人 Token Plan 证实的同步生成操作。
+func alibabaTokenPlanWanImageModels() []systemModelTemplate {
+	models := make([]systemModelTemplate, 0, 2)
+	for _, identity := range []systemModelIdentity{{upstreamID: "wan2.7-image-pro", displayName: "Wan 2.7 Image Pro"}, {upstreamID: "wan2.7-image", displayName: "Wan 2.7 Image"}} {
+		models = append(models, alibabaWanImageTemplate(identity, vcp.OperationImageGenerate))
 	}
 	return models
 }
@@ -37,8 +47,8 @@ func alibabaWanImageTemplate(identity systemModelIdentity, operation vcp.Operati
 	return template
 }
 
-// alibabaWanImageInputCapability returns the exact workspace image materialization contract.
-// alibabaWanImageInputCapability 返回精确的工作区图片物化合同。
+// alibabaWanImageInputCapability returns the exact synchronous Wan image materialization contract.
+// alibabaWanImageInputCapability 返回精确的同步 Wan 图片物化合同。
 func alibabaWanImageInputCapability(role vcp.MediaInputRole) catalog.MediaInputCapability {
 	return catalog.MediaInputCapability{
 		Kind: vcp.MediaImage, Roles: []vcp.MediaInputRole{role}, Level: catalog.CapabilityNative, InteractionModes: []catalog.MediaInteractionMode{catalog.MediaInteractionOperationInput}, MediaOnlyPolicy: catalog.MediaOnlyUnsupported,
@@ -70,9 +80,10 @@ func alibabaWanImageParameters(model string, operation vcp.OperationKind) []cata
 		{ID: "count", Kind: catalog.ParameterCount, IntegerRange: &catalog.IntegerRange{Minimum: &minimumCount, Maximum: &maximumCount}, Default: &catalog.ParameterDefault{Source: catalog.ParameterDefaultProvider, Integer: &defaultCount}},
 		{ID: "resolution", Kind: catalog.ParameterEnum, AllowedValues: resolutions},
 		{ID: "output_format", Kind: catalog.ParameterFormat, AllowedValues: []string{"png"}},
-	}
-	if operation == vcp.OperationImageGenerate {
-		parameters = append(parameters, catalog.ParameterDescriptor{ID: "seed", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumSeed, Maximum: &maximumSeed}})
+		{ID: "negative_prompt", Kind: catalog.ParameterString, StringRange: &catalog.StringRange{}},
+		{ID: "prompt_extend", Kind: catalog.ParameterBoolean},
+		{ID: "watermark", Kind: catalog.ParameterBoolean},
+		{ID: "seed", Kind: catalog.ParameterInteger, IntegerRange: &catalog.IntegerRange{Minimum: &minimumSeed, Maximum: &maximumSeed}},
 	}
 	return parameters
 }

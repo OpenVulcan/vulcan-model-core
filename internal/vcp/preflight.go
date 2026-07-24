@@ -79,6 +79,9 @@ type UsagePreflightResponse struct {
 	// Target echoes the exact target that was counted and never contains candidates.
 	// Target 回显被计量的精确 Target 且绝不包含候选列表。
 	Target TargetSelection `json:"target"`
+	// ModelToolPlan contains the immutable and side-effect-free tool decision that execution would use.
+	// ModelToolPlan 包含执行将使用的不可变且无副作用工具决策。
+	ModelToolPlan ModelToolPlan `json:"model_tool_plan"`
 	// Usage contains provider-compatible token accounting when available.
 	// Usage 在可用时包含供应商兼容 Token 计量。
 	Usage UsageObservation `json:"usage"`

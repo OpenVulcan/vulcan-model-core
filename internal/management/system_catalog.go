@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
+	provideralibaba "github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba"
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
@@ -44,6 +45,18 @@ type systemModelTemplate struct {
 	// inputModalities lists the exact accepted resource kinds.
 	// inputModalities 列出精确接受的资源类型。
 	inputModalities []string
+	// outputModalities overrides the operation default when a model returns more than one normalized modality.
+	// outputModalities 在模型返回多种规范化模态时覆盖操作默认值。
+	outputModalities []string
+	// standardTools lists verified provider-native implementations of closed Vulcan model tools.
+	// standardTools 列出封闭 Vulcan 模型工具经过验证的供应商原生实现。
+	standardTools []catalog.StandardModelToolCapability
+	// extraTools lists profile-scoped non-standard provider or model tools.
+	// extraTools 列出规格作用域的非标准供应商或模型工具。
+	extraTools []catalog.ModelExtraToolCapability
+	// streamingOnly restricts this template to provider-mandated streaming execution.
+	// streamingOnly 将此模板限制为供应商强制要求的流式执行。
+	streamingOnly bool
 	// reasoning records the verified reasoning capability level.
 	// reasoning 记录已验证的推理能力等级。
 	reasoning catalog.CapabilityLevel
@@ -112,6 +125,59 @@ type systemProfileTemplate struct {
 	// defaultProfile reports whether clients may omit this profile selection.
 	// defaultProfile 表示客户端是否可以省略该规格选择。
 	defaultProfile bool
+	// reasoningOverride replaces the offering reasoning level for this exact profile when present.
+	// reasoningOverride 在存在时替换此精确规格的产品推理级别。
+	reasoningOverride *catalog.CapabilityLevel
+	// removeParameterIDs excludes controls that are invalid for this exact profile shape.
+	// removeParameterIDs 排除对此精确规格形态无效的控制项。
+	removeParameterIDs []string
+}
+
+// applySystemProfileTemplate narrows one offering ceiling to an explicit profile without mutating shared facts.
+// applySystemProfileTemplate 将一个产品能力上限收窄为显式规格，且不修改共享事实。
+func applySystemProfileTemplate(capabilities catalog.ModelCapabilities, profile systemProfileTemplate) catalog.ModelCapabilities {
+	profileCapabilities := catalog.CloneModelCapabilities(capabilities)
+	if profile.contextWindow > 0 {
+		profileCapabilities.Tokens.ContextWindow = catalog.OptionalTokenLimit{Known: true, Value: profile.contextWindow}
+	}
+	if profile.reasoningOverride != nil {
+		profileCapabilities.Reasoning = *profile.reasoningOverride
+		if !callableSystemReasoning(*profile.reasoningOverride) {
+			profileCapabilities.ReasoningEfforts = nil
+			profileCapabilities.ReasoningSummaryModes = nil
+			profileCapabilities.Tokens.MaxReasoningTokens = catalog.OptionalTokenLimit{}
+			profileCapabilities.Recommendations.ReasoningTokens = catalog.OptionalTokenLimit{}
+		}
+	}
+	if len(profile.removeParameterIDs) > 0 {
+		profileCapabilities.Parameters = removeSystemParameters(profileCapabilities.Parameters, profile.removeParameterIDs)
+	}
+	return profileCapabilities
+}
+
+// callableSystemReasoning reports whether a system profile exposes callable reasoning behavior.
+// callableSystemReasoning 报告系统规格是否公开可调用的推理行为。
+func callableSystemReasoning(level catalog.CapabilityLevel) bool {
+	return level == catalog.CapabilityNative || level == catalog.CapabilityEmulated || level == catalog.CapabilityConditional
+}
+
+// removeSystemParameters returns a stable copy without the explicitly prohibited profile parameters.
+// removeSystemParameters 返回一个不含显式禁止规格参数的稳定副本。
+func removeSystemParameters(parameters []catalog.ParameterDescriptor, removedIDs []string) []catalog.ParameterDescriptor {
+	removed := make(map[string]struct{}, len(removedIDs))
+	for _, parameterID := range removedIDs {
+		removed[parameterID] = struct{}{}
+	}
+	filtered := make([]catalog.ParameterDescriptor, 0, len(parameters))
+	for _, parameter := range parameters {
+		if _, remove := removed[parameter.ID]; !remove {
+			filtered = append(filtered, parameter)
+		}
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	return filtered
 }
 
 // buildSystemCatalog materializes one immutable template into records owned only by the new instance.
@@ -121,6 +187,8 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 	if errTemplates != nil {
 		return catalog.Snapshot{}, errTemplates
 	}
+	templates = applyAlibabaEntitlementModes(templates, definition.ModelCatalogID)
+	templates = applyAlibabaCNObjectMaterialization(templates, definition.ModelCatalogID)
 	snapshot := catalog.Snapshot{ProviderInstanceID: onboarding.Instance.ID, Revision: 1, ObservedAt: observedAt}
 	for _, template := range templates {
 		operation := template.operation
@@ -140,15 +208,38 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 		offeringID := "offer_" + modelSuffix + "_" + protocolSuffix
 		capabilities := systemModelCapabilities(template, action.Delivery)
 		snapshot.Offerings = append(snapshot.Offerings, catalog.ModelOffering{ID: offeringID, ProviderInstanceID: onboarding.Instance.ID, ProviderModelID: modelID, ChannelID: action.ProtocolProfileID, UpstreamModelID: template.upstreamID, Capabilities: capabilities, CapabilityRevision: 1, Revision: 1})
+		if isAlibabaCatalogID(definition.ModelCatalogID) {
+			snapshot.ModelOperationPolicies = append(snapshot.ModelOperationPolicies, catalog.ModelOperationPolicy{ID: "policy_" + modelSuffix + "_" + catalogIdentifier(string(operation)) + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, ProviderModelID: modelID, OfferingID: offeringID, Operation: operation, Status: catalog.ModelOperationSupported, Reason: catalog.SupportReasonProviderContractVerified, Source: catalog.ModelSourceSystem, EvidenceRevision: 1, Revision: 1})
+		}
 		if len(template.profiles) == 0 {
 			snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, Operation: operation, ActionBindingID: action.ID, DisplayName: template.displayName, Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
 			continue
 		}
 		for _, profileTemplate := range template.profiles {
-			profileCapabilities := catalog.CloneModelCapabilities(capabilities)
-			profileCapabilities.Tokens.ContextWindow = catalog.OptionalTokenLimit{Known: true, Value: profileTemplate.contextWindow}
+			profileCapabilities := applySystemProfileTemplate(capabilities, profileTemplate)
 			snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_" + modelSuffix + "_" + profileTemplate.suffix + "_" + protocolSuffix, ProviderInstanceID: onboarding.Instance.ID, OfferingID: offeringID, Operation: operation, ActionBindingID: action.ID, DisplayName: profileTemplate.displayName, Default: profileTemplate.defaultProfile, Capabilities: profileCapabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 1, Revision: 1})
 		}
+	}
+	if isAlibabaCatalogID(definition.ModelCatalogID) {
+		var errGenerated error
+		snapshot, errGenerated = appendAlibabaGeneratedCatalog(snapshot, definition)
+		if errGenerated != nil {
+			return catalog.Snapshot{}, errGenerated
+		}
+	}
+	if isAlibabaModelStudioCatalogID(definition.ModelCatalogID) {
+		searchAction, errSearchAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
+		if errSearchAction != nil {
+			return catalog.Snapshot{}, errSearchAction
+		}
+		searchCapabilities := catalog.ServiceCapabilities{WebSearch: &catalog.WebSearchCapabilities{
+			BackendKind: vcp.SearchBackendDirectAPI, InvocationMode: catalog.SearchInvocationDirectRequest,
+			OutputModes: []vcp.WebSearchOutputMode{vcp.WebSearchOutputResults}, EvidenceKinds: []vcp.SearchEvidenceKind{vcp.SearchEvidenceStructuredResult}, EvidenceRequirements: []vcp.SearchEvidenceRequirement{vcp.SearchEvidenceBestEffort, vcp.SearchEvidenceVerified},
+			Filters: catalog.SearchFilterCapabilities{DomainAllow: catalog.CapabilityUnsupported, DomainBlock: catalog.CapabilityUnsupported, PublicationTime: catalog.CapabilityUnsupported, Language: catalog.CapabilityUnsupported, Region: catalog.CapabilityUnsupported, Location: catalog.CapabilityUnsupported, SafeSearch: catalog.CapabilityUnsupported}, MaxResults: catalog.OptionalCountLimit{},
+		}}
+		snapshot.Services = append(snapshot.Services, catalog.ProviderService{ID: "service_web_search", ProviderInstanceID: onboarding.Instance.ID, DisplayName: "Alibaba Model Studio WebSearch", Operation: vcp.OperationSearchWeb, Source: catalog.ModelSourceSystem, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 1})
+		snapshot.ServiceOfferings = append(snapshot.ServiceOfferings, catalog.ServiceOffering{ID: "service_offer_alibaba_web_search", ProviderInstanceID: onboarding.Instance.ID, ProviderServiceID: "service_web_search", ChannelID: searchAction.ProtocolProfileID, UpstreamServiceID: "bailian_web_search", Capabilities: searchCapabilities, CapabilityRevision: 1, Revision: 1})
+		snapshot.Profiles = append(snapshot.Profiles, catalog.ExecutionProfile{ID: "profile_alibaba_web_search", ProviderInstanceID: onboarding.Instance.ID, ServiceOfferingID: "service_offer_alibaba_web_search", Operation: vcp.OperationSearchWeb, ActionBindingID: searchAction.ID, DisplayName: "Alibaba Structured WebSearch", Default: true, ServiceCapabilities: &searchCapabilities, SwitchPolicy: catalog.ProfileSwitchReplayRequired, PoolPolicy: catalog.PoolPreferSmallestSufficient, CapabilityRevision: 1, Revision: 1})
 	}
 	if definition.ModelCatalogID == "tavily_search_api" {
 		searchAction, errAction := definitionActionForOperation(definition, vcp.OperationSearchWeb)
@@ -248,11 +339,75 @@ func buildSystemCatalog(onboarding providerconfig.SystemOnboarding, definition p
 	return snapshot, nil
 }
 
+// applyAlibabaEntitlementModes makes every static Alibaba model available to all credentials bound to its exact product instance.
+// applyAlibabaEntitlementModes 使每个静态阿里模型对绑定到其精确产品实例的全部凭据可用。
+func applyAlibabaEntitlementModes(templates []systemModelTemplate, catalogID string) []systemModelTemplate {
+	if !isAlibabaCatalogID(catalogID) {
+		return templates
+	}
+	updated := append([]systemModelTemplate(nil), templates...)
+	for templateIndex := range updated {
+		updated[templateIndex].entitlementMode = catalog.EntitlementAllBoundCredentials
+	}
+	return updated
+}
+
+// applyAlibabaCNObjectMaterialization adds the copied temporary OSS path only to drivers that consume it.
+// applyAlibabaCNObjectMaterialization 仅为会消费临时 OSS 路径的驱动增加该复制路径。
+func applyAlibabaCNObjectMaterialization(templates []systemModelTemplate, catalogID string) []systemModelTemplate {
+	if catalogID != "alibaba_model_studio_cn" {
+		return templates
+	}
+	updated := append([]systemModelTemplate(nil), templates...)
+	for templateIndex := range updated {
+		actionBindingID := updated[templateIndex].actionBindingID
+		omniInput := strings.HasPrefix(updated[templateIndex].upstreamID, "qwen3.5-omni-")
+		if !omniInput && actionBindingID != provideralibaba.ImageEditActionBindingID && actionBindingID != provideralibaba.SpeechTranscribeActionBindingID && actionBindingID != provideralibaba.SpeechTranscribeAsyncActionBindingID {
+			continue
+		}
+		updated[templateIndex].mediaInputs = append([]catalog.MediaInputCapability(nil), updated[templateIndex].mediaInputs...)
+		for inputIndex := range updated[templateIndex].mediaInputs {
+			input := updated[templateIndex].mediaInputs[inputIndex]
+			input.MaterializationModes = append([]catalog.UpstreamMaterializationMode(nil), input.MaterializationModes...)
+			if !containsAlibabaMaterialization(input.MaterializationModes, catalog.MaterializationProviderObjectURI) {
+				input.MaterializationModes = append(input.MaterializationModes, catalog.MaterializationProviderObjectURI)
+			}
+			if omniInput && input.Kind == vcp.MediaVideo && !containsAlibabaWorkflow(input.ClientWorkflows, catalog.ClientWorkflowUploadThenReference) {
+				input.ClientWorkflows = append(input.ClientWorkflows, catalog.ClientWorkflowUploadThenReference)
+			}
+			updated[templateIndex].mediaInputs[inputIndex] = input
+		}
+	}
+	return updated
+}
+
+// containsAlibabaWorkflow reports exact membership in one Router input-workflow set.
+// containsAlibabaWorkflow 报告一个 Router 输入流程集合中的精确成员关系。
+func containsAlibabaWorkflow(workflows []catalog.ClientResourceWorkflow, expected catalog.ClientResourceWorkflow) bool {
+	for _, workflow := range workflows {
+		if workflow == expected {
+			return true
+		}
+	}
+	return false
+}
+
+// containsAlibabaMaterialization reports exact membership in one materialization set.
+// containsAlibabaMaterialization 报告一个物化集合中的精确成员关系。
+func containsAlibabaMaterialization(modes []catalog.UpstreamMaterializationMode, expected catalog.UpstreamMaterializationMode) bool {
+	for _, mode := range modes {
+		if mode == expected {
+			return true
+		}
+	}
+	return false
+}
+
 // definitionActionForTemplate resolves the exact code-owned action declared by one model template.
 // definitionActionForTemplate 解析一个模型模板声明的精确代码拥有动作。
 func definitionActionForTemplate(definition providerconfig.ProviderDefinition, template systemModelTemplate, operation vcp.OperationKind) (providerconfig.ProviderActionBinding, error) {
 	if template.actionBindingID == "" {
-		return definitionActionForOperation(definition, operation)
+		return definitionPrimaryActionForOperation(definition, operation)
 	}
 	action, errAction := definitionActionByID(definition, template.actionBindingID)
 	if errAction != nil {
@@ -262,6 +417,41 @@ func definitionActionForTemplate(definition providerconfig.ProviderDefinition, t
 		return providerconfig.ProviderActionBinding{}, fmt.Errorf("provider definition %s action binding %s owns operation %s, not %s", definition.ID, action.ID, action.Operation, operation)
 	}
 	return action, nil
+}
+
+// definitionPrimaryActionForOperation resolves the unique operation action matching the definition's declared default channel.
+// definitionPrimaryActionForOperation 解析与 Definition 声明默认通道匹配的唯一操作动作。
+func definitionPrimaryActionForOperation(definition providerconfig.ProviderDefinition, operation vcp.OperationKind) (providerconfig.ProviderActionBinding, error) {
+	// operationActions contains every exact action for the requested operation before default-channel disambiguation.
+	// operationActions 在默认通道消歧前包含所请求操作的每个精确动作。
+	operationActions := make([]providerconfig.ProviderActionBinding, 0, 2)
+	for _, action := range definition.ActionBindings {
+		if action.Operation == operation {
+			operationActions = append(operationActions, action)
+		}
+	}
+	if len(operationActions) == 1 {
+		return operationActions[0], nil
+	}
+	if len(operationActions) == 0 {
+		return providerconfig.ProviderActionBinding{}, fmt.Errorf("provider definition %s does not declare %s action", definition.ID, operation)
+	}
+	var resolved providerconfig.ProviderActionBinding
+	found := false
+	for _, action := range operationActions {
+		if action.ProtocolProfileID != definition.ProtocolProfileID || action.EndpointProfileID != definition.EndpointProfileID {
+			continue
+		}
+		if found {
+			return providerconfig.ProviderActionBinding{}, fmt.Errorf("provider definition %s declares duplicate primary %s actions", definition.ID, operation)
+		}
+		resolved = action
+		found = true
+	}
+	if !found {
+		return providerconfig.ProviderActionBinding{}, fmt.Errorf("provider definition %s does not declare primary %s action", definition.ID, operation)
+	}
+	return resolved, nil
 }
 
 // definitionActionByID resolves one exact code-owned action by its immutable identifier.
@@ -320,15 +510,35 @@ func systemModelTemplates(catalogID string) ([]systemModelTemplate, error) {
 	case "alibaba_coding_plan_global":
 		return alibabaCodingPlanModels(), nil
 	case "alibaba_token_plan_personal_cn":
-		return alibabaTokenPlanPersonalCNModels(), nil
+		models := alibabaTokenPlanPersonalCNModels()
+		models = append(models, alibabaTokenPlanWanImageModels()...)
+		return append(models, alibabaHappyHorsePlanModels()...), nil
 	case "alibaba_token_plan_team_cn":
-		return alibabaTokenPlanTeamCNModels(), nil
+		models := alibabaTokenPlanTeamCNModels()
+		models = append(models, alibabaTokenPlanQwenImageModels()...)
+		models = append(models, alibabaTokenPlanWanImageModels()...)
+		return append(models, alibabaHappyHorsePlanModels()...), nil
 	case "alibaba_token_plan_team_global":
-		return alibabaTokenPlanTeamGlobalModels(), nil
-	case "alibaba_model_studio_cn", "alibaba_model_studio_global":
-		return alibabaModelStudioModels(false), nil
-	case "alibaba_model_studio_workspace_global":
-		return alibabaModelStudioModels(true), nil
+		models := alibabaTokenPlanTeamGlobalModels()
+		models = append(models, alibabaTokenPlanQwenImageModels()...)
+		return append(models, alibabaTokenPlanWanImageModels()...), nil
+	case "alibaba_model_studio_cn":
+		models := alibabaModelStudioCNConversationModels()
+		models = append(models, alibabaModelStudioCNEmbeddingModels()...)
+		models = append(models, alibabaModelStudioModels(true, false)...)
+		models = append(models, alibabaCosyVoiceModels(true)...)
+		return append(models, alibabaHappyHorseModels()...), nil
+	case "alibaba_model_studio_sg_domestic":
+		models := alibabaModelStudioSGConversationModels()
+		models = append(models, alibabaModelStudioModels(true, false)...)
+		return append(models, alibabaCosyVoiceModels(false)...), nil
+	case "alibaba_model_studio_us":
+		// The endpoint is documented, but no independently verified US catalog or capability source exists.
+		// 端点已有文档依据，但目前没有独立验证的美国目录或能力来源。
+		return nil, nil
+	case "alibaba_model_studio_workspace_sg":
+		models := alibabaModelStudioModels(false, true)
+		return append(models, alibabaCosyVoiceModels(false)...), nil
 	case "openai_api":
 		return openAIAPIModels(), nil
 	case "openrouter_api":
@@ -501,6 +711,11 @@ func systemModelCapabilities(template systemModelTemplate, delivery providerconf
 	if template.recommendedReasoningTokens > 0 {
 		recommendedReasoningTokens = catalog.OptionalTokenLimit{Known: true, Value: template.recommendedReasoningTokens}
 	}
+	capabilityDelivery := catalog.DeliveryCapabilities{Synchronous: delivery.Synchronous, Streaming: delivery.Streaming, Asynchronous: delivery.Asynchronous}
+	if template.streamingOnly {
+		capabilityDelivery.Synchronous = false
+		capabilityDelivery.Streaming = true
+	}
 	return catalog.ModelCapabilities{
 		Tokens:                 catalog.TokenLimits{ContextWindow: contextWindow, MaxInputTokens: maxInputTokens, MaxOutputTokens: maxOutputTokens, MaxReasoningTokens: maxReasoningTokens},
 		Recommendations:        catalog.TokenRecommendations{OutputTokens: recommendedOutputTokens, ReasoningTokens: recommendedReasoningTokens},
@@ -512,7 +727,7 @@ func systemModelCapabilities(template systemModelTemplate, delivery providerconf
 		ReasoningEfforts:       append([]string(nil), template.reasoningEfforts...),
 		InputModalities:        append([]string(nil), template.inputModalities...),
 		OutputModalities:       systemOutputModalities(template),
-		Delivery:               catalog.DeliveryCapabilities{Synchronous: delivery.Synchronous, Streaming: delivery.Streaming, Asynchronous: delivery.Asynchronous},
+		Delivery:               capabilityDelivery,
 		Embedding:              template.embedding,
 		Rerank:                 template.rerank,
 		MediaInputs:            append([]catalog.MediaInputCapability(nil), template.mediaInputs...),
@@ -520,12 +735,17 @@ func systemModelCapabilities(template systemModelTemplate, delivery providerconf
 		Parameters:             append([]catalog.ParameterDescriptor(nil), template.parameters...),
 		ParameterRules:         append([]catalog.ParameterRule(nil), template.parameterRules...),
 		UsageMetrics:           append([]catalog.UsageMetricCapability(nil), template.usageMetrics...),
+		StandardTools:          cloneStandardModelToolCapabilities(template.standardTools),
+		ExtraTools:             cloneExtraModelToolCapabilities(template.extraTools),
 	}
 }
 
 // systemOutputModalities returns the operation-specific closed output modality list.
 // systemOutputModalities 返回操作专属的封闭输出模态列表。
 func systemOutputModalities(template systemModelTemplate) []string {
+	if len(template.outputModalities) > 0 {
+		return append([]string(nil), template.outputModalities...)
+	}
 	switch template.operation {
 	case vcp.OperationImageGenerate, vcp.OperationImageEdit:
 		return []string{"image"}

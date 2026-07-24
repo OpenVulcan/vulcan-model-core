@@ -405,7 +405,7 @@ func cliProxyProviderDefinitions() []providerconfig.ProviderDefinition {
 	antigravityOAuth.PlanAcquisition = providerconfig.PlanAcquisitionProviderDetected
 	// unavailable records capabilities that CLIProxyAPI does not expose as provider catalog readers.
 	// unavailable 记录 CLIProxyAPI 未作为供应商目录读取器暴露的能力。
-	unavailable := providerconfig.ProviderFeatureSet{ModelDiscovery: providerconfig.SupportUnsupported, PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportUnsupported}
+	unavailable := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportUnsupported}
 	// codexFeatures reflect plan metadata and its exact allowed-model set embedded in the provider-issued Codex identity token.
 	// codexFeatures 反映供应商签发 Codex 身份令牌中携带的套餐元数据及其精确允许模型集合。
 	codexFeatures := unavailable

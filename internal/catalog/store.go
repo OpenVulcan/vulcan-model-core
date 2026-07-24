@@ -174,6 +174,7 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 		}
 		snapshot.Profiles[index].RequiredEntitlementClasses = append([]string(nil), snapshot.Profiles[index].RequiredEntitlementClasses...)
 	}
+	snapshot.ModelOperationPolicies = append([]ModelOperationPolicy(nil), snapshot.ModelOperationPolicies...)
 	snapshot.Entitlements = append([]ModelEntitlement(nil), snapshot.Entitlements...)
 	for index := range snapshot.Entitlements {
 		snapshot.Entitlements[index].AllowedProfileIDs = append([]string(nil), snapshot.Entitlements[index].AllowedProfileIDs...)
@@ -186,6 +187,21 @@ func cloneSnapshot(snapshot Snapshot) Snapshot {
 	snapshot.Allowances = append([]AllowanceSnapshot(nil), snapshot.Allowances...)
 	for index := range snapshot.Allowances {
 		snapshot.Allowances[index] = cloneAllowance(snapshot.Allowances[index])
+	}
+	snapshot.RateLimits = append([]RateLimitSnapshot(nil), snapshot.RateLimits...)
+	for index := range snapshot.RateLimits {
+		if snapshot.RateLimits[index].UsageLimit != nil {
+			// usageLimit detaches the copied optional ceiling from caller-owned memory.
+			// usageLimit 将复制后的可选上限与调用方内存分离。
+			usageLimit := *snapshot.RateLimits[index].UsageLimit
+			snapshot.RateLimits[index].UsageLimit = &usageLimit
+		}
+		if snapshot.RateLimits[index].UsagePeriodSeconds != nil {
+			// usagePeriod detaches the copied optional window from caller-owned memory.
+			// usagePeriod 将复制后的可选窗口与调用方内存分离。
+			usagePeriod := *snapshot.RateLimits[index].UsagePeriodSeconds
+			snapshot.RateLimits[index].UsagePeriodSeconds = &usagePeriod
+		}
 	}
 	snapshot.Voices = append([]VoiceSnapshot(nil), snapshot.Voices...)
 	for index := range snapshot.Voices {
@@ -240,8 +256,14 @@ func cloneCapabilities(capabilities ModelCapabilities) ModelCapabilities {
 	capabilities.ParameterRules = append([]ParameterRule(nil), capabilities.ParameterRules...)
 	for index := range capabilities.ParameterRules {
 		capabilities.ParameterRules[index].RelatedParameterIDs = append([]string(nil), capabilities.ParameterRules[index].RelatedParameterIDs...)
+		if capabilities.ParameterRules[index].BooleanValue != nil {
+			value := *capabilities.ParameterRules[index].BooleanValue
+			capabilities.ParameterRules[index].BooleanValue = &value
+		}
 	}
 	capabilities.UsageMetrics = append([]UsageMetricCapability(nil), capabilities.UsageMetrics...)
+	capabilities.StandardTools = cloneStandardModelTools(capabilities.StandardTools)
+	capabilities.ExtraTools = cloneExtraModelTools(capabilities.ExtraTools)
 	capabilities.HostedTools = append([]vcp.ToolKind(nil), capabilities.HostedTools...)
 	return capabilities
 }

@@ -484,6 +484,9 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 	if (request.ProviderModelID == "") == (request.ProviderServiceID == "") {
 		return Target{}, Diagnostics{}, errors.New("exactly one provider model or service is required")
 	}
+	if request.ProviderServiceID != "" && request.OfferingID != "" {
+		return Target{}, Diagnostics{}, errors.New("model offering cannot be selected for a provider service")
+	}
 	if request.ProviderServiceID != "" {
 		return r.resolveService(ctx, request)
 	}
@@ -505,9 +508,12 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 	if !exists {
 		return Target{}, Diagnostics{}, fmt.Errorf("%w: %s", ErrModelNotFound, request.ProviderModelID)
 	}
-	profile, offering, errProfile := selectProfile(snapshot, model.ID, request.ExecutionProfileID)
+	profile, offering, errProfile := selectProfile(snapshot, model.ID, request.OfferingID, request.ExecutionProfileID)
 	if errProfile != nil {
 		return Target{}, Diagnostics{}, errProfile
+	}
+	if len(snapshot.ModelOperationPolicies) > 0 && !supportedModelOperationPolicy(snapshot.ModelOperationPolicies, model.ID, offering.ID, profile.Operation) {
+		return Target{}, Diagnostics{}, fmt.Errorf("%w: model=%s offering=%s operation=%s", ErrProfilePolicyMismatch, model.ID, offering.ID, profile.Operation)
 	}
 	if profile.Operation != "" && request.Operation != profile.Operation {
 		return Target{}, Diagnostics{}, fmt.Errorf("%w: model operation does not match execution profile", ErrNoEligibleTarget)
@@ -640,6 +646,7 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		OfferingID:                   offering.ID,
 		Operation:                    profile.Operation,
 		ActionBindingID:              profile.ActionBindingID,
+		ProfileDriver:                profile.ProfileDriver,
 		ExecutionProfileID:           profile.ID,
 		UpstreamModelID:              offering.UpstreamModelID,
 		EffectiveContextWindow:       selected.effectiveContext,
@@ -652,6 +659,17 @@ func (r *Resolver) Resolve(ctx context.Context, request Request) (Target, Diagno
 		ProviderConfigRevision:       instance.Revision,
 		CatalogRevision:              snapshot.Revision,
 	}, diagnostics, nil
+}
+
+// supportedModelOperationPolicy verifies one exact model, offering, and operation decision at the final resolution boundary.
+// supportedModelOperationPolicy 在最终解析边界校验一个精确模型、Offering 与操作决策。
+func supportedModelOperationPolicy(policies []catalog.ModelOperationPolicy, modelID string, offeringID string, operation vcp.OperationKind) bool {
+	for _, policy := range policies {
+		if policy.ProviderModelID == modelID && policy.OfferingID == offeringID && policy.Operation == operation {
+			return policy.Status == catalog.ModelOperationSupported
+		}
+	}
+	return false
 }
 
 // resolveService selects one exact same-provider service target without fallback.
@@ -1020,12 +1038,12 @@ func cloneServiceCapabilities(capabilities catalog.ServiceCapabilities) catalog.
 	return capabilities
 }
 
-// selectProfile resolves an explicit profile or one unambiguous default profile for a model.
-// selectProfile 为模型解析显式规格或一个无歧义默认规格。
-func selectProfile(snapshot catalog.Snapshot, modelID string, profileID string) (catalog.ExecutionProfile, catalog.ModelOffering, error) {
+// selectProfile resolves one exact offering/profile constraint or one unambiguous default profile for a model.
+// selectProfile 为模型解析一个精确产品与规格约束，或一个无歧义默认规格。
+func selectProfile(snapshot catalog.Snapshot, modelID string, offeringID string, profileID string) (catalog.ExecutionProfile, catalog.ModelOffering, error) {
 	offerings := make(map[string]catalog.ModelOffering)
 	for _, offering := range snapshot.Offerings {
-		if offering.ProviderModelID == modelID {
+		if offering.ProviderModelID == modelID && (offeringID == "" || offering.ID == offeringID) {
 			offerings[offering.ID] = offering
 		}
 	}
@@ -1065,6 +1083,11 @@ func entitlementsByCredential(entitlements []catalog.ModelEntitlement, modelID s
 // entitlementForProfile resolves whether one credential may use one model profile at a fixed time.
 // entitlementForProfile 解析一个凭据在固定时间是否可以使用一个模型规格。
 func entitlementForProfile(model catalog.ProviderModel, profile catalog.ExecutionProfile, entitlement catalog.ModelEntitlement, now time.Time) (catalog.ModelEntitlement, bool) {
+	// Product-level profiles remain available to every bound credential even when another profile on the same logical model has narrower explicit authorization.
+	// 产品级规格对每个已绑定凭据保持可用，即使同一逻辑模型上的其他规格具有更窄的显式授权。
+	if model.EntitlementMode == catalog.EntitlementAllBoundCredentials && len(profile.RequiredEntitlementClasses) == 0 {
+		return catalog.ModelEntitlement{}, true
+	}
 	if entitlement.ID == "" {
 		if model.EntitlementMode == catalog.EntitlementExplicit || len(profile.RequiredEntitlementClasses) > 0 {
 			return catalog.ModelEntitlement{}, false
@@ -1081,6 +1104,13 @@ func entitlementForProfile(model catalog.ProviderModel, profile catalog.Executio
 		return catalog.ModelEntitlement{}, false
 	}
 	return entitlement, true
+}
+
+// ProfileEntitled reports whether one credential entitlement authorizes an exact execution profile at a fixed time.
+// ProfileEntitled 报告一个凭据授权是否在固定时间允许使用精确执行规格。
+func ProfileEntitled(model catalog.ProviderModel, profile catalog.ExecutionProfile, entitlement catalog.ModelEntitlement, now time.Time) bool {
+	_, entitled := entitlementForProfile(model, profile, entitlement, now)
+	return entitled
 }
 
 // metadataCurrent reports whether one observed commercial fact is active at the evaluation time.

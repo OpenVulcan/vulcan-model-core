@@ -246,9 +246,6 @@ type ProtocolProfile struct {
 	// RuntimeReady reports whether the corresponding adapter is executable.
 	// RuntimeReady 表示对应 Adapter 是否已经可以执行。
 	RuntimeReady bool
-	// ModelDiscovery describes whether the profile can list upstream models.
-	// ModelDiscovery 描述该 Profile 是否可以拉取上游模型。
-	ModelDiscovery SupportStatus
 	// Capabilities declares protocol behavior facts available for target-specific capability planning.
 	// Capabilities 声明可供 Target 特定能力规划使用的协议行为事实。
 	Capabilities []ProtocolCapabilityFact
@@ -283,9 +280,6 @@ type ProviderGroup struct {
 // ProviderFeatureSet describes optional system-provider management capabilities.
 // ProviderFeatureSet 描述系统供应商可选的管理能力。
 type ProviderFeatureSet struct {
-	// ModelDiscovery describes provider-native model discovery support.
-	// ModelDiscovery 描述供应商原生模型发现支持。
-	ModelDiscovery SupportStatus
 	// PlanReader describes commercial plan discovery support.
 	// PlanReader 描述商业套餐读取支持。
 	PlanReader SupportStatus
@@ -315,6 +309,9 @@ type AuthMethodDefinition struct {
 	// PlanAcquisition declares the trusted plan source for this exact authentication method.
 	// PlanAcquisition 声明该精确认证方式使用的可信套餐来源。
 	PlanAcquisition PlanAcquisitionMode
+	// ReaderFeatures optionally narrows provider metadata readers for this exact authentication method.
+	// ReaderFeatures 可选地为该精确认证方式收窄供应商元数据读取能力。
+	ReaderFeatures *ProviderFeatureSet
 }
 
 // PlanOptionDefinition describes one immutable commercial plan selectable for declared credentials.

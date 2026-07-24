@@ -39,6 +39,9 @@ type blockingMetadataRefresher struct {
 	// contextErrors records timeout or shutdown cancellation.
 	// contextErrors 记录超时或关闭取消。
 	contextErrors []error
+	// credentialCalls records exact credential-scoped refresh forwarding.
+	// credentialCalls 记录精确的凭据作用域刷新转发。
+	credentialCalls chan string
 }
 
 // Refresh records one call and obeys its exact caller timeout.
@@ -59,12 +62,62 @@ func (r *blockingMetadataRefresher) Refresh(ctx context.Context, instanceID stri
 	return catalog.Snapshot{}, ctx.Err()
 }
 
+// RefreshCredentialEntitlements records and completes one credential entitlement refresh.
+// RefreshCredentialEntitlements 记录并完成一次凭据权益刷新。
+func (r *blockingMetadataRefresher) RefreshCredentialEntitlements(_ context.Context, instanceID string, credentialID string, _ time.Time) (catalog.Snapshot, error) {
+	if r.credentialCalls != nil {
+		r.credentialCalls <- "entitlements:" + instanceID + ":" + credentialID
+	}
+	return catalog.Snapshot{ProviderInstanceID: instanceID}, nil
+}
+
+// RefreshCredentialAllowances records and completes one credential allowance refresh.
+// RefreshCredentialAllowances 记录并完成一次凭据额度刷新。
+func (r *blockingMetadataRefresher) RefreshCredentialAllowances(_ context.Context, instanceID string, credentialID string, _ time.Time) (catalog.Snapshot, error) {
+	if r.credentialCalls != nil {
+		r.credentialCalls <- "allowances:" + instanceID + ":" + credentialID
+	}
+	return catalog.Snapshot{ProviderInstanceID: instanceID}, nil
+}
+
 // recordContextError appends one observed cancellation under lock.
 // recordContextError 在锁保护下追加一个已观测取消。
 func (r *blockingMetadataRefresher) recordContextError(errValue error) {
 	r.mu.Lock()
 	r.contextErrors = append(r.contextErrors, errValue)
 	r.mu.Unlock()
+}
+
+// TestCoordinatorForwardsCredentialScopedRefreshes verifies the scheduler decorator preserves both explicit HTTP refresh contracts.
+// TestCoordinatorForwardsCredentialScopedRefreshes 验证调度装饰器保留两种显式 HTTP 刷新合同。
+func TestCoordinatorForwardsCredentialScopedRefreshes(t *testing.T) {
+	refresher := &blockingMetadataRefresher{
+		calls:           make(chan string, 1),
+		credentialCalls: make(chan string, 2),
+	}
+	coordinator, errCoordinator := NewCoordinator(coordinatorInstanceLister{}, refresher, CoordinatorOptions{})
+	if errCoordinator != nil {
+		t.Fatalf("create coordinator: %v", errCoordinator)
+	}
+	observedAt := time.Date(2026, 7, 23, 14, 0, 0, 0, time.UTC)
+	entitlementSnapshot, errEntitlements := coordinator.RefreshCredentialEntitlements(context.Background(), "pvi_test", "cred_test", observedAt)
+	if errEntitlements != nil || entitlementSnapshot.ProviderInstanceID != "pvi_test" {
+		t.Fatalf("entitlement refresh snapshot=%#v error=%v", entitlementSnapshot, errEntitlements)
+	}
+	allowanceSnapshot, errAllowances := coordinator.RefreshCredentialAllowances(context.Background(), "pvi_test", "cred_test", observedAt)
+	if errAllowances != nil || allowanceSnapshot.ProviderInstanceID != "pvi_test" {
+		t.Fatalf("allowance refresh snapshot=%#v error=%v", allowanceSnapshot, errAllowances)
+	}
+	for _, expectedCall := range []string{"entitlements:pvi_test:cred_test", "allowances:pvi_test:cred_test"} {
+		select {
+		case actualCall := <-refresher.credentialCalls:
+			if actualCall != expectedCall {
+				t.Fatalf("credential refresh call=%q, want %q", actualCall, expectedCall)
+			}
+		default:
+			t.Fatalf("credential refresh call %q was not forwarded", expectedCall)
+		}
+	}
 }
 
 // TestCoordinatorDeduplicatesImmediateTriggers verifies queued and in-flight refreshes share one key.

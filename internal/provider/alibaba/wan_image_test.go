@@ -22,6 +22,9 @@ import (
 // TestWanImageGenerationPreservesOrderedReferences verifies the exact synchronous workspace request and private output URL.
 // TestWanImageGenerationPreservesOrderedReferences 验证精确同步工作区请求与私有输出 URL。
 func TestWanImageGenerationPreservesOrderedReferences(t *testing.T) {
+	promptExtend := true
+	watermark := false
+	seed := int64(17)
 	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
 		if request.Method != http.MethodPost || request.URL.Path != "/api/v1/services/aigc/multimodal-generation/generation" || request.Header.Get("Authorization") != "Bearer test-secret" {
 			t.Errorf("request = %s %s authorization=%q", request.Method, request.URL.Path, request.Header.Get("Authorization"))
@@ -31,7 +34,7 @@ func TestWanImageGenerationPreservesOrderedReferences(t *testing.T) {
 			t.Errorf("decode request: %v", errDecode)
 		}
 		content := upstream.Input.Messages[0].Content
-		if upstream.Model != "wan2.7-image-pro" || len(content) != 3 || content[0].Image != "data:image/png;base64,cmVmMQ==" || content[1].Image != "https://inputs.example/reference.webp" || content[2].Text != "Keep both subjects" || upstream.Parameters.Size != "2K" || upstream.Parameters.Count != 2 {
+		if upstream.Model != "wan2.7-image-pro" || len(content) != 3 || content[0].Image != "data:image/png;base64,cmVmMQ==" || content[1].Image != "https://inputs.example/reference.webp" || content[2].Text != "Keep both subjects" || upstream.Parameters.Size != "2K" || upstream.Parameters.Count != 2 || upstream.Parameters.NegativePrompt != "blur" || upstream.Parameters.Seed == nil || *upstream.Parameters.Seed != seed || upstream.Parameters.PromptExtend == nil || *upstream.Parameters.PromptExtend != promptExtend || upstream.Parameters.Watermark == nil || *upstream.Parameters.Watermark != watermark {
 			t.Errorf("upstream = %#v", upstream)
 		}
 		_, _ = io.WriteString(writer, "{\"request_id\":\"request-wan\",\"output\":{\"choices\":[{\"message\":{\"content\":[{\"type\":\"image\",\"image\":\"https://result.example/wan.png?Expires=1\"}]}}]}}")
@@ -39,7 +42,7 @@ func TestWanImageGenerationPreservesOrderedReferences(t *testing.T) {
 	defer server.Close()
 
 	driver, execution := newAlibabaWanImageExecution(t, server.URL, WanImageGenerateActionBindingID, vcp.OperationImageGenerate, "wan2.7-image-pro")
-	execution.Execution.Payload.ImageGenerate = &vcp.ImageGenerateOperation{Prompt: "Keep both subjects", Count: 2, Resolution: "2k", OutputFormat: "png", References: []vcp.MediaInput{
+	execution.Execution.Payload.ImageGenerate = &vcp.ImageGenerateOperation{Prompt: "Keep both subjects", NegativePrompt: "blur", Count: 2, Resolution: "2k", OutputFormat: "png", Seed: &seed, PromptExtend: &promptExtend, Watermark: &watermark, References: []vcp.MediaInput{
 		{ID: "reference-one", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, Resource: vcp.ResourceReference{ResourceID: "resource-one"}},
 		{ID: "reference-two", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, Resource: vcp.ResourceReference{ResourceID: "resource-two"}},
 	}}
@@ -53,6 +56,32 @@ func TestWanImageGenerationPreservesOrderedReferences(t *testing.T) {
 	}
 	if result.UpstreamResponseID != "request-wan" || len(result.GeneratedResources) != 1 || result.GeneratedResources[0].MIMEType != "image/png" || !strings.Contains(result.GeneratedResources[0].DownloadURL, "wan.png") {
 		t.Fatalf("result = %#v", result)
+	}
+}
+
+// TestWanImageEditPreservesExtendedControls verifies every copied image-edit control reaches the synchronous request.
+// TestWanImageEditPreservesExtendedControls 验证每个复制的图片编辑控制项均进入同步请求。
+func TestWanImageEditPreservesExtendedControls(t *testing.T) {
+	promptExtend := false
+	watermark := true
+	seed := int64(23)
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		var upstream wanImageRequest
+		if errDecode := json.NewDecoder(request.Body).Decode(&upstream); errDecode != nil {
+			t.Errorf("decode request: %v", errDecode)
+		}
+		if upstream.Parameters.NegativePrompt != "artifacts" || upstream.Parameters.Seed == nil || *upstream.Parameters.Seed != seed || upstream.Parameters.PromptExtend == nil || *upstream.Parameters.PromptExtend != promptExtend || upstream.Parameters.Watermark == nil || *upstream.Parameters.Watermark != watermark {
+			t.Errorf("parameters = %#v", upstream.Parameters)
+		}
+		_, _ = io.WriteString(writer, `{"request_id":"request-wan-edit","output":{"choices":[{"message":{"content":[{"image":"https://result.example/wan-edit.png"}]}}]}}`)
+	}))
+	defer server.Close()
+
+	driver, execution := newAlibabaWanImageExecution(t, server.URL, WanImageEditActionBindingID, vcp.OperationImageEdit, "wan2.7-image")
+	execution.Execution.Payload.ImageEdit = &vcp.ImageEditOperation{Instruction: "Retouch", NegativePrompt: "artifacts", Seed: &seed, PromptExtend: &promptExtend, Watermark: &watermark, Sources: []vcp.MediaInput{{ID: "source", Kind: vcp.MediaImage, Role: vcp.MediaRoleEditSource, Resource: vcp.ResourceReference{ResourceID: "resource-source"}}}}
+	execution.MaterializedInputs = []resource.MaterializedInput{{InputID: "source", ResourceID: "resource-source", Kind: vcp.MediaImage, Role: vcp.MediaRoleEditSource, MIMEType: "image/png", Mode: "inline_base64", InlineBase64: "c291cmNl"}}
+	if _, errExecute := driver.Execute(context.Background(), execution); errExecute != nil {
+		t.Fatalf("Execute() error = %v", errExecute)
 	}
 }
 

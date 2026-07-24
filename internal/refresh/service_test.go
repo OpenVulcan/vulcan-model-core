@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -54,12 +55,6 @@ func (d separateKimiDriver) Definition() providerconfig.ProviderDefinition {
 // ClassifyError 表示没有运行时错误分类。
 func (d separateKimiDriver) ClassifyError(observation provider.ErrorObservation) (provider.ClassifiedError, bool) {
 	return d.base.ClassifyError(observation)
-}
-
-// DiscoverModels forwards deterministic model discovery.
-// DiscoverModels 转发确定性模型发现。
-func (d separateKimiDriver) DiscoverModels(ctx context.Context, request provider.DiscoveryRequest) (provider.ModelDiscoveryResult, error) {
-	return d.base.DiscoverModels(ctx, request)
 }
 
 // ReadPlan forwards one independent plan read.
@@ -116,6 +111,27 @@ type failingCatalogStore struct {
 	err error
 }
 
+// disappearingCredentialStore returns the selected credential once and then simulates revocation before the locked refresh begins.
+// disappearingCredentialStore 首次返回所选凭据，随后模拟其在加锁刷新开始前已被撤销。
+type disappearingCredentialStore struct {
+	// Store delegates every configuration operation except credential listing.
+	// Store 委托除凭据列表外的全部配置操作。
+	providerconfig.Store
+	// listCalls counts exact credential-list observations.
+	// listCalls 统计精确的凭据列表观测次数。
+	listCalls int
+}
+
+// ListCredentials exposes the initial caller lookup and then an authoritative empty current list.
+// ListCredentials 暴露调用方初始查询，随后返回权威的当前空列表。
+func (s *disappearingCredentialStore) ListCredentials(ctx context.Context, instanceID string) ([]providerconfig.Credential, error) {
+	s.listCalls++
+	if s.listCalls > 1 {
+		return nil, nil
+	}
+	return s.Store.ListCredentials(ctx, instanceID)
+}
+
 // Save injects the configured durable persistence failure.
 // Save 注入配置的持久化失败。
 func (s failingCatalogStore) Save(context.Context, catalog.Snapshot) error {
@@ -153,11 +169,11 @@ func (d fakeKimiDriver) ClassifyError(provider.ErrorObservation) (provider.Class
 	return provider.ClassifiedError{}, false
 }
 
-// DiscoverModels returns one K3 offering with 256K and 1M execution profiles.
-// DiscoverModels 返回一个具有 256K 与 1M 执行规格的 K3 产品。
-func (d fakeKimiDriver) DiscoverModels(_ context.Context, request provider.DiscoveryRequest) (provider.ModelDiscoveryResult, error) {
-	instanceID := request.ProviderInstance.ID
-	return provider.ModelDiscoveryResult{
+// fakeKimiStaticSnapshot returns one code-owned K3 offering with 256K and 1M execution profiles.
+// fakeKimiStaticSnapshot 返回一个代码拥有且包含 256K 与 1M 执行规格的 K3 产品。
+func fakeKimiStaticSnapshot(instanceID string, observedAt time.Time) catalog.Snapshot {
+	return catalog.Snapshot{
+		ProviderInstanceID: instanceID,
 		Models: []catalog.ProviderModel{{
 			ID:                 "model_kimi_k3",
 			ProviderInstanceID: instanceID,
@@ -204,11 +220,9 @@ func (d fakeKimiDriver) DiscoverModels(_ context.Context, request provider.Disco
 				Revision:                   1,
 			},
 		},
-		ObservedAt:     d.observedAt,
-		ExpiresAt:      d.observedAt.Add(time.Hour),
-		SourceRevision: "fake-kimi-1",
-		ETag:           "fake-kimi-etag-1",
-	}, nil
+		Revision:   1,
+		ObservedAt: observedAt,
+	}
 }
 
 // ReadPlan returns one account-specific commercial plan snapshot.
@@ -345,13 +359,12 @@ func fakeKimiCapabilities(contextWindow int64) catalog.ModelCapabilities {
 
 // TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery verifies the complete metadata loop.
 // TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery 校验完整元数据闭环。
-func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
+func TestFakeKimiRefreshPreservesStaticProfilesAndBuildsPools(t *testing.T) {
 	ctx := context.Background()
 	observedAt := time.Date(2026, 7, 17, 15, 0, 0, 0, time.UTC)
 	protocols := providerconfig.NewProtocolRegistry()
 	if err := protocols.Register(providerconfig.ProtocolProfile{
 		ID: "openai.chat", Version: "1", DisplayName: "OpenAI Chat", RuntimeReady: true,
-		ModelDiscovery: providerconfig.SupportUnsupported, AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
 	}
@@ -371,8 +384,9 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 			ID: "bearer", Type: providerconfig.AuthMethodBearer, MultipleCredentials: true,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery: providerconfig.SupportSupported, PlanReader: providerconfig.SupportSupported,
-			EntitlementReader: providerconfig.SupportSupported, AllowanceReader: providerconfig.SupportSupported,
+			PlanReader:        providerconfig.SupportSupported,
+			EntitlementReader: providerconfig.SupportSupported,
+			AllowanceReader:   providerconfig.SupportSupported,
 		},
 		Revision: 1,
 	}, observedAt: observedAt, metadataReads: &metadataReads, failCredentialID: &failingCredentialID}
@@ -423,6 +437,9 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	if _, errActivate := configurationService.ActivateInstance(ctx, instance.ID); errActivate != nil {
 		t.Fatalf("activate Kimi instance: %v", errActivate)
 	}
+	if errCatalog := catalogs.Save(ctx, fakeKimiStaticSnapshot(instance.ID, observedAt)); errCatalog != nil {
+		t.Fatalf("save static Kimi catalog: %v", errCatalog)
+	}
 	refreshService, errRefreshService := NewService(configurations, catalogs, drivers)
 	if errRefreshService != nil {
 		t.Fatalf("create refresh service: %v", errRefreshService)
@@ -437,6 +454,26 @@ func TestFakeKimiRefreshBuildsProfilesPoolsAndSafeQuery(t *testing.T) {
 	if metadataReads != len(credentialInputs) {
 		t.Fatalf("aggregate metadata reads=%d, want %d", metadataReads, len(credentialInputs))
 	}
+	// initialAllowances proves explicit entitlement refresh never replaces unrelated usage facts.
+	// initialAllowances 证明显式权益刷新绝不会替换无关用量事实。
+	initialAllowances := append([]catalog.AllowanceSnapshot(nil), snapshot.Allowances...)
+	metadataReads = 0
+	entitlementSnapshot, errEntitlementRefresh := refreshService.RefreshCredentialEntitlements(ctx, instance.ID, "cred_kimi_256k", observedAt.Add(time.Minute))
+	if errEntitlementRefresh != nil {
+		t.Fatalf("refresh exact credential entitlements: %v", errEntitlementRefresh)
+	}
+	if metadataReads != 1 || !reflect.DeepEqual(entitlementSnapshot.Allowances, initialAllowances) {
+		t.Fatalf("entitlement refresh reads=%d allowances changed=%t", metadataReads, !reflect.DeepEqual(entitlementSnapshot.Allowances, initialAllowances))
+	}
+	metadataReads = 0
+	usageSnapshot, errUsageRefresh := refreshService.RefreshCredentialAllowances(ctx, instance.ID, "cred_kimi_256k", observedAt.Add(2*time.Minute))
+	if errUsageRefresh != nil {
+		t.Fatalf("refresh exact credential usage: %v", errUsageRefresh)
+	}
+	if metadataReads != 1 || !reflect.DeepEqual(usageSnapshot.Entitlements, entitlementSnapshot.Entitlements) {
+		t.Fatalf("usage refresh reads=%d entitlements changed=%t", metadataReads, !reflect.DeepEqual(usageSnapshot.Entitlements, entitlementSnapshot.Entitlements))
+	}
+	snapshot = usageSnapshot
 	queryService, errQueryService := management.NewQueryService(configurations, catalogs)
 	if errQueryService != nil {
 		t.Fatalf("create query service: %v", errQueryService)
@@ -597,24 +634,6 @@ func TestNewServiceRejectsTypedNilDependencies(t *testing.T) {
 	}
 }
 
-// TestRecordDiscoveryFailureJoinsPersistenceFailure verifies last-good failure recording can never hide a storage outage.
-// TestRecordDiscoveryFailureJoinsPersistenceFailure 验证最后有效快照的失败记录绝不会隐藏存储故障。
-func TestRecordDiscoveryFailureJoinsPersistenceFailure(t *testing.T) {
-	ctx := context.Background()
-	now := time.Date(2026, time.July, 21, 6, 0, 0, 0, time.UTC)
-	store := catalog.NewMemoryStore()
-	snapshot := catalog.Snapshot{ProviderInstanceID: "pvi_dynamic", Revision: 1, ObservedAt: now.Add(-time.Minute), Dynamic: &catalog.DynamicCatalogMetadata{Authority: catalog.CatalogAuthorityProvider, SourceRevision: "source-1", RefreshedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour), Status: catalog.CatalogRefreshFresh}}
-	if errSave := store.Save(ctx, snapshot); errSave != nil {
-		t.Fatalf("Save() error = %v", errSave)
-	}
-	discoveryErr := errors.New("injected discovery failure")
-	persistenceErr := errors.New("injected persistence failure")
-	errRecord := recordDiscoveryFailure(ctx, failingCatalogStore{Store: store, err: persistenceErr}, snapshot, nil, snapshot.ProviderInstanceID, now, discoveryErr)
-	if !errors.Is(errRecord, discoveryErr) || !errors.Is(errRecord, persistenceErr) {
-		t.Fatalf("recordDiscoveryFailure() error = %v, want both causes", errRecord)
-	}
-}
-
 // TestPrepareCredentialRefreshesOnlyEligibleExpiringTokens verifies metadata refresh cannot strand a refreshable account at token expiry.
 // TestPrepareCredentialRefreshesOnlyEligibleExpiringTokens 验证元数据刷新不会在令牌到期时搁置可刷新账号。
 func TestPrepareCredentialRefreshesOnlyEligibleExpiringTokens(t *testing.T) {
@@ -736,5 +755,53 @@ func TestValidateCredentialMetadataOwnershipRejectsForeignRecords(t *testing.T) 
 				t.Fatal("validateCredentialMetadataOwnership() error = nil")
 			}
 		})
+	}
+}
+
+// TestLockInstanceRefreshSerializesOnlyMatchingInstances verifies concurrent mutations cannot race one provider snapshot while unrelated providers remain independent.
+// TestLockInstanceRefreshSerializesOnlyMatchingInstances 验证并发变更不能竞争同一供应商快照，同时无关供应商仍保持独立。
+func TestLockInstanceRefreshSerializesOnlyMatchingInstances(t *testing.T) {
+	service := &Service{refreshLocks: make(map[string]*instanceRefreshLock)}
+	releaseFirst := service.lockInstanceRefresh("pvi_same")
+	sameAttempted := make(chan struct{})
+	sameEntered := make(chan struct{})
+	sameFinished := make(chan struct{})
+	go func() {
+		close(sameAttempted)
+		releaseSame := service.lockInstanceRefresh("pvi_same")
+		close(sameEntered)
+		releaseSame()
+		close(sameFinished)
+	}()
+	<-sameAttempted
+	select {
+	case <-sameEntered:
+		t.Fatal("matching provider instance entered before the active refresh released its lock")
+	case <-time.After(50 * time.Millisecond):
+	}
+
+	differentEntered := make(chan struct{})
+	go func() {
+		releaseDifferent := service.lockInstanceRefresh("pvi_different")
+		close(differentEntered)
+		releaseDifferent()
+	}()
+	select {
+	case <-differentEntered:
+	case <-time.After(time.Second):
+		t.Fatal("different provider instance was unnecessarily serialized")
+	}
+
+	releaseFirst()
+	select {
+	case <-sameFinished:
+	case <-time.After(time.Second):
+		t.Fatal("matching provider instance did not resume after release")
+	}
+	service.refreshLocksMu.Lock()
+	remainingLocks := len(service.refreshLocks)
+	service.refreshLocksMu.Unlock()
+	if remainingLocks != 0 {
+		t.Fatalf("refresh lock registry retained %d inactive entries", remainingLocks)
 	}
 }

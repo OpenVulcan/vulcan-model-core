@@ -43,6 +43,29 @@ func TestProjectRequestWithInputsPreservesMixedMediaOrder(t *testing.T) {
 	}
 }
 
+// TestProjectRequestWithInputsPreservesRepeatedResourceRoles verifies Gemini projection resolves repeated resources by semantic role.
+// TestProjectRequestWithInputsPreservesRepeatedResourceRoles 验证 Gemini 投影会按语义角色解析重复资源。
+func TestProjectRequestWithInputsPreservesRepeatedResourceRoles(t *testing.T) {
+	request := aiStudioTestRequest()
+	request.Context[0].Content = []vcp.ContentBlock{
+		{Type: vcp.ContentText, Text: "Compare these uses"},
+		{Type: vcp.ContentImage, ResourceRef: "resource-image", MediaRole: vcp.MediaRoleUnderstanding},
+		{Type: vcp.ContentImage, ResourceRef: "resource-image", MediaRole: vcp.MediaRoleReference},
+	}
+	inputs := []resource.MaterializedInput{
+		{InputID: "understanding", ResourceID: "resource-image", Kind: vcp.MediaImage, Role: vcp.MediaRoleUnderstanding, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+		{InputID: "reference", ResourceID: "resource-image", Kind: vcp.MediaImage, Role: vcp.MediaRoleReference, MIMEType: "image/png", Mode: catalog.MaterializationInlineBase64, InlineBase64: "aW1hZ2U="},
+	}
+	projected, errProject := ProjectRequestWithInputs(request, aiStudioTarget(), aiStudioCapabilities(), "lineage-repeated-roles", aiStudioNow(), inputs)
+	if errProject != nil {
+		t.Fatalf("ProjectRequestWithInputs() error = %v", errProject)
+	}
+	parts := projected.Upstream.Contents[0].Parts
+	if len(parts) != 3 || parts[1].InlineData == nil || parts[2].InlineData == nil {
+		t.Fatalf("parts = %#v", parts)
+	}
+}
+
 // TestProjectRequestWithInputsRejectsRoleMismatch verifies a materialization cannot be reused under a different semantic role.
 // TestProjectRequestWithInputsRejectsRoleMismatch 验证物化结果不能在不同语义角色下复用。
 func TestProjectRequestWithInputsRejectsRoleMismatch(t *testing.T) {
@@ -236,6 +259,20 @@ func TestProjectRequestRejectsOpaqueReasoningContinuation(t *testing.T) {
 	}
 	if _, errProject := ProjectRequest(request, aiStudioTarget(), aiStudioCapabilities(), "lineage-opaque-continuation", aiStudioNow()); !errors.Is(errProject, vcp.ErrCapabilityUnavailable) {
 		t.Fatalf("ProjectRequest() error = %v, want ErrCapabilityUnavailable", errProject)
+	}
+}
+
+// TestProjectRequestRejectsUnverifiedReasoningSwitchAndBudget verifies unsupported canonical controls cannot be silently omitted by AI Studio.
+// TestProjectRequestRejectsUnverifiedReasoningSwitchAndBudget 验证 AI Studio 不能静默省略未验证的规范开关与预算控制。
+func TestProjectRequestRejectsUnverifiedReasoningSwitchAndBudget(t *testing.T) {
+	enabled := true
+	budget := int64(4000)
+	for _, policy := range []vcp.ReasoningPolicy{{Enabled: &enabled}, {BudgetTokens: &budget}} {
+		request := aiStudioTestRequest()
+		request.ReasoningPolicy = policy
+		if _, errProject := ProjectRequest(request, aiStudioTarget(), ProfileCapabilities{NativeReasoning: true}, "lin_reasoning_control", time.Unix(51, 0)); !errors.Is(errProject, ErrUnsupportedContext) {
+			t.Fatalf("ProjectRequest() error = %v, want ErrUnsupportedContext", errProject)
+		}
 	}
 }
 

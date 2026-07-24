@@ -3,6 +3,7 @@ package management
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sort"
 	"strconv"
 	"time"
@@ -193,6 +194,9 @@ type AuthMethodView struct {
 	// PlanAcquisition declares whether plan evidence is detected, required manually, optional, or unavailable.
 	// PlanAcquisition 声明套餐证据是自动识别、人工必选、人工可选还是不可获得。
 	PlanAcquisition providerconfig.PlanAcquisitionMode `json:"plan_acquisition"`
+	// ReaderFeatures reports the exact metadata readers enabled for this authentication method.
+	// ReaderFeatures 报告此认证方式启用的精确元数据读取器。
+	ReaderFeatures FeatureView `json:"reader_features"`
 }
 
 // PlanOptionView exposes one safe code-owned commercial plan choice.
@@ -224,9 +228,6 @@ type PlanOptionView struct {
 // FeatureView reports optional trusted provider management features.
 // FeatureView 报告可选的受信任供应商管理能力。
 type FeatureView struct {
-	// ModelDiscovery reports model listing support.
-	// ModelDiscovery 报告模型列表支持状态。
-	ModelDiscovery providerconfig.SupportStatus `json:"model_discovery"`
 	// PlanReader reports commercial plan reading support.
 	// PlanReader 报告商业套餐读取支持状态。
 	PlanReader providerconfig.SupportStatus `json:"plan_reader"`
@@ -335,6 +336,9 @@ type CredentialView struct {
 	// DetectedPlan contains provider-reported membership metadata for this exact credential when present.
 	// DetectedPlan 在存在时包含供应商为此精确凭据报告的会员元数据。
 	DetectedPlan *CredentialPlanView `json:"detected_plan,omitempty"`
+	// ReaderFeatures reports the exact metadata readers enabled by this credential's authentication method.
+	// ReaderFeatures 报告此凭据认证方式启用的精确元数据读取器。
+	ReaderFeatures FeatureView `json:"reader_features"`
 	// Revision identifies the persisted credential revision.
 	// Revision 标识持久化凭据修订号。
 	Revision uint64 `json:"revision"`
@@ -419,12 +423,181 @@ type CatalogView struct {
 	// Plans contains account-identity-free commercial plan aggregates.
 	// Plans 包含不带账号身份的商业套餐聚合。
 	Plans []PlanView `json:"plans"`
+	// RateLimits contains provider capacity ceilings separately from consumable allowances.
+	// RateLimits 包含与可消费额度分离的供应商容量上限。
+	RateLimits []RateLimitView `json:"rate_limits"`
 	// Revision identifies the complete atomic catalog revision.
 	// Revision 标识完整原子目录修订号。
 	Revision uint64 `json:"revision"`
 	// ObservedAt records when the catalog was produced.
 	// ObservedAt 记录目录生成时间。
 	ObservedAt time.Time `json:"observed_at"`
+}
+
+// RateLimitView contains one client-safe provider capacity ceiling.
+// RateLimitView 包含一项客户端安全的供应商容量上限。
+type RateLimitView struct {
+	// ID is the immutable rate-limit observation identifier.
+	// ID 是不可变的限速观测标识。
+	ID string `json:"id"`
+	// Scope identifies the provider capacity owner.
+	// Scope 标识供应商容量所有者。
+	Scope catalog.RateLimitScope `json:"scope"`
+	// ScopeID identifies the exact capacity owner without secret data.
+	// ScopeID 标识不含秘密数据的精确容量所有者。
+	ScopeID string `json:"scope_id"`
+	// TierID preserves the provider-authored rate tier.
+	// TierID 保留供应商编写的速率档位。
+	TierID string `json:"tier_id"`
+	// CountLimit is the known request-count ceiling.
+	// CountLimit 是已知请求次数上限。
+	CountLimit int64 `json:"count_limit"`
+	// CountPeriodSeconds is the request-count window duration.
+	// CountPeriodSeconds 是请求计数窗口秒数。
+	CountPeriodSeconds int64 `json:"count_period_seconds"`
+	// UsageLimit is the optional provider metric ceiling.
+	// UsageLimit 是可选供应商指标上限。
+	UsageLimit *int64 `json:"usage_limit,omitempty"`
+	// UsagePeriodSeconds is the optional provider metric window duration.
+	// UsagePeriodSeconds 是可选供应商指标窗口秒数。
+	UsagePeriodSeconds *int64 `json:"usage_period_seconds,omitempty"`
+	// UsageField identifies the exact provider metric.
+	// UsageField 标识精确的供应商指标。
+	UsageField string `json:"usage_field,omitempty"`
+	// ObservedAt records when the capacity fact was obtained.
+	// ObservedAt 记录容量事实的获取时间。
+	ObservedAt time.Time `json:"observed_at"`
+	// ExpiresAt records when the capacity fact becomes stale.
+	// ExpiresAt 记录容量事实何时过期。
+	ExpiresAt time.Time `json:"expires_at"`
+}
+
+// CatalogAuditView contains the complete internal model facts and publication decisions for one provider instance.
+// CatalogAuditView 包含一个供应商实例的完整内部模型事实与发布决策。
+type CatalogAuditView struct {
+	// ProviderInstanceID owns every returned record.
+	// ProviderInstanceID 是全部返回记录的所有者。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// DefinitionID identifies the immutable provider product boundary.
+	// DefinitionID 标识不可变的供应商产品边界。
+	DefinitionID string `json:"definition_id"`
+	// ModelCatalogID identifies the code-owned catalog baseline selected by the product.
+	// ModelCatalogID 标识该产品选择的代码拥有目录基线。
+	ModelCatalogID string `json:"model_catalog_id"`
+	// ProductName is the exact provider variant label authored by the system definition.
+	// ProductName 是系统定义编写的精确供应商变体标签。
+	ProductName string `json:"product_name"`
+	// EndpointRegions lists the configured provider regions without endpoint credentials.
+	// EndpointRegions 列出不含入口凭据的已配置供应商区域。
+	EndpointRegions []string `json:"endpoint_regions"`
+	// ChannelIDs lists every exact protocol or native action channel present in the catalog.
+	// ChannelIDs 列出目录中存在的每个精确协议或原生动作通道。
+	ChannelIDs []string `json:"channel_ids"`
+	// Models contains every collected model, including unpublished records.
+	// Models 包含全部已采集模型，包括未发布记录。
+	Models []CatalogAuditModelView `json:"models"`
+	// Offerings contains every collected model-channel relation, including unpublished records.
+	// Offerings 包含全部已采集模型通道关系，包括未发布记录。
+	Offerings []CatalogAuditOfferingView `json:"offerings"`
+	// Policies contains every explicit model-operation publication decision.
+	// Policies 包含全部显式模型操作发布决策。
+	Policies []CatalogAuditPolicyView `json:"policies"`
+	// RateLimits contains current provider capacity evidence.
+	// RateLimits 包含当前供应商容量证据。
+	RateLimits []RateLimitView `json:"rate_limits"`
+	// Revision identifies the complete atomic catalog revision.
+	// Revision 标识完整原子目录修订号。
+	Revision uint64 `json:"revision"`
+	// ObservedAt records when the catalog was produced.
+	// ObservedAt 记录目录生成时间。
+	ObservedAt time.Time `json:"observed_at"`
+	// SourceRevision is the exact upstream or committed static source revision when evidence exists.
+	// SourceRevision 是存在证据时的精确上游或已提交静态源修订号。
+	SourceRevision string `json:"source_revision,omitempty"`
+	// RefreshedAt records the latest dynamic catalog refresh attempt.
+	// RefreshedAt 记录最近一次动态目录刷新尝试时间。
+	RefreshedAt *time.Time `json:"refreshed_at,omitempty"`
+	// ExpiresAt records the dynamic catalog freshness boundary.
+	// ExpiresAt 记录动态目录的新鲜度边界。
+	ExpiresAt *time.Time `json:"expires_at,omitempty"`
+	// RefreshStatus reports the provider-owned refresh lifecycle when present.
+	// RefreshStatus 报告存在时由供应商拥有的刷新生命周期。
+	RefreshStatus catalog.CatalogRefreshStatus `json:"refresh_status,omitempty"`
+	// Stale reports whether dynamic evidence is retained past freshness or after a failed refresh.
+	// Stale 报告动态证据是否已过新鲜期或在刷新失败后被保留。
+	Stale bool `json:"stale"`
+}
+
+// CatalogAuditOfferingView contains one internal model-channel relation without executable publication filtering.
+// CatalogAuditOfferingView 包含一个不经过可执行发布过滤的内部模型通道关系。
+type CatalogAuditOfferingView struct {
+	// ID is the immutable provider-scoped offering identifier.
+	// ID 是不可变的供应商作用域 Offering 标识。
+	ID string `json:"id"`
+	// ProviderModelID identifies the exact internal model.
+	// ProviderModelID 标识精确内部模型。
+	ProviderModelID string `json:"provider_model_id"`
+	// UpstreamModelID is the exact provider request model value.
+	// UpstreamModelID 是精确供应商请求模型值。
+	UpstreamModelID string `json:"upstream_model_id"`
+	// ChannelID identifies the exact protocol or native action channel.
+	// ChannelID 标识精确协议或原生动作通道。
+	ChannelID string `json:"channel_id"`
+	// Capabilities contains the complete normalized capability classification collected for this channel.
+	// Capabilities 包含为此通道采集的完整规范化能力分类。
+	Capabilities CapabilityView `json:"capabilities"`
+	// CapabilityRevision identifies the exact capability evidence revision.
+	// CapabilityRevision 标识精确能力证据修订号。
+	CapabilityRevision uint64 `json:"capability_revision"`
+}
+
+// CatalogAuditModelView contains one internal provider model and its collected offerings.
+// CatalogAuditModelView 包含一个内部供应商模型及其已采集 Offering。
+type CatalogAuditModelView struct {
+	// ID is the provider-scoped internal model identifier.
+	// ID 是供应商作用域内部模型标识。
+	ID string `json:"id"`
+	// UpstreamModelID is the exact provider model identifier.
+	// UpstreamModelID 是精确供应商模型标识。
+	UpstreamModelID string `json:"upstream_model_id"`
+	// DisplayName is the provider-authored or code-owned model label.
+	// DisplayName 是供应商或代码拥有的模型标签。
+	DisplayName string `json:"display_name"`
+	// Source identifies the evidence authority.
+	// Source 标识证据权威来源。
+	Source catalog.ModelSource `json:"source"`
+	// OfferingIDs lists every collected provider channel offering.
+	// OfferingIDs 列出全部已采集供应商通道 Offering。
+	OfferingIDs []string `json:"offering_ids"`
+}
+
+// CatalogAuditPolicyView contains one publication decision and safe evidence metadata.
+// CatalogAuditPolicyView 包含一项发布决策与安全证据元数据。
+type CatalogAuditPolicyView struct {
+	// ID is the immutable publication decision identifier.
+	// ID 是不可变发布决策标识。
+	ID string `json:"id"`
+	// ProviderModelID identifies the classified model.
+	// ProviderModelID 标识被分类的模型。
+	ProviderModelID string `json:"provider_model_id"`
+	// OfferingID identifies the classified provider channel offering.
+	// OfferingID 标识被分类的供应商通道 Offering。
+	OfferingID string `json:"offering_id"`
+	// Operation identifies the classified VCP operation.
+	// Operation 标识被分类的 VCP 操作。
+	Operation vcp.OperationKind `json:"operation"`
+	// Status controls public publication and execution-profile creation.
+	// Status 控制公开发布与执行规格创建。
+	Status catalog.ModelOperationSupportStatus `json:"status"`
+	// Reason records the closed evidence-backed decision reason.
+	// Reason 记录由证据支持的封闭决策原因。
+	Reason catalog.ModelOperationSupportReason `json:"reason"`
+	// Source identifies the policy evidence authority.
+	// Source 标识策略证据权威来源。
+	Source catalog.ModelSource `json:"source"`
+	// EvidenceRevision identifies the policy evidence revision.
+	// EvidenceRevision 标识策略证据修订号。
+	EvidenceRevision uint64 `json:"evidence_revision"`
 }
 
 // VoiceView contains one client-safe cached voice and its exact account scope.
@@ -600,8 +773,8 @@ type ExecutionProfileView struct {
 // CapabilityView contains normalized capability and token limits.
 // CapabilityView 包含规范化能力与 Token 限制。
 type CapabilityView struct {
-	// ContextWindow is the explicit or unknown total context ceiling.
-	// ContextWindow 是明确或未知的总上下文上限。
+	// ContextWindow is the explicit or unknown total ceiling shared by input, reasoning, and output.
+	// ContextWindow 是输入、推理和输出共同占用的明确或未知总上限。
 	ContextWindow TokenLimitView `json:"context_window"`
 	// MaxInputTokens is the independently known input ceiling.
 	// MaxInputTokens 是独立已知的输入上限。
@@ -669,6 +842,15 @@ type CapabilityView struct {
 	// UsageMetrics lists independently observable usage dimensions.
 	// UsageMetrics 列出可独立观察的用量维度。
 	UsageMetrics []catalog.UsageMetricCapability `json:"usage_metrics,omitempty"`
+	// StandardTools lists verified provider-native implementations of closed Vulcan model tools.
+	// StandardTools 列出封闭 Vulcan 模型工具经过验证的供应商原生实现。
+	StandardTools []catalog.StandardModelToolCapability `json:"standard_tools,omitempty"`
+	// ExtraTools lists profile-scoped non-standard provider or model tools.
+	// ExtraTools 列出规格作用域的非标准供应商或模型工具。
+	ExtraTools []catalog.ModelExtraToolCapability `json:"extra_tools,omitempty"`
+	// HostedTools lists exact provider-hosted tool kinds exposed by this profile.
+	// HostedTools 列出该规格公开的精确供应商托管工具类型。
+	HostedTools []vcp.ToolKind `json:"hosted_tools,omitempty"`
 }
 
 // TokenLimitView preserves the distinction between unknown and zero.
@@ -899,6 +1081,9 @@ type ModelCredentialUsageView struct {
 	// Allowances contains every current model-applicable usage observation.
 	// Allowances 包含每个当前适用于该模型的用量观测。
 	Allowances []ModelUsageAllowanceView `json:"allowances"`
+	// AllowanceSupport reports whether this credential authentication method can query usage.
+	// AllowanceSupport 报告此凭据认证方式是否可以查询用量。
+	AllowanceSupport providerconfig.SupportStatus `json:"allowance_support"`
 	// CatalogRevision identifies the atomic evidence revision used by this response.
 	// CatalogRevision 标识该响应使用的原子证据修订号。
 	CatalogRevision uint64 `json:"catalog_revision"`
@@ -1084,6 +1269,104 @@ func (q *QueryService) GetCatalog(ctx context.Context, instanceID string) (Catal
 	return catalogView(snapshot, instance.DisabledModelIDs, instance.DisabledServiceIDs, credentialIDs, credentialLabels, evaluatedAt), nil
 }
 
+// GetCatalogAudit returns complete internal model facts and code-owned publication decisions for management review.
+// GetCatalogAudit 返回供管理审核使用的完整内部模型事实与代码拥有发布决策。
+func (q *QueryService) GetCatalogAudit(ctx context.Context, instanceID string) (CatalogAuditView, error) {
+	instance, errInstance := q.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return CatalogAuditView{}, errInstance
+	}
+	definition, errDefinition := q.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return CatalogAuditView{}, errDefinition
+	}
+	endpoints, errEndpoints := q.configurations.ListEndpoints(ctx, instanceID)
+	if errEndpoints != nil {
+		return CatalogAuditView{}, errEndpoints
+	}
+	snapshot, errSnapshot := q.catalogs.Get(ctx, instanceID)
+	if errSnapshot != nil {
+		return CatalogAuditView{}, errSnapshot
+	}
+	// offeringIDsByModel joins every collected offering without projecting executable profiles.
+	// offeringIDsByModel 关联全部已采集 Offering，且不投影可执行规格。
+	offeringIDsByModel := make(map[string][]string, len(snapshot.Models))
+	for _, offering := range snapshot.Offerings {
+		offeringIDsByModel[offering.ProviderModelID] = append(offeringIDsByModel[offering.ProviderModelID], offering.ID)
+	}
+	models := make([]CatalogAuditModelView, 0, len(snapshot.Models))
+	for _, model := range snapshot.Models {
+		offeringIDs := append([]string(nil), offeringIDsByModel[model.ID]...)
+		sort.Strings(offeringIDs)
+		models = append(models, CatalogAuditModelView{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName, Source: model.Source, OfferingIDs: offeringIDs})
+	}
+	sort.Slice(models, func(left int, right int) bool { return models[left].ID < models[right].ID })
+	offerings := make([]CatalogAuditOfferingView, 0, len(snapshot.Offerings))
+	// channelSet and regionSet deduplicate exact authored values without deriving aliases.
+	// channelSet 与 regionSet 对精确编写值去重且不派生别名。
+	channelSet := make(map[string]struct{}, len(snapshot.Offerings))
+	regionSet := make(map[string]struct{}, len(endpoints))
+	for _, offering := range snapshot.Offerings {
+		offerings = append(offerings, CatalogAuditOfferingView{
+			ID:                 offering.ID,
+			ProviderModelID:    offering.ProviderModelID,
+			UpstreamModelID:    offering.UpstreamModelID,
+			ChannelID:          offering.ChannelID,
+			Capabilities:       capabilityView(offering.Capabilities),
+			CapabilityRevision: offering.CapabilityRevision,
+		})
+		channelSet[offering.ChannelID] = struct{}{}
+	}
+	for _, endpoint := range endpoints {
+		if endpoint.Region != "" {
+			regionSet[endpoint.Region] = struct{}{}
+		}
+	}
+	sort.Slice(offerings, func(left int, right int) bool { return offerings[left].ID < offerings[right].ID })
+	channelIDs := make([]string, 0, len(channelSet))
+	for channelID := range channelSet {
+		channelIDs = append(channelIDs, channelID)
+	}
+	sort.Strings(channelIDs)
+	endpointRegions := make([]string, 0, len(regionSet))
+	for region := range regionSet {
+		endpointRegions = append(endpointRegions, region)
+	}
+	sort.Strings(endpointRegions)
+	policies := make([]CatalogAuditPolicyView, 0, len(snapshot.ModelOperationPolicies))
+	for _, policy := range snapshot.ModelOperationPolicies {
+		policies = append(policies, CatalogAuditPolicyView{ID: policy.ID, ProviderModelID: policy.ProviderModelID, OfferingID: policy.OfferingID, Operation: policy.Operation, Status: policy.Status, Reason: policy.Reason, Source: policy.Source, EvidenceRevision: policy.EvidenceRevision})
+	}
+	sort.Slice(policies, func(left int, right int) bool {
+		if policies[left].ProviderModelID != policies[right].ProviderModelID {
+			return policies[left].ProviderModelID < policies[right].ProviderModelID
+		}
+		if policies[left].OfferingID != policies[right].OfferingID {
+			return policies[left].OfferingID < policies[right].OfferingID
+		}
+		return policies[left].Operation < policies[right].Operation
+	})
+	view := CatalogAuditView{ProviderInstanceID: instanceID, DefinitionID: definition.ID, ModelCatalogID: definition.ModelCatalogID, ProductName: definition.VariantName, EndpointRegions: endpointRegions, ChannelIDs: channelIDs, Models: models, Offerings: offerings, Policies: policies, RateLimits: rateLimitViews(snapshot.RateLimits), Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+	if snapshot.Dynamic != nil {
+		refreshedAt := snapshot.Dynamic.RefreshedAt
+		expiresAt := snapshot.Dynamic.ExpiresAt
+		view.SourceRevision = snapshot.Dynamic.SourceRevision
+		view.RefreshedAt = &refreshedAt
+		view.ExpiresAt = &expiresAt
+		view.RefreshStatus = snapshot.Dynamic.Status
+		view.Stale = snapshot.Dynamic.Status == catalog.CatalogRefreshStale || !snapshot.Dynamic.ExpiresAt.After(q.now().UTC())
+	} else if isAlibabaCatalogID(definition.ModelCatalogID) {
+		sourceRevision, verified, errRevision := alibabaStaticCatalogSourceRevision(definition.ModelCatalogID)
+		if errRevision != nil {
+			return CatalogAuditView{}, fmt.Errorf("load Alibaba static catalog revision %q: %w", definition.ModelCatalogID, errRevision)
+		}
+		if verified {
+			view.SourceRevision = sourceRevision
+		}
+	}
+	return view, nil
+}
+
 // GetModelContexts returns every context profile and the exact configured accounts authorized beneath it.
 // GetModelContexts 返回每个上下文规格及其下方精确获得授权的配置账号。
 func (q *QueryService) GetModelContexts(ctx context.Context, instanceID string, modelID string) (ModelContextsView, error) {
@@ -1193,6 +1476,18 @@ func (q *QueryService) GetModelCredentialUsage(ctx context.Context, instanceID s
 	if !credentialExists {
 		return ModelCredentialUsageView{}, errors.Join(providerconfig.ErrNotFound, errors.New(credentialID))
 	}
+	instance, errInstance := q.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return ModelCredentialUsageView{}, errInstance
+	}
+	definition, errDefinition := q.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return ModelCredentialUsageView{}, errDefinition
+	}
+	readerFeatures, readerFeaturesExist := definition.ReaderFeaturesForAuthMethod(credential.AuthMethodID)
+	if !readerFeaturesExist {
+		return ModelCredentialUsageView{}, errors.New("credential references an unknown authentication method")
+	}
 	credentialLabels := map[string]string{credential.ID: credential.Label}
 	allowances := make([]ModelUsageAllowanceView, 0)
 	for _, allowance := range snapshot.Allowances {
@@ -1217,7 +1512,7 @@ func (q *QueryService) GetModelCredentialUsage(ctx context.Context, instanceID s
 		profileIDs = append(profileIDs, profile.ID)
 	}
 	sort.Strings(profileIDs)
-	return ModelCredentialUsageView{ProviderInstanceID: instanceID, ProviderModelID: model.ID, CredentialID: credential.ID, CredentialLabel: credential.Label, CredentialStatus: credential.Status, CredentialExpiresAt: cloneTime(credential.ExpiresAt), PlanCode: currentPlanCodes(snapshot.Plans, evaluatedAt)[credential.ID], SupportedContextProfileIDs: profileIDs, Allowances: allowances, CatalogRevision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}, nil
+	return ModelCredentialUsageView{ProviderInstanceID: instanceID, ProviderModelID: model.ID, CredentialID: credential.ID, CredentialLabel: credential.Label, CredentialStatus: credential.Status, CredentialExpiresAt: cloneTime(credential.ExpiresAt), PlanCode: currentPlanCodes(snapshot.Plans, evaluatedAt)[credential.ID], SupportedContextProfileIDs: profileIDs, Allowances: allowances, AllowanceSupport: readerFeatures.AllowanceReader, CatalogRevision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}, nil
 }
 
 // ListEndpoints returns management-safe endpoint records for one exact provider instance.
@@ -1272,6 +1567,14 @@ func (q *QueryService) ListCredentials(ctx context.Context, instanceID string) (
 			}
 		}
 	}
+	instance, errInstance := q.configurations.GetInstance(ctx, instanceID)
+	if errInstance != nil {
+		return nil, errInstance
+	}
+	definition, errDefinition := q.configurations.GetDefinition(ctx, instance.DefinitionID)
+	if errDefinition != nil {
+		return nil, errDefinition
+	}
 	views := make([]CredentialView, 0, len(credentials))
 	for _, credential := range credentials {
 		// detectedPlan is copied so each view owns an immutable response value.
@@ -1280,6 +1583,10 @@ func (q *QueryService) ListCredentials(ctx context.Context, instanceID string) (
 		if plan, exists := detectedPlansByCredential[credential.ID]; exists {
 			planCopy := plan
 			detectedPlan = &planCopy
+		}
+		readerFeatures, readerFeaturesExist := definition.ReaderFeaturesForAuthMethod(credential.AuthMethodID)
+		if !readerFeaturesExist {
+			return nil, errors.New("credential references an unknown authentication method")
 		}
 		views = append(views, CredentialView{
 			ID:                 credential.ID,
@@ -1292,6 +1599,7 @@ func (q *QueryService) ListCredentials(ctx context.Context, instanceID string) (
 			Priority:           credential.Priority,
 			DeclaredPlan:       cloneDeclaredPlan(credential.DeclaredPlan),
 			DetectedPlan:       detectedPlan,
+			ReaderFeatures:     featureView(readerFeatures),
 			Revision:           credential.Revision,
 		})
 	}
@@ -1369,6 +1677,7 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 			Refreshable:         authMethod.Refreshable,
 			MultipleCredentials: authMethod.MultipleCredentials,
 			PlanAcquisition:     planAcquisition,
+			ReaderFeatures:      featureViewForAuthMethod(definition, authMethod),
 		})
 	}
 	planOptions := make([]PlanOptionView, 0, len(definition.PlanOptions))
@@ -1404,19 +1713,32 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 		EndpointPresets:       endpointPresets,
 		AuthMethods:           authMethods,
 		PlanOptions:           planOptions,
-		Features: FeatureView{
-			ModelDiscovery:    definition.Features.ModelDiscovery,
-			PlanReader:        definition.Features.PlanReader,
-			EntitlementReader: definition.Features.EntitlementReader,
-			AllowanceReader:   definition.Features.AllowanceReader,
-		},
-		Revision: definition.Revision,
+		Features:              featureView(definition.Features),
+		Revision:              definition.Revision,
 	}
+}
+
+// featureView converts one internal feature set to its client-safe representation.
+// featureView 将一个内部功能集合转换为客户端安全表示。
+func featureView(features providerconfig.ProviderFeatureSet) FeatureView {
+	return FeatureView{PlanReader: features.PlanReader, EntitlementReader: features.EntitlementReader, AllowanceReader: features.AllowanceReader}
+}
+
+// featureViewForAuthMethod resolves the exact reader surface for one already-owned authentication method.
+// featureViewForAuthMethod 解析一个已归属认证方式的精确读取能力面。
+func featureViewForAuthMethod(definition providerconfig.ProviderDefinition, authMethod providerconfig.AuthMethodDefinition) FeatureView {
+	if authMethod.ReaderFeatures != nil {
+		return featureView(*authMethod.ReaderFeatures)
+	}
+	return featureView(definition.Features)
 }
 
 // catalogView converts one atomic internal snapshot to a redacted client view.
 // catalogView 将一个原子内部快照转换为脱敏客户端视图。
 func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledServiceIDs []string, credentialIDs []string, credentialLabels map[string]string, evaluationTime time.Time) CatalogView {
+	// policyControlled reports whether profiles are the sole publication projection for this snapshot.
+	// policyControlled 表示规格是否为此快照唯一的发布投影。
+	policyControlled := len(snapshot.ModelOperationPolicies) > 0
 	offeringsByModel := make(map[string][]catalog.ModelOffering)
 	for _, offering := range snapshot.Offerings {
 		offeringsByModel[offering.ProviderModelID] = append(offeringsByModel[offering.ProviderModelID], offering)
@@ -1432,9 +1754,13 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 	models := make([]ModelView, 0, len(snapshot.Models))
 	for _, model := range snapshot.Models {
 		offeringViews := make([]OfferingView, 0, len(offeringsByModel[model.ID]))
+		// publishedProfiles contains the exact executable authorization surfaces retained in the public projection.
+		// publishedProfiles 包含保留在公开投影中的精确可执行授权面。
+		publishedProfiles := make([]catalog.ExecutionProfile, 0)
 		for _, offering := range offeringsByModel[model.ID] {
 			profileViews := make([]ExecutionProfileView, 0, len(profilesByOffering[offering.ID]))
 			for _, profile := range profilesByOffering[offering.ID] {
+				publishedProfiles = append(publishedProfiles, profile)
 				profileView := ExecutionProfileView{
 					ID:              profile.ID,
 					DisplayName:     profile.DisplayName,
@@ -1462,12 +1788,18 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 				}
 				return profileViews[left].ID < profileViews[right].ID
 			})
+			if len(profileViews) == 0 && policyControlled {
+				continue
+			}
 			offeringViews = append(offeringViews, OfferingView{ID: offering.ID, UpstreamModelID: offering.UpstreamModelID, RequestProjection: catalog.CloneRequestProjection(offering.RequestProjection), Profiles: profileViews})
+		}
+		if len(offeringViews) == 0 && policyControlled {
+			continue
 		}
 		sort.Slice(offeringViews, func(left int, right int) bool {
 			return offeringViews[left].ID < offeringViews[right].ID
 		})
-		authorizationStatus := modelAuthorizationStatus(model, snapshot.Entitlements, credentialIDs, evaluationTime)
+		authorizationStatus := modelAuthorizationStatus(model, publishedProfiles, snapshot.Entitlements, credentialIDs, evaluationTime)
 		models = append(models, ModelView{ID: model.ID, UpstreamModelID: model.UpstreamModelID, DisplayName: model.DisplayName, EntitlementMode: model.EntitlementMode, Enabled: !modelDisabled(disabledModelIDs, model.ID), AuthorizationStatus: authorizationStatus, Offerings: offeringViews})
 	}
 	sort.Slice(models, func(left int, right int) bool {
@@ -1556,22 +1888,55 @@ func catalogView(snapshot catalog.Snapshot, disabledModelIDs []string, disabledS
 		}
 		return plans[left].EvidenceSource < plans[right].EvidenceSource
 	})
-	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters), Models: models, Services: services, Allowances: allowances, Voices: voices, Plans: plans, Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+	return CatalogView{ProviderInstanceID: snapshot.ProviderInstanceID, DefaultAdditionalParameters: catalog.CloneAdditionalPayloadProjection(snapshot.DefaultAdditionalParameters), Models: models, Services: services, Allowances: allowances, Voices: voices, Plans: plans, RateLimits: rateLimitViews(snapshot.RateLimits), Revision: snapshot.Revision, ObservedAt: snapshot.ObservedAt}
+}
+
+// rateLimitViews converts provider capacity observations to deterministic client-safe values.
+// rateLimitViews 将供应商容量观测转换为确定性的客户端安全值。
+func rateLimitViews(rateLimits []catalog.RateLimitSnapshot) []RateLimitView {
+	views := make([]RateLimitView, 0, len(rateLimits))
+	for _, rateLimit := range rateLimits {
+		// usageLimit is copied so callers cannot mutate the persisted catalog through a response value.
+		// usageLimit 会被复制，防止调用方通过响应值修改持久化目录。
+		var usageLimit *int64
+		if rateLimit.UsageLimit != nil {
+			value := *rateLimit.UsageLimit
+			usageLimit = &value
+		}
+		// usagePeriodSeconds is copied with the same immutable-response boundary.
+		// usagePeriodSeconds 使用相同的不可变响应边界进行复制。
+		var usagePeriodSeconds *int64
+		if rateLimit.UsagePeriodSeconds != nil {
+			value := *rateLimit.UsagePeriodSeconds
+			usagePeriodSeconds = &value
+		}
+		views = append(views, RateLimitView{ID: rateLimit.ID, Scope: rateLimit.Scope, ScopeID: rateLimit.ScopeID, TierID: rateLimit.TierID, CountLimit: rateLimit.CountLimit, CountPeriodSeconds: rateLimit.CountPeriodSeconds, UsageLimit: usageLimit, UsagePeriodSeconds: usagePeriodSeconds, UsageField: rateLimit.UsageField, ObservedAt: rateLimit.ObservedAt, ExpiresAt: rateLimit.ExpiresAt})
+	}
+	sort.Slice(views, func(left int, right int) bool {
+		if views[left].Scope != views[right].Scope {
+			return views[left].Scope < views[right].Scope
+		}
+		if views[left].ScopeID != views[right].ScopeID {
+			return views[left].ScopeID < views[right].ScopeID
+		}
+		return views[left].TierID < views[right].TierID
+	})
+	return views
 }
 
 // modelAuthorizationStatus derives three-state access without treating absent or expired evidence as denial.
 // modelAuthorizationStatus 派生三态访问结果且不会把缺失或过期证据视为拒绝。
-func modelAuthorizationStatus(model catalog.ProviderModel, entitlements []catalog.ModelEntitlement, credentialIDs []string, evaluationTime time.Time) catalog.AuthorizationStatus {
-	if model.EntitlementMode == catalog.EntitlementAllBoundCredentials {
-		if len(credentialIDs) == 0 {
-			return catalog.AuthorizationUnknown
-		}
-		return catalog.AuthorizationAuthorized
+func modelAuthorizationStatus(model catalog.ProviderModel, profiles []catalog.ExecutionProfile, entitlements []catalog.ModelEntitlement, credentialIDs []string, evaluationTime time.Time) catalog.AuthorizationStatus {
+	if len(credentialIDs) == 0 {
+		return catalog.AuthorizationUnknown
 	}
 	credentialSet := make(map[string]struct{}, len(credentialIDs))
 	for _, credentialID := range credentialIDs {
 		credentialSet[credentialID] = struct{}{}
 	}
+	// entitlementByCredential keeps the one validated model entitlement owned by each configured credential.
+	// entitlementByCredential 保存每个已配置凭据拥有的唯一已校验模型授权。
+	entitlementByCredential := make(map[string]catalog.ModelEntitlement)
 	deniedCredentials := make(map[string]struct{})
 	for _, entitlement := range entitlements {
 		if entitlement.ProviderModelID != model.ID || !metadataEvidenceCurrent(entitlement.ObservedAt, entitlement.ExpiresAt, evaluationTime) {
@@ -1580,11 +1945,28 @@ func modelAuthorizationStatus(model catalog.ProviderModel, entitlements []catalo
 		if _, configured := credentialSet[entitlement.CredentialID]; !configured {
 			continue
 		}
-		if entitlement.Availability == catalog.AvailabilityAllowed {
-			return catalog.AuthorizationAuthorized
-		}
+		entitlementByCredential[entitlement.CredentialID] = entitlement
 		if entitlement.Availability == catalog.AvailabilityDenied {
 			deniedCredentials[entitlement.CredentialID] = struct{}{}
+		}
+	}
+	// Legacy catalogs without policy-controlled profiles retain their historical model-level authorization contract.
+	// 没有策略控制规格的历史目录继续保留其既有模型级授权合同。
+	if len(profiles) == 0 {
+		if model.EntitlementMode == catalog.EntitlementAllBoundCredentials {
+			return catalog.AuthorizationAuthorized
+		}
+		for _, entitlement := range entitlementByCredential {
+			if entitlement.Availability == catalog.AvailabilityAllowed {
+				return catalog.AuthorizationAuthorized
+			}
+		}
+	}
+	for _, profile := range profiles {
+		for _, credentialID := range credentialIDs {
+			if resolve.ProfileEntitled(model, profile, entitlementByCredential[credentialID], evaluationTime) {
+				return catalog.AuthorizationAuthorized
+			}
 		}
 	}
 	if len(credentialIDs) > 0 && len(deniedCredentials) == len(credentialSet) {
@@ -1759,7 +2141,33 @@ func capabilityView(capabilities catalog.ModelCapabilities) CapabilityView {
 		Parameters:                 append([]catalog.ParameterDescriptor(nil), capabilities.Parameters...),
 		ParameterRules:             append([]catalog.ParameterRule(nil), capabilities.ParameterRules...),
 		UsageMetrics:               append([]catalog.UsageMetricCapability(nil), capabilities.UsageMetrics...),
+		StandardTools:              cloneStandardModelToolCapabilities(capabilities.StandardTools),
+		ExtraTools:                 cloneExtraModelToolCapabilities(capabilities.ExtraTools),
+		HostedTools:                append([]vcp.ToolKind(nil), capabilities.HostedTools...),
 	}
+}
+
+// cloneStandardModelToolCapabilities returns mutation-safe management standard-tool values.
+// cloneStandardModelToolCapabilities 返回防止外部修改的管理标准工具值。
+func cloneStandardModelToolCapabilities(values []catalog.StandardModelToolCapability) []catalog.StandardModelToolCapability {
+	cloned := append([]catalog.StandardModelToolCapability(nil), values...)
+	for index := range cloned {
+		cloned[index].Requires = append([]vcp.StandardModelToolKind(nil), cloned[index].Requires...)
+	}
+	return cloned
+}
+
+// cloneExtraModelToolCapabilities returns mutation-safe management extra-tool values.
+// cloneExtraModelToolCapabilities 返回防止外部修改的管理额外工具值。
+func cloneExtraModelToolCapabilities(values []catalog.ModelExtraToolCapability) []catalog.ModelExtraToolCapability {
+	cloned := append([]catalog.ModelExtraToolCapability(nil), values...)
+	for index := range cloned {
+		cloned[index].InputModalities = append([]string(nil), cloned[index].InputModalities...)
+		cloned[index].OutputModalities = append([]string(nil), cloned[index].OutputModalities...)
+		cloned[index].RequiresStandard = append([]vcp.StandardModelToolKind(nil), cloned[index].RequiresStandard...)
+		cloned[index].RequiresExtra = append([]string(nil), cloned[index].RequiresExtra...)
+	}
+	return cloned
 }
 
 // tokenLimitView preserves explicit unknown token ceilings.

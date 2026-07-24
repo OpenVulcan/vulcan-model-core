@@ -13,6 +13,60 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
+// TestSupportedModelOperationPolicyRequiresExactSupportedDecision verifies the final resolver guard rejects missing, cross-offering, and unsupported decisions.
+// TestSupportedModelOperationPolicyRequiresExactSupportedDecision 验证最终解析防线会拒绝缺失、跨 Offering 与非支持决策。
+func TestSupportedModelOperationPolicyRequiresExactSupportedDecision(t *testing.T) {
+	policies := []catalog.ModelOperationPolicy{{
+		ID: "policy_exact", ProviderInstanceID: "pvi_test", ProviderModelID: "model_test", OfferingID: "offer_test",
+		Operation: vcp.OperationConversationRespond, Status: catalog.ModelOperationSupported,
+	}}
+	if !supportedModelOperationPolicy(policies, "model_test", "offer_test", vcp.OperationConversationRespond) {
+		t.Fatal("exact supported policy was rejected")
+	}
+	if supportedModelOperationPolicy(policies, "model_other", "offer_test", vcp.OperationConversationRespond) {
+		t.Fatal("cross-model policy was accepted")
+	}
+	if supportedModelOperationPolicy(policies, "model_test", "offer_other", vcp.OperationConversationRespond) {
+		t.Fatal("cross-offering policy was accepted")
+	}
+	policies[0].Status = catalog.ModelOperationUnsupported
+	if supportedModelOperationPolicy(policies, "model_test", "offer_test", vcp.OperationConversationRespond) {
+		t.Fatal("unsupported policy was accepted")
+	}
+}
+
+// TestEntitlementForProfileSeparatesProductAndCompatibleScopes verifies one model can expose native product actions without widening a restricted compatible profile.
+// TestEntitlementForProfileSeparatesProductAndCompatibleScopes 验证同一模型可开放原生产品操作，同时不会扩大受限兼容规格的授权。
+func TestEntitlementForProfileSeparatesProductAndCompatibleScopes(t *testing.T) {
+	now := time.Date(2026, 7, 23, 9, 0, 0, 0, time.UTC)
+	model := catalog.ProviderModel{ID: "model_mixed", EntitlementMode: catalog.EntitlementAllBoundCredentials}
+	nativeProfile := catalog.ExecutionProfile{ID: "profile_native"}
+	compatibleProfile := catalog.ExecutionProfile{ID: "profile_compatible", RequiredEntitlementClasses: []string{"api_key_models_endpoint"}}
+	entitlement := catalog.ModelEntitlement{ID: "ent_mixed", ProviderModelID: model.ID, Availability: catalog.AvailabilityAllowed, EntitlementClass: "api_key_models_endpoint", AllowedProfileIDs: []string{compatibleProfile.ID}, ObservedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Hour)}
+	if selected, allowed := entitlementForProfile(model, nativeProfile, entitlement, now); !allowed || selected.ID != "" {
+		t.Fatalf("native profile entitlement = %#v allowed=%t", selected, allowed)
+	}
+	if selected, allowed := entitlementForProfile(model, compatibleProfile, entitlement, now); !allowed || selected.ID != entitlement.ID {
+		t.Fatalf("compatible profile entitlement = %#v allowed=%t", selected, allowed)
+	}
+	if _, allowed := entitlementForProfile(model, compatibleProfile, catalog.ModelEntitlement{}, now); allowed {
+		t.Fatal("compatible profile was accepted without /models evidence")
+	}
+	deniedEntitlement := entitlement
+	deniedEntitlement.Availability = catalog.AvailabilityDenied
+	if selected, allowed := entitlementForProfile(model, nativeProfile, deniedEntitlement, now); !allowed || selected.ID != "" {
+		t.Fatalf("native profile was denied by compatible-channel evidence: %#v allowed=%t", selected, allowed)
+	}
+	if _, allowed := entitlementForProfile(model, compatibleProfile, deniedEntitlement, now); allowed {
+		t.Fatal("compatible profile was accepted despite exact /models denial")
+	}
+	otherProfile := compatibleProfile
+	otherProfile.ID = "profile_other"
+	if _, allowed := entitlementForProfile(model, otherProfile, entitlement, now); allowed {
+		t.Fatal("explicit entitlement widened to another compatible profile")
+	}
+}
+
 // TestSelectChoosesOneProviderScopedSufficientProfile verifies capability preselection never widens beyond the caller-fixed instance.
 // TestSelectChoosesOneProviderScopedSufficientProfile 验证能力预选绝不会扩大到调用方固定实例之外。
 func TestSelectChoosesOneProviderScopedSufficientProfile(t *testing.T) {
@@ -159,6 +213,33 @@ func TestResolverCarriesProviderAndModelRequestRulesSeparately(t *testing.T) {
 	}
 }
 
+// TestResolveEnforcesExactModelOffering verifies an internal Router binding cannot drift across model offerings.
+// TestResolveEnforcesExactModelOffering 校验内部 Router 绑定不能跨模型产品发生漂移。
+func TestResolveEnforcesExactModelOffering(t *testing.T) {
+	fixture := newResolverFixture(t)
+	target, _, errResolve := fixture.resolver.Resolve(context.Background(), Request{
+		ProviderInstanceID: "pvi_kimi",
+		ProviderModelID:    "model_kimi_k3",
+		OfferingID:         "offer_kimi_k3",
+		ExecutionProfileID: "profile_kimi_k3_256k",
+		Operation:          vcp.OperationConversationRespond,
+		Now:                fixture.now,
+	})
+	if errResolve != nil || target.OfferingID != "offer_kimi_k3" {
+		t.Fatalf("exact offering target = %+v, error = %v", target, errResolve)
+	}
+	if _, _, errMismatch := fixture.resolver.Resolve(context.Background(), Request{
+		ProviderInstanceID: "pvi_kimi",
+		ProviderModelID:    "model_kimi_k3",
+		OfferingID:         "offer_other",
+		ExecutionProfileID: "profile_kimi_k3_256k",
+		Operation:          vcp.OperationConversationRespond,
+		Now:                fixture.now,
+	}); !errors.Is(errMismatch, ErrProfileNotFound) {
+		t.Fatalf("mismatched offering error = %v, want ErrProfileNotFound", errMismatch)
+	}
+}
+
 // resolverSearchCapabilities returns one model-grounded unified-search contract.
 // resolverSearchCapabilities 返回一个模型型统一搜索契约。
 func resolverSearchCapabilities() catalog.ServiceCapabilities {
@@ -233,7 +314,6 @@ func newResolverFixture(t *testing.T) resolverFixture {
 		Version:            "1",
 		DisplayName:        "OpenAI Chat",
 		RuntimeReady:       true,
-		ModelDiscovery:     providerconfig.SupportUnsupported,
 		AllowedAuthMethods: []providerconfig.AuthMethodType{providerconfig.AuthMethodBearer},
 	}); err != nil {
 		t.Fatalf("register protocol profile: %v", err)
@@ -264,7 +344,6 @@ func newResolverFixture(t *testing.T) resolverFixture {
 			{ID: "action_web_search", Operation: vcp.OperationSearchWeb, DriverID: "kimi-coding-plan", DriverVersion: "1.0.0", ProtocolProfileID: "openai.chat", EndpointProfileID: "kimi-coding", AuthMethodIDs: []string{"oauth"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true, Streaming: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendGroundedModel, BackingModelOfferingID: "offer_kimi_k3", PromptTemplateID: "search_prompt", PromptTemplateRevision: 1}, Revision: 1},
 		},
 		Features: providerconfig.ProviderFeatureSet{
-			ModelDiscovery:    providerconfig.SupportSupported,
 			PlanReader:        providerconfig.SupportSupported,
 			EntitlementReader: providerconfig.SupportSupported,
 			AllowanceReader:   providerconfig.SupportSupported,

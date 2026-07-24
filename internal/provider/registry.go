@@ -96,11 +96,6 @@ func (r *Registry) DefinitionIDs() []string {
 // validateFeatureContracts 校验声明支持的元数据能力具有具体库合同。
 func validateFeatureContracts(driver Driver, features providerconfig.ProviderFeatureSet) error {
 	_, supportsAggregateMetadata := driver.(CredentialMetadataReader)
-	if features.ModelDiscovery == providerconfig.SupportSupported {
-		if _, ok := driver.(ModelDiscoverer); !ok {
-			return errors.New("provider declares model discovery but does not implement ModelDiscoverer")
-		}
-	}
 	if features.PlanReader == providerconfig.SupportSupported {
 		if _, ok := driver.(PlanReader); !ok && !supportsAggregateMetadata {
 			return errors.New("provider declares plan reading but does not implement PlanReader")

@@ -28,6 +28,28 @@ func TestAllowanceViewFromPreservesProviderPresentationWindow(t *testing.T) {
 	}
 }
 
+// TestModelAuthorizationStatusUsesProfileEntitlements verifies a public catalog model is not called authorized until one exact published profile is entitled.
+// TestModelAuthorizationStatusUsesProfileEntitlements 验证公开目录模型只有在精确已发布规格获得授权后才会被标记为已授权。
+func TestModelAuthorizationStatusUsesProfileEntitlements(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 0, 0, 0, 0, time.UTC)
+	model := catalog.ProviderModel{ID: "model_qwen", EntitlementMode: catalog.EntitlementAllBoundCredentials}
+	compatibleProfile := catalog.ExecutionProfile{ID: "profile_chat", RequiredEntitlementClasses: []string{"api_key_models_endpoint"}}
+	if got := modelAuthorizationStatus(model, []catalog.ExecutionProfile{compatibleProfile}, nil, []string{"cred_api"}, now); got != catalog.AuthorizationUnknown {
+		t.Fatalf("modelAuthorizationStatus() = %q, want unknown before /models evidence", got)
+	}
+	entitlement := catalog.ModelEntitlement{
+		ID: "entitlement_chat", ProviderModelID: model.ID, CredentialID: "cred_api", Availability: catalog.AvailabilityAllowed,
+		EntitlementClass: "api_key_models_endpoint", AllowedProfileIDs: []string{compatibleProfile.ID}, ObservedAt: now.Add(-time.Minute), ExpiresAt: now.Add(time.Minute),
+	}
+	if got := modelAuthorizationStatus(model, []catalog.ExecutionProfile{compatibleProfile}, []catalog.ModelEntitlement{entitlement}, []string{"cred_api"}, now); got != catalog.AuthorizationAuthorized {
+		t.Fatalf("modelAuthorizationStatus() = %q, want authorized with exact /models evidence", got)
+	}
+	nativeProfile := catalog.ExecutionProfile{ID: "profile_native"}
+	if got := modelAuthorizationStatus(model, []catalog.ExecutionProfile{nativeProfile}, nil, []string{"cred_api"}, now); got != catalog.AuthorizationAuthorized {
+		t.Fatalf("modelAuthorizationStatus() = %q, want authorized for product-level native profile", got)
+	}
+}
+
 // TestQueryServiceReturnsModelContextsAndAccountUsage verifies the public discovery graph preserves exact model-profile-account ownership.
 // TestQueryServiceReturnsModelContextsAndAccountUsage 验证公开发现图保留精确模型规格账号归属关系。
 func TestQueryServiceReturnsModelContextsAndAccountUsage(t *testing.T) {
@@ -214,7 +236,7 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	if errGroups != nil {
 		t.Fatalf("ListProviderGroups() error = %v", errGroups)
 	}
-	if len(groups) != 9 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.AlibabaGroupID || len(groups[5].ProviderDefinitions) != 8 || groups[6].ID != bootstrap.OpenRouterGroupID || groups[7].ID != bootstrap.MiniMaxGroupID || groups[8].ID != bootstrap.TavilyGroupID {
+	if len(groups) != 9 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.AlibabaGroupID || len(groups[5].ProviderDefinitions) != 7 || groups[6].ID != bootstrap.OpenRouterGroupID || groups[7].ID != bootstrap.MiniMaxGroupID || groups[8].ID != bootstrap.TavilyGroupID {
 		t.Fatalf("groups = %#v", groups)
 	}
 	variants := groups[0].ProviderDefinitions
@@ -243,10 +265,75 @@ func TestCapabilityViewPreservesTokenRecommendations(t *testing.T) {
 			InputTasks: []vcp.EmbeddingInputTask{vcp.EmbeddingTaskQuery}, OutputKinds: []vcp.EmbeddingVectorKind{vcp.EmbeddingVectorDense}, Encodings: []vcp.EmbeddingEncoding{vcp.EmbeddingEncodingFloat}, Dimensions: []int{1024},
 		},
 		UsageMetrics: []catalog.UsageMetricCapability{{Unit: catalog.UsageUnitEmbeddingInputs, Accuracy: catalog.UsageExact}},
+		HostedTools:  []vcp.ToolKind{vcp.ToolNativeWebSearch},
 	}
 	view := capabilityView(capabilities)
-	if !view.MaxOutputTokens.Known || view.MaxOutputTokens.Value != 16_384 || !view.MaxReasoningTokens.Known || view.MaxReasoningTokens.Value != 8_192 || !view.RecommendedOutputTokens.Known || view.RecommendedOutputTokens.Value != 4_096 || !view.RecommendedReasoningTokens.Known || view.RecommendedReasoningTokens.Value != 1_024 || view.Embedding == nil || len(view.Embedding.Dimensions) != 1 || view.Embedding.Dimensions[0] != 1024 || len(view.UsageMetrics) != 1 {
+	if !view.MaxOutputTokens.Known || view.MaxOutputTokens.Value != 16_384 || !view.MaxReasoningTokens.Known || view.MaxReasoningTokens.Value != 8_192 || !view.RecommendedOutputTokens.Known || view.RecommendedOutputTokens.Value != 4_096 || !view.RecommendedReasoningTokens.Known || view.RecommendedReasoningTokens.Value != 1_024 || view.Embedding == nil || len(view.Embedding.Dimensions) != 1 || view.Embedding.Dimensions[0] != 1024 || len(view.UsageMetrics) != 1 || len(view.HostedTools) != 1 || view.HostedTools[0] != vcp.ToolNativeWebSearch {
 		t.Fatalf("capability view = %#v", view)
+	}
+}
+
+// TestGetCatalogAuditPreservesOfferingCapabilities verifies the full audit boundary does not discard collected capability classifications or their evidence revision.
+// TestGetCatalogAuditPreservesOfferingCapabilities 验证完整审核边界不会丢弃已采集能力分类及其证据修订。
+func TestGetCatalogAuditPreservesOfferingCapabilities(t *testing.T) {
+	// ctx fixes one complete management read scope.
+	// ctx 固定一个完整管理读取作用域。
+	ctx := context.Background()
+	// commands and configurations share the exact provider ownership graph queried by the audit service.
+	// commands 与 configurations 共享审核服务查询的精确供应商所有权图。
+	commands, configurations, _ := managementTestService(t)
+	instance, errInstance := commands.CreateInstance(ctx, CreateInstanceInput{
+		ID: "pvi_catalog_audit_capabilities", DefinitionID: "system_management_test", Handle: "catalog-audit-capabilities", DisplayName: "Catalog Audit Capabilities",
+	})
+	if errInstance != nil {
+		t.Fatalf("create audit provider instance: %v", errInstance)
+	}
+	// capabilities contain independently testable modality, token, tool, and reasoning classifications.
+	// capabilities 包含可独立测试的模态、Token、工具与推理分类。
+	capabilities := catalog.ModelCapabilities{
+		Tokens:                 catalog.TokenLimits{ContextWindow: catalog.OptionalTokenLimit{Known: true, Value: 131_072}, MaxOutputTokens: catalog.OptionalTokenLimit{Known: true, Value: 8_192}},
+		ToolCalling:            catalog.CapabilityNative,
+		ParallelToolCalls:      catalog.CapabilityConditional,
+		StreamingToolArguments: catalog.CapabilityUnknown,
+		StrictJSONSchema:       catalog.CapabilityUnsupported,
+		Reasoning:              catalog.CapabilityNative,
+		ReasoningEfforts:       []string{"high"},
+		InputModalities:        []string{"text", "image"},
+		OutputModalities:       []string{"text"},
+		Delivery:               catalog.DeliveryCapabilities{Synchronous: true},
+	}
+	// observedAt anchors every catalog fact in one deterministic snapshot.
+	// observedAt 将每项目录事实锚定在同一个确定性快照中。
+	observedAt := time.Date(2026, time.July, 23, 6, 0, 0, 0, time.UTC)
+	if errSave := commands.catalogs.Save(ctx, catalog.Snapshot{
+		ProviderInstanceID: instance.ID,
+		Models: []catalog.ProviderModel{{
+			ID: "model_catalog_audit", ProviderInstanceID: instance.ID, UpstreamModelID: "audit-model", DisplayName: "Audit Model", Source: catalog.ModelSourceSystem, EntitlementMode: catalog.EntitlementAllBoundCredentials, Revision: 7,
+		}},
+		Offerings: []catalog.ModelOffering{{
+			ID: "offer_catalog_audit", ProviderInstanceID: instance.ID, ProviderModelID: "model_catalog_audit", ChannelID: "openai.chat", UpstreamModelID: "audit-model", Capabilities: capabilities, CapabilityRevision: 7, Revision: 7,
+		}},
+		Profiles: []catalog.ExecutionProfile{{
+			ID: "profile_catalog_audit", ProviderInstanceID: instance.ID, OfferingID: "offer_catalog_audit", DisplayName: "Default", Default: true, Capabilities: capabilities, SwitchPolicy: catalog.ProfileSwitchSeamless, PoolPolicy: catalog.PoolStrictProfile, CapabilityRevision: 7, Revision: 7,
+		}},
+		Revision: 7, ObservedAt: observedAt,
+	}); errSave != nil {
+		t.Fatalf("save audit catalog: %v", errSave)
+	}
+	queries, errQueries := NewQueryService(configurations, commands.catalogs)
+	if errQueries != nil {
+		t.Fatalf("create audit query service: %v", errQueries)
+	}
+	audit, errAudit := queries.GetCatalogAudit(ctx, instance.ID)
+	if errAudit != nil {
+		t.Fatalf("GetCatalogAudit() error = %v", errAudit)
+	}
+	if len(audit.Offerings) != 1 {
+		t.Fatalf("audit offerings = %#v", audit.Offerings)
+	}
+	offering := audit.Offerings[0]
+	if offering.CapabilityRevision != 7 || !offering.Capabilities.ContextWindow.Known || offering.Capabilities.ContextWindow.Value != 131_072 || offering.Capabilities.ToolCalling != catalog.CapabilityNative || offering.Capabilities.Reasoning != catalog.CapabilityNative || len(offering.Capabilities.InputModalities) != 2 {
+		t.Fatalf("audit offering capabilities = %#v", offering)
 	}
 }
 

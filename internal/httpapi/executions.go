@@ -262,6 +262,12 @@ func parseLastEventID(executionID string, eventID string) (uint64, error) {
 // writeExecutionError maps failures without exposing target candidates, prompts, or upstream identifiers.
 // writeExecutionError 映射错误且不暴露 Target 候选、提示词或上游标识。
 func writeExecutionError(writer http.ResponseWriter, errValue error) {
+	var modelToolError *vcp.ModelToolError
+	if errors.As(errValue, &modelToolError) {
+		retryable := modelToolError.Retryable
+		writeJSON(writer, http.StatusBadRequest, errorResponse{Error: string(modelToolError.Code), Code: string(modelToolError.Code), ToolID: modelToolError.ToolID, Phase: modelToolError.Phase, Retryable: &retryable})
+		return
+	}
 	switch {
 	case errors.Is(errValue, execution.ErrExecutionNotFound):
 		writeJSON(writer, http.StatusNotFound, errorResponse{Error: "execution not found"})

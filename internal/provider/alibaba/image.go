@@ -176,6 +176,12 @@ type qwenImageParameters struct {
 	// Seed requests provider-relative deterministic output.
 	// Seed 请求供应商相对确定性输出。
 	Seed *int64 `json:"seed,omitempty"`
+	// PromptExtend controls provider-native prompt rewriting.
+	// PromptExtend 控制供应商原生提示词改写。
+	PromptExtend *bool `json:"prompt_extend,omitempty"`
+	// Watermark controls the provider-generated watermark.
+	// Watermark 控制供应商生成的水印。
+	Watermark *bool `json:"watermark,omitempty"`
 }
 
 // projectQwenImageRequest maps one closed VCP image payload to the official synchronous endpoint.
@@ -193,7 +199,7 @@ func projectQwenImageRequest(execution provider.ExecutionRequest, actionBindingI
 			return transport.Request{}, errParameters
 		}
 		contents = append(contents, qwenImageContent{Text: operation.Prompt})
-		parameters = qwenImageParameters{NegativePrompt: operation.NegativePrompt, Count: operation.Count, Seed: operation.Seed}
+		parameters = qwenImageParameters{NegativePrompt: operation.NegativePrompt, Count: operation.Count, Seed: operation.Seed, PromptExtend: operation.PromptExtend, Watermark: operation.Watermark}
 		if operation.Width != 0 {
 			parameters.Size = strconv.Itoa(operation.Width) + "*" + strconv.Itoa(operation.Height)
 		}
@@ -205,7 +211,7 @@ func projectQwenImageRequest(execution provider.ExecutionRequest, actionBindingI
 		if operation.Width != 0 || operation.Height != 0 || operation.AspectRatio != "" || operation.Resolution != "" || operation.Quality != "" {
 			return transport.Request{}, fmt.Errorf("%w: edit width, height, aspect_ratio, resolution, and quality have no Qwen Image carrier", ErrInvalidImageDriver)
 		}
-		if errParameters := validateQwenImageParameters(operation.Count, 0, 0, operation.OutputFormat, "", nil); errParameters != nil {
+		if errParameters := validateQwenImageParameters(operation.Count, 0, 0, operation.OutputFormat, operation.NegativePrompt, operation.Seed); errParameters != nil {
 			return transport.Request{}, errParameters
 		}
 		materializedByID := make(map[string]resource.MaterializedInput, len(execution.MaterializedInputs))
@@ -227,7 +233,7 @@ func projectQwenImageRequest(execution provider.ExecutionRequest, actionBindingI
 			contents = append(contents, qwenImageContent{Image: image})
 		}
 		contents = append(contents, qwenImageContent{Text: operation.Instruction})
-		parameters.Count = operation.Count
+		parameters = qwenImageParameters{NegativePrompt: operation.NegativePrompt, Count: operation.Count, Seed: operation.Seed, PromptExtend: operation.PromptExtend, Watermark: operation.Watermark}
 	default:
 		return transport.Request{}, ErrInvalidImageDriver
 	}
@@ -236,7 +242,7 @@ func projectQwenImageRequest(execution provider.ExecutionRequest, actionBindingI
 	if errEncode != nil {
 		return transport.Request{}, fmt.Errorf("%w: encode request: %v", ErrInvalidImageDriver, errEncode)
 	}
-	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/services/aigc/multimodal-generation/generation", Body: encoded, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: "/api/v1/services/aigc/multimodal-generation/generation", Body: encoded, Headers: alibabaJSONHeaders(execution.MaterializedInputs, false), Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
 }
 
 // validateQwenImageParameters enforces only limits explicitly documented for Qwen Image 2.0.
@@ -285,8 +291,10 @@ func qwenImageMaterialization(input resource.MaterializedInput) (string, error) 
 			return "", fmt.Errorf("%w: direct image URL is invalid", ErrInvalidImageDriver)
 		}
 		return input.RemoteURL, nil
+	case catalog.MaterializationProviderObjectURI:
+		return alibabaObjectURI(input, ErrInvalidImageDriver)
 	default:
-		return "", fmt.Errorf("%w: Qwen Image accepts inline Base64 or direct remote URL inputs only", ErrInvalidImageDriver)
+		return "", fmt.Errorf("%w: Qwen Image accepts inline Base64, direct remote URL, or Alibaba object URI inputs only", ErrInvalidImageDriver)
 	}
 }
 
@@ -348,9 +356,8 @@ type qwenImageResponseContent struct {
 // decodeQwenImageResponse 将临时图片 URL 转换为私有 Router 导入来源。
 func decodeQwenImageResponse(reader io.Reader) (provider.ExecutionResult, error) {
 	var response qwenImageResponse
-	decoder := json.NewDecoder(reader)
-	if errDecode := decoder.Decode(&response); errDecode != nil {
-		return provider.ExecutionResult{}, fmt.Errorf("%w: decode response: %v", ErrInvalidImageResponse, errDecode)
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidImageResponse); errDecode != nil {
+		return provider.ExecutionResult{}, errDecode
 	}
 	outputs := make([]provider.GeneratedResource, 0)
 	for _, choice := range response.Output.Choices {

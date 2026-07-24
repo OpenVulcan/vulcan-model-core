@@ -2,6 +2,7 @@ package httpapi
 
 import (
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
@@ -26,8 +27,10 @@ import (
 	providerxai "github.com/OpenVulcan/vulcan-model-core/internal/provider/xai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
 	"github.com/OpenVulcan/vulcan-model-core/internal/resolve"
+	"github.com/OpenVulcan/vulcan-model-core/internal/routertool"
 	"github.com/OpenVulcan/vulcan-model-core/internal/routingstate"
 	"github.com/OpenVulcan/vulcan-model-core/internal/runtimeconfig"
+	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
 const (
@@ -120,9 +123,6 @@ type ManagementCommands interface {
 	// DeleteProviderConfiguration removes one credential-free provider configuration.
 	// DeleteProviderConfiguration 删除一个不含凭据的供应商配置。
 	DeleteProviderConfiguration(context.Context, string) error
-	// DiscoverCustomProviderModels reads a standard model list with one explicit same-instance credential.
-	// DiscoverCustomProviderModels 使用一个显式同实例凭据读取标准模型清单。
-	DiscoverCustomProviderModels(context.Context, string, string) (catalog.Snapshot, error)
 	// SaveCustomProviderModels replaces one custom provider's simplified model catalog.
 	// SaveCustomProviderModels 替换一个自定义供应商的简化模型目录。
 	SaveCustomProviderModels(context.Context, string, []management.InitialProviderModelInput) (catalog.Snapshot, error)
@@ -224,6 +224,14 @@ type KimiTokenCommands interface {
 	// RefreshCredential replaces one exact refreshable credential.
 	// RefreshCredential 替换一个精确可刷新凭据。
 	RefreshCredential(context.Context, string, string) (providerconfig.Credential, error)
+}
+
+// CredentialRefreshRecovery clears stale temporary credential-scope routing failures after a provider verifies token refresh.
+// CredentialRefreshRecovery 在供应商验证 Token 刷新后清除过期的临时凭据作用域路由故障。
+type CredentialRefreshRecovery interface {
+	// RecordCredentialRefreshSuccess records the exact credential boundary proven valid by token refresh.
+	// RecordCredentialRefreshSuccess 记录已被 Token 刷新证明有效的精确凭据边界。
+	RecordCredentialRefreshSuccess(context.Context, string, string, time.Time) error
 }
 
 // XAIDeviceFlows owns transient xAI account authorization sessions without exposing provider tokens.
@@ -370,12 +378,20 @@ type ProviderMetadataRefresh interface {
 	Refresh(context.Context, string, time.Time) (catalog.Snapshot, error)
 }
 
-// ProviderCredentialModelDiscovery refreshes model metadata with one explicitly selected provider credential.
-// ProviderCredentialModelDiscovery 使用一个显式选择的供应商凭据刷新模型元数据。
-type ProviderCredentialModelDiscovery interface {
-	// RefreshWithCredential atomically discovers models with a same-instance credential.
-	// RefreshWithCredential 使用同实例凭据原子发现模型。
-	RefreshWithCredential(context.Context, string, string, time.Time) (catalog.Snapshot, error)
+// ProviderCredentialEntitlementRefresh replaces plan and authorization facts for one exact credential.
+// ProviderCredentialEntitlementRefresh 替换一个精确凭据的套餐与授权事实。
+type ProviderCredentialEntitlementRefresh interface {
+	// RefreshCredentialEntitlements atomically refreshes one credential without touching usage.
+	// RefreshCredentialEntitlements 原子刷新一个凭据且不修改用量。
+	RefreshCredentialEntitlements(context.Context, string, string, time.Time) (catalog.Snapshot, error)
+}
+
+// ProviderCredentialAllowanceRefresh replaces usage facts for one exact credential.
+// ProviderCredentialAllowanceRefresh 替换一个精确凭据的用量事实。
+type ProviderCredentialAllowanceRefresh interface {
+	// RefreshCredentialAllowances atomically refreshes usage without touching plan or authorization facts.
+	// RefreshCredentialAllowances 原子刷新用量且不修改套餐或授权事实。
+	RefreshCredentialAllowances(context.Context, string, string, time.Time) (catalog.Snapshot, error)
 }
 
 // ProviderMetadataRefreshScheduler accepts deduplicated immediate refresh triggers.
@@ -414,6 +430,20 @@ type RoutingManagement interface {
 	SetCredentialPlan(context.Context, string, string, string) (providerconfig.Credential, error)
 }
 
+// ModelToolAvailability evaluates scoped Router model-tool bindings without exposing backend identity.
+// ModelToolAvailability 评估作用域匹配的 Router 模型工具绑定且不暴露后端身份。
+type ModelToolAvailability interface {
+	// Availability separates configured support from current backend readiness for one exact parent target.
+	// Availability 为一个精确父 Target 分离已配置支持与当前后端就绪状态。
+	Availability(context.Context, resolve.Target, vcp.StandardModelToolKind, time.Time) (routertool.Availability, error)
+	// AvailabilityExtension separates configured support from current backend readiness for one closed Router enhancement.
+	// AvailabilityExtension 为一个封闭 Router 增强能力分离已配置支持与当前后端就绪状态。
+	AvailabilityExtension(context.Context, resolve.Target, vcp.RouterExtensionKind, time.Time) (routertool.Availability, error)
+	// ProbeBinding tests one exact persisted Router binding without exposing its selected credential.
+	// ProbeBinding 测试一个精确持久化 Router 绑定且不暴露其选定凭据。
+	ProbeBinding(context.Context, string, time.Time) (routertool.BindingProbe, error)
+}
+
 // ControlPlane groups every dependency required by authenticated management and call-plane routes.
 // ControlPlane 聚合认证管理和调用面路由所需的全部依赖。
 type ControlPlane struct {
@@ -435,6 +465,12 @@ type ControlPlane struct {
 	// Routing optionally exposes scheduling and manual-plan settings.
 	// Routing 可选暴露调度与人工套餐设置。
 	Routing RoutingManagement
+	// RouterTools optionally owns explicit standard-tool backend bindings.
+	// RouterTools 可选地管理显式标准工具后端绑定。
+	RouterTools routertool.Store
+	// ModelToolAvailability optionally evaluates scoped Router bindings for call-plane model discovery.
+	// ModelToolAvailability 可选地为调用面模型发现评估范围匹配的 Router 绑定。
+	ModelToolAvailability ModelToolAvailability
 	// Protocols exposes custom-provider-selectable protocol metadata.
 	// Protocols 暴露可供自定义供应商选择的协议元数据。
 	Protocols ProtocolProfileQuery
@@ -480,6 +516,9 @@ type ControlPlane struct {
 	// Targets verifies that discovery profiles are currently executable.
 	// Targets 校验发现规格当前可执行。
 	Targets TargetAvailability
+	// CredentialRefreshRecovery optionally clears stale credential cooldown after a successful provider token refresh.
+	// CredentialRefreshRecovery 可选地在供应商 Token 刷新成功后清除过期的凭据冷却。
+	CredentialRefreshRecovery CredentialRefreshRecovery
 	// KimiDeviceFlows optionally enables server-owned Coding Plan device authorization routes.
 	// KimiDeviceFlows 可选启用服务端拥有的 Coding Plan 设备授权路由。
 	KimiDeviceFlows KimiDeviceFlows
@@ -534,7 +573,7 @@ func (c ControlPlane) validate() error {
 	}
 	// optionalDependencies may be absent, but a typed nil would register or dispatch an unusable service.
 	// optionalDependencies 可以缺省，但带类型的 nil 会注册或分派一个不可用服务。
-	optionalDependencies := []any{c.MetadataRefresh, c.Routing, c.Access, c.CallIdentityVerifier, c.Preflight, c.KimiDeviceFlows, c.KimiTokens, c.MiniMaxDeviceFlows, c.MiniMaxTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
+	optionalDependencies := []any{c.MetadataRefresh, c.Routing, c.RouterTools, c.ModelToolAvailability, c.Access, c.CallIdentityVerifier, c.Preflight, c.KimiDeviceFlows, c.KimiTokens, c.MiniMaxDeviceFlows, c.MiniMaxTokens, c.XAIDeviceFlows, c.XAITokens, c.CodexDeviceFlows, c.CodexOAuthFlows, c.CodexTokens, c.ClaudeOAuthFlows, c.ClaudeTokens, c.AntigravityOAuthFlows, c.AntigravityTokens}
 	for _, dependency := range optionalDependencies {
 		if dependency != nil && isNilHTTPDependency(dependency) {
 			return errors.New("control-plane optional dependency must not contain a typed nil reference")
@@ -569,9 +608,6 @@ type protocolProfileView struct {
 	// RuntimeReady reports whether the process has an executable profile implementation.
 	// RuntimeReady 表示进程是否拥有可执行的 Profile 实现。
 	RuntimeReady bool `json:"runtime_ready"`
-	// ModelDiscovery reports profile-level upstream model discovery availability.
-	// ModelDiscovery 报告 Profile 级上游模型发现可用性。
-	ModelDiscovery providerconfig.SupportStatus `json:"model_discovery"`
 	// Capabilities contains explicitly registered profile-global capability facts.
 	// Capabilities 包含显式注册的 Profile 全局能力事实。
 	Capabilities []protocolCapabilityView `json:"capabilities"`
@@ -647,6 +683,22 @@ type bindingListResponse struct {
 	Bindings []management.BindingView `json:"bindings"`
 }
 
+// routerToolBindingListResponse returns Router-owned standard-tool bindings.
+// routerToolBindingListResponse 返回 Router 所有的标准工具绑定。
+type routerToolBindingListResponse struct {
+	// RouterToolBindings contains explicit non-secret service selections and safety limits.
+	// RouterToolBindings 包含显式的非秘密服务选择与安全限制。
+	RouterToolBindings []routertool.Binding `json:"router_tool_bindings"`
+}
+
+// modelToolAvailabilityResponse returns effective model-tool readiness without exposing binding backends.
+// modelToolAvailabilityResponse 返回有效模型工具就绪状态且不暴露绑定后端。
+type modelToolAvailabilityResponse struct {
+	// Models contains enabled model profiles, static capability facts, and current readiness.
+	// Models 包含已启用模型规格、静态能力事实与当前就绪状态。
+	Models []callModelView `json:"models"`
+}
+
 // apiKeyListResponse returns plaintext API keys only to the management plane.
 // apiKeyListResponse 仅向管理面返回明文 API 密钥。
 type apiKeyListResponse struct {
@@ -663,8 +715,8 @@ const (
 	// callInformationInstances selects configured provider instances.
 	// callInformationInstances 选择已配置供应商实例。
 	callInformationInstances callInformationKind = "instances"
-	// callInformationModels selects executable provider-scoped models.
-	// callInformationModels 选择可执行的供应商作用域模型。
+	// callInformationModels selects enabled provider-scoped models and their current readiness.
+	// callInformationModels 选择供应商作用域的已启用模型及其当前就绪状态。
 	callInformationModels callInformationKind = "models"
 	// callInformationAccounts selects context profiles and their authorized accounts for one exact model.
 	// callInformationAccounts 选择一个精确模型的上下文规格及其已授权账号。
@@ -776,6 +828,105 @@ type callModelView struct {
 	// Model contains the exact non-fused model, offering, and capability shape.
 	// Model 包含精确未融合的模型、产品和能力形态。
 	Model management.ModelView `json:"model"`
+	// ModelTools contains effective standard and extra tool availability for every executable profile.
+	// ModelTools 包含每个可执行规格的有效标准工具与额外工具可用性。
+	ModelTools []callProfileModelToolsView `json:"model_tools"`
+}
+
+// callProfileModelToolsView contains effective model-tool availability for one exact offering and execution profile.
+// callProfileModelToolsView 包含一个精确产品与执行规格的有效模型工具可用性。
+type callProfileModelToolsView struct {
+	// OfferingID identifies the exact model product containing the profile.
+	// OfferingID 标识包含该规格的精确模型产品。
+	OfferingID string `json:"offering_id"`
+	// ExecutionProfileID identifies the exact execution capability shape.
+	// ExecutionProfileID 标识精确执行能力形态。
+	ExecutionProfileID string `json:"execution_profile_id"`
+	// Standard contains the complete closed standard tool set.
+	// Standard 包含完整的封闭标准工具集合。
+	Standard []callStandardModelToolView `json:"standard"`
+	// Extra contains profile-scoped provider-native extra tools.
+	// Extra 包含规格作用域的供应商原生额外工具。
+	Extra []callExtraModelToolView `json:"extra"`
+	// RouterExtensions contains operation-backed Router enhancements currently published for this profile.
+	// RouterExtensions 包含当前为该规格发布且由操作支持的 Router 增强能力。
+	RouterExtensions []callRouterExtensionView `json:"router_extensions"`
+}
+
+// callModelToolUnavailableReason is one stable non-sensitive effective tool readiness reason.
+// callModelToolUnavailableReason 是一个稳定且不敏感的有效工具就绪原因。
+type callModelToolUnavailableReason string
+
+const (
+	// callModelToolUnavailableReasonParentTargetUnavailable means the selected parent model profile cannot currently execute.
+	// callModelToolUnavailableReasonParentTargetUnavailable 表示所选父模型规格当前无法执行。
+	callModelToolUnavailableReasonParentTargetUnavailable callModelToolUnavailableReason = "parent_target_unavailable"
+)
+
+// callStandardModelToolView separates static native support from Router binding readiness.
+// callStandardModelToolView 将静态原生支持与 Router 绑定就绪状态分离。
+type callStandardModelToolView struct {
+	// Kind identifies the stable standard tool semantic.
+	// Kind 标识稳定的标准工具语义。
+	Kind vcp.StandardModelToolKind `json:"kind"`
+	// NativeSupported reports catalog evidence for this exact profile.
+	// NativeSupported 报告此精确规格的目录证据。
+	NativeSupported bool `json:"native_supported"`
+	// NativeReady reports whether the already-resolved parent target can execute the native tool.
+	// NativeReady 报告已解析父 Target 是否可以执行原生工具。
+	NativeReady bool `json:"native_ready"`
+	// RouterToolSupported reports whether at least one scoped binding is configured.
+	// RouterToolSupported 报告是否至少配置一个范围匹配的绑定。
+	RouterToolSupported bool `json:"router_tool_supported"`
+	// RouterToolReady reports whether a scoped binding has an executable backend now.
+	// RouterToolReady 报告当前是否有范围匹配绑定拥有可执行后端。
+	RouterToolReady bool `json:"router_tool_ready"`
+	// AvailableModes lists only explicit execution choices supported by current static configuration.
+	// AvailableModes 仅列出当前静态配置支持的显式执行选项。
+	AvailableModes []vcp.ModelToolMode `json:"available_modes"`
+	// Requires lists standard tool dependencies from the native profile contract.
+	// Requires 列出原生规格合同中的标准工具依赖。
+	Requires []vcp.StandardModelToolKind `json:"requires"`
+	// NativeUnavailableReason is a stable code for a supported native mode that is not ready.
+	// NativeUnavailableReason 是已支持但未就绪的原生方式稳定原因代码。
+	NativeUnavailableReason callModelToolUnavailableReason `json:"native_unavailable_reason,omitempty"`
+	// RouterToolUnavailableReason is a stable code for a Router mode that is not ready.
+	// RouterToolUnavailableReason 是 Router 方式未就绪时的稳定原因代码。
+	RouterToolUnavailableReason callModelToolUnavailableReason `json:"router_tool_unavailable_reason,omitempty"`
+}
+
+// callExtraModelToolView adds runtime readiness to one catalog-owned extra tool.
+// callExtraModelToolView 为一个目录拥有的额外工具增加运行时就绪状态。
+type callExtraModelToolView struct {
+	// Capability contains the immutable profile-scoped extra-tool contract.
+	// Capability 包含不可变的规格作用域额外工具合同。
+	Capability catalog.ModelExtraToolCapability `json:"capability"`
+	// Ready reports whether the already-resolved profile can expose this native extra tool.
+	// Ready 报告已解析规格是否可以公开此原生额外工具。
+	Ready bool `json:"ready"`
+	// UnavailableReason is empty for executable catalog-owned extra tools.
+	// UnavailableReason 对可执行的目录拥有额外工具为空。
+	UnavailableReason callModelToolUnavailableReason `json:"unavailable_reason,omitempty"`
+}
+
+// callRouterExtensionView reports one operation-backed Router enhancement without exposing backend identity.
+// callRouterExtensionView 报告一个由操作支持的 Router 增强能力且不暴露后端身份。
+type callRouterExtensionView struct {
+	// ID identifies the stable Router enhancement.
+	// ID 标识稳定的 Router 增强能力。
+	ID string `json:"id"`
+	// DisplayName is the default English catalog label.
+	// DisplayName 是默认英文目录标签。
+	DisplayName string `json:"display_name"`
+	// Supported reports whether one scoped administrator binding exists.
+	// Supported 报告是否存在一个匹配作用域的管理员绑定。
+	Supported bool `json:"supported"`
+	// Ready reports whether an exact backend is currently executable.
+	// Ready 报告当前是否有精确后端可执行。
+	Ready bool `json:"ready"`
+	// UnavailableReason is a stable non-sensitive readiness code.
+	// UnavailableReason 是稳定且不敏感的就绪原因代码。
+	UnavailableReason callModelToolUnavailableReason `json:"unavailable_reason,omitempty"`
 }
 
 // callInformationServicesResponse returns the services branch of the information union.
@@ -1158,14 +1309,6 @@ type credentialPlanRequest struct {
 	PlanOptionID string `json:"plan_option_id"`
 }
 
-// credentialModelDiscoveryRequest selects one exact same-instance credential for provider model discovery.
-// credentialModelDiscoveryRequest 为供应商模型发现选择一个精确同实例凭据。
-type credentialModelDiscoveryRequest struct {
-	// CredentialID identifies the account used by the upstream model-list operation.
-	// CredentialID 标识上游模型清单操作使用的账号。
-	CredentialID string `json:"credential_id"`
-}
-
 // routingSettingsResponse exposes Router-wide scheduling settings.
 // routingSettingsResponse 暴露 Router 全局调度设置。
 type routingSettingsResponse struct {
@@ -1435,6 +1578,71 @@ type updateBindingRequest struct {
 	Enabled bool `json:"enabled"`
 }
 
+// routerToolBindingRequest decodes every operator-authored Router tool binding field.
+// routerToolBindingRequest 解码由操作员编写的全部 Router 工具绑定字段。
+type routerToolBindingRequest struct {
+	// Kind selects one closed standard model tool.
+	// Kind 选择一个封闭的标准模型工具。
+	Kind vcp.StandardModelToolKind `json:"kind"`
+	// Extension selects one closed operation-backed Router enhancement.
+	// Extension 选择一个封闭且由操作支持的 Router 增强能力。
+	Extension vcp.RouterExtensionKind `json:"extension"`
+	// ProviderInstanceID fixes the backend service or model owner.
+	// ProviderInstanceID 固定后端服务或模型所有者。
+	ProviderInstanceID string `json:"provider_instance_id"`
+	// ProviderServiceID fixes the logical service.
+	// ProviderServiceID 固定逻辑服务。
+	ProviderServiceID string `json:"provider_service_id"`
+	// ServiceOfferingID fixes the service offering.
+	// ServiceOfferingID 固定服务产品。
+	ServiceOfferingID string `json:"service_offering_id"`
+	// ProviderModelID fixes the logical model used by an operation-backed enhancement.
+	// ProviderModelID 固定由操作支持的增强能力使用的逻辑模型。
+	ProviderModelID string `json:"provider_model_id"`
+	// OfferingID fixes the exact model offering used by an operation-backed enhancement.
+	// OfferingID 固定由操作支持的增强能力使用的精确模型产品。
+	OfferingID string `json:"offering_id"`
+	// ExecutionProfileID fixes the executable service profile.
+	// ExecutionProfileID 固定可执行服务规格。
+	ExecutionProfileID string `json:"execution_profile_id"`
+	// Priority orders eligible bindings in ascending order.
+	// Priority 按升序排列合格绑定。
+	Priority int `json:"priority"`
+	// Enabled controls immediate selection eligibility.
+	// Enabled 控制立即选择资格。
+	Enabled bool `json:"enabled"`
+	// AllowedProviderInstanceIDs restricts parent provider instances when non-empty.
+	// AllowedProviderInstanceIDs 非空时限制父供应商实例。
+	AllowedProviderInstanceIDs []string `json:"allowed_provider_instance_ids"`
+	// AllowedProviderModelIDs restricts parent provider models when non-empty.
+	// AllowedProviderModelIDs 非空时限制父供应商模型。
+	AllowedProviderModelIDs []string `json:"allowed_provider_model_ids"`
+	// AllowedExecutionProfileIDs restricts parent execution profiles when non-empty.
+	// AllowedExecutionProfileIDs 非空时限制父执行规格。
+	AllowedExecutionProfileIDs []string `json:"allowed_execution_profile_ids"`
+	// TimeoutMilliseconds is the hard ceiling for one child execution.
+	// TimeoutMilliseconds 是单次子执行的硬超时上限。
+	TimeoutMilliseconds int64 `json:"timeout_milliseconds"`
+	// MaximumCalls limits calls per parent execution.
+	// MaximumCalls 限制每个父执行的调用次数。
+	MaximumCalls int `json:"maximum_calls"`
+	// MaximumResults limits normalized web-search results.
+	// MaximumResults 限制规范化网页搜索结果。
+	MaximumResults int `json:"maximum_results"`
+	// MaximumURLs limits normalized extraction URLs.
+	// MaximumURLs 限制规范化抓取 URL。
+	MaximumURLs int `json:"maximum_urls"`
+	// MaximumResultBytes limits serialized child results returned to the parent model.
+	// MaximumResultBytes 限制回填父模型的序列化子结果大小。
+	MaximumResultBytes int64 `json:"maximum_result_bytes"`
+	// SafetyPolicy fixes outbound resource validation.
+	// SafetyPolicy 固定出站资源校验。
+	SafetyPolicy routertool.SafetyPolicy `json:"safety_policy"`
+	// Revision is required by updates for optimistic concurrency and ignored by creation.
+	// Revision 在更新时用于乐观并发控制，创建时忽略。
+	Revision uint64 `json:"revision"`
+}
+
 // apiKeyRequest decodes one plaintext call-plane API key mutation.
 // apiKeyRequest 解码一个明文调用面 API 密钥变更。
 type apiKeyRequest struct {
@@ -1695,9 +1903,12 @@ func decodeControlJSON[T any](writer http.ResponseWriter, request *http.Request)
 func writeControlError(writer http.ResponseWriter, err error) {
 	statusCode := http.StatusBadRequest
 	errorCode := "invalid_request"
-	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) || errors.Is(err, management.ErrProviderModelNotFound) || errors.Is(err, resolve.ErrModelNotFound) || errors.Is(err, resolve.ErrProfileNotFound) || errors.Is(err, runtimeconfig.ErrAPIKeyNotFound) {
+	if errors.Is(err, providerconfig.ErrNotFound) || errors.Is(err, catalog.ErrSnapshotNotFound) || errors.Is(err, management.ErrProviderModelNotFound) || errors.Is(err, resolve.ErrModelNotFound) || errors.Is(err, resolve.ErrProfileNotFound) || errors.Is(err, runtimeconfig.ErrAPIKeyNotFound) || errors.Is(err, routertool.ErrBindingNotFound) {
 		statusCode = http.StatusNotFound
 		errorCode = "not_found"
+	} else if errors.Is(err, routertool.ErrInvalidBinding) {
+		statusCode = http.StatusBadRequest
+		errorCode = "invalid_router_tool_binding"
 	} else if errors.Is(err, providerkimi.ErrFlowNotFound) || errors.Is(err, providerxai.ErrFlowNotFound) || errors.Is(err, provideropenai.ErrCodexFlowNotFound) {
 		statusCode = http.StatusNotFound
 		errorCode = "device_flow_not_found"
@@ -1780,7 +1991,6 @@ func protocolProfileViewFrom(profile providerconfig.ProtocolProfile) protocolPro
 		DisplayName:        profile.DisplayName,
 		UserConfigurable:   profile.UserConfigurable,
 		RuntimeReady:       profile.RuntimeReady,
-		ModelDiscovery:     profile.ModelDiscovery,
 		Capabilities:       capabilities,
 		AllowedAuthMethods: append([]providerconfig.AuthMethodType(nil), profile.AllowedAuthMethods...),
 	}
@@ -1933,10 +2143,11 @@ func (s *Server) handleConfigureProvider(writer http.ResponseWriter, request *ht
 	writeJSON(writer, http.StatusCreated, response)
 }
 
-// handleDeleteProviderConfiguration deletes one provider configuration after the service proves it owns no credentials.
-// handleDeleteProviderConfiguration 在服务证明供应商配置不拥有凭据后删除该配置。
+// handleDeleteProviderConfiguration deletes one provider configuration after runtime credentials have been removed.
+// handleDeleteProviderConfiguration 在运行时凭据已移除后删除一个供应商配置。
 func (s *Server) handleDeleteProviderConfiguration(writer http.ResponseWriter, request *http.Request) {
-	if errDelete := s.control.Commands.DeleteProviderConfiguration(request.Context(), request.PathValue("provider_instance_id")); errDelete != nil {
+	instanceID := request.PathValue("provider_instance_id")
+	if errDelete := s.control.Commands.DeleteProviderConfiguration(request.Context(), instanceID); errDelete != nil {
 		writeControlError(writer, errDelete)
 		return
 	}
@@ -2604,6 +2815,12 @@ func (s *Server) handleRefreshProviderCredential(writer http.ResponseWriter, req
 		writeControlError(writer, errRefresh)
 		return
 	}
+	if s.control.CredentialRefreshRecovery != nil {
+		if errRecovery := s.control.CredentialRefreshRecovery.RecordCredentialRefreshSuccess(request.Context(), instanceID, credentialID, time.Now().UTC()); errRecovery != nil {
+			writeControlError(writer, errRecovery)
+			return
+		}
+	}
 	s.triggerMetadataRefresh(instanceID)
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: credential.ID})
 }
@@ -2617,15 +2834,16 @@ func (s *Server) triggerMetadataRefresh(instanceID string) {
 	}
 }
 
-// handleRefreshProviderMetadata refreshes provider-native account metadata and returns the safe catalog view.
-// handleRefreshProviderMetadata 刷新供应商原生账号元数据并返回安全目录视图。
-func (s *Server) handleRefreshProviderMetadata(writer http.ResponseWriter, request *http.Request) {
-	if s.control.MetadataRefresh == nil {
-		writeJSON(writer, http.StatusNotImplemented, errorResponse{Error: "provider_metadata_refresh_unavailable"})
+// handleRefreshProviderCredentialEntitlements refreshes only one account's plan and model authorization evidence.
+// handleRefreshProviderCredentialEntitlements 仅刷新一个账号的套餐与模型授权证据。
+func (s *Server) handleRefreshProviderCredentialEntitlements(writer http.ResponseWriter, request *http.Request) {
+	refresher, supported := s.control.MetadataRefresh.(ProviderCredentialEntitlementRefresh)
+	if !supported {
+		writeJSON(writer, http.StatusNotImplemented, errorResponse{Error: "provider_entitlement_refresh_unavailable"})
 		return
 	}
 	instanceID := request.PathValue("provider_instance_id")
-	if _, errRefresh := s.control.MetadataRefresh.Refresh(request.Context(), instanceID, time.Now().UTC()); errRefresh != nil {
+	if _, errRefresh := refresher.RefreshCredentialEntitlements(request.Context(), instanceID, request.PathValue("credential_id"), time.Now().UTC()); errRefresh != nil {
 		writeControlError(writer, errRefresh)
 		return
 	}
@@ -2637,43 +2855,17 @@ func (s *Server) handleRefreshProviderMetadata(writer http.ResponseWriter, reque
 	writeJSON(writer, http.StatusOK, view)
 }
 
-// handleDiscoverProviderModels performs credential-scoped discovery without allowing implicit account selection.
-// handleDiscoverProviderModels 执行凭据作用域发现且不允许隐式选择账号。
-func (s *Server) handleDiscoverProviderModels(writer http.ResponseWriter, request *http.Request) {
-	discovery, supported := s.control.MetadataRefresh.(ProviderCredentialModelDiscovery)
+// handleRefreshProviderCredentialUsage refreshes only one account's supported usage observations.
+// handleRefreshProviderCredentialUsage 仅刷新一个账号受支持的用量观测。
+func (s *Server) handleRefreshProviderCredentialUsage(writer http.ResponseWriter, request *http.Request) {
+	refresher, supported := s.control.MetadataRefresh.(ProviderCredentialAllowanceRefresh)
 	if !supported {
-		writeJSON(writer, http.StatusNotImplemented, errorResponse{Error: "provider_model_discovery_unavailable"})
-		return
-	}
-	payload, errDecode := decodeControlJSON[credentialModelDiscoveryRequest](writer, request)
-	if errDecode != nil {
-		writeControlError(writer, errDecode)
+		writeJSON(writer, http.StatusNotImplemented, errorResponse{Error: "provider_usage_refresh_unavailable"})
 		return
 	}
 	instanceID := request.PathValue("provider_instance_id")
-	if _, errDiscover := discovery.RefreshWithCredential(request.Context(), instanceID, payload.CredentialID, time.Now().UTC()); errDiscover != nil {
-		writeControlError(writer, errDiscover)
-		return
-	}
-	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
-	if errView != nil {
-		writeControlError(writer, errView)
-		return
-	}
-	writeJSON(writer, http.StatusOK, view)
-}
-
-// handleDiscoverCustomProviderModels reads a standard custom-provider model list without implicit credential selection.
-// handleDiscoverCustomProviderModels 读取标准自定义供应商模型清单且不隐式选择凭据。
-func (s *Server) handleDiscoverCustomProviderModels(writer http.ResponseWriter, request *http.Request) {
-	payload, errDecode := decodeControlJSON[credentialModelDiscoveryRequest](writer, request)
-	if errDecode != nil {
-		writeControlError(writer, errDecode)
-		return
-	}
-	instanceID := request.PathValue("provider_instance_id")
-	if _, errDiscover := s.control.Commands.DiscoverCustomProviderModels(request.Context(), instanceID, payload.CredentialID); errDiscover != nil {
-		writeControlError(writer, errDiscover)
+	if _, errRefresh := refresher.RefreshCredentialAllowances(request.Context(), instanceID, request.PathValue("credential_id"), time.Now().UTC()); errRefresh != nil {
+		writeControlError(writer, errRefresh)
 		return
 	}
 	view, errView := s.control.Query.GetCatalog(request.Context(), instanceID)
@@ -2866,6 +3058,17 @@ func (s *Server) handleProviderCatalog(writer http.ResponseWriter, request *http
 	writeJSON(writer, http.StatusOK, providerCatalog)
 }
 
+// handleProviderCatalogAudit returns every internal model fact and explicit publication decision.
+// handleProviderCatalogAudit 返回全部内部模型事实与显式发布决策。
+func (s *Server) handleProviderCatalogAudit(writer http.ResponseWriter, request *http.Request) {
+	audit, errAudit := s.control.Query.GetCatalogAudit(request.Context(), request.PathValue("provider_instance_id"))
+	if errAudit != nil {
+		writeControlError(writer, errAudit)
+		return
+	}
+	writeJSON(writer, http.StatusOK, audit)
+}
+
 // handleCustomCatalog returns the complete operator-managed catalog document for one custom provider instance.
 // handleCustomCatalog 为一个自定义供应商实例返回完整的操作员管理目录文档。
 func (s *Server) handleCustomCatalog(writer http.ResponseWriter, request *http.Request) {
@@ -3021,6 +3224,9 @@ func capabilityFromView(view management.CapabilityView) catalog.ModelCapabilitie
 		Parameters:             append([]catalog.ParameterDescriptor(nil), view.Parameters...),
 		ParameterRules:         append([]catalog.ParameterRule(nil), view.ParameterRules...),
 		UsageMetrics:           append([]catalog.UsageMetricCapability(nil), view.UsageMetrics...),
+		StandardTools:          cloneHTTPStandardModelTools(view.StandardTools),
+		ExtraTools:             cloneHTTPExtraModelTools(view.ExtraTools),
+		HostedTools:            append([]vcp.ToolKind(nil), view.HostedTools...),
 	}
 }
 
@@ -3051,7 +3257,33 @@ func capabilityView(capabilities catalog.ModelCapabilities) management.Capabilit
 		Parameters:                 append([]catalog.ParameterDescriptor(nil), capabilities.Parameters...),
 		ParameterRules:             append([]catalog.ParameterRule(nil), capabilities.ParameterRules...),
 		UsageMetrics:               append([]catalog.UsageMetricCapability(nil), capabilities.UsageMetrics...),
+		StandardTools:              cloneHTTPStandardModelTools(capabilities.StandardTools),
+		ExtraTools:                 cloneHTTPExtraModelTools(capabilities.ExtraTools),
+		HostedTools:                append([]vcp.ToolKind(nil), capabilities.HostedTools...),
 	}
+}
+
+// cloneHTTPStandardModelTools returns mutation-safe standard model-tool DTO values.
+// cloneHTTPStandardModelTools 返回防止外部修改的标准模型工具 DTO 值。
+func cloneHTTPStandardModelTools(values []catalog.StandardModelToolCapability) []catalog.StandardModelToolCapability {
+	cloned := append([]catalog.StandardModelToolCapability(nil), values...)
+	for index := range cloned {
+		cloned[index].Requires = append([]vcp.StandardModelToolKind(nil), cloned[index].Requires...)
+	}
+	return cloned
+}
+
+// cloneHTTPExtraModelTools returns mutation-safe extra model-tool DTO values.
+// cloneHTTPExtraModelTools 返回防止外部修改的额外模型工具 DTO 值。
+func cloneHTTPExtraModelTools(values []catalog.ModelExtraToolCapability) []catalog.ModelExtraToolCapability {
+	cloned := append([]catalog.ModelExtraToolCapability(nil), values...)
+	for index := range cloned {
+		cloned[index].InputModalities = append([]string(nil), cloned[index].InputModalities...)
+		cloned[index].OutputModalities = append([]string(nil), cloned[index].OutputModalities...)
+		cloned[index].RequiresStandard = append([]vcp.StandardModelToolKind(nil), cloned[index].RequiresStandard...)
+		cloned[index].RequiresExtra = append([]string(nil), cloned[index].RequiresExtra...)
+	}
+	return cloned
 }
 
 // handleSetModelEnabled updates one instance-level provider model availability policy.
@@ -3295,6 +3527,213 @@ func (s *Server) handleUpdateBinding(writer http.ResponseWriter, request *http.R
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: binding.ID})
 }
 
+// handleRouterToolBindings returns every explicit Router standard-tool binding.
+// handleRouterToolBindings 返回全部显式 Router 标准工具绑定。
+func (s *Server) handleRouterToolBindings(writer http.ResponseWriter, request *http.Request) {
+	bindings, errBindings := s.control.RouterTools.List(request.Context())
+	if errBindings != nil {
+		writeControlError(writer, errBindings)
+		return
+	}
+	writeJSON(writer, http.StatusOK, routerToolBindingListResponse{RouterToolBindings: bindings})
+}
+
+// handleProbeRouterToolBinding tests exact backend resolution for one persisted binding.
+// handleProbeRouterToolBinding 测试一个持久化绑定的精确后端解析。
+func (s *Server) handleProbeRouterToolBinding(writer http.ResponseWriter, request *http.Request) {
+	probe, errProbe := s.control.ModelToolAvailability.ProbeBinding(request.Context(), request.PathValue("binding_id"), time.Now().UTC())
+	if errProbe != nil {
+		writeControlError(writer, errProbe)
+		return
+	}
+	writeJSON(writer, http.StatusOK, probe)
+}
+
+// handleModelToolAvailability returns management-safe native, extra, and Router tool readiness.
+// handleModelToolAvailability 返回管理安全的原生、额外及 Router 工具就绪状态。
+func (s *Server) handleModelToolAvailability(writer http.ResponseWriter, request *http.Request) {
+	query := request.URL.Query()
+	models, errModels := s.callModels(request.Context(), query.Get("provider_instance_id"), query.Get("provider_model_id"))
+	if errModels != nil {
+		writeControlError(writer, errModels)
+		return
+	}
+	writeJSON(writer, http.StatusOK, modelToolAvailabilityResponse{Models: models})
+}
+
+// handleCreateRouterToolBinding creates one validated standard-tool or operation-backed extension binding.
+// handleCreateRouterToolBinding 创建一个经过校验的标准工具或操作支持增强能力绑定。
+func (s *Server) handleCreateRouterToolBinding(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[routerToolBindingRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	if errTarget := s.validateRouterToolBindingTarget(request.Context(), payload); errTarget != nil {
+		writeControlError(writer, errTarget)
+		return
+	}
+	bindingID, errID := generateRouterToolBindingID()
+	if errID != nil {
+		writeControlError(writer, errID)
+		return
+	}
+	now := time.Now().UTC()
+	binding := routerToolBindingFromRequest(bindingID, payload, 1, now, now)
+	if errSave := s.control.RouterTools.Save(request.Context(), binding); errSave != nil {
+		writeControlError(writer, errSave)
+		return
+	}
+	writeJSON(writer, http.StatusCreated, binding)
+}
+
+// handleUpdateRouterToolBinding replaces one binding using an explicit optimistic revision.
+// handleUpdateRouterToolBinding 使用显式乐观修订号替换一个绑定。
+func (s *Server) handleUpdateRouterToolBinding(writer http.ResponseWriter, request *http.Request) {
+	payload, errDecode := decodeControlJSON[routerToolBindingRequest](writer, request)
+	if errDecode != nil {
+		writeControlError(writer, errDecode)
+		return
+	}
+	current, errCurrent := s.control.RouterTools.Get(request.Context(), request.PathValue("binding_id"))
+	if errCurrent != nil {
+		writeControlError(writer, errCurrent)
+		return
+	}
+	if payload.Revision != current.Revision {
+		writeControlError(writer, fmt.Errorf("%w: stale revision", routertool.ErrInvalidBinding))
+		return
+	}
+	if errTarget := s.validateRouterToolBindingTarget(request.Context(), payload); errTarget != nil {
+		writeControlError(writer, errTarget)
+		return
+	}
+	binding := routerToolBindingFromRequest(current.ID, payload, current.Revision+1, current.CreatedAt, time.Now().UTC())
+	if errSave := s.control.RouterTools.Save(request.Context(), binding); errSave != nil {
+		writeControlError(writer, errSave)
+		return
+	}
+	writeJSON(writer, http.StatusOK, binding)
+}
+
+// handleDeleteRouterToolBinding removes one exact Router tool binding.
+// handleDeleteRouterToolBinding 删除一个精确的 Router 工具绑定。
+func (s *Server) handleDeleteRouterToolBinding(writer http.ResponseWriter, request *http.Request) {
+	if errDelete := s.control.RouterTools.Delete(request.Context(), request.PathValue("binding_id")); errDelete != nil {
+		writeControlError(writer, errDelete)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
+}
+
+// validateRouterToolBindingTarget proves that every selected service or model identifier belongs to one exact catalog path.
+// validateRouterToolBindingTarget 证明每个已选服务或模型标识都属于一条精确目录路径。
+func (s *Server) validateRouterToolBindingTarget(ctx context.Context, payload routerToolBindingRequest) error {
+	catalogView, errCatalog := s.control.Query.GetCatalog(ctx, payload.ProviderInstanceID)
+	if errCatalog != nil {
+		return errCatalog
+	}
+	standard := payload.Kind.Valid()
+	extension := payload.Extension.Valid()
+	if standard == extension {
+		return fmt.Errorf("%w: exactly one standard tool or Router extension is required", routertool.ErrInvalidBinding)
+	}
+	if extension {
+		if payload.ProviderServiceID != "" || payload.ServiceOfferingID != "" || payload.ProviderModelID == "" || payload.OfferingID == "" {
+			return fmt.Errorf("%w: Router extension requires one exact model target", routertool.ErrInvalidBinding)
+		}
+		for _, model := range catalogView.Models {
+			if model.ID != payload.ProviderModelID {
+				continue
+			}
+			if !model.Enabled {
+				return fmt.Errorf("%w: provider model is disabled", routertool.ErrInvalidBinding)
+			}
+			for _, offering := range model.Offerings {
+				if offering.ID != payload.OfferingID {
+					continue
+				}
+				for _, profile := range offering.Profiles {
+					if profile.ID != payload.ExecutionProfileID {
+						continue
+					}
+					if profile.Operation != payload.Extension.Operation() {
+						return fmt.Errorf("%w: execution profile operation does not match Router extension", routertool.ErrInvalidBinding)
+					}
+					return nil
+				}
+				return fmt.Errorf("%w: execution profile does not belong to model offering", routertool.ErrInvalidBinding)
+			}
+			return fmt.Errorf("%w: model offering does not belong to provider model", routertool.ErrInvalidBinding)
+		}
+		return fmt.Errorf("%w: provider model does not belong to provider instance", routertool.ErrInvalidBinding)
+	}
+	if payload.ProviderModelID != "" || payload.OfferingID != "" || payload.ProviderServiceID == "" || payload.ServiceOfferingID == "" {
+		return fmt.Errorf("%w: standard tool requires one exact service target", routertool.ErrInvalidBinding)
+	}
+	for _, service := range catalogView.Services {
+		if service.ID != payload.ProviderServiceID {
+			continue
+		}
+		if !service.Enabled {
+			return fmt.Errorf("%w: provider service is disabled", routertool.ErrInvalidBinding)
+		}
+		for _, offering := range service.Offerings {
+			if offering.ID != payload.ServiceOfferingID {
+				continue
+			}
+			for _, profile := range offering.Profiles {
+				if profile.ID == payload.ExecutionProfileID && profile.Operation == standardRouterToolOperation(payload.Kind) {
+					return nil
+				}
+				if profile.ID == payload.ExecutionProfileID {
+					return fmt.Errorf("%w: execution profile operation does not match standard Router tool", routertool.ErrInvalidBinding)
+				}
+			}
+			return fmt.Errorf("%w: execution profile does not belong to service offering", routertool.ErrInvalidBinding)
+		}
+		return fmt.Errorf("%w: service offering does not belong to provider service", routertool.ErrInvalidBinding)
+	}
+	return fmt.Errorf("%w: provider service does not belong to provider instance", routertool.ErrInvalidBinding)
+}
+
+// standardRouterToolOperation returns the exact VCP child operation for one closed standard tool.
+// standardRouterToolOperation 返回一个封闭标准工具对应的精确 VCP 子操作。
+func standardRouterToolOperation(kind vcp.StandardModelToolKind) vcp.OperationKind {
+	switch kind {
+	case vcp.StandardModelToolWebSearch:
+		return vcp.OperationSearchWeb
+	case vcp.StandardModelToolWebExtractor:
+		return vcp.OperationWebExtract
+	default:
+		return ""
+	}
+}
+
+// routerToolBindingFromRequest creates one immutable storage value from an authenticated management request.
+// routerToolBindingFromRequest 从经过认证的管理请求创建一个不可变存储值。
+func routerToolBindingFromRequest(id string, payload routerToolBindingRequest, revision uint64, createdAt time.Time, updatedAt time.Time) routertool.Binding {
+	return routertool.Binding{
+		ID: id, Kind: payload.Kind, Extension: payload.Extension, ProviderInstanceID: payload.ProviderInstanceID, ProviderServiceID: payload.ProviderServiceID,
+		ServiceOfferingID: payload.ServiceOfferingID, ProviderModelID: payload.ProviderModelID, OfferingID: payload.OfferingID, ExecutionProfileID: payload.ExecutionProfileID, Priority: payload.Priority,
+		Enabled: payload.Enabled, AllowedProviderInstanceIDs: append([]string(nil), payload.AllowedProviderInstanceIDs...),
+		AllowedProviderModelIDs: append([]string(nil), payload.AllowedProviderModelIDs...), AllowedExecutionProfileIDs: append([]string(nil), payload.AllowedExecutionProfileIDs...),
+		TimeoutMilliseconds: payload.TimeoutMilliseconds, MaximumCalls: payload.MaximumCalls, MaximumResults: payload.MaximumResults,
+		MaximumURLs: payload.MaximumURLs, MaximumResultBytes: payload.MaximumResultBytes, SafetyPolicy: payload.SafetyPolicy,
+		Revision: revision, CreatedAt: createdAt, UpdatedAt: updatedAt,
+	}
+}
+
+// generateRouterToolBindingID creates one collision-resistant Router-owned binding identifier.
+// generateRouterToolBindingID 创建一个抗碰撞的 Router 所有绑定标识。
+func generateRouterToolBindingID() (string, error) {
+	randomBytes := make([]byte, 16)
+	if _, errRead := rand.Read(randomBytes); errRead != nil {
+		return "", fmt.Errorf("generate Router tool binding identifier: %w", errRead)
+	}
+	return "rtb_" + hex.EncodeToString(randomBytes), nil
+}
+
 // handleAPIKeys returns plaintext call-plane API keys only after management authentication.
 // handleAPIKeys 仅在管理认证后返回明文调用面 API 密钥。
 func (s *Server) handleAPIKeys(writer http.ResponseWriter, _ *http.Request) {
@@ -3448,8 +3887,8 @@ func (s *Server) handleCallInformation(writer http.ResponseWriter, request *http
 	}
 }
 
-// callModels returns enabled models and capabilities without fusing identically named provider models.
-// callModels 返回启用模型和能力，且不融合名称相同的供应商模型。
+// callModels returns enabled models with static capabilities and independent current readiness.
+// callModels 返回带有静态能力及独立当前就绪状态的已启用模型。
 func (s *Server) callModels(ctx context.Context, providerInstanceID string, providerModelID string) ([]callModelView, error) {
 	instances, errInstances := s.control.Query.ListInstances(ctx)
 	if errInstances != nil {
@@ -3477,25 +3916,196 @@ func (s *Server) callModels(ctx context.Context, providerInstanceID string, prov
 			if providerModelID != "" && model.ID != providerModelID {
 				continue
 			}
-			if !model.Enabled || model.AuthorizationStatus != catalog.AuthorizationAuthorized {
+			if !model.Enabled {
 				continue
 			}
-			filteredModel, executable, errFilter := s.executableModelView(ctx, instance.ID, model, discoveryTime)
-			if errFilter != nil {
-				return nil, errFilter
-			}
-			if !executable {
-				continue
+			modelTools, errModelTools := s.callModelToolViews(ctx, instance.ID, model, discoveryTime)
+			if errModelTools != nil {
+				return nil, errModelTools
 			}
 			models = append(models, callModelView{
 				ProviderInstanceID:   instance.ID,
 				ProviderHandle:       instance.Handle,
 				ProviderDefinitionID: instance.DefinitionID,
-				Model:                filteredModel,
+				Model:                model,
+				ModelTools:           modelTools,
 			})
 		}
 	}
 	return models, nil
+}
+
+// callModelToolViews computes effective native and Router tool availability for every published model profile.
+// callModelToolViews 计算每个已发布模型规格的有效原生与 Router 工具可用性。
+func (s *Server) callModelToolViews(ctx context.Context, providerInstanceID string, model management.ModelView, discoveryTime time.Time) ([]callProfileModelToolsView, error) {
+	views := make([]callProfileModelToolsView, 0)
+	for _, offering := range model.Offerings {
+		for _, profile := range offering.Profiles {
+			// parentTarget retains static parent identity even when no credential is currently executable.
+			// parentTarget 即使当前没有可执行凭据也保留静态父模型身份。
+			parentTarget := resolve.Target{
+				ProviderInstanceID: providerInstanceID,
+				SubjectKind:        resolve.ExecutionSubjectModel,
+				ProviderModelID:    model.ID,
+				OfferingID:         offering.ID,
+				Operation:          profile.Operation,
+				ExecutionProfileID: profile.ID,
+			}
+			resolvedTarget, _, errResolve := s.control.Targets.Resolve(ctx, resolve.Request{
+				ProviderInstanceID: providerInstanceID,
+				ProviderModelID:    model.ID,
+				OfferingID:         offering.ID,
+				Operation:          profile.Operation,
+				ExecutionProfileID: profile.ID,
+				Now:                discoveryTime,
+			})
+			parentReady := errResolve == nil
+			if errResolve != nil {
+				if !targetIneligible(errResolve) {
+					return nil, errResolve
+				}
+			} else {
+				parentTarget = resolvedTarget
+			}
+			standard := make([]callStandardModelToolView, 0, 2)
+			for _, kind := range []vcp.StandardModelToolKind{vcp.StandardModelToolWebSearch, vcp.StandardModelToolWebExtractor} {
+				nativeCapability, nativeSupported := callStandardToolCapability(profile.Capabilities.StandardTools, kind)
+				routerAvailability := routertool.Availability{UnavailableReason: routertool.AvailabilityReasonBindingMissing}
+				if s.control.ModelToolAvailability != nil {
+					availability, errAvailability := s.control.ModelToolAvailability.Availability(ctx, parentTarget, kind, discoveryTime)
+					if errAvailability != nil {
+						return nil, errAvailability
+					}
+					routerAvailability = availability
+				}
+				modes := []vcp.ModelToolMode{vcp.ModelToolDisabled}
+				if nativeSupported && nativeCapability.Native {
+					modes = append(modes, vcp.ModelToolNative)
+				}
+				if routerAvailability.Supported {
+					modes = append(modes, vcp.ModelToolRouter)
+				}
+				nativeReady := nativeSupported && nativeCapability.Native && parentReady
+				nativeUnavailableReason := callModelToolUnavailableReason("")
+				if nativeSupported && nativeCapability.Native && !nativeReady {
+					nativeUnavailableReason = callModelToolUnavailableReasonParentTargetUnavailable
+				}
+				routerToolReady, routerToolUnavailableReason := effectiveRouterToolAvailability(parentReady, routerAvailability)
+				standard = append(standard, callStandardModelToolView{
+					Kind:                        kind,
+					NativeSupported:             nativeSupported && nativeCapability.Native,
+					NativeReady:                 nativeReady,
+					RouterToolSupported:         routerAvailability.Supported,
+					RouterToolReady:             routerToolReady,
+					AvailableModes:              modes,
+					Requires:                    append([]vcp.StandardModelToolKind(nil), nativeCapability.Requires...),
+					NativeUnavailableReason:     nativeUnavailableReason,
+					RouterToolUnavailableReason: routerToolUnavailableReason,
+				})
+			}
+			extra := make([]callExtraModelToolView, 0, len(profile.Capabilities.ExtraTools))
+			for _, capability := range profile.Capabilities.ExtraTools {
+				unavailableReason := callModelToolUnavailableReason("")
+				if !parentReady {
+					unavailableReason = callModelToolUnavailableReasonParentTargetUnavailable
+				}
+				extra = append(extra, callExtraModelToolView{
+					Capability:        capability,
+					Ready:             parentReady,
+					UnavailableReason: unavailableReason,
+				})
+			}
+			routerExtensions := make([]callRouterExtensionView, 0)
+			if profile.Operation == vcp.OperationConversationRespond {
+				for _, extension := range allRouterExtensions() {
+					availability := routertool.Availability{UnavailableReason: routertool.AvailabilityReasonBindingMissing}
+					if s.control.ModelToolAvailability != nil {
+						resolvedAvailability, errAvailability := s.control.ModelToolAvailability.AvailabilityExtension(ctx, parentTarget, extension, discoveryTime)
+						if errAvailability != nil {
+							return nil, errAvailability
+						}
+						availability = resolvedAvailability
+					}
+					ready, unavailableReason := effectiveRouterToolAvailability(parentReady, availability)
+					routerExtensions = append(routerExtensions, callRouterExtensionView{
+						ID:                string(extension),
+						DisplayName:       routerExtensionDisplayName(extension),
+						Supported:         availability.Supported,
+						Ready:             ready,
+						UnavailableReason: unavailableReason,
+					})
+				}
+			}
+			views = append(views, callProfileModelToolsView{
+				OfferingID:         offering.ID,
+				ExecutionProfileID: profile.ID,
+				Standard:           standard,
+				Extra:              extra,
+				RouterExtensions:   routerExtensions,
+			})
+		}
+	}
+	return views, nil
+}
+
+// effectiveRouterToolAvailability combines binding readiness with the immutable parent target readiness.
+// effectiveRouterToolAvailability 将绑定就绪状态与不可变父 Target 就绪状态组合。
+func effectiveRouterToolAvailability(parentReady bool, availability routertool.Availability) (bool, callModelToolUnavailableReason) {
+	if !availability.Ready {
+		return false, callModelToolUnavailableReason(availability.UnavailableReason)
+	}
+	if !parentReady {
+		return false, callModelToolUnavailableReasonParentTargetUnavailable
+	}
+	return true, ""
+}
+
+// allRouterExtensions returns the canonical stable Router enhancement order.
+// allRouterExtensions 返回规范且稳定的 Router 增强能力顺序。
+func allRouterExtensions() []vcp.RouterExtensionKind {
+	return []vcp.RouterExtensionKind{
+		vcp.RouterExtensionImageUnderstanding,
+		vcp.RouterExtensionAudioUnderstanding,
+		vcp.RouterExtensionVideoUnderstanding,
+		vcp.RouterExtensionImageGeneration,
+		vcp.RouterExtensionVideoGeneration,
+		vcp.RouterExtensionSpeechGeneration,
+		vcp.RouterExtensionSpeechTranscription,
+	}
+}
+
+// routerExtensionDisplayName returns the default English label for one closed Router enhancement.
+// routerExtensionDisplayName 返回一个封闭 Router 增强能力的默认英文标签。
+func routerExtensionDisplayName(extension vcp.RouterExtensionKind) string {
+	switch extension {
+	case vcp.RouterExtensionImageUnderstanding:
+		return "Image understanding"
+	case vcp.RouterExtensionAudioUnderstanding:
+		return "Audio understanding"
+	case vcp.RouterExtensionVideoUnderstanding:
+		return "Video understanding"
+	case vcp.RouterExtensionImageGeneration:
+		return "Image generation"
+	case vcp.RouterExtensionVideoGeneration:
+		return "Video generation"
+	case vcp.RouterExtensionSpeechGeneration:
+		return "Speech generation"
+	case vcp.RouterExtensionSpeechTranscription:
+		return "Speech transcription"
+	default:
+		return ""
+	}
+}
+
+// callStandardToolCapability returns one exact management-view standard tool without inferring support.
+// callStandardToolCapability 返回一个精确管理视图标准工具且不推断支持。
+func callStandardToolCapability(values []catalog.StandardModelToolCapability, kind vcp.StandardModelToolKind) (catalog.StandardModelToolCapability, bool) {
+	for _, capability := range values {
+		if capability.Kind == kind {
+			return capability, true
+		}
+	}
+	return catalog.StandardModelToolCapability{}, false
 }
 
 // callServices returns executable provider-scoped special services without entering the model list.
@@ -3543,29 +4153,6 @@ func (s *Server) callServices(ctx context.Context, providerInstanceID string, pr
 	return services, nil
 }
 
-// executableModelView retains only offerings and profiles whose exact target currently resolves.
-// executableModelView 仅保留当前能够解析精确 Target 的产品与规格。
-func (s *Server) executableModelView(ctx context.Context, providerInstanceID string, model management.ModelView, discoveryTime time.Time) (management.ModelView, bool, error) {
-	filteredOfferings := make([]management.OfferingView, 0, len(model.Offerings))
-	for _, offering := range model.Offerings {
-		filteredProfiles := make([]management.ExecutionProfileView, 0, len(offering.Profiles))
-		for _, profile := range offering.Profiles {
-			if _, _, errResolve := s.control.Targets.Resolve(ctx, resolve.Request{ProviderInstanceID: providerInstanceID, ProviderModelID: model.ID, Operation: profile.Operation, ExecutionProfileID: profile.ID, Now: discoveryTime}); errResolve == nil {
-				filteredProfiles = append(filteredProfiles, profile)
-			} else if !targetIneligible(errResolve) {
-				return management.ModelView{}, false, errResolve
-			}
-		}
-		if len(filteredProfiles) == 0 {
-			continue
-		}
-		offering.Profiles = filteredProfiles
-		filteredOfferings = append(filteredOfferings, offering)
-	}
-	model.Offerings = filteredOfferings
-	return model, len(filteredOfferings) > 0, nil
-}
-
 // executableServiceView retains only offerings and profiles whose exact service target currently resolves.
 // executableServiceView 仅保留当前能够解析精确服务 Target 的产品与规格。
 func (s *Server) executableServiceView(ctx context.Context, providerInstanceID string, service management.ServiceView, discoveryTime time.Time) (management.ServiceView, bool, error) {
@@ -3598,5 +4185,6 @@ func targetIneligible(errValue error) bool {
 		errors.Is(errValue, resolve.ErrServiceNotFound) ||
 		errors.Is(errValue, resolve.ErrServiceDisabled) ||
 		errors.Is(errValue, resolve.ErrProfileNotFound) ||
+		errors.Is(errValue, resolve.ErrProfilePolicyMismatch) ||
 		errors.Is(errValue, resolve.ErrNoEligibleTarget)
 }

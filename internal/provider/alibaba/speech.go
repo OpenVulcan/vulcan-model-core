@@ -236,7 +236,7 @@ func projectAlibabaSpeechRequest(execution provider.ExecutionRequest, actionBind
 	if errEncode != nil {
 		return transport.Request{}, fmt.Errorf("%w: encode request: %v", ErrInvalidSpeechDriver, errEncode)
 	}
-	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: dashScopeMultimodalGenerationPath, Body: encoded, Headers: []transport.Header{{Name: "Content-Type", Value: "application/json"}}, Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
+	return transport.Request{Binding: execution.Binding, Method: http.MethodPost, Path: dashScopeMultimodalGenerationPath, Body: encoded, Headers: alibabaJSONHeaders(execution.MaterializedInputs, false), Authentication: transport.Authentication{Mode: transport.AuthenticationBearer}, IdempotencyKey: execution.Execution.IdempotencyKey}, nil
 }
 
 // projectQwen3TTSBody validates and projects one non-streaming synthesis operation.
@@ -310,8 +310,10 @@ func qwen3ASRMaterialization(input resource.MaterializedInput) (string, error) {
 			return "", fmt.Errorf("%w: direct audio URL is invalid", ErrInvalidSpeechDriver)
 		}
 		return input.RemoteURL, nil
+	case catalog.MaterializationProviderObjectURI:
+		return alibabaObjectURI(input, ErrInvalidSpeechDriver)
 	default:
-		return "", fmt.Errorf("%w: Qwen3-ASR accepts inline Base64 or direct remote URL only", ErrInvalidSpeechDriver)
+		return "", fmt.Errorf("%w: Qwen3-ASR accepts inline Base64, direct remote URL, or Alibaba object URI only", ErrInvalidSpeechDriver)
 	}
 }
 
@@ -388,7 +390,10 @@ type qwen3TTSAudio struct {
 // decodeQwen3TTSResponse 校验一个完整非流式合成响应。
 func decodeQwen3TTSResponse(reader io.Reader) (provider.ExecutionResult, error) {
 	var response qwen3TTSResponse
-	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil || response.StatusCode != http.StatusOK || response.Output.FinishReason != "stop" || strings.TrimSpace(response.Output.Audio.URL) == "" {
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidSpeechResponse); errDecode != nil {
+		return provider.ExecutionResult{}, errDecode
+	}
+	if response.StatusCode != http.StatusOK || response.Output.FinishReason != "stop" || strings.TrimSpace(response.Output.Audio.URL) == "" {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: malformed Qwen3-TTS output", ErrInvalidSpeechResponse)
 	}
 	return provider.ExecutionResult{UpstreamResponseID: response.RequestID, GeneratedResources: []provider.GeneratedResource{{OutputID: "audio-0", Kind: vcp.MediaAudio, MIMEType: "audio/wav", DownloadURL: response.Output.Audio.URL}}}, nil
@@ -472,7 +477,10 @@ type qwen3ASRUsage struct {
 // decodeQwen3ASRResponse 校验类型化文本且不虚构不可用的分段或置信度。
 func decodeQwen3ASRResponse(reader io.Reader) (provider.ExecutionResult, error) {
 	var response qwen3ASRResponse
-	if errDecode := json.NewDecoder(reader).Decode(&response); errDecode != nil || strings.TrimSpace(response.RequestID) == "" || len(response.Output.Choices) != 1 {
+	if errDecode := decodeAlibabaJSONResponse(reader, &response, ErrInvalidSpeechResponse); errDecode != nil {
+		return provider.ExecutionResult{}, errDecode
+	}
+	if strings.TrimSpace(response.RequestID) == "" || len(response.Output.Choices) != 1 {
 		return provider.ExecutionResult{}, fmt.Errorf("%w: malformed Qwen3-ASR output", ErrInvalidSpeechResponse)
 	}
 	choice := response.Output.Choices[0]

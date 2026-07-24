@@ -13,6 +13,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
 	"github.com/OpenVulcan/vulcan-model-core/internal/catalog"
 	"github.com/OpenVulcan/vulcan-model-core/internal/dependency"
+	protocolmessages "github.com/OpenVulcan/vulcan-model-core/internal/protocol/anthropic/messages"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	provideropenai "github.com/OpenVulcan/vulcan-model-core/internal/provider/openai"
 	"github.com/OpenVulcan/vulcan-model-core/internal/providerconfig"
@@ -109,6 +110,380 @@ func reconcileMiniMaxSharedOrigin(ctx context.Context, configurations providerco
 		return false, errReplace
 	}
 	return true, nil
+}
+
+// ReconcileAlibabaSystemCatalogs upgrades every persisted built-in Alibaba catalog to the current complete code-owned baseline while retaining valid operator and account state.
+// ReconcileAlibabaSystemCatalogs 将每个已持久化的内置 Alibaba 目录升级到当前完整的代码拥有基线，同时保留有效的操作员与账号状态。
+func ReconcileAlibabaSystemCatalogs(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("context is required")
+	}
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
+		return 0, errors.New("provider configuration and catalog stores are required")
+	}
+	instances, errInstances := configurations.ListInstances(ctx, "")
+	if errInstances != nil {
+		return 0, fmt.Errorf("list provider instances for Alibaba catalog reconciliation: %w", errInstances)
+	}
+	targetResolver, errResolver := resolve.New(configurations, catalogs)
+	if errResolver != nil {
+		return 0, errResolver
+	}
+	// reconciliationTime gives every catalog upgraded in this startup pass one deterministic evaluation boundary.
+	// reconciliationTime 为本次启动过程中升级的每个目录提供同一个确定性评估边界。
+	reconciliationTime := time.Now().UTC()
+	changedInstances := 0
+	for _, instance := range instances {
+		if !isAlibabaSystemDefinition(instance.DefinitionID) {
+			continue
+		}
+		definition, errDefinition := configurations.GetDefinition(ctx, instance.DefinitionID)
+		if errDefinition != nil {
+			return changedInstances, fmt.Errorf("get Alibaba definition %s: %w", instance.DefinitionID, errDefinition)
+		}
+		accessGraphChanged, errAccessGraph := reconcileAlibabaAccessGraph(ctx, configurations, instance, definition)
+		if errAccessGraph != nil {
+			return changedInstances, fmt.Errorf("reconcile Alibaba access graph %s: %w", instance.ID, errAccessGraph)
+		}
+		credentials, errCredentials := configurations.ListCredentials(ctx, instance.ID)
+		if errCredentials != nil {
+			return changedInstances, fmt.Errorf("list Alibaba credentials %s: %w", instance.ID, errCredentials)
+		}
+		current, errCurrent := catalogs.Get(ctx, instance.ID)
+		if errors.Is(errCurrent, catalog.ErrSnapshotNotFound) {
+			created, errCreate := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: instance}, definition, reconciliationTime)
+			if errCreate != nil {
+				return changedInstances, fmt.Errorf("build missing Alibaba catalog %s: %w", instance.ID, errCreate)
+			}
+			pools, errPools := targetResolver.SummarizeSnapshot(ctx, created, reconciliationTime, created.Revision)
+			if errPools != nil {
+				return changedInstances, fmt.Errorf("summarize missing Alibaba catalog %s: %w", instance.ID, errPools)
+			}
+			created.Pools = pools
+			if errSave := catalogs.Save(ctx, created); errSave != nil {
+				return changedInstances, fmt.Errorf("save missing Alibaba catalog %s: %w", instance.ID, errSave)
+			}
+			changedInstances++
+			continue
+		}
+		if errCurrent != nil {
+			return changedInstances, fmt.Errorf("get Alibaba catalog %s: %w", instance.ID, errCurrent)
+		}
+		upgraded, changed, errUpgrade := rebuildAlibabaSystemCatalog(ctx, targetResolver, instance, definition, credentials, current, reconciliationTime)
+		if errUpgrade != nil {
+			return changedInstances, fmt.Errorf("rebuild Alibaba catalog %s: %w", instance.ID, errUpgrade)
+		}
+		if !changed {
+			if accessGraphChanged {
+				changedInstances++
+			}
+			continue
+		}
+		if errSave := catalogs.Save(ctx, upgraded); errSave != nil {
+			return changedInstances, fmt.Errorf("save upgraded Alibaba catalog %s: %w", instance.ID, errSave)
+		}
+		changedInstances++
+	}
+	return changedInstances, nil
+}
+
+// reconcileAlibabaAccessGraph migrates the exact historical Anthropic path and adds only definition-owned native action channels to existing account-endpoint relationships.
+// reconcileAlibabaAccessGraph 迁移精确的历史 Anthropic 路径，并仅为既有账号入口关系补齐定义拥有的原生操作通道。
+func reconcileAlibabaAccessGraph(ctx context.Context, configurations providerconfig.Store, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition) (bool, error) {
+	endpoints, errEndpoints := configurations.ListEndpoints(ctx, instance.ID)
+	if errEndpoints != nil {
+		return false, errEndpoints
+	}
+	bindings, errBindings := configurations.ListBindings(ctx, instance.ID)
+	if errBindings != nil {
+		return false, errBindings
+	}
+	if len(endpoints) == 0 || len(bindings) == 0 {
+		return false, nil
+	}
+	if len(definition.EndpointPresets) != 1 {
+		return false, errors.New("Alibaba system definition requires exactly one endpoint preset")
+	}
+	// replacementEndpoints and replacementBindings preserve caller-owned identifiers and scheduling fields before any atomic replacement.
+	// replacementEndpoints 与 replacementBindings 在任何原子替换前保留调用方拥有的标识与调度字段。
+	replacementEndpoints := append([]providerconfig.Endpoint(nil), endpoints...)
+	replacementBindings := append([]providerconfig.AccessBinding(nil), bindings...)
+	preset := definition.EndpointPresets[0]
+	changed := false
+	for endpointIndex := range replacementEndpoints {
+		endpoint := &replacementEndpoints[endpointIndex]
+		if endpoint.ChannelID != protocolmessages.ProfileID {
+			continue
+		}
+		if endpoint.Revision == math.MaxUint64 {
+			return false, fmt.Errorf("Alibaba endpoint revision is exhausted for %s", endpoint.ID)
+		}
+		endpoint.ChannelID = definition.ProtocolProfileID
+		endpoint.BaseURL = preset.BaseURL
+		endpoint.Region = preset.Region
+		endpoint.Parameters = nil
+		endpoint.Revision++
+		changed = true
+	}
+	for bindingIndex := range replacementBindings {
+		binding := &replacementBindings[bindingIndex]
+		if binding.ChannelID != protocolmessages.ProfileID {
+			continue
+		}
+		if binding.Revision == math.MaxUint64 {
+			return false, fmt.Errorf("Alibaba binding revision is exhausted for %s", binding.ID)
+		}
+		binding.ChannelID = definition.ProtocolProfileID
+		binding.Revision++
+		changed = true
+	}
+	// bindingKey identifies one exact credential, endpoint, and definition-owned channel relation.
+	// bindingKey 标识一个精确的凭据、入口与定义拥有通道关系。
+	type bindingKey struct {
+		// endpointID identifies the exact shared Origin.
+		// endpointID 标识精确的共享 Origin。
+		endpointID string
+		// credentialID identifies the exact account.
+		// credentialID 标识精确账号。
+		credentialID string
+		// channelID identifies the exact executable Wire contract.
+		// channelID 标识精确的可执行 Wire 合同。
+		channelID string
+	}
+	existing := make(map[bindingKey]struct{}, len(replacementBindings))
+	// primaryBindings are the only proven account-endpoint relationships that may receive newly introduced native action channels.
+	// primaryBindings 是唯一已证明且可补充新原生操作通道的账号入口关系。
+	primaryBindings := make([]providerconfig.AccessBinding, 0, len(replacementBindings))
+	for _, binding := range replacementBindings {
+		existing[bindingKey{endpointID: binding.EndpointID, credentialID: binding.CredentialID, channelID: binding.ChannelID}] = struct{}{}
+		if binding.ChannelID == definition.ProtocolProfileID {
+			primaryBindings = append(primaryBindings, binding)
+		}
+	}
+	for _, primary := range primaryBindings {
+		for _, channelID := range definition.ChannelIDs() {
+			key := bindingKey{endpointID: primary.EndpointID, credentialID: primary.CredentialID, channelID: channelID}
+			if _, exists := existing[key]; exists {
+				continue
+			}
+			bindingID, errBindingID := generateID("bind_")
+			if errBindingID != nil {
+				return false, errBindingID
+			}
+			replacementBindings = append(replacementBindings, providerconfig.AccessBinding{
+				ID: bindingID, ProviderInstanceID: instance.ID, ChannelID: channelID, EndpointID: primary.EndpointID,
+				CredentialID: primary.CredentialID, Priority: primary.Priority, Enabled: primary.Enabled, Revision: 1,
+			})
+			existing[key] = struct{}{}
+			changed = true
+		}
+	}
+	if !changed {
+		return false, nil
+	}
+	replacement := providerconfig.AccessGraphReplacement{
+		ProviderInstanceID: instance.ID, ExpectedEndpoints: endpoints, ExpectedBindings: bindings,
+		Endpoints: replacementEndpoints, Bindings: replacementBindings,
+	}
+	if errReplace := configurations.ReplaceAccessGraph(ctx, replacement); errReplace != nil {
+		return false, errReplace
+	}
+	return true, nil
+}
+
+// rebuildAlibabaSystemCatalog converges one historical snapshot after the access graph has been reconciled independently.
+// rebuildAlibabaSystemCatalog 在访问图已独立完成收敛后重建一份历史快照。
+func rebuildAlibabaSystemCatalog(ctx context.Context, targetResolver *resolve.Resolver, instance providerconfig.ProviderInstance, definition providerconfig.ProviderDefinition, credentials []providerconfig.Credential, current catalog.Snapshot, now time.Time) (catalog.Snapshot, bool, error) {
+	desired, errDesired := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: instance}, definition, now)
+	if errDesired != nil {
+		return catalog.Snapshot{}, false, errDesired
+	}
+	// Operator-authored provider defaults are configuration, not generated catalog evidence, and therefore survive a baseline rebuild.
+	// 操作员编写的供应商默认参数属于配置而非生成目录证据，因此在基线重建时必须保留。
+	desired.DefaultAdditionalParameters = current.DefaultAdditionalParameters
+	preserveAlibabaAccountMetadata(&desired, current, credentials, now)
+	// provisionalRevision supports semantic comparison at MaxUint64 without pretending that an unsavable successor exists.
+	// provisionalRevision 支持在 MaxUint64 上进行语义比较，而不会假装存在一个无法保存的后继修订。
+	provisionalRevision := current.Revision
+	if provisionalRevision < math.MaxUint64 {
+		provisionalRevision++
+	}
+	pools, errPools := targetResolver.SummarizeSnapshot(ctx, desired, now, provisionalRevision)
+	if errPools != nil {
+		return catalog.Snapshot{}, false, errPools
+	}
+	desired.Pools = pools
+	if alibabaCatalogEquivalent(current, desired) {
+		return current, false, nil
+	}
+	if current.Revision == math.MaxUint64 {
+		return catalog.Snapshot{}, false, errors.New("Alibaba catalog revision is exhausted")
+	}
+	desired.Revision = current.Revision + 1
+	desired.ObservedAt = now
+	if errValidate := desired.Validate(); errValidate != nil {
+		return catalog.Snapshot{}, false, errValidate
+	}
+	return desired, true, nil
+}
+
+// preserveAlibabaAccountMetadata keeps only current observations whose exact credential and catalog references remain valid after rebuilding.
+// preserveAlibabaAccountMetadata 仅保留重建后精确凭据与目录引用仍然有效的当前观测。
+func preserveAlibabaAccountMetadata(desired *catalog.Snapshot, current catalog.Snapshot, credentials []providerconfig.Credential, now time.Time) {
+	// credentialIDs and sharedScopeIDs are the only persisted ownership facts allowed to retain credential-scoped observations.
+	// credentialIDs 与 sharedScopeIDs 是允许保留凭据作用域观测的唯一持久所有权事实。
+	credentialIDs := make(map[string]struct{}, len(credentials))
+	sharedScopeIDs := make(map[string]struct{})
+	for _, credential := range credentials {
+		credentialIDs[credential.ID] = struct{}{}
+		for _, scopeReference := range credential.ScopeRefs {
+			sharedScopeIDs[scopeReference.Kind+"\x00"+scopeReference.ID] = struct{}{}
+		}
+	}
+	// modelIDs and profileIDs prove allowance references against the rebuilt static baseline.
+	// modelIDs 与 profileIDs 用于根据重建后的静态基线证明额度引用。
+	modelIDs := make(map[string]struct{}, len(desired.Models))
+	profileIDs := make(map[string]struct{}, len(desired.Profiles))
+	for _, model := range desired.Models {
+		modelIDs[model.ID] = struct{}{}
+	}
+	for _, profile := range desired.Profiles {
+		profileIDs[profile.ID] = struct{}{}
+	}
+	for _, plan := range current.Plans {
+		_, credentialExists := credentialIDs[plan.CredentialID]
+		if credentialExists && catalogMetadataCurrent(plan.ObservedAt, plan.ExpiresAt, now) {
+			desired.Plans = append(desired.Plans, plan)
+		}
+	}
+	// Historical dynamic entitlement observations are intentionally discarded because every Alibaba catalog now uses static all-bound-credential ownership.
+	// 历史动态权益观测会被有意丢弃，因为所有 Alibaba 目录现已使用静态的全部已绑定凭据归属。
+	for _, allowance := range current.Allowances {
+		if catalogMetadataCurrent(allowance.ObservedAt, allowance.ExpiresAt, now) && alibabaAllowanceReferenceExists(allowance, credentialIDs, sharedScopeIDs, modelIDs, profileIDs) {
+			desired.Allowances = append(desired.Allowances, allowance)
+		}
+	}
+	for _, voice := range current.Voices {
+		_, credentialExists := credentialIDs[voice.CredentialID]
+		if credentialExists && catalogMetadataCurrent(voice.ObservedAt, voice.ExpiresAt, now) {
+			desired.Voices = append(desired.Voices, voice)
+		}
+	}
+}
+
+// alibabaAllowanceReferenceExists verifies every catalog-dependent or credential-owned allowance scope without inventing fallback ownership.
+// alibabaAllowanceReferenceExists 在不虚构回退所有权的前提下校验每个依赖目录或凭据拥有的额度作用域。
+func alibabaAllowanceReferenceExists(allowance catalog.AllowanceSnapshot, credentialIDs map[string]struct{}, sharedScopeIDs map[string]struct{}, modelIDs map[string]struct{}, profileIDs map[string]struct{}) bool {
+	switch allowance.Scope {
+	case catalog.ScopeCredential:
+		_, exists := credentialIDs[allowance.ScopeID]
+		return exists
+	case catalog.ScopeSubscription, catalog.ScopeOrganization, catalog.ScopeProject, catalog.ScopeBillingAccount:
+		_, exists := sharedScopeIDs[string(allowance.Scope)+"\x00"+allowance.ScopeID]
+		return exists
+	case catalog.ScopeProviderModel:
+		_, exists := modelIDs[allowance.ScopeID]
+		return exists
+	case catalog.ScopeExecutionProfile:
+		_, exists := profileIDs[allowance.ScopeID]
+		return exists
+	case catalog.ScopeCapability:
+		// Capability identifiers are provider-owned independent quota dimensions and do not reference a catalog record.
+		// 能力标识是供应商拥有的独立额度维度，不引用目录记录。
+		return true
+	default:
+		return false
+	}
+}
+
+// alibabaCatalogEquivalent compares the complete retained catalog while ignoring only persistence counters and derived observation time.
+// alibabaCatalogEquivalent 比较完整的保留目录，同时仅忽略持久化计数器与派生观测时间。
+func alibabaCatalogEquivalent(current catalog.Snapshot, desired catalog.Snapshot) bool {
+	return reflect.DeepEqual(normalizedAlibabaCatalog(current), normalizedAlibabaCatalog(desired))
+}
+
+// normalizedAlibabaCatalog creates a mutation-safe semantic comparison value for every Alibaba snapshot collection.
+// normalizedAlibabaCatalog 为 Alibaba 快照的每个集合创建可安全修改的语义比较值。
+func normalizedAlibabaCatalog(snapshot catalog.Snapshot) catalog.Snapshot {
+	snapshot.Models = append([]catalog.ProviderModel(nil), snapshot.Models...)
+	snapshot.Offerings = append([]catalog.ModelOffering(nil), snapshot.Offerings...)
+	snapshot.Services = append([]catalog.ProviderService(nil), snapshot.Services...)
+	snapshot.ServiceOfferings = append([]catalog.ServiceOffering(nil), snapshot.ServiceOfferings...)
+	snapshot.Profiles = append([]catalog.ExecutionProfile(nil), snapshot.Profiles...)
+	snapshot.ModelOperationPolicies = append([]catalog.ModelOperationPolicy(nil), snapshot.ModelOperationPolicies...)
+	snapshot.Entitlements = append([]catalog.ModelEntitlement(nil), snapshot.Entitlements...)
+	snapshot.ServiceEntitlements = append([]catalog.ServiceEntitlement(nil), snapshot.ServiceEntitlements...)
+	snapshot.Plans = append([]catalog.PlanSnapshot(nil), snapshot.Plans...)
+	snapshot.Allowances = append([]catalog.AllowanceSnapshot(nil), snapshot.Allowances...)
+	snapshot.RateLimits = append([]catalog.RateLimitSnapshot(nil), snapshot.RateLimits...)
+	snapshot.Voices = append([]catalog.VoiceSnapshot(nil), snapshot.Voices...)
+	snapshot.Pools = append([]catalog.PoolSummary(nil), snapshot.Pools...)
+	snapshot.Revision = 0
+	snapshot.ObservedAt = time.Time{}
+	for index := range snapshot.Models {
+		snapshot.Models[index].Revision = 0
+	}
+	for index := range snapshot.Offerings {
+		snapshot.Offerings[index].CapabilityRevision = 0
+		snapshot.Offerings[index].Revision = 0
+	}
+	for index := range snapshot.Services {
+		snapshot.Services[index].Revision = 0
+	}
+	for index := range snapshot.ServiceOfferings {
+		snapshot.ServiceOfferings[index].CapabilityRevision = 0
+		snapshot.ServiceOfferings[index].Revision = 0
+	}
+	for index := range snapshot.Profiles {
+		snapshot.Profiles[index].CapabilityRevision = 0
+		snapshot.Profiles[index].Revision = 0
+	}
+	for index := range snapshot.ModelOperationPolicies {
+		snapshot.ModelOperationPolicies[index].Revision = 0
+	}
+	for index := range snapshot.Entitlements {
+		snapshot.Entitlements[index].Revision = 0
+	}
+	for index := range snapshot.ServiceEntitlements {
+		snapshot.ServiceEntitlements[index].Revision = 0
+	}
+	for index := range snapshot.Plans {
+		snapshot.Plans[index].Revision = 0
+	}
+	for index := range snapshot.Allowances {
+		snapshot.Allowances[index].Revision = 0
+	}
+	for index := range snapshot.RateLimits {
+		snapshot.RateLimits[index].Revision = 0
+	}
+	for index := range snapshot.Voices {
+		snapshot.Voices[index].Revision = 0
+	}
+	for index := range snapshot.Pools {
+		snapshot.Pools[index].Revision = 0
+		snapshot.Pools[index].ObservedAt = time.Time{}
+		if len(snapshot.Pools[index].BlockingAllowanceKinds) == 0 {
+			snapshot.Pools[index].BlockingAllowanceKinds = nil
+		}
+	}
+	return snapshot
+}
+
+// isAlibabaSystemDefinition reports whether one immutable definition belongs to the seven published Alibaba products.
+// isAlibabaSystemDefinition 判断一个不可变定义是否属于七个已发布 Alibaba 产品之一。
+func isAlibabaSystemDefinition(definitionID string) bool {
+	switch definitionID {
+	case bootstrap.AlibabaCodingPlanCNDefinitionID,
+		bootstrap.AlibabaCodingPlanGlobalDefinitionID,
+		bootstrap.AlibabaTokenPlanPersonalCNDefinitionID,
+		bootstrap.AlibabaTokenPlanTeamCNDefinitionID,
+		bootstrap.AlibabaTokenPlanTeamGlobalDefinitionID,
+		bootstrap.AlibabaModelStudioCNDefinitionID,
+		bootstrap.AlibabaModelStudioGlobalDefinitionID:
+		return true
+	default:
+		return false
+	}
 }
 
 // ReconcileKimiSystemCatalogs migrates persisted Kimi catalogs to the current single Chat protocol contract and returns the changed instance count.

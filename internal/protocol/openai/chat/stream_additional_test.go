@@ -297,12 +297,16 @@ func TestStreamDecoderIncludesUsageReportedAfterFinishReason(t *testing.T) {
 	if errClose != nil {
 		t.Fatalf("Close() error = %v", errClose)
 	}
-	if len(closeEvents) != 1 || closeEvents[0].Type != vcp.EventResponseCompleted || closeEvents[0].FinishReason != "stop" {
+	if len(closeEvents) != 2 || closeEvents[0].Type != vcp.EventUsageUpdated || closeEvents[0].Usage == nil || closeEvents[0].Usage.Phase != "terminal" || !closeEvents[0].Usage.Final || closeEvents[1].Type != vcp.EventResponseCompleted || closeEvents[1].FinishReason != "stop" {
 		t.Fatalf("close events = %#v", closeEvents)
 	}
 	response := decoder.Response()
-	if response.Status != vcp.ResponseCompleted || response.Usage == nil || response.Usage.TotalTokens == nil || *response.Usage.TotalTokens != 5 {
+	if response.Status != vcp.ResponseCompleted || response.Usage == nil || response.Usage.TotalTokens == nil || *response.Usage.TotalTokens != 5 || response.Usage.Phase != "terminal" || !response.Usage.Final {
 		t.Fatalf("completed response = %#v", response)
+	}
+	report := decoder.Report()
+	if report.Usage == nil || report.Usage.Phase != "terminal" || !report.Usage.Final {
+		t.Fatalf("terminal report usage = %#v", report.Usage)
 	}
 }
 

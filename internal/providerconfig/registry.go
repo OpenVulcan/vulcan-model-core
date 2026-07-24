@@ -271,6 +271,15 @@ func cloneProtocolProfile(profile ProtocolProfile) ProtocolProfile {
 func cloneProviderDefinition(definition ProviderDefinition) ProviderDefinition {
 	definition.AuthMethodIDs = append([]string(nil), definition.AuthMethodIDs...)
 	definition.AuthMethods = append([]AuthMethodDefinition(nil), definition.AuthMethods...)
+	for index := range definition.AuthMethods {
+		if definition.AuthMethods[index].ReaderFeatures == nil {
+			continue
+		}
+		// readerFeatures detaches the auth-method override from registry caller memory.
+		// readerFeatures 将认证方式覆盖与注册表调用方内存分离。
+		readerFeatures := *definition.AuthMethods[index].ReaderFeatures
+		definition.AuthMethods[index].ReaderFeatures = &readerFeatures
+	}
 	definition.PlanOptions = append([]PlanOptionDefinition(nil), definition.PlanOptions...)
 	for index := range definition.PlanOptions {
 		definition.PlanOptions[index].AuthMethodIDs = append([]string(nil), definition.PlanOptions[index].AuthMethodIDs...)

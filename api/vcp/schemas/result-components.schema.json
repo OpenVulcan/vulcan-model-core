@@ -138,6 +138,19 @@
         "usage": {"$ref": "./usage-observation.schema.json"}
       }
     },
+    "webExtractResult": {
+      "type": "object", "additionalProperties": false, "required": ["url", "raw_content"],
+      "properties": {"url": {"type": "string", "format": "uri", "pattern": "^https://"}, "raw_content": {"type": "string"}, "images": {"type": "array", "items": {"type": "string"}}, "favicon": {"type": "string"}}
+    },
+    "webExtractFailure": {
+      "type": "object", "additionalProperties": false, "required": ["url", "error"],
+      "properties": {"url": {"type": "string", "format": "uri", "pattern": "^https://"}, "error": {"type": "string", "minLength": 1}}
+    },
+    "webExtractResponse": {
+      "type": "object", "additionalProperties": false, "required": ["results"],
+      "properties": {"results": {"type": "array", "items": {"$ref": "#/$defs/webExtractResult"}}, "failed_results": {"type": "array", "items": {"$ref": "#/$defs/webExtractFailure"}}, "provider_request_id": {"type": "string"}, "response_time_seconds": {"type": "number", "minimum": 0}, "usage": {"$ref": "./usage-observation.schema.json"}},
+      "anyOf": [{"properties": {"results": {"minItems": 1}}}, {"required": ["failed_results"], "properties": {"failed_results": {"minItems": 1}}}]
+    },
     "transcriptWord": {
       "type": "object", "additionalProperties": false, "required": ["text"],
       "properties": {"text": {"type": "string"}, "start_milliseconds": {"type": "integer", "minimum": 0}, "end_milliseconds": {"type": "integer", "minimum": 0}, "speaker": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}}
@@ -148,11 +161,16 @@
     },
     "transcriptCandidate": {
       "type": "object", "additionalProperties": false, "required": ["candidate_id", "text"],
-      "properties": {"candidate_id": {"type": "string"}, "text": {"type": "string"}, "language": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "segments": {"type": "array", "items": {"$ref": "#/$defs/transcriptSegment"}}}
+      "properties": {"candidate_id": {"type": "string"}, "channel_id": {"type": "integer", "minimum": 0}, "text": {"type": "string"}, "language": {"type": "string"}, "confidence": {"type": "number", "minimum": 0, "maximum": 1}, "segments": {"type": "array", "items": {"$ref": "#/$defs/transcriptSegment"}}}
     },
     "transcript": {
       "type": "object", "additionalProperties": false, "required": ["candidates"],
       "properties": {"duration_milliseconds": {"type": "integer", "minimum": 0}, "candidates": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/transcriptCandidate"}}}
+    },
+    "transcriptionResult": {
+      "type": "object", "additionalProperties": false, "required": ["input_id", "resource_id"],
+      "properties": {"input_id": {"type": "string", "minLength": 1}, "resource_id": {"type": "string", "minLength": 1}, "transcript": {"$ref": "#/$defs/transcript"}, "error_code": {"const": "transcription_failed"}},
+      "oneOf": [{"required": ["transcript"], "not": {"required": ["error_code"]}}, {"required": ["error_code"], "not": {"required": ["transcript"]}}]
     },
     "musicCoverPreparation": {
       "type": "object", "additionalProperties": false, "required": ["preparation_id", "formatted_lyrics", "structure", "audio_duration_seconds", "expires_at"],

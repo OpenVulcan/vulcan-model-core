@@ -675,14 +675,37 @@ type GenerationPolicy struct {
 	// StrictJSONSchema contains a required strict output schema.
 	// StrictJSONSchema 包含必需的严格输出 Schema。
 	StrictJSONSchema json.RawMessage `json:"strict_json_schema,omitempty"`
+	// OutputModalities lists the exact normalized response modalities requested from one conversation model.
+	// OutputModalities 列出向一个会话模型请求的精确规范化响应模态。
+	OutputModalities []string `json:"output_modalities,omitempty"`
+	// AudioOutput configures mixed conversational audio output when audio is explicitly requested.
+	// AudioOutput 在明确请求音频时配置会话混合音频输出。
+	AudioOutput *ConversationAudioOutput `json:"audio_output,omitempty"`
+}
+
+// ConversationAudioOutput contains the exact voice and encoding requested from a mixed-output conversation model.
+// ConversationAudioOutput 包含向混合输出会话模型请求的精确音色与编码。
+type ConversationAudioOutput struct {
+	// VoiceID selects a provider-supported built-in or account-owned voice without guessing aliases.
+	// VoiceID 选择供应商支持的内置或账号自有音色，且不猜测别名。
+	VoiceID string `json:"voice_id"`
+	// OutputFormat selects the exact generated audio file encoding.
+	// OutputFormat 选择精确的生成音频文件编码。
+	OutputFormat string `json:"output_format"`
 }
 
 // ReasoningPolicy contains explicitly requested reasoning behavior.
 // ReasoningPolicy 包含显式请求的推理行为。
 type ReasoningPolicy struct {
+	// Enabled explicitly requests or disables provider reasoning when the selected profile exposes a switch.
+	// Enabled 在所选规格公开开关时显式请求或关闭供应商推理。
+	Enabled *bool `json:"enabled,omitempty"`
 	// Effort identifies a registered reasoning effort level.
 	// Effort 标识已注册推理强度等级。
 	Effort string `json:"effort,omitempty"`
+	// BudgetTokens requests one provider-validated reasoning token budget without implying a context ceiling.
+	// BudgetTokens 请求一个经供应商范围校验的推理 Token 预算，且不暗示上下文上限。
+	BudgetTokens *int64 `json:"budget_tokens,omitempty"`
 	// Summary requests a visible reasoning summary.
 	// Summary 请求可见推理摘要。
 	Summary bool `json:"summary,omitempty"`
@@ -1071,9 +1094,15 @@ type VulcanRequest struct {
 	// CapabilityPolicy controls derived demand decisions.
 	// CapabilityPolicy 控制推导需求决策。
 	CapabilityPolicy CapabilityPolicy `json:"capability_policy"`
+	// ModelTools explicitly selects standard, provider-extra, and Router extension tools.
+	// ModelTools 显式选择标准工具、供应商额外工具和 Router 增强工具。
+	ModelTools ModelToolSelection `json:"model_tools,omitempty"`
 	// Stream requests VCP semantic events.
 	// Stream 请求 VCP 语义事件。
 	Stream bool `json:"stream"`
+	// Budget preserves caller-enforced ceilings for streaming protocol drivers.
+	// Budget 为流式协议 Driver 保留调用方强制上限。
+	Budget OperationBudget `json:"budget"`
 	// RegisteredExtensions lists allowed request extension identifiers.
 	// RegisteredExtensions 列出允许的请求扩展标识。
 	RegisteredExtensions []string `json:"registered_extensions,omitempty"`

@@ -136,7 +136,6 @@ func kimiProviderDefinitions() []providerconfig.ProviderDefinition {
 	// unsupportedFeatures explicitly records management capabilities that do not yet have trusted implementations.
 	// unsupportedFeatures 显式记录尚无受信任实现的管理能力。
 	unsupportedFeatures := providerconfig.ProviderFeatureSet{
-		ModelDiscovery:    providerconfig.SupportUnsupported,
 		PlanReader:        providerconfig.SupportUnsupported,
 		EntitlementReader: providerconfig.SupportUnsupported,
 		AllowanceReader:   providerconfig.SupportUnsupported,
