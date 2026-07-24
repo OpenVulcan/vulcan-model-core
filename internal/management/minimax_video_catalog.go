@@ -35,7 +35,7 @@ func miniMaxVisionModels() []systemModelTemplate {
 // miniMaxTextModels 返回固定 minimax-cli 源码证明的精确默认文本模型。
 func miniMaxTextModels() []systemModelTemplate {
 	return []systemModelTemplate{{
-		upstreamID: "MiniMax-M3", displayName: "MiniMax M3", inputModalities: []string{"text"},
+		upstreamID: "MiniMax-M3", displayName: "MiniMax M3", contextWindow: 1048576, maxInputTokens: 1048576, maxOutputTokens: 32768, inputModalities: []string{"text"},
 		reasoning: catalog.CapabilityNative, toolCalling: catalog.CapabilityNative, parallelTools: catalog.CapabilityUnknown,
 		streamingTools: catalog.CapabilityNative, strictSchema: catalog.CapabilityUnknown, entitlementMode: catalog.EntitlementAllBoundCredentials,
 		operation: vcp.OperationConversationRespond, actionBindingID: providerminimax.ConversationRespondActionBindingID,

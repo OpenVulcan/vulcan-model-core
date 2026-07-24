@@ -560,7 +560,7 @@ func systemModelTemplates(catalogID string) ([]systemModelTemplate, error) {
 	case "google_vertex":
 		// VCP 1.0 has no durable Router-owned output resource store, so media-output Imagen and Gemini Image products are not advertised as executable text models.
 		// VCP 1.0 尚无持久 Router 所有输出资源存储，因此不将媒体输出 Imagen 与 Gemini Image 产品声明为可执行文本模型。
-		return copiedTextModels("vertex", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-pro-preview", "Gemini 3 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}}), nil
+		return geminiVertexTextModels(), nil
 	case "google_antigravity":
 		return copiedTextModels("antigravity", []systemModelIdentity{{"claude-opus-4-6-thinking", "Claude Opus 4.6 (Thinking)", 200000}, {"claude-sonnet-4-6", "Claude Sonnet 4.6 (Thinking)", 200000}, {"gemini-3-flash", "Gemini 3 Flash", 1048576}, {"gemini-3-flash-agent", "Gemini 3.5 Flash (High)", 1048576}, {"gemini-pro-agent", "Gemini 3.1 Pro (High)", 1048576}, {"gemini-3.1-pro-low", "Gemini 3.1 Pro (Low)", 1048576}, {"gpt-oss-120b-medium", "GPT-OSS 120B (Medium)", 114000}, {"gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", 1048576}, {"gemini-3.5-flash-low", "Gemini 3.5 Flash (Medium)", 1048576}, {"gemini-3.5-flash-extra-low", "Gemini 3.5 Flash (Low)", 1048576}}), nil
 	case "xai_api":
@@ -608,10 +608,30 @@ func copiedTextModels(sourceCatalogID string, identities []systemModelIdentity) 
 	return templates
 }
 
-// geminiAPITextModels returns CLIProxyAPI's official Gemini API-key catalog while excluding image-output products that VCP cannot persist yet.
-// geminiAPITextModels 返回 CLIProxyAPI 官方 Gemini API Key 目录，并排除 VCP 当前尚不能持久化的图像输出产品。
+// geminiOfficialTextModels applies the current official Google token limits to one copied Gemini text catalog.
+// geminiOfficialTextModels 将当前 Google 官方 Token 限制应用到一个复制的 Gemini 文本目录。
+func geminiOfficialTextModels(sourceCatalogID string, identities []systemModelIdentity) []systemModelTemplate {
+	// models keeps copied capability evidence while replacing absent token limits with current provider facts.
+	// models 保留复制的能力证据，同时用当前供应商事实替换缺失的 Token 限制。
+	models := copiedTextModels(sourceCatalogID, identities)
+	for index := range models {
+		models[index].contextWindow = 1048576
+		models[index].maxInputTokens = 1048576
+		models[index].maxOutputTokens = 65536
+	}
+	return models
+}
+
+// geminiAPITextModels returns the official Gemini API-key catalog while excluding image-output products that VCP cannot persist yet.
+// geminiAPITextModels 返回官方 Gemini API Key 目录，并排除 VCP 当前尚不能持久化的图像输出产品。
 func geminiAPITextModels() []systemModelTemplate {
-	return copiedTextModels("gemini", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-pro-preview", "Gemini 3 Pro Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash Lite Preview", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
+	return geminiOfficialTextModels("gemini", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-pro-preview", "Gemini 3 Pro Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash Lite Preview", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
+}
+
+// geminiVertexTextModels returns the official Vertex Gemini text catalog with provider token limits.
+// geminiVertexTextModels 返回带有供应商 Token 限制的官方 Vertex Gemini 文本目录。
+func geminiVertexTextModels() []systemModelTemplate {
+	return geminiOfficialTextModels("vertex", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-pro-preview", "Gemini 3 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
 }
 
 // geminiInteractionsModels returns text models plus current native Gemini image actions.

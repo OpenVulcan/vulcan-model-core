@@ -175,13 +175,18 @@ func assertCopiedModelTemplate(t *testing.T, modelCatalogID string, index int, t
 	if slices.Contains(record.SupportedParameters, "tools") {
 		expectedToolCalling = catalog.CapabilityNative
 	}
+	// expectedContextWindow and expected token ceilings begin with the pinned copy and permit only explicit provider-official overrides.
+	// expectedContextWindow 与预期 Token 上限以固定副本为基线，并且仅允许明确的供应商官方覆盖。
 	expectedContextWindow := record.ContextLength
+	expectedMaxInputTokens := int64(0)
 	expectedMaxOutputTokens := record.MaxCompletionTokens
-	if modelCatalogID == "google_ai_studio" && record.ID == "gemini-2.5-flash" {
+	switch modelCatalogID {
+	case "google_ai_studio", "google_interactions", "google_vertex":
 		expectedContextWindow = 1048576
+		expectedMaxInputTokens = 1048576
 		expectedMaxOutputTokens = 65536
 	}
-	if template.upstreamID != record.ID || template.displayName != record.DisplayName || template.contextWindow != expectedContextWindow || template.maxOutputTokens != expectedMaxOutputTokens || template.maxReasoningTokens != expectedMaxReasoningTokens || template.reasoning != expectedReasoning || template.toolCalling != expectedToolCalling {
+	if template.upstreamID != record.ID || template.displayName != record.DisplayName || template.contextWindow != expectedContextWindow || template.maxInputTokens != expectedMaxInputTokens || template.maxOutputTokens != expectedMaxOutputTokens || template.maxReasoningTokens != expectedMaxReasoningTokens || template.reasoning != expectedReasoning || template.toolCalling != expectedToolCalling {
 		t.Fatalf("template[%d] = %#v, source = %#v", index, template, record)
 	}
 }

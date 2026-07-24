@@ -16,6 +16,57 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/vcp"
 )
 
+// TestOfficialGeminiConversationModelsDeclareTokenLimits verifies every published Google conversation entry carries the official limits.
+// TestOfficialGeminiConversationModelsDeclareTokenLimits 验证每个已发布 Google 会话条目都携带官方限制。
+func TestOfficialGeminiConversationModelsDeclareTokenLimits(t *testing.T) {
+	// testCases covers each Google entry point that publishes the shared Gemini text catalog.
+	// testCases 覆盖发布共享 Gemini 文本目录的每个 Google 入口。
+	testCases := []struct {
+		name   string
+		models []systemModelTemplate
+	}{
+		{name: "AI Studio", models: geminiAIStudioModels()},
+		{name: "Interactions", models: geminiInteractionsModels()},
+		{name: "Vertex", models: geminiVertexTextModels()},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			// conversationCount proves operation-specific media templates are excluded without losing a text model.
+			// conversationCount 证明排除操作专属媒体模板时没有丢失文本模型。
+			conversationCount := 0
+			for _, model := range testCase.models {
+				if model.operation != "" && model.operation != vcp.OperationConversationRespond {
+					continue
+				}
+				conversationCount++
+				if model.contextWindow != 1048576 || model.maxInputTokens != 1048576 || model.maxOutputTokens != 65536 {
+					t.Fatalf("%s %s token limits = context:%d input:%d output:%d", testCase.name, model.upstreamID, model.contextWindow, model.maxInputTokens, model.maxOutputTokens)
+				}
+			}
+			if conversationCount != 8 {
+				t.Fatalf("%s conversation model count = %d, want 8", testCase.name, conversationCount)
+			}
+		})
+	}
+}
+
+// TestMiniMaxM3DeclaresConservativeOfficialTokenLimits verifies the M3 catalog records its official context and conservative output ceiling.
+// TestMiniMaxM3DeclaresConservativeOfficialTokenLimits 验证 M3 目录记录官方上下文与保守输出上限。
+func TestMiniMaxM3DeclaresConservativeOfficialTokenLimits(t *testing.T) {
+	// models contains the provider's exact published text-model set.
+	// models 包含供应商精确发布的文本模型集合。
+	models := miniMaxTextModels()
+	if len(models) != 1 {
+		t.Fatalf("MiniMax text model count = %d, want 1", len(models))
+	}
+	// model is the only currently published MiniMax conversation model.
+	// model 是当前唯一发布的 MiniMax 会话模型。
+	model := models[0]
+	if model.upstreamID != "MiniMax-M3" || model.contextWindow != 1048576 || model.maxInputTokens != 1048576 || model.maxOutputTokens != 32768 {
+		t.Fatalf("MiniMax M3 limits = id:%s context:%d input:%d output:%d", model.upstreamID, model.contextWindow, model.maxInputTokens, model.maxOutputTokens)
+	}
+}
+
 // TestAlibabaVerifiedFactsAndPoliciesReachTheInternalCatalog verifies publication filtering never drops provider models or classified operation decisions.
 // TestAlibabaVerifiedFactsAndPoliciesReachTheInternalCatalog 验证发布过滤绝不会丢弃供应商模型或已分类操作决策。
 func TestAlibabaVerifiedFactsAndPoliciesReachTheInternalCatalog(t *testing.T) {
