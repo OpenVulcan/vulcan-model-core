@@ -22,6 +22,9 @@ type Store interface {
 	// SaveCustomDefinitionMigration atomically replaces one custom definition and transitions its complete instance set.
 	// SaveCustomDefinitionMigration 原子替换一个自定义定义并转换其完整实例集合。
 	SaveCustomDefinitionMigration(context.Context, CustomDefinitionMigration) error
+	// DeleteCustomDefinition removes one unchanged custom definition after all owned instances have been deleted.
+	// DeleteCustomDefinition 在全部所属实例删除后移除一个未变化的自定义定义。
+	DeleteCustomDefinition(context.Context, ProviderDefinition) error
 	// GetDefinition resolves one system or custom provider definition.
 	// GetDefinition 解析一个系统或自定义供应商定义。
 	GetDefinition(context.Context, string) (ProviderDefinition, error)
@@ -441,6 +444,33 @@ func (s *MemoryStore) SaveCustomDefinition(ctx context.Context, definition Provi
 		return fmt.Errorf("%w: provider definition %s", ErrAlreadyRegistered, definition.ID)
 	}
 	s.customDefinitions[definition.ID] = cloneProviderDefinition(definition)
+	return nil
+}
+
+// DeleteCustomDefinition removes one exact custom definition only when no provider instance still references it.
+// DeleteCustomDefinition 仅在没有供应商实例继续引用时删除一个精确的自定义定义。
+func (s *MemoryStore) DeleteCustomDefinition(ctx context.Context, definition ProviderDefinition) error {
+	if err := contextError(ctx); err != nil {
+		return err
+	}
+	if definition.Kind != DefinitionKindCustom {
+		return invalid("only custom provider definitions can be deleted")
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	current, exists := s.customDefinitions[definition.ID]
+	if !exists {
+		return fmt.Errorf("%w: provider definition %s", ErrNotFound, definition.ID)
+	}
+	if !reflect.DeepEqual(current, definition) {
+		return invalid("custom provider definition changed concurrently")
+	}
+	for _, instance := range s.instances {
+		if instance.DefinitionID == definition.ID {
+			return invalid("custom provider definition still owns provider instances")
+		}
+	}
+	delete(s.customDefinitions, definition.ID)
 	return nil
 }
 

@@ -1,8 +1,9 @@
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { I18nProvider } from "@/i18n";
+import { I18nProvider, type TranslationKey } from "@/i18n";
 import {
+  credentialBillingLabel,
   credentialPlanLabel,
   ProviderManagementPage,
 } from "@/pages/provider-management-page";
@@ -707,6 +708,49 @@ describe("ProviderManagementPage", () => {
     });
     expect(detectedPlanLabel).toBe("Researcher");
     expect(credentialPlanLabel(undefined, {})).toBeUndefined();
+  });
+
+  // This test verifies exact plans override the declared charging shape and unknown plans use localized stable fallbacks.
+  // 此测试验证精确套餐优先于声明的计费形态，未知套餐则使用本地化稳定回退。
+  it("presents usage billing and unnamed subscriptions without guessing a plan name", () => {
+    const translateBilling = (key: TranslationKey): string =>
+      key === "providers.billingUsage"
+        ? "Pay as you go"
+        : key === "providers.billingSubscription"
+          ? "Plan"
+          : String(key);
+    expect(
+      credentialBillingLabel(
+        undefined,
+        {},
+        { billing_mode: "usage" },
+        translateBilling,
+      ),
+    ).toBe("Pay as you go");
+    expect(
+      credentialBillingLabel(
+        undefined,
+        {},
+        { billing_mode: "subscription" },
+        translateBilling,
+      ),
+    ).toBe("Plan");
+    expect(
+      credentialBillingLabel(
+        undefined,
+        {
+          detected_plan: {
+            plan_code: "researcher",
+            plan_name: "Researcher",
+            status: "active",
+            evidence_source: "provider_api",
+            observed_at: "2026-07-22T04:00:00Z",
+          },
+        },
+        { billing_mode: "subscription" },
+        translateBilling,
+      ),
+    ).toBe("Researcher");
   });
 
   // This test verifies the authorized list is primary and provider filtering precedes exact variant selection.
@@ -2100,9 +2144,9 @@ describe("ProviderManagementPage", () => {
       provider_instance_id: "pvi_antigravity",
       models: [
         {
-          id: "model_gemini_3_pro",
-          upstream_model_id: "gemini-3-pro-preview",
-          display_name: "Gemini 3 Pro",
+          id: "model_gemini_3_1_pro",
+          upstream_model_id: "gemini-pro-agent",
+          display_name: "Gemini 3.1 Pro (High)",
           entitlement_mode: "all_bound_credentials",
           enabled: true,
           authorization_status: "authorized",
@@ -2213,8 +2257,8 @@ describe("ProviderManagementPage", () => {
       "/vulcan/manage/provider-instances/pvi_antigravity/catalog/refresh",
       expect.anything(),
     );
-    expect(screen.getByText("Gemini 3 Pro")).toBeInTheDocument();
-    expect(screen.getByText("gemini-3-pro-preview")).toBeInTheDocument();
+    expect(screen.getByText("Gemini 3.1 Pro (High)")).toBeInTheDocument();
+    expect(screen.getByText("gemini-pro-agent")).toBeInTheDocument();
     expect(screen.getByText("Google One AI credits")).toBeInTheDocument();
     expect(screen.getAllByText("Google Account").length).toBeGreaterThan(1);
     expect(screen.getByText("750 provider_credits")).toBeInTheDocument();

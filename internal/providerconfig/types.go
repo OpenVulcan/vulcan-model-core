@@ -174,6 +174,19 @@ const (
 	PlanAcquisitionManualOptional PlanAcquisitionMode = "manual_optional"
 )
 
+// BillingMode identifies the commercial charging shape of one authentication method.
+// BillingMode 标识一种认证方式对应的商业计费形态。
+type BillingMode string
+
+const (
+	// BillingModeUsage identifies metered API consumption without a subscription membership name.
+	// BillingModeUsage 标识不带订阅会员名称的按量 API 消费。
+	BillingModeUsage BillingMode = "usage"
+	// BillingModeSubscription identifies entitlement supplied by a subscription product.
+	// BillingModeSubscription 标识由订阅产品提供的权益。
+	BillingModeSubscription BillingMode = "subscription"
+)
+
 // RoutingStrategy identifies one same-provider credential selection algorithm.
 // RoutingStrategy 标识一种同供应商凭据选择算法。
 type RoutingStrategy string
@@ -309,6 +322,9 @@ type AuthMethodDefinition struct {
 	// PlanAcquisition declares the trusted plan source for this exact authentication method.
 	// PlanAcquisition 声明该精确认证方式使用的可信套餐来源。
 	PlanAcquisition PlanAcquisitionMode
+	// BillingMode declares whether this authentication method consumes metered API usage or subscription entitlement.
+	// BillingMode 声明该认证方式消费按量 API 用量还是订阅权益。
+	BillingMode BillingMode
 	// ReaderFeatures optionally narrows provider metadata readers for this exact authentication method.
 	// ReaderFeatures 可选地为该精确认证方式收窄供应商元数据读取能力。
 	ReaderFeatures *ProviderFeatureSet

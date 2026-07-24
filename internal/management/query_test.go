@@ -236,7 +236,7 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	if errGroups != nil {
 		t.Fatalf("ListProviderGroups() error = %v", errGroups)
 	}
-	if len(groups) != 9 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.AlibabaGroupID || len(groups[5].ProviderDefinitions) != 7 || groups[6].ID != bootstrap.OpenRouterGroupID || groups[7].ID != bootstrap.MiniMaxGroupID || groups[8].ID != bootstrap.TavilyGroupID {
+	if len(groups) != 10 || groups[0].ID != bootstrap.KimiGroupID || len(groups[0].ProviderDefinitions) != 3 || groups[5].ID != bootstrap.DeepSeekGroupID || len(groups[5].ProviderDefinitions) != 1 || groups[6].ID != bootstrap.AlibabaGroupID || len(groups[6].ProviderDefinitions) != 7 || groups[7].ID != bootstrap.OpenRouterGroupID || groups[8].ID != bootstrap.MiniMaxGroupID || groups[9].ID != bootstrap.TavilyGroupID {
 		t.Fatalf("groups = %#v", groups)
 	}
 	variants := groups[0].ProviderDefinitions
@@ -245,6 +245,13 @@ func TestListProviderGroupsReturnsExactKimiVariants(t *testing.T) {
 	}
 	if variants[0].ModelCatalogID != variants[1].ModelCatalogID || variants[2].ModelCatalogID == variants[0].ModelCatalogID {
 		t.Fatalf("catalog ownership = %#v", variants)
+	}
+	if variants[0].AuthMethods[0].BillingMode != providerconfig.BillingModeUsage || variants[2].AuthMethods[0].BillingMode != providerconfig.BillingModeSubscription {
+		t.Fatalf("Kimi billing modes = %#v", variants)
+	}
+	alibabaVariants := groups[6].ProviderDefinitions
+	if alibabaVariants[2].AuthMethods[0].BillingMode != providerconfig.BillingModeSubscription || alibabaVariants[5].AuthMethods[0].BillingMode != providerconfig.BillingModeUsage {
+		t.Fatalf("Alibaba billing modes = %#v", alibabaVariants)
 	}
 }
 

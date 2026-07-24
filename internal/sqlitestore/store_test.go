@@ -399,6 +399,54 @@ func TestCatalogStoreReadsLegacySnapshotWithoutPoliciesOrRateLimits(t *testing.T
 	}
 }
 
+// TestCatalogStorePurgeRemovesSnapshotAndHistoricalChanges verifies ownership migration leaves no system-catalog rows in SQLite.
+// TestCatalogStorePurgeRemovesSnapshotAndHistoricalChanges 验证所有权迁移不会在 SQLite 中留下系统目录记录。
+func TestCatalogStorePurgeRemovesSnapshotAndHistoricalChanges(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "catalog-purge.db"))
+	if errDatabase != nil {
+		t.Fatalf("open catalog purge database: %v", errDatabase)
+	}
+	defer func() {
+		if errClose := database.Close(); errClose != nil {
+			t.Errorf("close catalog purge database: %v", errClose)
+		}
+	}()
+	store, errStore := NewCatalogStore(database)
+	if errStore != nil {
+		t.Fatalf("create catalog purge store: %v", errStore)
+	}
+	protocols, systems := sqliteTestRegistries(t)
+	configurations, errConfigurations := NewConfigurationStore(database, protocols, systems)
+	if errConfigurations != nil {
+		t.Fatalf("create catalog purge configuration store: %v", errConfigurations)
+	}
+	managementService, errManagementService := management.NewService(configurations, secret.NewMemoryStore(), store)
+	if errManagementService != nil {
+		t.Fatalf("create catalog purge management service: %v", errManagementService)
+	}
+	if _, errInstance := managementService.CreateInstance(ctx, management.CreateInstanceInput{ID: "pvi_sqlite", DefinitionID: "system_sqlite_test", Handle: "purge-sqlite", DisplayName: "Purge SQLite"}); errInstance != nil {
+		t.Fatalf("create catalog purge owner: %v", errInstance)
+	}
+	observedAt := time.Date(2026, 7, 24, 8, 0, 0, 0, time.UTC)
+	if errSave := store.Save(ctx, sqliteTestSnapshot(observedAt)); errSave != nil {
+		t.Fatalf("seed persisted system catalog: %v", errSave)
+	}
+	purged, errPurge := store.Purge(ctx, []string{"pvi_sqlite"})
+	if errPurge != nil || purged != 1 {
+		t.Fatalf("Purge() purged=%d error=%v", purged, errPurge)
+	}
+	for _, table := range []string{"catalog_snapshots", "catalog_changes"} {
+		var rows int
+		if errCount := database.sql.QueryRowContext(ctx, `SELECT COUNT(*) FROM `+table+` WHERE provider_instance_id = ?`, "pvi_sqlite").Scan(&rows); errCount != nil {
+			t.Fatalf("count %s rows: %v", table, errCount)
+		}
+		if rows != 0 {
+			t.Fatalf("%s rows after purge = %d", table, rows)
+		}
+	}
+}
+
 // TestDatabaseConfiguresSQLiteAndPersistsRepositories verifies migration and restart recovery.
 // TestDatabaseConfiguresSQLiteAndPersistsRepositories 校验迁移与重启恢复。
 func TestDatabaseConfiguresSQLiteAndPersistsRepositories(t *testing.T) {

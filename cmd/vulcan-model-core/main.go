@@ -18,6 +18,7 @@ import (
 
 	"github.com/OpenVulcan/vulcan-model-core/internal/access"
 	"github.com/OpenVulcan/vulcan-model-core/internal/bootstrap"
+	"github.com/OpenVulcan/vulcan-model-core/internal/catalogruntime"
 	executioncore "github.com/OpenVulcan/vulcan-model-core/internal/execution"
 	"github.com/OpenVulcan/vulcan-model-core/internal/httpapi"
 	"github.com/OpenVulcan/vulcan-model-core/internal/inputplan"
@@ -25,6 +26,7 @@ import (
 	"github.com/OpenVulcan/vulcan-model-core/internal/provider"
 	provideralibaba "github.com/OpenVulcan/vulcan-model-core/internal/provider/alibaba"
 	provideranthropic "github.com/OpenVulcan/vulcan-model-core/internal/provider/anthropic"
+	providerdeepseek "github.com/OpenVulcan/vulcan-model-core/internal/provider/deepseek"
 	providergoogle "github.com/OpenVulcan/vulcan-model-core/internal/provider/google"
 	providerkimi "github.com/OpenVulcan/vulcan-model-core/internal/provider/kimi"
 	providerminimax "github.com/OpenVulcan/vulcan-model-core/internal/provider/minimax"
@@ -168,8 +170,8 @@ func run(ctx context.Context, args []string) error {
 	if errRegisterProviders := bootstrap.RegisterSystemProviders(systemDefinitions); errRegisterProviders != nil {
 		return fmt.Errorf("register built-in system providers: %w", errRegisterProviders)
 	}
-	// database owns durable non-secret configuration and atomic catalog snapshots.
-	// database 管理持久化非秘密配置与原子目录快照。
+	// database owns durable user configuration, secrets metadata, and custom-provider catalogs.
+	// database 管理持久化用户配置、Secret 元数据与自定义供应商目录。
 	database, errDatabase := sqlitestore.Open(ctx, options.databasePath)
 	if errDatabase != nil {
 		return fmt.Errorf("open model core database: %w", errDatabase)
@@ -185,11 +187,24 @@ func run(ctx context.Context, args []string) error {
 	if errConfigurations != nil {
 		return fmt.Errorf("create provider configuration store: %w", errConfigurations)
 	}
-	// catalogs persists complete provider-scoped model and resource snapshots.
-	// catalogs 持久化完整供应商作用域模型与资源快照。
-	catalogs, errCatalogs := sqlitestore.NewCatalogStore(database)
+	// persistedCatalogs owns only user-created custom-provider model and resource snapshots.
+	// persistedCatalogs 仅拥有用户创建的自定义供应商模型与资源快照。
+	persistedCatalogs, errPersistedCatalogs := sqlitestore.NewCatalogStore(database)
+	if errPersistedCatalogs != nil {
+		return fmt.Errorf("create persistent custom-provider catalog store: %w", errPersistedCatalogs)
+	}
+	purgedSystemCatalogs, errPurgeSystemCatalogs := catalogruntime.PurgePersistedSystemCatalogs(ctx, configurations, persistedCatalogs)
+	if errPurgeSystemCatalogs != nil {
+		return fmt.Errorf("purge historical persisted system catalogs: %w", errPurgeSystemCatalogs)
+	}
+	if purgedSystemCatalogs > 0 {
+		log.Printf("purged %d historical persisted system catalog(s)", purgedSystemCatalogs)
+	}
+	// catalogs keeps code-owned system catalogs in memory and delegates only custom catalogs to SQLite.
+	// catalogs 将代码拥有的系统目录保留在内存，并仅将自定义目录委托给 SQLite。
+	catalogs, errCatalogs := catalogruntime.New(configurations, persistedCatalogs)
 	if errCatalogs != nil {
-		return fmt.Errorf("create provider catalog store: %w", errCatalogs)
+		return fmt.Errorf("create ownership-aware catalog store: %w", errCatalogs)
 	}
 	// routingStates persists inherited scheduling policy and exact credential-model cooldowns.
 	// routingStates 持久化继承的调度策略与精确凭据模型冷却状态。
@@ -205,6 +220,13 @@ func run(ctx context.Context, args []string) error {
 	}
 	if reconciledMiniMaxOrigins > 0 {
 		log.Printf("reconciled %d persisted MiniMax provider Origin(s)", reconciledMiniMaxOrigins)
+	}
+	loadedSystemCatalogs, errLoadSystemCatalogs := management.LoadSystemCatalogs(ctx, configurations, catalogs)
+	if errLoadSystemCatalogs != nil {
+		return fmt.Errorf("load runtime system catalogs: %w", errLoadSystemCatalogs)
+	}
+	if loadedSystemCatalogs > 0 {
+		log.Printf("loaded %d code-owned system catalog(s) into runtime memory", loadedSystemCatalogs)
 	}
 	// reconciledAlibabaCatalogs upgrades historical Alibaba snapshots to the complete explicit-policy baseline before any resolver or management query reads them.
 	// reconciledAlibabaCatalogs 在任何 Resolver 或管理查询读取历史 Alibaba 快照前，将其升级到完整的显式策略基线。
@@ -377,6 +399,19 @@ func run(ctx context.Context, args []string) error {
 	}
 	if errRegisterTavilyMetadata := metadataDrivers.Register(tavilyMetadataDriver); errRegisterTavilyMetadata != nil {
 		return fmt.Errorf("register Tavily metadata driver: %w", errRegisterTavilyMetadata)
+	}
+	deepSeekDefinition, existsDeepSeekDefinition := systemDefinitions.Lookup(bootstrap.DeepSeekAPIDefinitionID)
+	if !existsDeepSeekDefinition {
+		return errors.New("DeepSeek system definition is missing")
+	}
+	// deepSeekAllowanceDriver reads the official balance endpoint without exposing protected API keys.
+	// deepSeekAllowanceDriver 读取官方余额端点且不暴露受保护 API Key。
+	deepSeekAllowanceDriver, errDeepSeekAllowanceDriver := providerdeepseek.NewAllowanceDriver(deepSeekDefinition, secrets, &http.Client{Timeout: 30 * time.Second})
+	if errDeepSeekAllowanceDriver != nil {
+		return fmt.Errorf("create DeepSeek allowance driver: %w", errDeepSeekAllowanceDriver)
+	}
+	if errRegisterDeepSeekAllowance := metadataDrivers.Register(deepSeekAllowanceDriver); errRegisterDeepSeekAllowance != nil {
+		return fmt.Errorf("register DeepSeek allowance driver: %w", errRegisterDeepSeekAllowance)
 	}
 	antigravityDefinition, existsAntigravityDefinition := systemDefinitions.Lookup(bootstrap.GoogleAntigravityDefinitionID)
 	if !existsAntigravityDefinition {
@@ -770,6 +805,9 @@ func run(ctx context.Context, args []string) error {
 	}
 	if errDrivers := bootstrap.RegisterTavilyExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
 		return fmt.Errorf("register Tavily execution drivers: %w", errDrivers)
+	}
+	if errDrivers := bootstrap.RegisterDeepSeekExecutionDrivers(executionDrivers, openPlatformTransport); errDrivers != nil {
+		return fmt.Errorf("register DeepSeek execution drivers: %w", errDrivers)
 	}
 	if errFactory := bootstrap.RegisterCustomExecutionDriverFactory(executionDrivers, openPlatformTransport); errFactory != nil {
 		return fmt.Errorf("register custom compatibility execution factory: %w", errFactory)

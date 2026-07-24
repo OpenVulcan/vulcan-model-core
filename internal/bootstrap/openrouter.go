@@ -25,7 +25,7 @@ func registerOpenRouterProviderCatalog(registry *providerconfig.SystemRegistry) 
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{ID: OpenRouterGroupID, DisplayName: "OpenRouter", Description: "OpenRouter model routing API with typed native capability actions.", DescriptionKey: "providers.openrouter.description", SortOrder: 70, Revision: 1}); errGroup != nil {
 		return fmt.Errorf("register OpenRouter provider group: %w", errGroup)
 	}
-	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true}
+	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, BillingMode: providerconfig.BillingModeUsage}
 	features := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportUnsupported}
 	definition := providerDefinition(OpenRouterAPIDefinitionID, "OpenRouter API", OpenRouterGroupID, "API", "OpenRouter API with typed image, video, non-realtime speech, embedding, and rerank execution.", "providers.openrouter.apiDescription", "openrouter_api", 10, "openrouter", provideropenrouter.EmbeddingProtocolProfileID, "openrouter_embeddings", "https://openrouter.ai/api", true, []providerconfig.AuthMethodDefinition{auth}, features)
 	definition.ActionBindings = []providerconfig.ProviderActionBinding{

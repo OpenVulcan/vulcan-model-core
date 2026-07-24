@@ -278,6 +278,9 @@ func (a AuthMethodDefinition) Validate() error {
 	if a.PlanAcquisition != "" && !validPlanAcquisitionMode(a.PlanAcquisition) {
 		return invalid("auth method plan acquisition mode %q is invalid", a.PlanAcquisition)
 	}
+	if a.BillingMode != "" && !validBillingMode(a.BillingMode) {
+		return invalid("auth method billing mode %q is invalid", a.BillingMode)
+	}
 	if a.ReaderFeatures != nil {
 		if errFeatures := a.ReaderFeatures.Validate(); errFeatures != nil {
 			return fmt.Errorf("auth method %q reader features: %w", a.ID, errFeatures)
@@ -1271,6 +1274,17 @@ func validAuthMethodType(authMethod AuthMethodType) bool {
 func validPlanAcquisitionMode(mode PlanAcquisitionMode) bool {
 	switch mode {
 	case PlanAcquisitionUnavailable, PlanAcquisitionProviderDetected, PlanAcquisitionManualRequired, PlanAcquisitionManualOptional:
+		return true
+	default:
+		return false
+	}
+}
+
+// validBillingMode reports whether one charging shape belongs to the closed vocabulary.
+// validBillingMode 报告一个计费形态是否属于封闭词汇表。
+func validBillingMode(mode BillingMode) bool {
+	switch mode {
+	case BillingModeUsage, BillingModeSubscription:
 		return true
 	default:
 		return false

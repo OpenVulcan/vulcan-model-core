@@ -547,6 +547,8 @@ func systemModelTemplates(catalogID string) ([]systemModelTemplate, error) {
 		return miniMaxModels(), nil
 	case "tavily_search_api":
 		return nil, nil
+	case "deepseek_api":
+		return deepSeekModels(), nil
 	case "openai_codex_api_key":
 		return codexSystemModels(catalog.EntitlementAllBoundCredentials), nil
 	case "openai_codex_account":
@@ -625,13 +627,13 @@ func geminiOfficialTextModels(sourceCatalogID string, identities []systemModelId
 // geminiAPITextModels returns the official Gemini API-key catalog while excluding image-output products that VCP cannot persist yet.
 // geminiAPITextModels 返回官方 Gemini API Key 目录，并排除 VCP 当前尚不能持久化的图像输出产品。
 func geminiAPITextModels() []systemModelTemplate {
-	return geminiOfficialTextModels("gemini", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-pro-preview", "Gemini 3 Pro Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-flash-lite-preview", "Gemini 3.1 Flash Lite Preview", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
+	return geminiOfficialTextModels("gemini", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
 }
 
 // geminiVertexTextModels returns the official Vertex Gemini text catalog with provider token limits.
 // geminiVertexTextModels 返回带有供应商 Token 限制的官方 Vertex Gemini 文本目录。
 func geminiVertexTextModels() []systemModelTemplate {
-	return geminiOfficialTextModels("vertex", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-pro-preview", "Gemini 3 Pro Preview", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
+	return geminiOfficialTextModels("vertex", []systemModelIdentity{{"gemini-2.5-pro", "Gemini 2.5 Pro", 0}, {"gemini-2.5-flash", "Gemini 2.5 Flash", 0}, {"gemini-2.5-flash-lite", "Gemini 2.5 Flash Lite", 0}, {"gemini-3-flash-preview", "Gemini 3 Flash Preview", 0}, {"gemini-3.1-pro-preview", "Gemini 3.1 Pro Preview", 0}, {"gemini-3.1-flash-lite", "Gemini 3.1 Flash Lite", 0}, {"gemini-3.5-flash", "Gemini 3.5 Flash", 0}})
 }
 
 // geminiInteractionsModels returns text models plus current native Gemini image actions.

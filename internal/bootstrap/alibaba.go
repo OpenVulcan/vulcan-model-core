@@ -256,15 +256,18 @@ func alibabaProviderDefinitions() []providerconfig.ProviderDefinition {
 		EntitlementReader: providerconfig.SupportUnsupported,
 		AllowanceReader:   providerconfig.SupportUnsupported,
 	}
-	// staticCatalogAPIKey is the sole executable credential for every Alibaba static product catalog.
-	// staticCatalogAPIKey 是每个 Alibaba 静态产品目录唯一的可执行凭据。
-	staticCatalogAPIKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, ReaderFeatures: &staticCatalogFeatures}
+	// subscriptionAPIKey is the sole executable credential for Alibaba Coding Plan and Token Plan products.
+	// subscriptionAPIKey 是 Alibaba Coding Plan 与 Token Plan 产品唯一的可执行凭据。
+	subscriptionAPIKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, BillingMode: providerconfig.BillingModeSubscription, ReaderFeatures: &staticCatalogFeatures}
+	// usageAPIKey is the metered credential for Alibaba Cloud Model Studio products.
+	// usageAPIKey 是 Alibaba Cloud Model Studio 产品的按量计费凭据。
+	usageAPIKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, BillingMode: providerconfig.BillingModeUsage, ReaderFeatures: &staticCatalogFeatures}
 	definitions := []providerconfig.ProviderDefinition{
-		alibabaProviderDefinition(AlibabaCodingPlanCNDefinitionID, "Alibaba Coding Plan CN", "Coding Plan CN", "Alibaba Coding Plan service hosted at the CN site.", "providers.alibaba.codingPlanCNDescription", "alibaba_coding_plan_cn", "coding_plan_cn", "https://coding.dashscope.aliyuncs.com", "CN", 10, staticCatalogAPIKey, staticCatalogFeatures),
-		alibabaProviderDefinition(AlibabaCodingPlanGlobalDefinitionID, "Alibaba Coding Plan Global", "Coding Plan Global", "Alibaba Coding Plan service hosted at the Global site.", "providers.alibaba.codingPlanGlobalDescription", "alibaba_coding_plan_global", "coding_plan_global", "https://coding-intl.dashscope.aliyuncs.com", "Global", 20, staticCatalogAPIKey, staticCatalogFeatures),
-		alibabaProviderDefinition(AlibabaTokenPlanPersonalCNDefinitionID, "Alibaba Token Plan Personal CN", "Token Plan Personal CN", "Personal Token Plan service hosted at the CN site.", "providers.alibaba.tokenPlanPersonalCNDescription", "alibaba_token_plan_personal_cn", "token_plan_personal_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com", "CN", 30, staticCatalogAPIKey, staticCatalogFeatures),
-		alibabaProviderDefinition(AlibabaTokenPlanTeamCNDefinitionID, "Alibaba Token Plan Team CN", "Token Plan Team CN", "Team Token Plan service hosted at the CN site.", "providers.alibaba.tokenPlanTeamCNDescription", "alibaba_token_plan_team_cn", "token_plan_team_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com", "CN", 40, staticCatalogAPIKey, staticCatalogFeatures),
-		alibabaProviderDefinition(AlibabaTokenPlanTeamGlobalDefinitionID, "Alibaba Token Plan Team Global", "Token Plan Team Global", "Team Token Plan service hosted at the Global site.", "providers.alibaba.tokenPlanTeamGlobalDescription", "alibaba_token_plan_team_global", "token_plan_team_global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com", "Global", 50, staticCatalogAPIKey, staticCatalogFeatures),
+		alibabaProviderDefinition(AlibabaCodingPlanCNDefinitionID, "Alibaba Coding Plan CN", "Coding Plan CN", "Alibaba Coding Plan service hosted at the CN site.", "providers.alibaba.codingPlanCNDescription", "alibaba_coding_plan_cn", "coding_plan_cn", "https://coding.dashscope.aliyuncs.com", "CN", 10, subscriptionAPIKey, staticCatalogFeatures),
+		alibabaProviderDefinition(AlibabaCodingPlanGlobalDefinitionID, "Alibaba Coding Plan Global", "Coding Plan Global", "Alibaba Coding Plan service hosted at the Global site.", "providers.alibaba.codingPlanGlobalDescription", "alibaba_coding_plan_global", "coding_plan_global", "https://coding-intl.dashscope.aliyuncs.com", "Global", 20, subscriptionAPIKey, staticCatalogFeatures),
+		alibabaProviderDefinition(AlibabaTokenPlanPersonalCNDefinitionID, "Alibaba Token Plan Personal CN", "Token Plan Personal CN", "Personal Token Plan service hosted at the CN site.", "providers.alibaba.tokenPlanPersonalCNDescription", "alibaba_token_plan_personal_cn", "token_plan_personal_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com", "CN", 30, subscriptionAPIKey, staticCatalogFeatures),
+		alibabaProviderDefinition(AlibabaTokenPlanTeamCNDefinitionID, "Alibaba Token Plan Team CN", "Token Plan Team CN", "Team Token Plan service hosted at the CN site.", "providers.alibaba.tokenPlanTeamCNDescription", "alibaba_token_plan_team_cn", "token_plan_team_cn", "https://token-plan.cn-beijing.maas.aliyuncs.com", "CN", 40, subscriptionAPIKey, staticCatalogFeatures),
+		alibabaProviderDefinition(AlibabaTokenPlanTeamGlobalDefinitionID, "Alibaba Token Plan Team Global", "Token Plan Team Global", "Team Token Plan service hosted at the Global site.", "providers.alibaba.tokenPlanTeamGlobalDescription", "alibaba_token_plan_team_global", "token_plan_team_global", "https://token-plan.ap-southeast-1.maas.aliyuncs.com", "Global", 50, subscriptionAPIKey, staticCatalogFeatures),
 	}
 	for definitionIndex := range definitions {
 		switch definitions[definitionIndex].ID {
@@ -290,8 +293,8 @@ func alibabaProviderDefinitions() []providerconfig.ProviderDefinition {
 		}
 	}
 	definitions = append(definitions,
-		alibabaEmbeddingProviderDefinition(AlibabaModelStudioCNDefinitionID, "Alibaba Cloud Model Studio CN", "Model Studio CN", "Alibaba Cloud Model Studio compatible embedding API hosted at the CN site.", "providers.alibaba.modelStudioCNDescription", "alibaba_model_studio_cn", providerconfig.EndpointPreset{ID: "model_studio_cn", BaseURL: "https://dashscope.aliyuncs.com", Region: "CN"}, 60, staticCatalogAPIKey, staticCatalogFeatures),
-		alibabaEmbeddingProviderDefinition(AlibabaModelStudioGlobalDefinitionID, "Alibaba Cloud Model Studio Singapore", "Model Studio Singapore", "Alibaba Cloud Model Studio API hosted in Singapore and visible from the domestic console site.", "providers.alibaba.modelStudioSingaporeDescription", "alibaba_model_studio_sg_domestic", providerconfig.EndpointPreset{ID: "model_studio_singapore", BaseURL: "https://dashscope-intl.aliyuncs.com", Region: "Singapore"}, 70, staticCatalogAPIKey, staticCatalogFeatures),
+		alibabaEmbeddingProviderDefinition(AlibabaModelStudioCNDefinitionID, "Alibaba Cloud Model Studio CN", "Model Studio CN", "Alibaba Cloud Model Studio compatible embedding API hosted at the CN site.", "providers.alibaba.modelStudioCNDescription", "alibaba_model_studio_cn", providerconfig.EndpointPreset{ID: "model_studio_cn", BaseURL: "https://dashscope.aliyuncs.com", Region: "CN"}, 60, usageAPIKey, staticCatalogFeatures),
+		alibabaEmbeddingProviderDefinition(AlibabaModelStudioGlobalDefinitionID, "Alibaba Cloud Model Studio Singapore", "Model Studio Singapore", "Alibaba Cloud Model Studio API hosted in Singapore and visible from the domestic console site.", "providers.alibaba.modelStudioSingaporeDescription", "alibaba_model_studio_sg_domestic", providerconfig.EndpointPreset{ID: "model_studio_singapore", BaseURL: "https://dashscope-intl.aliyuncs.com", Region: "Singapore"}, 70, usageAPIKey, staticCatalogFeatures),
 	)
 	return definitions
 }

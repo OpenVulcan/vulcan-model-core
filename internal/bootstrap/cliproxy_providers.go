@@ -383,16 +383,16 @@ func xaiAccountResponsesCapabilities() protocolxai.ProfileCapabilities {
 func cliProxyProviderDefinitions() []providerconfig.ProviderDefinition {
 	// apiKey represents manually issued provider API keys.
 	// apiKey 表示供应商手动签发的 API Key。
-	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeUsage}
 	// oauth represents refreshable account authorization without a proven commercial-plan reader.
 	// oauth 表示没有已证实商业套餐读取器的可刷新账号授权。
-	oauth := providerconfig.AuthMethodDefinition{ID: "oauth", Type: providerconfig.AuthMethodOAuth, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	oauth := providerconfig.AuthMethodDefinition{ID: "oauth", Type: providerconfig.AuthMethodOAuth, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeSubscription}
 	// deviceFlow represents refreshable RFC 8628 account authorization.
 	// deviceFlow 表示可刷新的 RFC 8628 账号授权。
-	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeSubscription}
 	// serviceAccount represents one uploaded Google-owned RSA service-account document.
 	// serviceAccount 表示一个上传的 Google 所有 RSA 服务账号文档。
-	serviceAccount := providerconfig.AuthMethodDefinition{ID: "service_account", Type: providerconfig.AuthMethodServiceAccount, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	serviceAccount := providerconfig.AuthMethodDefinition{ID: "service_account", Type: providerconfig.AuthMethodServiceAccount, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeUsage}
 	// codexOAuth and codexDeviceFlow derive a commercial plan from the protected provider identity token.
 	// codexOAuth 与 codexDeviceFlow 从受保护的供应商身份 Token 派生商业套餐。
 	codexOAuth := oauth

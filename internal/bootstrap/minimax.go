@@ -33,10 +33,10 @@ func registerMiniMaxProviderCatalog(registry *providerconfig.SystemRegistry) err
 	}
 	// auth describes raw API keys that remain bound to the operator-selected regional variant.
 	// auth 描述始终绑定到操作员所选区域变体的原始 API Key。
-	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeUsage}
 	// deviceFlow is region-specific and obtains quota from the same selected API Origin without region probing.
 	// deviceFlow 按区域区分，并从同一个所选 API Origin 获取额度且不探测区域。
-	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeSubscription}
 	features := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportUnsupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportSupported}
 	definitions := []providerconfig.ProviderDefinition{
 		miniMaxProviderDefinition(MiniMaxGlobalDefinitionID, "MiniMax Global", "Global", "MiniMax Global multimodal API services.", "providers.minimax.globalDescription", 10, "https://api.minimax.io", "Global", []providerconfig.AuthMethodDefinition{auth, deviceFlow}, features),

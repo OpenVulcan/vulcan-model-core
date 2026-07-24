@@ -133,6 +133,9 @@ export interface ProviderAuthMethod {
     | "manual_required"
     | "manual_optional"
     | "unavailable";
+  // billing_mode identifies metered API usage or subscription-backed entitlement.
+  // billing_mode 标识按量 API 用量或订阅权益。
+  billing_mode?: "usage" | "subscription";
   // reader_features contains the exact reader surface for this authentication method after server-side narrowing.
   // reader_features 包含此认证方式经服务端收窄后的精确读取能力面。
   reader_features: ProviderFeatures;
@@ -1389,6 +1392,7 @@ const providerAuthMethodSchema = z.object({
     ])
     .optional()
     .default("unavailable"),
+  billing_mode: z.enum(["usage", "subscription"]).optional(),
   reader_features: providerFeaturesSchema,
 });
 
@@ -2314,6 +2318,26 @@ export class ProviderCredentialRefreshError extends Error {
   }
 }
 
+// CustomProviderDeletionError preserves the stable server decision that distinguishes confirmation-required deletion from ordinary failures.
+// CustomProviderDeletionError 保留稳定的服务端删除决策，用于区分需要确认的删除与普通失败。
+export class CustomProviderDeletionError extends Error {
+  // code is the stable management error identifier.
+  // code 是稳定的管理错误标识。
+  readonly code: string;
+  // status is the HTTP status returned by the management endpoint.
+  // status 是管理入口返回的 HTTP 状态。
+  readonly status: number;
+
+  // constructor creates one typed custom-provider deletion failure without retaining response bodies.
+  // constructor 创建一个不保留响应正文的强类型自定义供应商删除失败。
+  constructor(code: string, status: number) {
+    super(`Custom provider deletion failed with status ${status}`);
+    this.name = "CustomProviderDeletionError";
+    this.code = code;
+    this.status = status;
+  }
+}
+
 // providerInstanceSchema validates one management-safe configured provider.
 // providerInstanceSchema 校验一个管理安全的已配置供应商。
 const providerInstanceSchema = z.object({
@@ -3097,6 +3121,33 @@ export async function deleteProviderCredential(
     throw new Error(
       `provider credential deletion failed with status ${response.status}`,
     );
+}
+
+// deleteCustomProviderDefinition deletes one user-owned provider graph and includes credentials only after explicit confirmation.
+// deleteCustomProviderDefinition 删除一个用户拥有的供应商图，并且仅在显式确认后包含凭据。
+export async function deleteCustomProviderDefinition(
+  managementAuthToken: string,
+  providerDefinitionID: string,
+  deleteCredentials: boolean,
+): Promise<void> {
+  const query = deleteCredentials ? "?delete_credentials=true" : "";
+  const response = await fetch(
+    `/vulcan/manage/provider-definitions/${encodeURIComponent(providerDefinitionID)}${query}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${managementAuthToken}` },
+    },
+  );
+  if (response.ok) return;
+  let code = "custom_provider_deletion_failed";
+  try {
+    const parsed = controlErrorResponseSchema.safeParse(await response.json());
+    if (parsed.success) code = parsed.data.error;
+  } catch {
+    // The stable local fallback intentionally avoids retaining an unvalidated response body.
+    // 稳定的本地回退有意避免保留未经校验的响应正文。
+  }
+  throw new CustomProviderDeletionError(code, response.status);
 }
 
 // onboardCustomProvider submits the complete compatibility definition and initial model through one atomic management command.

@@ -56,8 +56,8 @@ type copiedCatalogParityCase struct {
 	// sourceCatalogID selects the verbatim models.json array.
 	// sourceCatalogID 选择原样 models.json 数组。
 	sourceCatalogID string
-	// excludedModelIDs lists media-output products that VCP cannot yet persist safely.
-	// excludedModelIDs 列出 VCP 当前尚不能安全持久化的媒体输出产品。
+	// excludedModelIDs lists unsupported media-output products and provider-retired model identities.
+	// excludedModelIDs 列出不受支持的媒体输出产品及供应商已弃用模型身份。
 	excludedModelIDs []string
 	// additionalModelIDs lists models added from newer provider-official evidence rather than the pinned CLIProxyAPI snapshot.
 	// additionalModelIDs 列出来自更新供应商官方证据而非固定 CLIProxyAPI 快照的模型。
@@ -76,9 +76,9 @@ func TestSystemModelTemplatesMatchCopiedCLIProxyModels(t *testing.T) {
 		{modelCatalogID: "openai_codex_account", sourceCatalogID: "codex-pro"},
 		{modelCatalogID: "anthropic_api", sourceCatalogID: "claude"},
 		{modelCatalogID: "anthropic_claude_code", sourceCatalogID: "claude"},
-		{modelCatalogID: "google_ai_studio", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}, additionalModelIDs: []string{"gemini-embedding-2"}, additionalOperationCount: 6},
-		{modelCatalogID: "google_interactions", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}, additionalModelIDs: []string{"gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"}, additionalOperationCount: 2},
-		{modelCatalogID: "google_vertex", sourceCatalogID: "vertex", excludedModelIDs: []string{"gemini-2.5-flash-image", "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001", "imagen-3.0-generate-002", "imagen-3.0-fast-generate-001", "imagen-4.0-fast-generate-001"}},
+		{modelCatalogID: "google_ai_studio", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}, additionalModelIDs: []string{"gemini-embedding-2"}, additionalOperationCount: 6},
+		{modelCatalogID: "google_interactions", sourceCatalogID: "gemini", excludedModelIDs: []string{"gemini-3-pro-preview", "gemini-3.1-flash-lite-preview", "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview"}, additionalModelIDs: []string{"gemini-3.1-flash-tts-preview", "gemini-2.5-flash-preview-tts", "gemini-2.5-pro-preview-tts"}, additionalOperationCount: 2},
+		{modelCatalogID: "google_vertex", sourceCatalogID: "vertex", excludedModelIDs: []string{"gemini-3-pro-preview", "gemini-2.5-flash-image", "gemini-3.1-flash-image-preview", "gemini-3-pro-image-preview", "imagen-4.0-generate-001", "imagen-4.0-ultra-generate-001", "imagen-3.0-generate-002", "imagen-3.0-fast-generate-001", "imagen-4.0-fast-generate-001"}},
 		{modelCatalogID: "google_antigravity", sourceCatalogID: "antigravity", excludedModelIDs: []string{"gemini-3.1-flash-image"}},
 		{modelCatalogID: "xai_api", sourceCatalogID: "xai", additionalOperationCount: 7},
 		{modelCatalogID: "xai_account", sourceCatalogID: "xai"},

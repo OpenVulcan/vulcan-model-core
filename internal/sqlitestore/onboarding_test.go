@@ -1,7 +1,9 @@
 package sqlitestore
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"testing"
@@ -143,6 +145,77 @@ func TestProviderConfigurationLifecycleIsCredentialIndependent(t *testing.T) {
 	}
 	if _, errInstance := store.GetInstance(ctx, configuration.Instance.ID); !errors.Is(errInstance, providerconfig.ErrNotFound) {
 		t.Fatalf("compensated provider instance error = %v", errInstance)
+	}
+}
+
+// TestDeleteCustomDefinitionRequiresAllSQLiteInstancesRemoved verifies the definition compare-and-delete boundary rejects referenced rows.
+// TestDeleteCustomDefinitionRequiresAllSQLiteInstancesRemoved 验证定义比较删除边界会拒绝仍被实例引用的记录。
+func TestDeleteCustomDefinitionRequiresAllSQLiteInstancesRemoved(t *testing.T) {
+	ctx := context.Background()
+	database, errDatabase := Open(ctx, filepath.Join(t.TempDir(), "custom-definition-deletion.db"))
+	if errDatabase != nil {
+		t.Fatalf("Open() error = %v", errDatabase)
+	}
+	defer database.Close()
+	protocols := providerconfig.NewProtocolRegistry()
+	if errProtocols := bootstrap.RegisterProtocolProfiles(protocols); errProtocols != nil {
+		t.Fatalf("RegisterProtocolProfiles() error = %v", errProtocols)
+	}
+	systems, errSystems := providerconfig.NewSystemRegistry(protocols)
+	if errSystems != nil {
+		t.Fatalf("NewSystemRegistry() error = %v", errSystems)
+	}
+	if errProviders := bootstrap.RegisterSystemProviders(systems); errProviders != nil {
+		t.Fatalf("RegisterSystemProviders() error = %v", errProviders)
+	}
+	store, errStore := NewConfigurationStore(database, protocols, systems)
+	if errStore != nil {
+		t.Fatalf("NewConfigurationStore() error = %v", errStore)
+	}
+	onboarding := sqliteCustomOnboarding("custom_delete", "pvi_custom_delete", "custom-delete", "ep_custom_delete", "cred_unused", "bind_unused")
+	if errDefinition := store.SaveCustomDefinition(ctx, onboarding.Definition); errDefinition != nil {
+		t.Fatalf("SaveCustomDefinition() error = %v", errDefinition)
+	}
+	onboarding.Instance.Status = providerconfig.LifecycleDraft
+	configuration := providerconfig.ProviderConfiguration{Instance: onboarding.Instance, Endpoints: []providerconfig.Endpoint{onboarding.Endpoint}}
+	if errConfiguration := store.SaveProviderConfiguration(ctx, configuration); errConfiguration != nil {
+		t.Fatalf("SaveProviderConfiguration() error = %v", errConfiguration)
+	}
+	if errReferencedDelete := store.DeleteCustomDefinition(ctx, onboarding.Definition); errReferencedDelete == nil {
+		t.Fatal("DeleteCustomDefinition() with an instance error = nil, want rejection")
+	}
+	if errConfigurationDelete := store.DeleteProviderConfiguration(ctx, configuration); errConfigurationDelete != nil {
+		t.Fatalf("DeleteProviderConfiguration() error = %v", errConfigurationDelete)
+	}
+	// persistedPayload captures the exact historical JSON bytes so the test can preserve semantics while changing serialization.
+	// persistedPayload 捕获历史 JSON 的精确字节，以便测试在保持语义不变的同时改变序列化形式。
+	var persistedPayload []byte
+	if errPayload := database.sql.QueryRowContext(
+		ctx,
+		`SELECT payload FROM custom_provider_definitions WHERE id = ?`,
+		onboarding.Definition.ID,
+	).Scan(&persistedPayload); errPayload != nil {
+		t.Fatalf("read custom definition payload: %v", errPayload)
+	}
+	// indentedPayload represents legacy semantically equivalent JSON that must not invalidate revision-based deletion.
+	// indentedPayload 表示语义等价的历史 JSON，不得导致基于修订号的删除失效。
+	var indentedPayload bytes.Buffer
+	if errIndent := json.Indent(&indentedPayload, persistedPayload, "", "  "); errIndent != nil {
+		t.Fatalf("indent custom definition payload: %v", errIndent)
+	}
+	if _, errUpdate := database.sql.ExecContext(
+		ctx,
+		`UPDATE custom_provider_definitions SET payload = ? WHERE id = ?`,
+		indentedPayload.Bytes(),
+		onboarding.Definition.ID,
+	); errUpdate != nil {
+		t.Fatalf("rewrite custom definition payload: %v", errUpdate)
+	}
+	if errDefinitionDelete := store.DeleteCustomDefinition(ctx, onboarding.Definition); errDefinitionDelete != nil {
+		t.Fatalf("DeleteCustomDefinition() error = %v", errDefinitionDelete)
+	}
+	if _, errDefinition := store.GetDefinition(ctx, onboarding.Definition.ID); !errors.Is(errDefinition, providerconfig.ErrNotFound) {
+		t.Fatalf("GetDefinition() after deletion error = %v, want ErrNotFound", errDefinition)
 	}
 }
 

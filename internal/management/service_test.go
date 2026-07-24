@@ -137,6 +137,86 @@ func TestConfigureProviderThenAttachCredentialSeparatesProviderAndAccountLifecyc
 	}
 }
 
+// TestDeleteCustomDefinitionRequiresCredentialConfirmation verifies direct deletion is safe and confirmed deletion removes the complete custom graph.
+// TestDeleteCustomDefinitionRequiresCredentialConfirmation 验证直接删除安全受限，且确认删除会移除完整自定义图。
+func TestDeleteCustomDefinitionRequiresCredentialConfirmation(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, secrets := managementTestService(t)
+	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
+		ID: "custom_delete_confirmation", DisplayName: "Delete Confirmation", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
+	})
+	if errDefinition != nil {
+		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
+	}
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
+		DefinitionID: definition.ID, Handle: "delete-confirmation", DisplayName: "Delete Confirmation", BaseURL: "https://delete.example/v1",
+		InitialModel: &InitialProviderModelInput{UpstreamModelID: "delete-model", DisplayName: "Delete Model", ContextWindow: 131072, MaxOutputTokens: 8192, ToolCalling: catalog.CapabilityNative, Reasoning: catalog.CapabilityNative},
+	})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
+	}
+	attached, errAttach := service.AttachCredential(ctx, AddCredentialInput{
+		ProviderInstanceID: configured.Configuration.Instance.ID, AuthMethodID: "default", Label: "Primary", Secret: []byte("delete-secret"),
+	})
+	if errAttach != nil {
+		t.Fatalf("AttachCredential() error = %v", errAttach)
+	}
+	errUnconfirmed := service.DeleteCustomDefinition(ctx, definition.ID, false)
+	if !errors.Is(errUnconfirmed, ErrCustomDefinitionHasCredentials) {
+		t.Fatalf("DeleteCustomDefinition(unconfirmed) error = %v, want ErrCustomDefinitionHasCredentials", errUnconfirmed)
+	}
+	if _, errCredential := configurations.ListCredentials(ctx, configured.Configuration.Instance.ID); errCredential != nil {
+		t.Fatalf("ListCredentials() after rejected deletion error = %v", errCredential)
+	}
+	if errDelete := service.DeleteCustomDefinition(ctx, definition.ID, true); errDelete != nil {
+		t.Fatalf("DeleteCustomDefinition(confirmed) error = %v", errDelete)
+	}
+	if _, errDeletedDefinition := configurations.GetDefinition(ctx, definition.ID); !errors.Is(errDeletedDefinition, providerconfig.ErrNotFound) {
+		t.Fatalf("GetDefinition() after deletion error = %v, want ErrNotFound", errDeletedDefinition)
+	}
+	if _, errDeletedInstance := configurations.GetInstance(ctx, configured.Configuration.Instance.ID); !errors.Is(errDeletedInstance, providerconfig.ErrNotFound) {
+		t.Fatalf("GetInstance() after deletion error = %v, want ErrNotFound", errDeletedInstance)
+	}
+	if secrets.Count() != 0 {
+		t.Fatalf("secret count after confirmed deletion = %d, want 0 for credential %s", secrets.Count(), attached.Credential.ID)
+	}
+}
+
+// TestDeleteCustomDefinitionWithoutCredentialsIsImmediate verifies a credential-free custom provider needs no cascading confirmation.
+// TestDeleteCustomDefinitionWithoutCredentialsIsImmediate 验证不含凭据的自定义供应商无需级联确认即可删除。
+func TestDeleteCustomDefinitionWithoutCredentialsIsImmediate(t *testing.T) {
+	ctx := context.Background()
+	service, configurations, _ := managementTestService(t)
+	definition, errDefinition := service.CreateCustomDefinition(ctx, CreateCustomDefinitionInput{
+		ID: "custom_delete_direct", DisplayName: "Delete Direct", ProtocolProfileID: protocolchat.ProfileID, AuthMethod: providerconfig.AuthMethodBearer,
+	})
+	if errDefinition != nil {
+		t.Fatalf("CreateCustomDefinition() error = %v", errDefinition)
+	}
+	configured, errConfigure := service.ConfigureProvider(ctx, ConfigureProviderInput{
+		DefinitionID: definition.ID, Handle: "delete-direct", DisplayName: "Delete Direct", BaseURL: "https://direct.example/v1",
+	})
+	if errConfigure != nil {
+		t.Fatalf("ConfigureProvider() error = %v", errConfigure)
+	}
+	if errDelete := service.DeleteCustomDefinition(ctx, definition.ID, false); errDelete != nil {
+		t.Fatalf("DeleteCustomDefinition() error = %v", errDelete)
+	}
+	if _, errDeletedInstance := configurations.GetInstance(ctx, configured.Configuration.Instance.ID); !errors.Is(errDeletedInstance, providerconfig.ErrNotFound) {
+		t.Fatalf("GetInstance() after direct deletion error = %v, want ErrNotFound", errDeletedInstance)
+	}
+}
+
+// TestDeleteCustomDefinitionRejectsSystemDefinitions verifies code-owned provider definitions remain immutable.
+// TestDeleteCustomDefinitionRejectsSystemDefinitions 验证代码拥有的供应商定义保持不可变。
+func TestDeleteCustomDefinitionRejectsSystemDefinitions(t *testing.T) {
+	service, _, _ := managementTestService(t)
+	errDelete := service.DeleteCustomDefinition(context.Background(), "system_management_test", true)
+	if !errors.Is(errDelete, ErrSystemDefinitionImmutable) {
+		t.Fatalf("DeleteCustomDefinition(system) error = %v, want ErrSystemDefinitionImmutable", errDelete)
+	}
+}
+
 // TestSystemOnboardingReportsBuildCompensationFailure verifies a failed graph build never hides an orphaned secret.
 // TestSystemOnboardingReportsBuildCompensationFailure 验证配置图构建失败时绝不隐藏孤立秘密。
 func TestSystemOnboardingReportsBuildCompensationFailure(t *testing.T) {

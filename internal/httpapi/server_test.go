@@ -315,6 +315,12 @@ func (staticManagementCommands) DeleteProviderConfiguration(context.Context, str
 	return errors.New("static command fixture")
 }
 
+// DeleteCustomDefinition reports that the static fixture does not execute custom provider deletion flows.
+// DeleteCustomDefinition 报告静态夹具不执行自定义供应商删除流程。
+func (staticManagementCommands) DeleteCustomDefinition(context.Context, string, bool) error {
+	return errors.New("static command fixture")
+}
+
 // SaveCustomProviderModels reports that the static fixture does not execute custom model editing flows.
 // SaveCustomProviderModels 报告静态夹具不执行自定义模型编辑流程。
 func (staticManagementCommands) SaveCustomProviderModels(context.Context, string, []management.InitialProviderModelInput) (catalog.Snapshot, error) {

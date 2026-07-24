@@ -194,6 +194,9 @@ type AuthMethodView struct {
 	// PlanAcquisition declares whether plan evidence is detected, required manually, optional, or unavailable.
 	// PlanAcquisition 声明套餐证据是自动识别、人工必选、人工可选还是不可获得。
 	PlanAcquisition providerconfig.PlanAcquisitionMode `json:"plan_acquisition"`
+	// BillingMode declares whether this authentication method is usage-billed or subscription-backed.
+	// BillingMode 声明该认证方式是按量计费还是由订阅套餐支撑。
+	BillingMode providerconfig.BillingMode `json:"billing_mode,omitempty"`
 	// ReaderFeatures reports the exact metadata readers enabled for this authentication method.
 	// ReaderFeatures 报告此认证方式启用的精确元数据读取器。
 	ReaderFeatures FeatureView `json:"reader_features"`
@@ -1677,6 +1680,7 @@ func definitionView(definition providerconfig.ProviderDefinition) ProviderDefini
 			Refreshable:         authMethod.Refreshable,
 			MultipleCredentials: authMethod.MultipleCredentials,
 			PlanAcquisition:     planAcquisition,
+			BillingMode:         authMethod.BillingMode,
 			ReaderFeatures:      featureViewForAuthMethod(definition, authMethod),
 		})
 	}

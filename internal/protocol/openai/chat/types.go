@@ -150,8 +150,8 @@ type Request struct {
 	// VLHighResolutionImages enables Alibaba's documented high-resolution visual tokenization only for exact vision models with media input.
 	// VLHighResolutionImages 仅为具有媒体输入的精确视觉模型启用 Alibaba 文档化的高分辨率视觉分词。
 	VLHighResolutionImages *bool `json:"vl_high_resolution_images,omitempty"`
-	// Thinking carries the typed Moonshot thinking switch only after an explicitly registered provider adapter selects it.
-	// Thinking 仅在显式注册的供应商适配器选择后携带类型化 Moonshot 思考开关。
+	// Thinking carries a typed provider thinking switch only after an explicitly registered adapter selects it.
+	// Thinking 仅在显式注册的供应商适配器选择后携带类型化思考开关。
 	Thinking *ThinkingConfiguration `json:"thinking,omitempty"`
 	// Modalities selects the documented response modality combination for mixed-output models.
 	// Modalities 为混合输出模型选择文档化的响应模态组合。
@@ -175,8 +175,8 @@ type OutputAudioConfiguration struct {
 	Format string `json:"format"`
 }
 
-// ThinkingMode identifies one closed Moonshot thinking switch value.
-// ThinkingMode 标识一个封闭的 Moonshot 思考开关值。
+// ThinkingMode identifies one closed provider-verified thinking switch value.
+// ThinkingMode 标识一个封闭且经过供应商验证的思考开关值。
 type ThinkingMode string
 
 const (
@@ -188,8 +188,8 @@ const (
 	ThinkingDisabled ThinkingMode = "disabled"
 )
 
-// ThinkingConfiguration contains the provider-verified Moonshot thinking extension.
-// ThinkingConfiguration 包含供应商已验证的 Moonshot 思考扩展。
+// ThinkingConfiguration contains a provider-verified thinking extension.
+// ThinkingConfiguration 包含供应商已验证的思考扩展。
 type ThinkingConfiguration struct {
 	// Type selects the enabled or disabled thinking route.
 	// Type 选择启用或禁用思考的路由。

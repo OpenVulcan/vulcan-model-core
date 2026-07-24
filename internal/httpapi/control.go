@@ -117,6 +117,9 @@ type ManagementCommands interface {
 	// UpdateCustomDefinition replaces one user-owned provider definition.
 	// UpdateCustomDefinition 替换一个用户拥有的供应商定义。
 	UpdateCustomDefinition(context.Context, management.UpdateCustomDefinitionInput) (providerconfig.ProviderDefinition, error)
+	// DeleteCustomDefinition removes one user-owned provider definition and optionally its complete credential graph.
+	// DeleteCustomDefinition 删除一个用户拥有的供应商定义，并可选择删除其完整凭据图。
+	DeleteCustomDefinition(context.Context, string, bool) error
 	// ConfigureProvider creates one credential-independent provider configuration and catalog.
 	// ConfigureProvider 创建一个独立于凭据的供应商配置与目录。
 	ConfigureProvider(context.Context, management.ConfigureProviderInput) (management.ProviderConfigurationResult, error)
@@ -1954,6 +1957,9 @@ func writeControlError(writer http.ResponseWriter, err error) {
 	} else if errors.Is(err, management.ErrSystemDefinitionImmutable) {
 		statusCode = http.StatusConflict
 		errorCode = "immutable_resource"
+	} else if errors.Is(err, management.ErrCustomDefinitionHasCredentials) {
+		statusCode = http.StatusConflict
+		errorCode = "custom_provider_has_credentials"
 	}
 	writeJSON(writer, statusCode, errorResponse{Error: errorCode})
 }
@@ -2076,6 +2082,29 @@ func (s *Server) handleUpdateCustomDefinition(writer http.ResponseWriter, reques
 		return
 	}
 	writeJSON(writer, http.StatusOK, identifierResponse{ID: definition.ID})
+}
+
+// handleDeleteCustomDefinition deletes one custom provider directly or cascades credentials only after explicit query confirmation.
+// handleDeleteCustomDefinition 直接删除一个自定义供应商，或仅在查询参数显式确认后级联删除凭据。
+func (s *Server) handleDeleteCustomDefinition(writer http.ResponseWriter, request *http.Request) {
+	deleteCredentials := false
+	switch value := request.URL.Query().Get("delete_credentials"); value {
+	case "":
+	case "true":
+		deleteCredentials = true
+	default:
+		writeControlError(writer, errors.New("delete_credentials must be true when provided"))
+		return
+	}
+	if errDelete := s.control.Commands.DeleteCustomDefinition(
+		request.Context(),
+		request.PathValue("provider_definition_id"),
+		deleteCredentials,
+	); errDelete != nil {
+		writeControlError(writer, errDelete)
+		return
+	}
+	writer.WriteHeader(http.StatusNoContent)
 }
 
 // handleProviderInstances returns all management-safe provider instance views.

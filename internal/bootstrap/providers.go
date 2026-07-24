@@ -51,6 +51,9 @@ func RegisterSystemProviders(registry *providerconfig.SystemRegistry) error {
 	if errTavily := registerTavilyProviderCatalog(registry); errTavily != nil {
 		return errTavily
 	}
+	if errDeepSeek := registerDeepSeekProviderCatalog(registry); errDeepSeek != nil {
+		return errDeepSeek
+	}
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{
 		ID:             KimiGroupID,
 		DisplayName:    "Kimi",
@@ -118,13 +121,13 @@ func kimiChatCapabilities() protocolchat.ProfileCapabilities {
 func kimiProviderDefinitions() []providerconfig.ProviderDefinition {
 	// apiKey is shared as immutable value input across the returned definitions.
 	// apiKey 作为不可变值输入在返回的定义之间共享。
-	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable}
+	apiKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionUnavailable, BillingMode: providerconfig.BillingModeUsage}
 	// codingAPIKey requires an explicit membership tier because Kimi cannot derive it from a static key.
 	// codingAPIKey 要求显式选择会员档位，因为 Kimi 无法从静态密钥推导该档位。
-	codingAPIKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionManualRequired}
+	codingAPIKey := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionManualRequired, BillingMode: providerconfig.BillingModeSubscription}
 	// deviceFlow describes the refreshable Coding Plan authorization lifecycle copied from the proven Kimi integration.
 	// deviceFlow 描述从已验证 Kimi 集成复制而来的可刷新 Coding Plan 授权生命周期。
-	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionProviderDetected}
+	deviceFlow := providerconfig.AuthMethodDefinition{ID: "device_flow", Type: providerconfig.AuthMethodDeviceFlow, Refreshable: true, MultipleCredentials: true, PlanAcquisition: providerconfig.PlanAcquisitionProviderDetected, BillingMode: providerconfig.BillingModeSubscription}
 	// codingPlans freezes the user-confirmed Kimi membership vocabulary and exact provider codes.
 	// codingPlans 固化用户确认的 Kimi 会员词汇表与精确供应商代码。
 	codingPlans := []providerconfig.PlanOptionDefinition{

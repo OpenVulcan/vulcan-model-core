@@ -85,6 +85,7 @@ func TestWriteControlErrorMapsKimiDeviceFlowStates(t *testing.T) {
 		{name: "metadata authentication", err: provider.ErrMetadataAuthentication, statusCode: http.StatusFailedDependency, errorCode: "provider_metadata_authentication_failed"},
 		{name: "metadata unavailable", err: provider.ErrMetadataUnavailable, statusCode: http.StatusServiceUnavailable, errorCode: "provider_metadata_unavailable"},
 		{name: "metadata invalid response", err: provider.ErrMetadataResponseInvalid, statusCode: http.StatusBadGateway, errorCode: "provider_metadata_invalid_response"},
+		{name: "custom provider owns credentials", err: management.ErrCustomDefinitionHasCredentials, statusCode: http.StatusConflict, errorCode: "custom_provider_has_credentials"},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -504,6 +505,26 @@ func TestCustomProviderOnboardingHTTPCommitsCompleteSecretSafeGraph(t *testing.T
 	catalogResponse := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID+"/custom-catalog", "admin-control-key", "")
 	if !strings.Contains(catalogResponse.Body.String(), created.ProviderModelID) || !strings.Contains(catalogResponse.Body.String(), "acme-model") {
 		t.Fatalf("custom catalog body=%s", catalogResponse.Body.String())
+	}
+	// unconfirmedDeletion proves credential-bearing custom providers cannot be removed by one accidental request.
+	// unconfirmedDeletion 证明带凭据的自定义供应商不会被一次误操作请求删除。
+	unconfirmedDeletion := serveControlRequest(server, http.MethodDelete, "/vulcan/manage/provider-definitions/"+created.ProviderDefinitionID, "admin-control-key", "")
+	if unconfirmedDeletion.Code != http.StatusConflict || !strings.Contains(unconfirmedDeletion.Body.String(), "custom_provider_has_credentials") {
+		t.Fatalf("unconfirmed custom deletion status=%d body=%s", unconfirmedDeletion.Code, unconfirmedDeletion.Body.String())
+	}
+	// confirmedDeletion explicitly removes credentials, protected secrets, catalogs, instances, and the custom definition.
+	// confirmedDeletion 显式删除凭据、受保护秘密、目录、实例与自定义定义。
+	confirmedDeletion := serveControlRequest(server, http.MethodDelete, "/vulcan/manage/provider-definitions/"+created.ProviderDefinitionID+"?delete_credentials=true", "admin-control-key", "")
+	if confirmedDeletion.Code != http.StatusNoContent {
+		t.Fatalf("confirmed custom deletion status=%d body=%s", confirmedDeletion.Code, confirmedDeletion.Body.String())
+	}
+	deletedInstance := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-instances/"+created.ProviderInstanceID, "admin-control-key", "")
+	if deletedInstance.Code != http.StatusNotFound {
+		t.Fatalf("deleted custom instance status=%d body=%s", deletedInstance.Code, deletedInstance.Body.String())
+	}
+	remainingDefinitions := serveControlRequest(server, http.MethodGet, "/vulcan/manage/provider-definitions", "admin-control-key", "")
+	if remainingDefinitions.Code != http.StatusOK || strings.Contains(remainingDefinitions.Body.String(), created.ProviderDefinitionID) {
+		t.Fatalf("remaining custom definitions status=%d body=%s", remainingDefinitions.Code, remainingDefinitions.Body.String())
 	}
 }
 

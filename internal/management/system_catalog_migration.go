@@ -33,6 +33,66 @@ const (
 	tavilyExtractServiceID = "service_web_extract"
 )
 
+// LoadSystemCatalogs rebuilds every code-owned provider catalog into the runtime store from the current definitions and user-owned access configuration.
+// LoadSystemCatalogs 根据当前定义与用户拥有的访问配置，将每个代码拥有的供应商目录重建到运行时存储。
+func LoadSystemCatalogs(ctx context.Context, configurations providerconfig.Store, catalogs catalog.Store) (int, error) {
+	if ctx == nil {
+		return 0, errors.New("context is required")
+	}
+	if dependency.IsNil(configurations) || dependency.IsNil(catalogs) {
+		return 0, errors.New("provider configuration and catalog stores are required")
+	}
+	instances, errInstances := configurations.ListInstances(ctx, "")
+	if errInstances != nil {
+		return 0, fmt.Errorf("list provider instances for runtime system catalogs: %w", errInstances)
+	}
+	targetResolver, errResolver := resolve.New(configurations, catalogs)
+	if errResolver != nil {
+		return 0, errResolver
+	}
+	observedAt := time.Now().UTC()
+	loaded := 0
+	for _, instance := range instances {
+		definition, errDefinition := configurations.GetDefinition(ctx, instance.DefinitionID)
+		if errDefinition != nil {
+			return loaded, fmt.Errorf("get provider definition %s for runtime system catalog: %w", instance.DefinitionID, errDefinition)
+		}
+		if definition.Kind != providerconfig.DefinitionKindSystem {
+			continue
+		}
+		snapshot, errBuild := buildSystemCatalog(providerconfig.SystemOnboarding{Instance: instance}, definition, observedAt)
+		if errBuild != nil {
+			return loaded, fmt.Errorf("build runtime system catalog %s: %w", instance.ID, errBuild)
+		}
+		if definition.ID == bootstrap.KimiCodingDefinitionID {
+			credentials, errCredentials := configurations.ListCredentials(ctx, instance.ID)
+			if errCredentials != nil {
+				return loaded, fmt.Errorf("list Kimi credentials %s for runtime system catalog: %w", instance.ID, errCredentials)
+			}
+			for _, credential := range credentials {
+				if credential.AuthMethodID != "api_key" || credential.DeclaredPlan == nil {
+					continue
+				}
+				var errMembership error
+				snapshot, errMembership = providerkimi.ApplyDeclaredMembership(snapshot, credential)
+				if errMembership != nil {
+					return loaded, fmt.Errorf("apply Kimi declared membership %s: %w", credential.ID, errMembership)
+				}
+			}
+		}
+		pools, errPools := targetResolver.SummarizeSnapshot(ctx, snapshot, observedAt, snapshot.Revision)
+		if errPools != nil {
+			return loaded, fmt.Errorf("summarize runtime system catalog %s: %w", instance.ID, errPools)
+		}
+		snapshot.Pools = pools
+		if errSave := catalogs.Save(ctx, snapshot); errSave != nil {
+			return loaded, fmt.Errorf("save runtime system catalog %s: %w", instance.ID, errSave)
+		}
+		loaded++
+	}
+	return loaded, nil
+}
+
 // ReconcileMiniMaxSharedOrigins collapses historical per-action endpoint copies into one regional Origin per MiniMax instance.
 // ReconcileMiniMaxSharedOrigins 将历史上按动作复制的端点收敛为每个 MiniMax 实例的唯一区域 Origin。
 func ReconcileMiniMaxSharedOrigins(ctx context.Context, configurations providerconfig.Store) (int, error) {

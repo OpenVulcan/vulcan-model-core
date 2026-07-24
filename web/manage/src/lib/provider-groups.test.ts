@@ -1,8 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
+  CustomProviderDeletionError,
   ProviderCredentialRefreshError,
   ProviderMetadataRefreshError,
+  deleteCustomProviderDefinition,
   fetchProviderCatalogAudit,
   fetchProviderFiles,
   parseAdditionalPayloadProjectionJSON,
@@ -14,6 +16,78 @@ import {
   startKimiDeviceFlow,
   updateProviderEndpoint,
 } from "@/lib/provider-groups";
+
+describe("custom provider deletion transport", () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  // This test verifies the first deletion request never authorizes cascading credential removal.
+  // 此测试验证首次删除请求绝不授权级联删除凭据。
+  it("deletes a credential-free custom provider without a cascade flag", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteCustomProviderDefinition(
+      "management-token",
+      "custom_provider",
+      false,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-definitions/custom_provider",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+
+  // This test verifies the server's credential conflict remains typed for the confirmation dialog.
+  // 此测试验证服务端凭据冲突保持强类型，以供确认对话框使用。
+  it("preserves the credential confirmation requirement", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({ error: "custom_provider_has_credentials" }),
+          {
+            status: 409,
+            headers: { "Content-Type": "application/json" },
+          },
+        ),
+      ),
+    );
+
+    await expect(
+      deleteCustomProviderDefinition(
+        "management-token",
+        "custom_provider",
+        false,
+      ),
+    ).rejects.toEqual(
+      expect.objectContaining<Partial<CustomProviderDeletionError>>({
+        code: "custom_provider_has_credentials",
+        status: 409,
+      }),
+    );
+  });
+
+  // This test verifies confirmed deletion uses the single explicit credential-cascade query flag.
+  // 此测试验证确认删除仅使用一个显式凭据级联查询标志。
+  it("sends explicit confirmation for cascading credential deletion", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await deleteCustomProviderDefinition(
+      "management-token",
+      "custom provider",
+      true,
+    );
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      "/vulcan/manage/provider-definitions/custom%20provider?delete_credentials=true",
+      expect.objectContaining({ method: "DELETE" }),
+    );
+  });
+});
 
 describe("provider catalog actions", () => {
   // This test verifies a search-only catalog cannot expose the static model list action.

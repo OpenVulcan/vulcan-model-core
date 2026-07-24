@@ -49,6 +49,46 @@ func TestAlibabaParameterMappingsReferenceRegisteredActions(t *testing.T) {
 	}
 }
 
+// TestSystemProviderBillingModesFollowExactProducts verifies API and subscription products do not derive charging shape from credential type.
+// TestSystemProviderBillingModesFollowExactProducts 验证 API 与订阅产品不会从凭据类型推导计费形态。
+func TestSystemProviderBillingModesFollowExactProducts(t *testing.T) {
+	testCases := []struct {
+		name       string
+		definition providerconfig.ProviderDefinition
+		authID     string
+		expected   providerconfig.BillingMode
+	}{
+		{name: "Alibaba Model Studio", definition: providerDefinitionByID(t, alibabaProviderDefinitions(), AlibabaModelStudioCNDefinitionID), authID: "api_key", expected: providerconfig.BillingModeUsage},
+		{name: "Alibaba Token Plan", definition: providerDefinitionByID(t, alibabaProviderDefinitions(), AlibabaTokenPlanPersonalCNDefinitionID), authID: "api_key", expected: providerconfig.BillingModeSubscription},
+		{name: "Kimi API", definition: providerDefinitionByID(t, kimiProviderDefinitions(), KimiCNDefinitionID), authID: "api_key", expected: providerconfig.BillingModeUsage},
+		{name: "Kimi Coding", definition: providerDefinitionByID(t, kimiProviderDefinitions(), KimiCodingDefinitionID), authID: "device_flow", expected: providerconfig.BillingModeSubscription},
+	}
+	for _, testCase := range testCases {
+		t.Run(testCase.name, func(t *testing.T) {
+			authMethod, exists := testCase.definition.AuthMethod(testCase.authID)
+			if !exists {
+				t.Fatalf("definition %q auth method %q missing", testCase.definition.ID, testCase.authID)
+			}
+			if authMethod.BillingMode != testCase.expected {
+				t.Fatalf("definition %q auth method %q billing mode = %q, want %q", testCase.definition.ID, testCase.authID, authMethod.BillingMode, testCase.expected)
+			}
+		})
+	}
+}
+
+// providerDefinitionByID returns one exact bootstrap definition for focused invariant tests.
+// providerDefinitionByID 为聚焦不变量测试返回一个精确 Bootstrap 定义。
+func providerDefinitionByID(t *testing.T, definitions []providerconfig.ProviderDefinition, definitionID string) providerconfig.ProviderDefinition {
+	t.Helper()
+	for _, definition := range definitions {
+		if definition.ID == definitionID {
+			return definition
+		}
+	}
+	t.Fatalf("definition %q missing", definitionID)
+	return providerconfig.ProviderDefinition{}
+}
+
 // TestRegisterSystemProvidersBuildsKimiGroup verifies exact variants, shared catalogs, endpoints, and protocols.
 // TestRegisterSystemProvidersBuildsKimiGroup 验证精确变体、共享目录、端点和协议。
 func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
@@ -64,11 +104,11 @@ func TestRegisterSystemProvidersBuildsKimiGroup(t *testing.T) {
 		t.Fatalf("RegisterSystemProviders() error = %v", errRegister)
 	}
 	groups := systems.ListGroups()
-	if len(groups) != 9 || groups[0].ID != KimiGroupID || groups[0].DisplayName != "Kimi" || groups[5].ID != AlibabaGroupID || groups[6].ID != OpenRouterGroupID || groups[7].ID != MiniMaxGroupID || groups[8].ID != TavilyGroupID {
+	if len(groups) != 10 || groups[0].ID != KimiGroupID || groups[0].DisplayName != "Kimi" || groups[5].ID != DeepSeekGroupID || groups[6].ID != AlibabaGroupID || groups[7].ID != OpenRouterGroupID || groups[8].ID != MiniMaxGroupID || groups[9].ID != TavilyGroupID {
 		t.Fatalf("groups = %#v", groups)
 	}
 	definitions := systems.List()
-	if len(definitions) != 25 {
+	if len(definitions) != 26 {
 		t.Fatalf("definition count = %d", len(definitions))
 	}
 	for _, definition := range definitions {
@@ -274,6 +314,7 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		GoogleAntigravityDefinitionID:   {groupID: GoogleGroupID, baseURL: "https://cloudcode-pa.googleapis.com", runtimeReady: true},
 		XAIAPIDefinitionID:              {groupID: XAIGroupID, baseURL: "https://api.x.ai/v1", runtimeReady: true},
 		XAIOAuthDefinitionID:            {groupID: XAIGroupID, baseURL: "https://cli-chat-proxy.grok.com/v1", runtimeReady: true},
+		DeepSeekAPIDefinitionID:         {groupID: DeepSeekGroupID, baseURL: "https://api.deepseek.com", runtimeReady: true},
 		OpenRouterAPIDefinitionID:       {groupID: OpenRouterGroupID, baseURL: "https://openrouter.ai/api", runtimeReady: true},
 		MiniMaxAPIDefinitionID:          {groupID: MiniMaxGroupID, baseURL: "https://api.minimax.io", runtimeReady: true},
 		MiniMaxCNDefinitionID:           {groupID: MiniMaxGroupID, baseURL: "https://api.minimaxi.com", runtimeReady: true},
@@ -314,6 +355,7 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		AnthropicAPIDefinitionID: {}, AnthropicClaudeCodeDefinitionID: {},
 		GoogleAIStudioDefinitionID: {}, GoogleInteractionsDefinitionID: {}, GoogleVertexDefinitionID: {}, GoogleAntigravityDefinitionID: {},
 		XAIAPIDefinitionID: {}, XAIOAuthDefinitionID: {},
+		DeepSeekAPIDefinitionID:         {},
 		AlibabaCodingPlanCNDefinitionID: {}, AlibabaCodingPlanGlobalDefinitionID: {},
 		AlibabaTokenPlanPersonalCNDefinitionID: {}, AlibabaTokenPlanTeamCNDefinitionID: {}, AlibabaTokenPlanTeamGlobalDefinitionID: {},
 		AlibabaModelStudioCNDefinitionID: {}, AlibabaModelStudioGlobalDefinitionID: {},
@@ -330,6 +372,24 @@ func TestRegisterSystemProvidersIncludesAdaptedProducts(t *testing.T) {
 		if _, exists := expectedDefinitionIDs[definition.ID]; !exists {
 			t.Errorf("unexpected system definition %q", definition.ID)
 		}
+	}
+}
+
+// TestRegisterDeepSeekExecutionDriversOwnsOfficialAPI verifies the DeepSeek registrar owns exactly its official Chat product.
+// TestRegisterDeepSeekExecutionDriversOwnsOfficialAPI 验证 DeepSeek 注册器仅拥有其官方 Chat 产品。
+func TestRegisterDeepSeekExecutionDriversOwnsOfficialAPI(t *testing.T) {
+	secrets := secret.NewMemoryStore()
+	client, errClient := transport.NewClient(http.DefaultClient, secrets, transport.RetryPolicy{})
+	if errClient != nil {
+		t.Fatalf("NewClient() error = %v", errClient)
+	}
+	registry := provider.NewExecutionRegistry()
+	if errRegister := RegisterDeepSeekExecutionDrivers(registry, client); errRegister != nil {
+		t.Fatalf("RegisterDeepSeekExecutionDrivers() error = %v", errRegister)
+	}
+	definitionIDs := registry.ProviderIDs()
+	if len(definitionIDs) != 1 || definitionIDs[0] != DeepSeekAPIDefinitionID {
+		t.Fatalf("registered Driver IDs = %#v", definitionIDs)
 	}
 }
 

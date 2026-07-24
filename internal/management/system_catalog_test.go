@@ -22,12 +22,13 @@ func TestOfficialGeminiConversationModelsDeclareTokenLimits(t *testing.T) {
 	// testCases covers each Google entry point that publishes the shared Gemini text catalog.
 	// testCases 覆盖发布共享 Gemini 文本目录的每个 Google 入口。
 	testCases := []struct {
-		name   string
-		models []systemModelTemplate
+		name          string
+		models        []systemModelTemplate
+		expectedCount int
 	}{
-		{name: "AI Studio", models: geminiAIStudioModels()},
-		{name: "Interactions", models: geminiInteractionsModels()},
-		{name: "Vertex", models: geminiVertexTextModels()},
+		{name: "AI Studio", models: geminiAIStudioModels(), expectedCount: 6},
+		{name: "Interactions", models: geminiInteractionsModels(), expectedCount: 6},
+		{name: "Vertex", models: geminiVertexTextModels(), expectedCount: 7},
 	}
 	for _, testCase := range testCases {
 		t.Run(testCase.name, func(t *testing.T) {
@@ -38,15 +39,39 @@ func TestOfficialGeminiConversationModelsDeclareTokenLimits(t *testing.T) {
 				if model.operation != "" && model.operation != vcp.OperationConversationRespond {
 					continue
 				}
+				if model.upstreamID == "gemini-3-pro-preview" || model.upstreamID == "gemini-3.1-flash-lite-preview" {
+					t.Fatalf("%s still publishes retired model %q", testCase.name, model.upstreamID)
+				}
 				conversationCount++
 				if model.contextWindow != 1048576 || model.maxInputTokens != 1048576 || model.maxOutputTokens != 65536 {
 					t.Fatalf("%s %s token limits = context:%d input:%d output:%d", testCase.name, model.upstreamID, model.contextWindow, model.maxInputTokens, model.maxOutputTokens)
 				}
 			}
-			if conversationCount != 8 {
-				t.Fatalf("%s conversation model count = %d, want 8", testCase.name, conversationCount)
+			if conversationCount != testCase.expectedCount {
+				t.Fatalf("%s conversation model count = %d, want %d", testCase.name, conversationCount, testCase.expectedCount)
 			}
 		})
+	}
+}
+
+// TestDeepSeekCatalogDeclaresExactOfficialModelsAndLimits verifies the public API exposes only the current two models with fixed token semantics.
+// TestDeepSeekCatalogDeclaresExactOfficialModelsAndLimits 验证公共 API 仅公开当前两个模型并使用固定 Token 语义。
+func TestDeepSeekCatalogDeclaresExactOfficialModelsAndLimits(t *testing.T) {
+	models := deepSeekModels()
+	expectedIDs := []string{"deepseek-v4-flash", "deepseek-v4-pro"}
+	if len(models) != len(expectedIDs) {
+		t.Fatalf("DeepSeek model count = %d, want %d", len(models), len(expectedIDs))
+	}
+	for index, model := range models {
+		if model.upstreamID != expectedIDs[index] {
+			t.Fatalf("model[%d] ID = %q, want %q", index, model.upstreamID, expectedIDs[index])
+		}
+		if model.contextWindow != 1000000 || model.maxInputTokens != 840000 || model.maxOutputTokens != 393216 || model.recommendedOutputTokens != 128000 {
+			t.Fatalf("model[%d] token limits = context:%d input:%d output:%d recommended:%d", index, model.contextWindow, model.maxInputTokens, model.maxOutputTokens, model.recommendedOutputTokens)
+		}
+		if model.reasoning != catalog.CapabilityNative || model.toolCalling != catalog.CapabilityNative || len(model.reasoningEfforts) != 2 || model.reasoningEfforts[0] != "high" || model.reasoningEfforts[1] != "max" {
+			t.Fatalf("model[%d] capabilities = %#v", index, model)
+		}
 	}
 }
 

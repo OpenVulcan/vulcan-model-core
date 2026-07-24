@@ -334,6 +334,10 @@ const englishMessages = {
   "providers.xai.apiDescription": "Public xAI API using xAI Responses.",
   "providers.xai.oauthDescription":
     "Grok CLI account authorization using xAI Responses.",
+  "providers.deepseek.description":
+    "Official DeepSeek API with dual thinking modes and account balance queries.",
+  "providers.deepseek.apiDescription":
+    "Official DeepSeek API using OpenAI Chat Completions and provider-native balance queries.",
   "providers.handle": "Instance handle",
   "providers.name": "Name",
   "providers.credentialName": "Credential name",
@@ -496,11 +500,14 @@ const englishMessages = {
   "providers.updatePriority": "Update priority",
   "providers.plans": "Plans",
   "providers.membershipPlan": "Membership plan",
+  "providers.billingUsage": "Pay as you go",
+  "providers.billingSubscription": "Plan",
   "providers.selectMembershipPlan": "Select a membership plan",
   "providers.membershipPlanHelp":
     "Choose the plan attached to this API key. The selection is saved only after onboarding succeeds.",
   "providers.allowances": "Allowances and credits",
   "providers.usage": "Usage",
+  "providers.balance": "Balance",
   "providers.noUsage": "No usage data",
   "providers.sharedUsage": "Shared",
   "providers.resources": "Resources",
@@ -549,6 +556,9 @@ const englishMessages = {
   "providers.allowanceMetrics.tavilyKeyExtract": "API key extract usage",
   "providers.allowanceMetrics.tavilyAccountSearch": "Account search usage",
   "providers.allowanceMetrics.tavilyAccountExtract": "Account extract usage",
+  "providers.allowanceMetrics.deepseekTotal": "Available balance",
+  "providers.allowanceMetrics.deepseekGranted": "Granted balance",
+  "providers.allowanceMetrics.deepseekToppedUp": "Topped-up balance",
   "providers.allowanceMetrics.tavilyPlan": "Plan",
   "providers.allowanceMetrics.tavilyPaygo": "Pay-as-you-go",
   "providers.allowanceMetrics.fiveHour": "5-hour usage window",
@@ -576,6 +586,7 @@ const englishMessages = {
   "sidebar.providerManagement": "Provider Management",
   "sidebar.credentialManagement": "Credential Management",
   "credentials.title": "Credential Management",
+  "credentials.all": "All",
   "providerConfig.title": "Provider Management",
   "providerConfig.description":
     "Manage provider definitions, endpoints, model catalogs, and capabilities independently from account credentials.",
@@ -584,6 +595,7 @@ const englishMessages = {
     "Configure the protocol, provider identity, and API endpoint. You can optionally add the first API key now and then discover models directly.",
   "providerConfig.nativeProviders": "Native providers",
   "providerConfig.configuredProviders": "Configured providers",
+  "providerConfig.customProviders": "Custom providers",
   "providerConfig.provider": "Provider",
   "providerConfig.details": "Description and interfaces",
   "providerConfig.actions": "Actions",
@@ -598,6 +610,15 @@ const englishMessages = {
   "providerConfig.add": "Add",
   "providerConfig.newCredential": "New credential",
   "providerConfig.configure": "Configure",
+  "providerConfig.unconfigured": "Unconfigured",
+  "providerConfig.deleteProvider": "Delete provider",
+  "providerConfig.deleteFailed": "Unable to delete the custom provider.",
+  "providerConfig.deleteWithCredentialsTitle":
+    "Delete this provider and all credentials?",
+  "providerConfig.deleteWithCredentialsDescription":
+    "This custom provider still owns credentials. Continuing permanently deletes every credential, endpoint, model configuration, and provider definition owned by it.",
+  "providerConfig.deleteProviderAndCredentials":
+    "Delete provider and credentials",
   "providerConfig.interface": "Provider interface",
   "providerConfig.addSystemProvider": "Add provider credential",
   "providerConfig.addSystemDescription":
@@ -610,7 +631,7 @@ const englishMessages = {
   "providerConfig.configurationDescription":
     "Review endpoints and models, then open the relevant provider configuration tool.",
   "providerConfig.loading": "Loading provider inventory…",
-  "providerConfig.empty": "No provider configuration has been created yet.",
+  "providerConfig.empty": "No custom provider has been defined yet.",
   "providerConfig.loadFailed": "Unable to load provider inventory.",
   "providerConfig.createFailed": "Unable to create provider configuration.",
   "providerConfig.catalogUnavailable":
@@ -1060,6 +1081,10 @@ const chineseMessages: Messages = {
   "providers.xai.apiDescription": "使用 xAI Responses 协议的 xAI 公共 API。",
   "providers.xai.oauthDescription":
     "通过 Grok CLI 账号授权的 xAI Responses 服务。",
+  "providers.deepseek.description":
+    "支持双重思考模式与账号余额查询的 DeepSeek 官方 API。",
+  "providers.deepseek.apiDescription":
+    "使用 OpenAI Chat Completions 协议并支持原生余额查询的 DeepSeek 官方 API。",
   "providers.handle": "实例标识",
   "providers.name": "名称",
   "providers.credentialName": "凭据名称",
@@ -1199,11 +1224,14 @@ const chineseMessages: Messages = {
   "providers.updatePriority": "确认更新",
   "providers.plans": "套餐",
   "providers.membershipPlan": "会员套餐",
+  "providers.billingUsage": "按量",
+  "providers.billingSubscription": "套餐",
   "providers.selectMembershipPlan": "请选择会员套餐",
   "providers.membershipPlanHelp":
     "请选择该 API 密钥所属套餐；仅在录入成功后保存此选择。",
   "providers.allowances": "额度与积分",
   "providers.usage": "用量",
+  "providers.balance": "余额",
   "providers.noUsage": "暂无用量数据",
   "providers.sharedUsage": "共享",
   "providers.resources": "资源",
@@ -1250,6 +1278,9 @@ const chineseMessages: Messages = {
   "providers.allowanceMetrics.tavilyKeyExtract": "API 密钥提取用量",
   "providers.allowanceMetrics.tavilyAccountSearch": "账号搜索用量",
   "providers.allowanceMetrics.tavilyAccountExtract": "账号提取用量",
+  "providers.allowanceMetrics.deepseekTotal": "可用余额",
+  "providers.allowanceMetrics.deepseekGranted": "赠送余额",
+  "providers.allowanceMetrics.deepseekToppedUp": "充值余额",
   "providers.allowanceMetrics.tavilyPlan": "套餐",
   "providers.allowanceMetrics.tavilyPaygo": "按量付费",
   "providers.allowanceMetrics.fiveHour": "5 小时用量窗口",
@@ -1277,6 +1308,7 @@ const chineseMessages: Messages = {
   "sidebar.providerManagement": "供应商管理",
   "sidebar.credentialManagement": "凭据管理",
   "credentials.title": "凭据管理",
+  "credentials.all": "全部",
   "providerConfig.title": "供应商管理",
   "providerConfig.description":
     "独立管理供应商定义、入口、模型目录与能力，不在此处管理账号凭据。",
@@ -1285,6 +1317,7 @@ const chineseMessages: Messages = {
     "配置协议、供应商身份与接口地址；可以同时填写首个 API 密钥，创建后直接拉取模型。",
   "providerConfig.nativeProviders": "原生供应商",
   "providerConfig.configuredProviders": "已配置供应商",
+  "providerConfig.customProviders": "自定义供应商",
   "providerConfig.provider": "供应商",
   "providerConfig.details": "说明与接口",
   "providerConfig.actions": "操作",
@@ -1299,6 +1332,13 @@ const chineseMessages: Messages = {
   "providerConfig.add": "新增",
   "providerConfig.newCredential": "新建凭据",
   "providerConfig.configure": "配置",
+  "providerConfig.unconfigured": "未配置",
+  "providerConfig.deleteProvider": "删除供应商",
+  "providerConfig.deleteFailed": "无法删除自定义供应商。",
+  "providerConfig.deleteWithCredentialsTitle": "删除该供应商及其全部凭据？",
+  "providerConfig.deleteWithCredentialsDescription":
+    "该自定义供应商仍然拥有凭据。继续操作将永久删除其全部凭据、接口、模型配置与供应商定义。",
+  "providerConfig.deleteProviderAndCredentials": "删除供应商及凭据",
   "providerConfig.interface": "供应商接口",
   "providerConfig.addSystemProvider": "新增供应商凭据",
   "providerConfig.addSystemDescription":
@@ -1311,7 +1351,7 @@ const chineseMessages: Messages = {
   "providerConfig.configurationDescription":
     "查看入口与模型，并进入对应的供应商配置功能。",
   "providerConfig.loading": "正在加载供应商清单…",
-  "providerConfig.empty": "尚未创建供应商配置。",
+  "providerConfig.empty": "尚未定义自定义供应商。",
   "providerConfig.loadFailed": "无法加载供应商清单。",
   "providerConfig.createFailed": "无法创建供应商配置。",
   "providerConfig.catalogUnavailable": "无法加载该供应商的模型目录。",

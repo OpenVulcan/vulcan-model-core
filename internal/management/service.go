@@ -511,6 +511,9 @@ var (
 	// ErrSystemDefinitionImmutable reports a management mutation attempted against a code-owned system definition.
 	// ErrSystemDefinitionImmutable 表示管理变更尝试作用于代码拥有的系统定义。
 	ErrSystemDefinitionImmutable = errors.New("system provider definition is immutable")
+	// ErrCustomDefinitionHasCredentials reports that explicit confirmation is required before deleting credential-bearing custom providers.
+	// ErrCustomDefinitionHasCredentials 表示删除带凭据的自定义供应商前需要显式确认。
+	ErrCustomDefinitionHasCredentials = errors.New("custom provider definition owns credentials")
 	// ErrCustomCatalogRequiresCustomProvider reports a user-declared catalog operation attempted against a system provider.
 	// ErrCustomCatalogRequiresCustomProvider 表示用户声明目录操作尝试作用于系统供应商。
 	ErrCustomCatalogRequiresCustomProvider = errors.New("user-declared catalogs are allowed only for custom providers")
@@ -854,6 +857,51 @@ func (s *Service) UpdateCustomDefinition(ctx context.Context, input UpdateCustom
 	return updated, nil
 }
 
+// DeleteCustomDefinition removes one user-owned definition and all of its provider configurations, requiring explicit confirmation before credential deletion.
+// DeleteCustomDefinition 删除一个用户拥有的定义及其全部供应商配置，并在删除凭据前要求显式确认。
+func (s *Service) DeleteCustomDefinition(ctx context.Context, definitionID string, deleteCredentials bool) error {
+	definition, errDefinition := s.configurations.GetDefinition(ctx, strings.TrimSpace(definitionID))
+	if errDefinition != nil {
+		return errDefinition
+	}
+	if definition.Kind != providerconfig.DefinitionKindCustom {
+		return fmt.Errorf("%w: %s", ErrSystemDefinitionImmutable, definition.ID)
+	}
+	instances, errInstances := s.configurations.ListInstances(ctx, definition.ID)
+	if errInstances != nil {
+		return errInstances
+	}
+	if !deleteCredentials {
+		for _, instance := range instances {
+			credentials, errCredentials := s.configurations.ListCredentials(ctx, instance.ID)
+			if errCredentials != nil {
+				return errCredentials
+			}
+			if len(credentials) > 0 {
+				return fmt.Errorf("%w: %s", ErrCustomDefinitionHasCredentials, definition.ID)
+			}
+		}
+	}
+	for _, instance := range instances {
+		credentials, errCredentials := s.configurations.ListCredentials(ctx, instance.ID)
+		if errCredentials != nil {
+			return errCredentials
+		}
+		if !deleteCredentials && len(credentials) > 0 {
+			return fmt.Errorf("%w: %s", ErrCustomDefinitionHasCredentials, definition.ID)
+		}
+		for _, credential := range credentials {
+			if _, errDeleteCredential := s.DeleteCredential(ctx, instance.ID, credential.ID); errDeleteCredential != nil {
+				return errDeleteCredential
+			}
+		}
+		if errDeleteConfiguration := s.DeleteProviderConfiguration(ctx, instance.ID); errDeleteConfiguration != nil {
+			return errDeleteConfiguration
+		}
+	}
+	return s.configurations.DeleteCustomDefinition(ctx, definition)
+}
+
 // customDefinition builds the sole supported generic custom provider shape from explicit management input.
 // customDefinition 根据显式管理输入构建唯一受支持的通用自定义供应商形态。
 func customDefinition(definitionID string, revision uint64, input CreateCustomDefinitionInput) providerconfig.ProviderDefinition {
@@ -870,6 +918,7 @@ func customDefinition(definitionID string, revision uint64, input CreateCustomDe
 			ID:                  "default",
 			Type:                input.AuthMethod,
 			MultipleCredentials: true,
+			BillingMode:         providerconfig.BillingModeUsage,
 		}},
 		Features: providerconfig.ProviderFeatureSet{
 			PlanReader:        providerconfig.SupportUnsupported,

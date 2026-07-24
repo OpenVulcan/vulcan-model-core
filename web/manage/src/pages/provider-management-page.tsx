@@ -112,6 +112,7 @@ import {
   type CodexOAuthFlow,
   type CustomProtocolProfile,
   type KimiDeviceFlow,
+  type ProviderAuthMethod,
   type ProviderDefinitionIdentity,
   type ProviderDefinitionSummary,
   type ProviderDefinition,
@@ -177,6 +178,10 @@ interface CredentialProviderCategory {
   // definitions 包含仅在创建凭据时选择的精确子类。
   definitions: CredentialProviderDefinition[];
 }
+
+// allCredentialCategoryID is the frontend-only identity for the aggregate credential directory entry.
+// allCredentialCategoryID 是聚合凭据目录项使用的纯前端标识。
+const allCredentialCategoryID = "credentials:all";
 
 // CredentialReauthorizationSelection binds one local credential to its immutable provider definition.
 // CredentialReauthorizationSelection 将一个本地凭据绑定到其不可变供应商定义。
@@ -427,8 +432,8 @@ export function ProviderManagementPage({
     definitions,
     groups,
   );
-  // defaultCredentialCategory is the first category with configured account data, otherwise the first supported category.
-  // defaultCredentialCategory 是首个拥有已配置账号数据的分类，否则为首个受支持分类。
+  // defaultCredentialCategory preserves the existing first-configured-provider selection when no explicit navigation state exists.
+  // defaultCredentialCategory 在不存在显式导航状态时保留原有的首个已配置供应商选择。
   const defaultCredentialCategory =
     credentialCategories.find((category) =>
       category.definitions.some((definition) =>
@@ -437,21 +442,26 @@ export function ProviderManagementPage({
         ),
       ),
     ) ?? credentialCategories[0];
-  // activeCredentialCategoryID avoids an empty intermediate workspace while asynchronous inventories settle.
-  // activeCredentialCategoryID 在异步清单稳定期间避免出现空白的中间工作区。
-  const activeCredentialCategoryID = credentialCategories.some(
-    (category) => category.id === selectedCredentialCategoryID,
-  )
-    ? selectedCredentialCategoryID
-    : (defaultCredentialCategory?.id ?? "");
+  // activeCredentialCategoryID accepts the aggregate entry without changing the established provider-first default.
+  // activeCredentialCategoryID 接受聚合项，同时不改变既有的供应商优先默认选择。
+  const activeCredentialCategoryID =
+    selectedCredentialCategoryID === allCredentialCategoryID ||
+    credentialCategories.some(
+      (category) => category.id === selectedCredentialCategoryID,
+    )
+      ? selectedCredentialCategoryID
+      : (defaultCredentialCategory?.id ?? allCredentialCategoryID);
 
   useEffect(() => {
     if (!credentialMode) return;
     setSelectedCredentialCategoryID((current) => {
-      if (credentialCategories.some((category) => category.id === current)) {
+      if (
+        current === allCredentialCategoryID ||
+        credentialCategories.some((category) => category.id === current)
+      ) {
         return current;
       }
-      return defaultCredentialCategory?.id ?? "";
+      return defaultCredentialCategory?.id ?? allCredentialCategoryID;
     });
   }, [authorizedProviders, credentialMode, definitions, groups]);
 
@@ -482,12 +492,21 @@ export function ProviderManagementPage({
   const selectedCredentialCategory = credentialCategories.find(
     (category) => category.id === activeCredentialCategoryID,
   );
-  // selectedCredentialProviders contains every configured subtype instance owned by the selected category.
-  // selectedCredentialProviders 包含所选大类拥有的每个已配置子类实例。
-  const selectedCredentialProviders = authorizedProviders.filter((provider) =>
-    selectedCredentialCategory?.definitions.some(
-      (definition) => definition.id === provider.instance.definition_id,
-    ),
+  // selectedCredentialProviders contains every configured instance for the aggregate entry or only exact category-owned instances.
+  // selectedCredentialProviders 在聚合项下包含全部已配置实例，否则仅包含精确归属于所选大类的实例。
+  const selectedCredentialProviders =
+    activeCredentialCategoryID === allCredentialCategoryID
+      ? authorizedProviders
+      : authorizedProviders.filter((provider) =>
+          selectedCredentialCategory?.definitions.some(
+            (definition) => definition.id === provider.instance.definition_id,
+          ),
+        );
+  // allCredentialCount totals every credential displayed by the aggregate entry.
+  // allCredentialCount 汇总聚合项显示的全部凭据。
+  const allCredentialCount = authorizedProviders.reduce(
+    (count, provider) => count + provider.credentials.length,
+    0,
   );
   // credentialCreationCategory is the top-level category whose subtype chooser is active in the dialog.
   // credentialCreationCategory 是其子类选择器当前显示在 Dialog 中的顶层分类。
@@ -937,6 +956,27 @@ export function ProviderManagementPage({
                   role="tree"
                   aria-label={t("credentials.title")}
                 >
+                  <button
+                    type="button"
+                    role="treeitem"
+                    aria-selected={
+                      activeCredentialCategoryID === allCredentialCategoryID
+                    }
+                    className={`flex w-full items-center justify-between gap-2 rounded-md px-3 py-2 text-left text-sm transition-colors ${activeCredentialCategoryID === allCredentialCategoryID ? "bg-muted/80 text-foreground ring-1 ring-inset ring-border" : "hover:bg-muted"}`}
+                    onClick={() =>
+                      setSelectedCredentialCategoryID(allCredentialCategoryID)
+                    }
+                  >
+                    <span className="flex min-w-0 items-center gap-2.5">
+                      <span className="flex size-[26px] shrink-0 items-center justify-center rounded-md bg-muted">
+                        <KeyRoundIcon className="size-4" />
+                      </span>
+                      <span className="min-w-0 truncate font-medium">
+                        {t("credentials.all")}
+                      </span>
+                    </span>
+                    <Badge variant="secondary">{allCredentialCount}</Badge>
+                  </button>
                   {credentialCategories.map((category) => {
                     // configuredProviders contains every configured subtype owned by this top-level category.
                     // configuredProviders 包含此顶层大类拥有的每个已配置子类。
@@ -1006,6 +1046,15 @@ export function ProviderManagementPage({
                     onDeleteCredential={deleteCredential}
                     onAddCredential={beginCredentialAttachment}
                   />
+                ) : activeCredentialCategoryID === allCredentialCategoryID ? (
+                  <Card>
+                    <CardContent className="flex flex-col items-center gap-2 py-12 text-center">
+                      <ShieldCheckIcon className="text-muted-foreground size-8" />
+                      <p className="font-medium">
+                        {t("credentials.noProviders")}
+                      </p>
+                    </CardContent>
+                  </Card>
                 ) : selectedCredentialCategory ? (
                   <Card>
                     <CardContent className="flex flex-col items-center gap-3 py-12 text-center">
@@ -1883,6 +1932,9 @@ function CredentialManagementTable({
                 {t("providers.membershipPlan")}
               </TableHead>
               <TableHead className="min-w-48">{t("providers.usage")}</TableHead>
+              <TableHead className="min-w-28">
+                {t("providers.balance")}
+              </TableHead>
               <TableHead className="w-24 text-center">
                 {t("providers.priority")}
               </TableHead>
@@ -1940,7 +1992,7 @@ function CredentialManagementTable({
                       </div>
                     </TableCell>
                     <TableCell
-                      colSpan={6}
+                      colSpan={7}
                       className="whitespace-normal py-3 align-middle"
                     >
                       <div className="flex flex-wrap items-center justify-between gap-3">
@@ -2046,13 +2098,18 @@ function CredentialManagementTable({
                         />
                       ) : (
                         <span className="text-muted-foreground text-sm">
-                          {credentialPlanLabel(definition, credential) ?? "—"}
+                          {credentialBillingLabel(
+                            definition,
+                            credential,
+                            authMethod,
+                            t,
+                          ) ?? "—"}
                         </span>
                       )}
                     </TableCell>
-                    <TableCell className="whitespace-normal py-3 align-top">
+                    <TableCell className="whitespace-normal py-3 align-middle">
                       {supportsUsageRefresh ? (
-                        <CompactAllowanceSummary
+                        <AdaptiveAllowanceSummary
                           allowances={metadata?.allowances ?? []}
                           credentialID={credential.id}
                           includeSharedAllowances={credentialIndex === 0}
@@ -2063,6 +2120,14 @@ function CredentialManagementTable({
                           {t("providers.usageUnsupported")}
                         </span>
                       )}
+                    </TableCell>
+                    <TableCell className="whitespace-normal py-3 align-middle">
+                      <AdaptiveBalanceSummary
+                        allowances={metadata?.allowances ?? []}
+                        credentialID={credential.id}
+                        includeSharedAllowances={credentialIndex === 0}
+                        t={t}
+                      />
                     </TableCell>
                     <TableCell className="py-3 text-center align-middle">
                       <Button
@@ -2767,9 +2832,28 @@ export function credentialPlanLabel(
   );
 }
 
-// CompactAllowanceSummaryProps defines the limited quota visualization placed inside one credential table field.
-// CompactAllowanceSummaryProps 定义放置在一个凭据表格字段内的有限额度可视化。
-interface CompactAllowanceSummaryProps {
+// credentialBillingLabel resolves an exact plan first and otherwise presents the authentication method's declared charging shape.
+// credentialBillingLabel 优先解析精确套餐，否则展示认证方式声明的计费形态。
+export function credentialBillingLabel(
+  definition: Pick<ProviderDefinitionIdentity, "plan_options"> | undefined,
+  credential: Pick<ProviderCredential, "declared_plan" | "detected_plan">,
+  authMethod: Pick<ProviderAuthMethod, "billing_mode"> | undefined,
+  t: (key: TranslationKey) => string,
+): string | undefined {
+  const exactPlan = credentialPlanLabel(definition, credential);
+  if (exactPlan) return exactPlan;
+  if (authMethod?.billing_mode === "usage") {
+    return t("providers.billingUsage");
+  }
+  if (authMethod?.billing_mode === "subscription") {
+    return t("providers.billingSubscription");
+  }
+  return undefined;
+}
+
+// AdaptiveAllowanceSummaryProps defines provider-aware usage visualization placed inside one credential table field.
+// AdaptiveAllowanceSummaryProps 定义放置在一个凭据表格字段内的供应商感知用量可视化。
+interface AdaptiveAllowanceSummaryProps {
   // allowances contains one provider's latest normalized quota observations.
   // allowances 包含一个供应商最新的规范化额度观测。
   allowances: ProviderAllowance[];
@@ -2783,6 +2867,10 @@ interface CompactAllowanceSummaryProps {
   // t 解析当前本地化字段标签。
   t: (key: TranslationKey) => string;
 }
+
+// AdaptiveBalanceSummaryProps defines the separate balance visualization for one exact credential row.
+// AdaptiveBalanceSummaryProps 定义一个精确凭据行的独立余额可视化。
+type AdaptiveBalanceSummaryProps = AdaptiveAllowanceSummaryProps;
 
 // MiniMaxAllowanceRow joins the provider's current and weekly windows for one Token Plan resource bucket.
 // MiniMaxAllowanceRow 将供应商针对一个 Token Plan 资源桶的当前周期与周窗口连接起来。
@@ -2868,6 +2956,50 @@ export function TavilyAllowanceSummary({
           </div>
         ) : null}
       </div>
+    </div>
+  );
+}
+
+// DeepSeekAllowanceSummaryData selects the callable balance totals rendered by the balance-mode panel.
+// DeepSeekAllowanceSummaryData 选择由余额模式面板渲染的可调用总余额。
+interface DeepSeekAllowanceSummaryData {
+  // balances contains one provider-reported total for each available currency.
+  // balances 包含每种可用币种对应的一个供应商总余额。
+  balances: ProviderAllowance[];
+}
+
+// deepSeekAllowanceSummary recognizes the exact DeepSeek balance metric namespace without exposing breakdown rows.
+// deepSeekAllowanceSummary 识别精确的 DeepSeek 余额指标命名空间，同时不暴露明细行。
+function deepSeekAllowanceSummary(
+  allowances: ProviderAllowance[],
+): DeepSeekAllowanceSummaryData | undefined {
+  // balances retains only callable totals because granted and topped-up rows are accounting details.
+  // balances 仅保留可调用总额，因为赠送与充值行属于账务明细。
+  const balances = allowances.filter(
+    (allowance) => allowance.metric === "deepseek.balance.total",
+  );
+  return balances.length > 0 ? { balances } : undefined;
+}
+
+// DeepSeekAllowanceSummary renders callable balances with normal table typography.
+// DeepSeekAllowanceSummary 使用常规表格字体渲染可调用余额。
+export function DeepSeekAllowanceSummary({
+  summary,
+  t,
+}: {
+  summary: DeepSeekAllowanceSummaryData;
+  t: (key: TranslationKey) => string;
+}) {
+  return (
+    <div className="space-y-1 text-sm leading-5">
+      {summary.balances.map((allowance, index) => (
+        <span
+          key={`${allowance.kind}\u0000${allowance.metric}\u0000${allowance.scope}\u0000${allowance.currency ?? ""}\u0000${index}`}
+          className="block tabular-nums"
+        >
+          {compactAllowanceValue(allowance, t)}
+        </span>
+      ))}
     </div>
   );
 }
@@ -3066,14 +3198,14 @@ function miniMaxPeriodDate(value: string): string {
   return new Date(value).toISOString().slice(0, 10);
 }
 
-// CompactAllowanceSummary renders up to three miniature usage indicators in one table field.
-// CompactAllowanceSummary 在一个表格字段内渲染最多三个微型用量指示器。
-function CompactAllowanceSummary({
+// AdaptiveAllowanceSummary selects a provider-specific usage panel before using the generic compact fallback.
+// AdaptiveAllowanceSummary 优先选择供应商专属用量面板，最后才使用通用紧凑回退。
+export function AdaptiveAllowanceSummary({
   allowances,
   credentialID,
   includeSharedAllowances,
   t,
-}: CompactAllowanceSummaryProps) {
+}: AdaptiveAllowanceSummaryProps) {
   // credentialAllowances keeps ownership exact and never treats shared usage as credential-specific.
   // credentialAllowances 保持归属精确，绝不将共享用量视为凭据专属。
   const credentialAllowances = allowances.filter(
@@ -3084,7 +3216,9 @@ function CompactAllowanceSummary({
   const sharedAllowances = includeSharedAllowances
     ? allowances.filter((allowance) => allowance.credential_id === undefined)
     : [];
-  const scopedAllowances = [...credentialAllowances, ...sharedAllowances];
+  const scopedAllowances = [...credentialAllowances, ...sharedAllowances].filter(
+    (allowance) => !isBalanceAccountingAllowance(allowance),
+  );
   const miniMaxRows = miniMaxAllowanceRows(scopedAllowances);
   if (miniMaxRows.length > 0) {
     return <MiniMaxAllowanceSummary rows={miniMaxRows} t={t} />;
@@ -3093,13 +3227,11 @@ function CompactAllowanceSummary({
   if (tavilySummary) {
     return <TavilyAllowanceSummary summary={tavilySummary} t={t} />;
   }
-  // visibleAllowances caps table density while retaining the full detailed contract in the model and resource dialogs.
-  // visibleAllowances 限制表格密度，同时在模型与资源对话框中保留完整详情契约。
+  // visibleAllowances caps generic table density after every known provider-specific mode has been selected.
+  // visibleAllowances 在所有已知供应商专属模式完成选择后限制通用表格密度。
   const visibleAllowances = scopedAllowances.slice(0, 3);
   const hiddenAllowanceCount =
-    credentialAllowances.length +
-    sharedAllowances.length -
-    visibleAllowances.length;
+    scopedAllowances.length - visibleAllowances.length;
   if (visibleAllowances.length === 0) {
     return (
       <span className="text-muted-foreground text-xs">
@@ -3169,6 +3301,38 @@ function CompactAllowanceSummary({
       ) : null}
     </div>
   );
+}
+
+// AdaptiveBalanceSummary renders exact provider balance totals independently from quota usage.
+// AdaptiveBalanceSummary 独立于额度用量渲染精确的供应商余额总额。
+export function AdaptiveBalanceSummary({
+  allowances,
+  credentialID,
+  includeSharedAllowances,
+  t,
+}: AdaptiveBalanceSummaryProps) {
+  const credentialAllowances = allowances.filter(
+    (allowance) => allowance.credential_id === credentialID,
+  );
+  const sharedAllowances = includeSharedAllowances
+    ? allowances.filter((allowance) => allowance.credential_id === undefined)
+    : [];
+  const summary = deepSeekAllowanceSummary([
+    ...credentialAllowances,
+    ...sharedAllowances,
+  ]);
+  if (!summary) {
+    return <span className="text-muted-foreground text-sm">--</span>;
+  }
+  return <DeepSeekAllowanceSummary summary={summary} t={t} />;
+}
+
+// isBalanceAccountingAllowance separates provider balance accounting from consumable quota usage.
+// isBalanceAccountingAllowance 将供应商余额账务与可消费额度用量分离。
+function isBalanceAccountingAllowance(
+  allowance: ProviderAllowance,
+): boolean {
+  return allowance.metric.startsWith("deepseek.balance.");
 }
 
 // compactAllowanceValue renders the exact available amount for observations that do not provide a progress ratio.
@@ -4488,6 +4652,10 @@ function allowanceMetricLabel(
     "tavily.key.extract": "providers.allowanceMetrics.tavilyKeyExtract",
     "tavily.account.search": "providers.allowanceMetrics.tavilyAccountSearch",
     "tavily.account.extract": "providers.allowanceMetrics.tavilyAccountExtract",
+    "deepseek.balance.total": "providers.allowanceMetrics.deepseekTotal",
+    "deepseek.balance.granted": "providers.allowanceMetrics.deepseekGranted",
+    "deepseek.balance.topped_up":
+      "providers.allowanceMetrics.deepseekToppedUp",
     five_hour: "providers.allowanceMetrics.fiveHour",
     five_hour_usage: "providers.allowanceMetrics.fiveHour",
     seven_day: "providers.allowanceMetrics.sevenDay",

@@ -307,6 +307,23 @@ func TestAuthMethodReaderFeaturesNarrowProviderCapabilities(t *testing.T) {
 	}
 }
 
+// TestAuthMethodDefinitionRejectsUnknownBillingMode verifies charging presentation cannot silently accept an unowned value.
+// TestAuthMethodDefinitionRejectsUnknownBillingMode 验证计费展示不能静默接受未归属值。
+func TestAuthMethodDefinitionRejectsUnknownBillingMode(t *testing.T) {
+	authMethod := AuthMethodDefinition{
+		ID:          "api_key",
+		Type:        AuthMethodAPIKey,
+		BillingMode: BillingMode("unknown"),
+	}
+	if errValidate := authMethod.Validate(); errValidate == nil {
+		t.Fatal("AuthMethodDefinition.Validate() error = nil")
+	}
+	authMethod.BillingMode = BillingModeUsage
+	if errValidate := authMethod.Validate(); errValidate != nil {
+		t.Fatalf("AuthMethodDefinition.Validate() error = %v", errValidate)
+	}
+}
+
 // testSystemDefinition returns one immutable code-owned provider fixture.
 // testSystemDefinition 返回一个不可变的代码拥有供应商测试夹具。
 func testSystemDefinition() ProviderDefinition {

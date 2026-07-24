@@ -79,6 +79,49 @@ func (s *ConfigurationStore) SaveCustomDefinition(ctx context.Context, definitio
 	return nil
 }
 
+// DeleteCustomDefinition removes one unchanged custom definition after verifying that no provider instance still references it.
+// DeleteCustomDefinition 在确认没有供应商实例继续引用后删除一个未变化的自定义定义。
+func (s *ConfigurationStore) DeleteCustomDefinition(ctx context.Context, definition providerconfig.ProviderDefinition) error {
+	if err := validateContext(ctx); err != nil {
+		return err
+	}
+	if definition.Kind != providerconfig.DefinitionKindCustom {
+		return invalidConfiguration("only custom provider definitions can be deleted")
+	}
+	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return fmt.Errorf("begin custom provider definition deletion: %w", errBegin)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	var instanceCount int
+	if errCount := transaction.QueryRowContext(ctx, `SELECT COUNT(*) FROM provider_instances WHERE definition_id = ?`, definition.ID).Scan(&instanceCount); errCount != nil {
+		return fmt.Errorf("count custom provider definition instances: %w", errCount)
+	}
+	if instanceCount != 0 {
+		return invalidConfiguration("custom provider definition still owns provider instances")
+	}
+	result, errDelete := transaction.ExecContext(
+		ctx,
+		`DELETE FROM custom_provider_definitions WHERE id = ? AND revision = ?`,
+		definition.ID,
+		definition.Revision,
+	)
+	if errDelete != nil {
+		return fmt.Errorf("delete custom provider definition: %w", errDelete)
+	}
+	rowsAffected, errRows := result.RowsAffected()
+	if errRows != nil {
+		return fmt.Errorf("read custom provider definition deletion result: %w", errRows)
+	}
+	if rowsAffected != 1 {
+		return invalidConfiguration("custom provider definition changed concurrently")
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return fmt.Errorf("commit custom provider definition deletion: %w", errCommit)
+	}
+	return nil
+}
+
 // SaveCustomDefinitionMigration atomically replaces one custom definition and transitions every owned instance in SQLite.
 // SaveCustomDefinitionMigration 在 SQLite 中原子替换一个自定义定义并转换其拥有的全部实例。
 func (s *ConfigurationStore) SaveCustomDefinitionMigration(ctx context.Context, migration providerconfig.CustomDefinitionMigration) error {

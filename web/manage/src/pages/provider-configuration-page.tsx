@@ -14,6 +14,16 @@ import {
 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@/components/ui/alert-dialog";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -52,6 +62,7 @@ import {
   configureProvider,
   attachProviderCredential,
   createCustomProviderDefinition,
+  deleteCustomProviderDefinition,
   fetchProtocolProfiles,
   filterCustomProtocolProfiles,
   fetchProviderCatalog,
@@ -65,6 +76,7 @@ import {
   saveCustomProviderModels,
   updateProviderEndpoint,
   updateProviderInstance,
+  CustomProviderDeletionError,
   type CustomProtocolProfile,
   type ProviderCatalogMetadata,
   type ProviderDefinitionSummary,
@@ -253,6 +265,9 @@ export function ProviderConfigurationPage({
   // protocolProfiles contains the complete server-owned display catalog for configured and native interfaces.
   // protocolProfiles 包含用于已配置及原生接口的完整服务端显示目录。
   const [protocolProfiles, setProtocolProfiles] = useState<CustomProtocolProfile[]>([]);
+  // definitions contains the authoritative provider definitions independently from configured instances.
+  // definitions 包含独立于已配置实例的权威供应商定义。
+  const [definitions, setDefinitions] = useState<ProviderDefinitionSummary[]>([]);
   // inventory contains provider configurations without credential material.
   // inventory 包含不带凭据材料的供应商配置。
   const [inventory, setInventory] = useState<ProviderInventoryItem[]>([]);
@@ -346,12 +361,45 @@ export function ProviderConfigurationPage({
   // providerAdditionalError reports one explicit provider-level rule failure.
   // providerAdditionalError 报告一个明确的供应商级规则失败。
   const [providerAdditionalError, setProviderAdditionalError] = useState<string | null>(null);
+  // deletingProviderDefinitionID prevents duplicate deletion requests for one custom provider.
+  // deletingProviderDefinitionID 防止对同一个自定义供应商重复发起删除请求。
+  const [deletingProviderDefinitionID, setDeletingProviderDefinitionID] = useState("");
+  // credentialDeletionTarget stores the custom provider that requires explicit cascading credential confirmation.
+  // credentialDeletionTarget 存储需要显式确认级联删除凭据的自定义供应商。
+  const [credentialDeletionTarget, setCredentialDeletionTarget] = useState<ProviderDefinitionSummary | null>(null);
+  // providerDeletionError reports one explicit custom-provider deletion failure.
+  // providerDeletionError 报告一个明确的自定义供应商删除失败。
+  const [providerDeletionError, setProviderDeletionError] = useState<string | null>(null);
 
   // systemDefinitions flattens grouped native variants into their exact definition identities.
   // systemDefinitions 将分组原生变体展开为精确定义身份。
   const systemDefinitions = useMemo(
     () => groups.flatMap((group) => group.provider_definitions),
     [groups],
+  );
+  // customProviderDefinitions contains every user-owned definition, including definitions without a configured instance.
+  // customProviderDefinitions 包含每个用户拥有的定义，包括尚无已配置实例的定义。
+  const customProviderDefinitions = useMemo(
+    () => definitions.filter((definition) => definition.kind === "custom"),
+    [definitions],
+  );
+  // inventoryByDefinitionID groups exact configured instances under their authoritative definition.
+  // inventoryByDefinitionID 将精确的已配置实例按其权威定义分组。
+  const inventoryByDefinitionID = useMemo(
+    () => {
+      // grouped stores only explicitly declared definition-to-instance ownership.
+      // grouped 仅存储明确声明的定义到实例归属关系。
+      const grouped = new Map<string, ProviderInventoryItem[]>();
+      for (const item of inventory) {
+        // ownedItems contains the configurations already associated with this exact definition.
+        // ownedItems 包含已与此精确定义关联的配置。
+        const ownedItems = grouped.get(item.definition.id) ?? [];
+        ownedItems.push(item);
+        grouped.set(item.definition.id, ownedItems);
+      }
+      return grouped;
+    },
+    [inventory],
   );
   // selectedCustomProtocol resolves the exact executable profile for new custom definitions.
   // selectedCustomProtocol 为新自定义定义解析精确可执行 Profile。
@@ -440,6 +488,7 @@ export function ProviderConfigurationPage({
           }),
         );
         setGroups(loadedGroups);
+        setDefinitions(loadedDefinitions);
         setProtocolProfiles(loadedProtocols);
         setCustomProtocols(filterCustomProtocolProfiles(loadedProtocols));
         setInventory(items);
@@ -810,6 +859,56 @@ export function ProviderConfigurationPage({
     }
   }
 
+  // deleteCustomProvider requests a safe deletion and opens confirmation only when the server observes credentials.
+  // deleteCustomProvider 请求安全删除，并且仅在服务端检测到凭据时打开确认。
+  async function deleteCustomProvider(definition: ProviderDefinitionSummary): Promise<void> {
+    setDeletingProviderDefinitionID(definition.id);
+    setProviderDeletionError(null);
+    try {
+      await deleteCustomProviderDefinition(
+        managementAuthToken,
+        definition.id,
+        false,
+      );
+      await loadInventory();
+    } catch (error) {
+      if (
+        error instanceof CustomProviderDeletionError &&
+        error.code === "custom_provider_has_credentials"
+      ) {
+        setCredentialDeletionTarget(definition);
+        return;
+      }
+      await loadInventory();
+      setProviderDeletionError(t("providerConfig.deleteFailed"));
+    } finally {
+      setDeletingProviderDefinitionID("");
+    }
+  }
+
+  // confirmCustomProviderCredentialDeletion performs the explicitly approved cascading provider and credential deletion.
+  // confirmCustomProviderCredentialDeletion 执行已经明确批准的供应商与凭据级联删除。
+  async function confirmCustomProviderCredentialDeletion(): Promise<void> {
+    if (!credentialDeletionTarget) return;
+    const target = credentialDeletionTarget;
+    setDeletingProviderDefinitionID(target.id);
+    setProviderDeletionError(null);
+    try {
+      await deleteCustomProviderDefinition(
+        managementAuthToken,
+        target.id,
+        true,
+      );
+      setCredentialDeletionTarget(null);
+      await loadInventory();
+    } catch {
+      await loadInventory();
+      setProviderDeletionError(t("providerConfig.deleteFailed"));
+    } finally {
+      setDeletingProviderDefinitionID("");
+    }
+  }
+
   return (
     <div className="space-y-6 px-4 lg:px-6">
       <div>
@@ -834,8 +933,8 @@ export function ProviderConfigurationPage({
         <div className="flex flex-wrap items-center justify-between gap-3">
           <div className="flex items-center gap-2">
             <ServerCogIcon className="size-4" />
-            <h3 className="font-medium">{t("providerConfig.configuredProviders")}</h3>
-            <Badge variant="secondary">{inventory.length}</Badge>
+            <h3 className="font-medium">{t("providerConfig.customProviders")}</h3>
+            <Badge variant="secondary">{customProviderDefinitions.length}</Badge>
           </div>
           <Button
             type="button"
@@ -852,7 +951,7 @@ export function ProviderConfigurationPage({
             <LoaderCircleIcon className="size-4 animate-spin" />
             {t("providerConfig.loading")}
           </div>
-        ) : inventory.length === 0 ? (
+        ) : customProviderDefinitions.length === 0 ? (
           <div className="rounded-lg border border-dashed p-8 text-center text-sm text-muted-foreground">
             {t("providerConfig.empty")}
           </div>
@@ -862,7 +961,6 @@ export function ProviderConfigurationPage({
               <TableHeader className="bg-muted/40">
                 <TableRow>
                   <TableHead className="w-[18rem]">{t("providerConfig.provider")}</TableHead>
-                  <TableHead className="w-24 text-center">{t("providerConfig.kind")}</TableHead>
                   <TableHead>{t("providerConfig.interface")}</TableHead>
                   <TableHead className="w-32">{t("providerConfig.resourceCounts")}</TableHead>
                   <TableHead className="w-28 text-center">{t("providerConfig.status")}</TableHead>
@@ -870,62 +968,132 @@ export function ProviderConfigurationPage({
                 </TableRow>
               </TableHeader>
               <TableBody>
-                {inventory.map((item) => (
-                  <TableRow key={item.instance.id}>
-                    <TableCell className="whitespace-normal py-3 align-top">
-                      <div className="flex items-center gap-3">
-                        <ProviderIcon
-                          definitionID={item.definition.id}
-                          groupID={item.definition.group_id}
-                          className="size-[26px]"
-                        />
-                        <div className="min-w-0">
-                          <div className="font-medium">{item.instance.display_name}</div>
-                          <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{item.instance.handle}</div>
+                {customProviderDefinitions.map((definition) => {
+                  // configuredItems contains every configuration that explicitly references this definition.
+                  // configuredItems 包含每个明确引用该定义的配置。
+                  const configuredItems = inventoryByDefinitionID.get(definition.id) ?? [];
+                  // modelCount totals the loaded model entries owned by the definition's configurations.
+                  // modelCount 汇总该定义所属配置已加载的模型条目。
+                  const modelCount = configuredItems.reduce(
+                    (total, item) => total + (item.catalog?.models.length ?? 0),
+                    0,
+                  );
+                  return (
+                    <TableRow key={definition.id}>
+                      <TableCell className="whitespace-normal py-3 align-top">
+                        <div className="flex items-center gap-3">
+                          <ProviderIcon
+                            definitionID={definition.id}
+                            groupID={definition.group_id}
+                            className="size-[26px]"
+                          />
+                          <div className="min-w-0">
+                            <div className="font-medium">{definition.display_name}</div>
+                            <div className="mt-1 truncate font-mono text-xs text-muted-foreground">{definition.id}</div>
+                          </div>
                         </div>
-                      </div>
-                    </TableCell>
-                    <TableCell className="whitespace-normal py-3 text-center align-middle">
-                      <Badge variant="outline">
-                        {t(item.definition.kind === "system" ? "providerConfig.kindSystem" : "providerConfig.kindCustom")}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="whitespace-normal py-3 align-top">
-                      <div className="font-medium">{protocolDisplayName(item.definition.protocol_profile_id)}</div>
-                      <div className="mt-1 space-y-1 text-xs text-muted-foreground">
-                        {item.endpoints.map((endpoint) => (
-                          <div key={endpoint.id} className="break-all font-mono">{endpoint.base_url}</div>
-                        ))}
-                      </div>
-                    </TableCell>
-                    <TableCell className="whitespace-normal py-3 align-top">
-                      <div>{t("providerConfig.modelCount")}: {item.catalog?.models.length ?? 0}</div>
-                      <div className="mt-1 text-muted-foreground">{t("providerConfig.credentialCount")}: {item.instance.credential_count}</div>
-                    </TableCell>
-                    <TableCell className="whitespace-normal py-3 text-center align-middle">
-                      <Badge variant={item.instance.status === "ready" ? "default" : "outline"}>
-                        {providerStatusLabel(t, item.instance.status)}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="text-right align-middle">
-                      <Button
-                        type="button"
-                        variant="outline"
-                        size="sm"
-                        aria-label={`${t("providerConfig.configure")} ${item.instance.display_name}`}
-                        onClick={() => setConfiguringProviderInstanceID(item.instance.id)}
-                      >
-                        <Settings2Icon className="size-4" />
-                        {t("providerConfig.configure")}
-                      </Button>
-                    </TableCell>
-                  </TableRow>
-                ))}
+                      </TableCell>
+                      <TableCell className="whitespace-normal py-3 align-top">
+                        <div className="font-medium">{protocolDisplayName(definition.protocol_profile_id)}</div>
+                        <div className="mt-1 space-y-1 text-xs text-muted-foreground">
+                          {configuredItems.flatMap((item) => item.endpoints).map((endpoint) => (
+                            <div key={endpoint.id} className="break-all font-mono">{endpoint.base_url}</div>
+                          ))}
+                        </div>
+                      </TableCell>
+                      <TableCell className="whitespace-normal py-3 align-top">
+                        <div>{t("providerConfig.modelCount")}: {modelCount}</div>
+                      </TableCell>
+                      <TableCell className="whitespace-normal py-3 text-center align-middle">
+                        {configuredItems.length === 0 ? (
+                          <Badge variant="outline">{t("providerConfig.unconfigured")}</Badge>
+                        ) : (
+                          <div className="flex flex-col items-center gap-1">
+                            {configuredItems.map((item) => (
+                              <Badge
+                                key={item.instance.id}
+                                variant={item.instance.status === "ready" ? "default" : "outline"}
+                              >
+                                {providerStatusLabel(t, item.instance.status)}
+                              </Badge>
+                            ))}
+                          </div>
+                        )}
+                      </TableCell>
+                      <TableCell className="text-right align-middle">
+                        <div className="flex justify-end gap-2">
+                          {configuredItems.map((item) => (
+                            <Button
+                              key={item.instance.id}
+                              type="button"
+                              variant="outline"
+                              size="sm"
+                              aria-label={`${t("providerConfig.configure")} ${item.instance.display_name}`}
+                              onClick={() => setConfiguringProviderInstanceID(item.instance.id)}
+                            >
+                              <Settings2Icon className="size-4" />
+                              {t("providerConfig.configure")}
+                            </Button>
+                          ))}
+                          <Button
+                            type="button"
+                            variant="ghost"
+                            size="icon-sm"
+                            className="text-destructive hover:text-destructive"
+                            aria-label={`${t("providerConfig.deleteProvider")} ${definition.display_name}`}
+                            disabled={deletingProviderDefinitionID === definition.id}
+                            onClick={() => void deleteCustomProvider(definition)}
+                          >
+                            {deletingProviderDefinitionID === definition.id ? (
+                              <LoaderCircleIcon className="size-4 animate-spin" />
+                            ) : (
+                              <Trash2Icon className="size-4" />
+                            )}
+                          </Button>
+                        </div>
+                      </TableCell>
+                    </TableRow>
+                  );
+                })}
               </TableBody>
             </Table>
           </div>
         )}
+        {providerDeletionError ? (
+          <p className="text-sm text-destructive">{providerDeletionError}</p>
+        ) : null}
       </section>
+
+      <AlertDialog
+        open={credentialDeletionTarget !== null}
+        onOpenChange={(open) => {
+          if (!open && !deletingProviderDefinitionID) {
+            setCredentialDeletionTarget(null);
+          }
+        }}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {t("providerConfig.deleteWithCredentialsTitle")}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {t("providerConfig.deleteWithCredentialsDescription")}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel disabled={Boolean(deletingProviderDefinitionID)}>
+              {t("common.cancel")}
+            </AlertDialogCancel>
+            <AlertDialogAction
+              disabled={Boolean(deletingProviderDefinitionID)}
+              onClick={() => void confirmCustomProviderCredentialDeletion()}
+            >
+              {t("providerConfig.deleteProviderAndCredentials")}
+            </AlertDialogAction>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
 
       <section className="space-y-3">
         <div className="flex items-center gap-2">

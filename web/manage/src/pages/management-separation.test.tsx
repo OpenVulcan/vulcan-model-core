@@ -342,8 +342,8 @@ describe("separated provider and credential management", () => {
     );
   });
 
-  // This test verifies provider management renders only definitions, endpoints, catalogs, and credential counts.
-  // 此测试验证供应商管理仅渲染定义、入口、目录与凭据计数。
+  // This test verifies provider management renders only user-defined providers and omits credential-management fields.
+  // 此测试验证供应商管理仅渲染用户定义供应商，并省略凭据管理字段。
   it("renders the provider-only inventory", async () => {
     vi.stubGlobal(
       "fetch",
@@ -356,7 +356,7 @@ describe("separated provider and credential management", () => {
                 {
                   id: definition.id,
                   kind: "custom",
-                  display_name: definition.display_name,
+                  display_name: "Custom Test Provider",
                   protocol_profile_id: definition.protocol_profile_id,
                   auth_methods: definition.auth_methods,
                   plan_options: [],
@@ -419,22 +419,17 @@ describe("separated provider and credential management", () => {
     );
 
     expect(await screen.findByText("Native providers")).toBeInTheDocument();
-    expect(await screen.findByText("Test Production")).toBeInTheDocument();
+    expect(await screen.findByText("Custom providers")).toBeInTheDocument();
+    expect(await screen.findByText("Custom Test Provider")).toBeInTheDocument();
     expect(screen.getByText("https://provider.example/v1")).toBeInTheDocument();
-    const configuredRow = screen.getByText("Test Production").closest("tr");
+    const configuredRow = screen.getByText("Custom Test Provider").closest("tr");
     expect(configuredRow).not.toBeNull();
     const configuredRowQueries = within(configuredRow as HTMLTableRowElement);
-    expect(configuredRowQueries.getByText("Custom")).toHaveAttribute(
-      "data-slot",
-      "badge",
-    );
     expect(
       configuredRowQueries.getByText("OpenAI Chat Completions"),
     ).toBeInTheDocument();
     expect(configuredRowQueries.getByText("Models: 1")).toBeInTheDocument();
-    expect(
-      configuredRowQueries.getByText("Credentials: 1"),
-    ).toBeInTheDocument();
+    expect(configuredRowQueries.queryByText(/Credentials:/)).not.toBeInTheDocument();
     expect(configuredRowQueries.getByText("Ready")).toHaveAttribute(
       "data-slot",
       "badge",
@@ -453,6 +448,202 @@ describe("separated provider and credential management", () => {
       screen.getByRole("heading", { name: "Test Production" }),
     ).toBeInTheDocument();
     expect(screen.queryByText("Authorizations")).not.toBeInTheDocument();
+  });
+
+  // This test verifies configured native instances remain exclusively in credential management and never appear as custom providers.
+  // 此测试验证已配置原生实例仅保留在凭据管理中，绝不会显示为自定义供应商。
+  it("excludes configured native instances from the custom provider list", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockImplementation((input: string | URL | Request) => {
+        const url = String(input);
+        const common = commonReadResponse(url);
+        if (common) return Promise.resolve(common);
+        if (url.endsWith(`/provider-instances/${instance.id}/endpoints`)) {
+          return Promise.resolve(
+            jsonResponse({
+              endpoints: [
+                {
+                  id: "ep_native_provider",
+                  provider_instance_id: instance.id,
+                  base_url: "https://provider.example/v1",
+                  region: "Global",
+                  parameters: [],
+                  status: "ready",
+                  revision: 1,
+                },
+              ],
+            }),
+          );
+        }
+        if (url.endsWith(`/provider-instances/${instance.id}/catalog`)) {
+          return Promise.resolve(
+            jsonResponse({
+              provider_instance_id: instance.id,
+              models: [],
+              plans: [],
+              allowances: [],
+              revision: 1,
+              observed_at: "2026-07-21T07:00:00Z",
+            }),
+          );
+        }
+        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+      }),
+    );
+
+    render(
+      <I18nProvider>
+        <ProviderConfigurationPage managementAuthToken="management-token" />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText("Custom providers")).toBeInTheDocument();
+    expect(await screen.findByText("No custom provider has been defined yet.")).toBeInTheDocument();
+    expect(screen.queryByText("Test Production")).not.toBeInTheDocument();
+  });
+
+  // This test verifies a partial deletion reloads the page and leaves the orphaned definition available for a retry.
+  // 此测试验证部分删除会重新加载页面，并保留孤立定义供再次删除。
+  it("synchronizes and retries an orphaned custom provider definition", async () => {
+    // customDefinition is the authoritative user-owned definition that remains after the first partial deletion.
+    // customDefinition 是第一次部分删除后保留的权威用户自定义定义。
+    const customDefinition = {
+      id: "custom_partial_delete",
+      kind: "custom",
+      display_name: "Partial Delete Provider",
+      protocol_profile_id: "openai.chat",
+      auth_methods: definition.auth_methods,
+      plan_options: [],
+      features: unavailableFeatures,
+    };
+    // customInstance is removed by the simulated first server request before that request reports failure.
+    // customInstance 会被模拟的第一次服务端请求删除，而该请求随后报告失败。
+    const customInstance = {
+      ...instance,
+      id: "pvi_partial_delete",
+      definition_id: customDefinition.id,
+      handle: "partial-delete",
+      display_name: customDefinition.display_name,
+    };
+    // definitionPresent tracks whether the authoritative definition still exists.
+    // definitionPresent 跟踪权威定义是否仍然存在。
+    let definitionPresent = true;
+    // instancePresent tracks the partial graph deletion performed by the first request.
+    // instancePresent 跟踪第一次请求执行的部分配置图删除。
+    let instancePresent = true;
+    // deleteAttempts distinguishes the simulated partial failure from the successful retry.
+    // deleteAttempts 区分模拟的部分失败与成功重试。
+    let deleteAttempts = 0;
+    const fetchMock = vi.fn().mockImplementation(
+      (input: string | URL | Request, init?: RequestInit) => {
+        const url = String(input);
+        // method resolves the exact management operation under test.
+        // method 解析当前测试中的精确管理操作。
+        const method =
+          init?.method ?? (input instanceof Request ? input.method : "GET");
+        if (
+          url.endsWith(`/provider-definitions/${customDefinition.id}`) &&
+          method === "DELETE"
+        ) {
+          deleteAttempts += 1;
+          if (deleteAttempts === 1) {
+            instancePresent = false;
+            return Promise.resolve(
+              jsonResponse(
+                {
+                  error: "invalid_request",
+                  code: "invalid_request",
+                  message: "invalid_request",
+                },
+                400,
+              ),
+            );
+          }
+          definitionPresent = false;
+          return Promise.resolve(new Response(null, { status: 204 }));
+        }
+        if (url.endsWith("/provider-definitions")) {
+          return Promise.resolve(
+            jsonResponse({
+              provider_definitions: definitionPresent ? [customDefinition] : [],
+            }),
+          );
+        }
+        if (url.endsWith("/provider-instances")) {
+          return Promise.resolve(
+            jsonResponse({
+              provider_instances: instancePresent ? [customInstance] : [],
+            }),
+          );
+        }
+        if (url.endsWith(`/provider-instances/${customInstance.id}/endpoints`)) {
+          return Promise.resolve(
+            jsonResponse({
+              endpoints: [
+                {
+                  id: "ep_partial_delete",
+                  provider_instance_id: customInstance.id,
+                  base_url: "https://partial-delete.example/v1",
+                  region: "Global",
+                  parameters: [],
+                  status: "ready",
+                  revision: 1,
+                },
+              ],
+            }),
+          );
+        }
+        if (url.endsWith(`/provider-instances/${customInstance.id}/catalog`)) {
+          return Promise.resolve(
+            jsonResponse({
+              provider_instance_id: customInstance.id,
+              models: [],
+              plans: [],
+              allowances: [],
+              revision: 1,
+              observed_at: "2026-07-24T08:00:00Z",
+            }),
+          );
+        }
+        const common = commonReadResponse(url);
+        if (common) return Promise.resolve(common);
+        return Promise.resolve(jsonResponse({ error: "not_found" }, 404));
+      },
+    );
+    vi.stubGlobal("fetch", fetchMock);
+
+    render(
+      <I18nProvider>
+        <ProviderConfigurationPage managementAuthToken="management-token" />
+      </I18nProvider>,
+    );
+
+    expect(await screen.findByText(customDefinition.display_name)).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: `Delete provider ${customDefinition.display_name}`,
+      }),
+    );
+    expect(
+      await screen.findByText("Unable to delete the custom provider."),
+    ).toBeInTheDocument();
+    expect(await screen.findByText("Unconfigured")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", {
+        name: `Configure ${customDefinition.display_name}`,
+      }),
+    ).not.toBeInTheDocument();
+
+    fireEvent.click(
+      screen.getByRole("button", {
+        name: `Delete provider ${customDefinition.display_name}`,
+      }),
+    );
+    expect(
+      await screen.findByText("No custom provider has been defined yet."),
+    ).toBeInTheDocument();
+    expect(deleteAttempts).toBe(2);
   });
 
   // This test verifies a native provider row attaches a credential to its existing configuration instead of cloning the provider.
@@ -602,9 +793,10 @@ describe("separated provider and credential management", () => {
       </I18nProvider>,
     );
 
-    expect(
-      await screen.findByRole("tree", { name: "Credential Management" }),
-    ).toBeInTheDocument();
+    const providerTree = await screen.findByRole("tree", {
+      name: "Credential Management",
+    });
+    fireEvent.click(within(providerTree).getByText("Test"));
     fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
     fireEvent.click(screen.getByRole("button", { name: "Select Global" }));
     fireEvent.change(screen.getByLabelText("Credential name"), {
@@ -1153,8 +1345,40 @@ describe("separated provider and credential management", () => {
       plan_options: [],
       features: unavailableFeatures,
     };
-    // fetchMock serves one configured instance while retaining two additional supported definitions.
-    // fetchMock 提供一个已配置实例，同时保留另外两个受支持 Definition。
+    // customInstance is the configured custom provider included by the aggregate credential entry.
+    // customInstance 是由聚合凭据项包含的已配置自定义供应商。
+    const customInstance = {
+      ...instance,
+      id: "pvi_custom_deepseek",
+      definition_id: customDefinition.id,
+      handle: "deepseek",
+      display_name: "DeepSeek",
+    };
+    // testCredential is the native credential rendered in the aggregate table.
+    // testCredential 是在聚合表格中渲染的原生凭据。
+    const testCredential = {
+      id: "cred_test_provider",
+      provider_instance_id: instance.id,
+      auth_method_id: "api_key",
+      label: "Test credential",
+      status: "active",
+      expires_at: null,
+      cooling_until: null,
+      priority: 0,
+      reader_features: unavailableFeatures,
+      revision: 1,
+    };
+    // customCredential is the custom-provider credential rendered beside the native credential.
+    // customCredential 是与原生凭据同时渲染的自定义供应商凭据。
+    const customCredential = {
+      ...testCredential,
+      id: "cred_custom_deepseek",
+      provider_instance_id: customInstance.id,
+      auth_method_id: "default",
+      label: "DeepSeek credential",
+    };
+    // fetchMock serves two configured provider families while retaining one additional supported definition.
+    // fetchMock 提供两个已配置供应商大类，同时保留一个额外受支持 Definition。
     const fetchMock = vi
       .fn()
       .mockImplementation(
@@ -1208,11 +1432,24 @@ describe("separated provider and credential management", () => {
           }
           if (url.endsWith("/provider-instances")) {
             return Promise.resolve(
-              jsonResponse({ provider_instances: [instance] }),
+              jsonResponse({
+                provider_instances: [instance, customInstance],
+              }),
             );
           }
           if (url.endsWith(`/provider-instances/${instance.id}/credentials`)) {
-            return Promise.resolve(jsonResponse({ credentials: [] }));
+            return Promise.resolve(
+              jsonResponse({ credentials: [testCredential] }),
+            );
+          }
+          if (
+            url.endsWith(
+              `/provider-instances/${customInstance.id}/credentials`,
+            )
+          ) {
+            return Promise.resolve(
+              jsonResponse({ credentials: [customCredential] }),
+            );
           }
           if (
             url.endsWith("/provider-instances/onboard") &&
@@ -1248,6 +1485,12 @@ describe("separated provider and credential management", () => {
     const providerTree = await screen.findByRole("tree", {
       name: "Credential Management",
     });
+    const allTreeItem = within(providerTree).getByRole("treeitem", {
+      name: /All/,
+    });
+    fireEvent.click(allTreeItem);
+    expect(allTreeItem).toHaveAttribute("aria-selected", "true");
+    expect(within(allTreeItem).getByText("2")).toBeInTheDocument();
     expect(within(providerTree).getByText("Test")).toBeInTheDocument();
     expect(
       within(providerTree).queryByText("Test Provider"),
@@ -1256,7 +1499,10 @@ describe("separated provider and credential management", () => {
       within(providerTree).queryByText("Unconfigured Native"),
     ).not.toBeInTheDocument();
     expect(within(providerTree).getByText("DeepSeek")).toBeInTheDocument();
+    expect(await screen.findByText("Test credential")).toBeInTheDocument();
+    expect(screen.getByText("DeepSeek credential")).toBeInTheDocument();
 
+    fireEvent.click(within(providerTree).getByText("Test"));
     fireEvent.click(screen.getByRole("button", { name: "Add credential" }));
     expect(
       screen.getByRole("button", { name: "Select Global" }),

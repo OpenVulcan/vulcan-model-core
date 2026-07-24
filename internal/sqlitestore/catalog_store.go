@@ -120,6 +120,44 @@ func (s *CatalogStore) Delete(ctx context.Context, providerInstanceID string) er
 	return nil
 }
 
+// Purge removes catalog snapshots and historical catalog-change rows for the exact provider instances without publishing runtime tombstones.
+// Purge 删除精确供应商实例的目录快照与历史目录变更记录，且不发布运行时墓碑。
+func (s *CatalogStore) Purge(ctx context.Context, providerInstanceIDs []string) (int, error) {
+	if err := validateContext(ctx); err != nil {
+		return 0, err
+	}
+	if len(providerInstanceIDs) == 0 {
+		return 0, nil
+	}
+	transaction, errBegin := s.database.sql.BeginTx(ctx, nil)
+	if errBegin != nil {
+		return 0, fmt.Errorf("begin provider catalog purge: %w", errBegin)
+	}
+	defer func() { _ = transaction.Rollback() }()
+	purgedSnapshots := 0
+	for _, providerInstanceID := range providerInstanceIDs {
+		if providerInstanceID == "" {
+			return 0, errors.New("provider instance ID is required for catalog purge")
+		}
+		if _, errDeleteChanges := transaction.ExecContext(ctx, `DELETE FROM catalog_changes WHERE provider_instance_id = ?`, providerInstanceID); errDeleteChanges != nil {
+			return 0, fmt.Errorf("purge provider catalog changes %s: %w", providerInstanceID, errDeleteChanges)
+		}
+		result, errDeleteSnapshot := transaction.ExecContext(ctx, `DELETE FROM catalog_snapshots WHERE provider_instance_id = ?`, providerInstanceID)
+		if errDeleteSnapshot != nil {
+			return 0, fmt.Errorf("purge provider catalog snapshot %s: %w", providerInstanceID, errDeleteSnapshot)
+		}
+		rowsAffected, errRows := result.RowsAffected()
+		if errRows != nil {
+			return 0, fmt.Errorf("read provider catalog purge result %s: %w", providerInstanceID, errRows)
+		}
+		purgedSnapshots += int(rowsAffected)
+	}
+	if errCommit := transaction.Commit(); errCommit != nil {
+		return 0, fmt.Errorf("commit provider catalog purge: %w", errCommit)
+	}
+	return purgedSnapshots, nil
+}
+
 // ListChanges returns one globally ordered mutation-safe incremental catalog page.
 // ListChanges 返回一个全局有序且防止外部修改的增量目录页。
 func (s *CatalogStore) ListChanges(ctx context.Context, afterRevision uint64, limit int) (catalog.ChangePage, error) {

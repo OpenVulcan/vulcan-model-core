@@ -25,7 +25,7 @@ func registerTavilyProviderCatalog(registry *providerconfig.SystemRegistry) erro
 	if errGroup := registry.RegisterGroup(providerconfig.ProviderGroup{ID: TavilyGroupID, DisplayName: "Tavily", Description: "Tavily structured web search and content extraction API.", DescriptionKey: "providers.tavily.description", SortOrder: 80, Revision: 1}); errGroup != nil {
 		return fmt.Errorf("register Tavily provider group: %w", errGroup)
 	}
-	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true}
+	auth := providerconfig.AuthMethodDefinition{ID: "api_key", Type: providerconfig.AuthMethodAPIKey, MultipleCredentials: true, BillingMode: providerconfig.BillingModeSubscription}
 	features := providerconfig.ProviderFeatureSet{PlanReader: providerconfig.SupportSupported, EntitlementReader: providerconfig.SupportUnsupported, AllowanceReader: providerconfig.SupportSupported}
 	searchAction := providerconfig.ProviderActionBinding{ID: providertavily.ActionBindingID, Operation: vcp.OperationSearchWeb, DriverID: "tavily", DriverVersion: "1", ProtocolProfileID: providertavily.ProtocolProfileID, EndpointProfileID: "tavily_search", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Search: &providerconfig.SearchActionBinding{BackendKind: vcp.SearchBackendDirectAPI}, Revision: 1}
 	extractAction := providerconfig.ProviderActionBinding{ID: providertavily.ExtractActionBindingID, Operation: vcp.OperationWebExtract, DriverID: "tavily", DriverVersion: "1", ProtocolProfileID: providertavily.ExtractProtocolProfileID, EndpointProfileID: "tavily_search", AuthMethodIDs: []string{"api_key"}, Delivery: providerconfig.ActionDeliveryModes{Synchronous: true}, Revision: 1}
